@@ -7030,6 +7030,75 @@ fn detected_plans_from_conn(
     Ok(plans)
 }
 
+/// Read one credential's `auth_method` without a lease, for `ck auth list --json`.
+///
+/// The value comes from the same closed table `credential.list_scoped` reports
+/// ([`crate::list_auth_method::list_auth_method`] over the unsealed record's kind
+/// and stored refresh adapter), never from the credential id, so the scripted
+/// inventory and the consumer listing cannot disagree. A row that fails to open
+/// or decode maps to `None` (its JSON row carries null) rather than failing the
+/// whole listing: one unreadable envelope must not hide the other credentials,
+/// the same way `detected_plans_read_only` skips rather than refuses.
+///
+/// Lease-free and read-only, like the other inventory readers `ck auth list` uses:
+/// safe beside a running daemon and against a stopped one.
+#[allow(clippy::type_complexity)]
+pub fn auth_methods_read_only(
+    path: &std::path::Path,
+    key: &MasterKey,
+) -> Result<
+    std::collections::BTreeMap<String, Option<crate::list_auth_method::ListAuthMethod>>,
+    StoreOpError,
+> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
+    auth_methods_from_conn(&conn, key).map_err(map)
+}
+
+fn auth_methods_from_conn(
+    conn: &rusqlite::Connection,
+    key: &MasterKey,
+) -> rusqlite::Result<
+    std::collections::BTreeMap<String, Option<crate::list_auth_method::ListAuthMethod>>,
+> {
+    let mut stmt =
+        conn.prepare("SELECT credential_id, record_version, envelope FROM credentials")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as u64,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut methods = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, version, envelope) = row?;
+        let method = envelope::open(
+            key,
+            &envelope,
+            &RecordBinding {
+                credential_id: &id,
+                record_version: version,
+            },
+        )
+        .ok()
+        .and_then(|plain| VaultRecord::decode(&plain).ok())
+        .map(|record| {
+            crate::list_auth_method::list_auth_method(
+                record.kind,
+                record.refresh_adapter.as_deref(),
+            )
+        });
+        // `open`/`decode` failing yields `None` inside `Some` flattening: keep the
+        // row present with a null method rather than dropping it, so the caller
+        // renders every inventory id exactly once.
+        methods.insert(id, method.flatten());
+    }
+    Ok(methods)
+}
+
 /// Refuse a store whose recorded schema is newer than the binary's own chain.
 ///
 /// `binary_newest` is the newest migration the running binary knows: production

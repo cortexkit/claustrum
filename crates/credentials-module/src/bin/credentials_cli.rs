@@ -385,7 +385,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "grant" => cmd_grant(&global, &args),
         "revoke-grant" => cmd_revoke_grant(&global, &args),
         "approve" => cmd_approve(&global, &args),
-        "list" => cmd_list(&global),
+        "list" => cmd_list(&global, &args),
         "grants" => cmd_grants(&global),
         "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
@@ -538,6 +538,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
         "transfer" => &["--replace"],
+        "list" => &["--json"],
         _ => &[],
     };
     let mut i = if matches!(command, "set-identity" | "set-category")
@@ -806,11 +807,21 @@ fn help_verb(verb: &str) -> String {
              store."
         }
         "list" => {
-            "ck auth list\n\
+            "ck auth list [--json]\n\
+             \n\
+             \x20 --json               print a stable JSON inventory for scripts\n\
              \n\
              NOTES\n\
              Print each credential's id + lifecycle state + version (no secrets), e.g. to\n\
-             find which credential a health probe flagged needs_reauth."
+             find which credential a health probe flagged needs_reauth. The human table\n\
+             is not a stable format; scripts must use --json. --json prints one JSON\n\
+             document on stdout: {\"v\":1,\"credentials\":[...]} with rows sorted by id.\n\
+             Each row carries exactly id, state, record_version, categories,\n\
+             provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
+             auth_method is apikey, chatgpt, antigravity or oauth, and null when the\n\
+             credential has no subscription or API plane. plan_tier and plan_tier_source\n\
+             are null when unset; creator is null when none. No payloads, tokens,\n\
+             handles or emails are ever printed."
         }
         "grants" => {
             "ck auth grants\n\
@@ -5430,14 +5441,112 @@ fn format_ts_ms(ts_ms: i64) -> String {
     format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
-fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
+fn cmd_list(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // A discovered daemon still supplies authenticated `admin.status`; when none is
     // reachable, the same report is built from lease-free plaintext metadata readers.
     let (result, store_schema) = request_admin_status_with_schema(global)?;
+    if has_flag(args, "--json") {
+        print_inventory_json(&result, global)?;
+        print_inventory_store_behind_note(store_schema);
+        return Ok(());
+    }
     let rows = parse_inventory(&result)?;
     print_inventory(&rows, &result);
     print_inventory_store_behind_note(store_schema);
     Ok(())
+}
+
+/// Print the stable machine-readable inventory for operator scripts.
+///
+/// One JSON document on stdout, `{"v":1,"credentials":[...]}`, rows sorted by
+/// id. Each row carries exactly nine keys (`id`, `state`, `record_version`,
+/// `categories`, `provider_ids`, `auth_method`, `plan_tier`, `plan_tier_source`,
+/// `creator`); absent optionals render null, never omitted, so a script can pin
+/// the key set. Nothing secret is read and nothing secret is printed: the rows
+/// come from the same `admin.status` report the human table renders, plus the
+/// `auth_method` derived below without opening any payload.
+fn print_inventory_json(result: &serde_json::Value, global: &GlobalArgs) -> Result<(), CliError> {
+    let rows = inventory_json_rows(result, global)?;
+    println!("{}", serde_json::json!({ "v": 1, "credentials": rows }));
+    Ok(())
+}
+
+/// Build the `--json` rows from the `admin.status` report.
+///
+/// Shared fields reuse [`parse_inventory`]'s validation so a malformed report is
+/// refused the same way in both renderings; `plan_tier_source` and `creator` are
+/// passed through as strings with null for unset, matching the report's own
+/// vocabulary (`created_by` on the wire is `creator` here).
+fn inventory_json_rows(
+    result: &serde_json::Value,
+    global: &GlobalArgs,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let rows = parse_inventory(result)?;
+    let methods = inventory_auth_methods(global);
+    let mut out: Vec<serde_json::Value> = rows
+        .iter()
+        .map(
+            |(state, version, id, categories, providers): &InventoryRow| {
+                let entry = result["credentials"].as_array().and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|row| row["id"].as_str() == Some(id.as_str()))
+                });
+                let plan_tier = entry
+                    .and_then(|row| row.get("plan_tier"))
+                    .and_then(serde_json::Value::as_str);
+                let plan_tier_source = entry
+                    .and_then(|row| row.get("plan_tier_source"))
+                    .and_then(serde_json::Value::as_str);
+                let creator = entry
+                    .and_then(|row| row.get("created_by"))
+                    .and_then(serde_json::Value::as_str);
+                let auth_method = methods
+                    .get(id)
+                    .copied()
+                    .flatten()
+                    .map(|method| method.as_str());
+                serde_json::json!({
+                    "id": id,
+                    "state": state,
+                    "record_version": version,
+                    "categories": categories,
+                    "provider_ids": providers,
+                    "auth_method": auth_method,
+                    "plan_tier": plan_tier,
+                    "plan_tier_source": plan_tier_source,
+                    "creator": creator,
+                })
+            },
+        )
+        .collect();
+    out.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    Ok(out)
+}
+
+/// Map each inventory id to its listed `auth_method`, derived without seeing a
+/// payload: the unsealed record's kind and stored refresh adapter through the
+/// same [`credentials_core::list_auth_method::list_auth_method`] table that
+/// `credential.list_scoped` rows use, never parsed from the credential id.
+///
+/// Lease-free and read-only (the same property `ck auth list` already keeps):
+/// the store file is opened `SQLITE_OPEN_READ_ONLY` and no lease is taken, so
+/// this works beside a running daemon and against a stopped one. A missing key
+/// or an unreadable envelope degrades that row to null rather than failing the
+/// listing, the way the detected-plan enrichment degrades when no key resolves.
+fn inventory_auth_methods(
+    global: &GlobalArgs,
+) -> std::collections::BTreeMap<String, Option<credentials_core::list_auth_method::ListAuthMethod>>
+{
+    let db = store_path(global);
+    if !db.exists() {
+        return std::collections::BTreeMap::new();
+    }
+    let key = match resolve_store_key(global) {
+        Ok(key) => key,
+        Err(_) => return std::collections::BTreeMap::new(),
+    };
+    credentials_core::store::auth_methods_read_only(&db, &key).unwrap_or_default()
 }
 
 /// `ck auth enroll <list|approve|deny|revoke|reissue>` — the operator half of consumer

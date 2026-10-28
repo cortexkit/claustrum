@@ -1,12 +1,14 @@
 //! The outbound client against the callosum stand-in: one deadline per call, a
 //! consumer identity on every route it opens, and recovery from a silent restart.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
+use tokio::time::Instant;
 
 use crate::support::{
-    poll_once, resolved_after_advance, resolved_before_deadline, Held, Reply, TwoVaults,
+    poll_once, resolved_after_advance, resolved_before_deadline, wait_for_signal, wait_until, Held,
+    Reply, TwoVaults,
 };
 use claustrum_module_probe::federation as fed;
 
@@ -227,19 +229,31 @@ async fn a_stalled_call_ends_at_the_consumer_deadline_and_a_restart_costs_one_fa
     let root = crate::support::temp_root("outbound-deadline");
     let vaults = TwoVaults::new(&root).await;
     let home = vaults.home_member().to_string();
-    vaults
-        .callosum
-        .answer("claustrum", "credential.get_scoped", Reply::Stall);
+    let held = Held::new();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Hold(held.clone()),
+    );
 
+    tokio::time::pause();
     let started = Instant::now();
-    let error = call(
+    let mut request = std::pin::pin!(call(
         &vaults.b.outbound,
         &home,
         consumer_get(),
         fed::CONSUMER_FACING_DEADLINE,
-    )
-    .await
-    .expect_err("a stalled call never succeeds");
+    ));
+    held.arrived_before(&mut request).await;
+    tokio::time::advance(fed::CONSUMER_FACING_DEADLINE - Duration::from_millis(1)).await;
+    assert!(
+        poll_once(&mut request).await.is_none(),
+        "a stalled call must not end before its deadline"
+    );
+    tokio::time::advance(Duration::from_millis(2)).await;
+    let error = wait_for_signal(request)
+        .await
+        .expect_err("a stalled call never succeeds");
     let elapsed = started.elapsed();
     assert!(
         error.is_transient(),
@@ -262,12 +276,12 @@ async fn a_stalled_call_ends_at_the_consumer_deadline_and_a_restart_costs_one_fa
         "credential.get_scoped",
         Reply::Ok(json!({ "payload": "tok" })),
     );
-    call(
+    wait_for_signal(call(
         &vaults.b.outbound,
         &home,
         consumer_get(),
         fed::CONSUMER_FACING_DEADLINE,
-    )
+    ))
     .await
     .expect("the call after the restart succeeds");
 }
@@ -323,26 +337,21 @@ async fn an_admin_op_budget_bounds_the_call_that_exhausts_it_inside_the_cli_wait
         Reply::Hold(held.clone()),
     );
 
-    let client = vaults.b.outbound.clone();
-    let mut request = tokio::spawn(async move {
-        call(
-            &client,
-            &home,
-            json!({ "method": "callosum.peer_keys_read", "params": {} }),
-            fed::ADMIN_OP_BUDGET,
-        )
-        .await
-    });
-    held.arrived_before(&mut request).await;
     tokio::time::pause();
+    let mut request = std::pin::pin!(call(
+        &vaults.b.outbound,
+        &home,
+        json!({ "method": "callosum.peer_keys_read", "params": {} }),
+        fed::ADMIN_OP_BUDGET,
+    ));
+    held.arrived_before(&mut request).await;
     tokio::time::advance(fed::ADMIN_OP_BUDGET - Duration::from_millis(100)).await;
     assert!(
         poll_once(&mut request).await.is_none(),
         "the admin budget has not expired"
     );
-    assert!(resolved_after_advance(request, Duration::from_millis(101))
-        .await
-        .is_err());
+    tokio::time::advance(Duration::from_millis(101)).await;
+    assert!(wait_for_signal(request).await.is_err());
 }
 
 #[tokio::test]
@@ -427,6 +436,7 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
         Reply::Ok(json!({ "payload": "tok" })),
     );
 
+    tokio::time::pause();
     let mut admin = {
         let client = vaults.b.outbound.clone();
         let home = home.clone();
@@ -443,12 +453,12 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
     held.arrived_before(&mut admin).await;
 
     let started = Instant::now();
-    call(
+    wait_for_signal(call(
         &vaults.b.outbound,
         &home,
         consumer_get(),
         fed::CONSUMER_FACING_DEADLINE,
-    )
+    ))
     .await
     .expect("a consumer call still succeeds while an admin call is in flight");
     let elapsed = started.elapsed();
@@ -460,7 +470,7 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
     assert!(!admin.is_finished(), "the admin reply is still held");
     held.release(Reply::Ok(json!({ "keys": [] })));
     held.answered_before(&mut admin).await;
-    admin
+    wait_for_signal(admin)
         .await
         .expect("admin task joined")
         .expect("the admin call eventually gets its own reply");
@@ -472,35 +482,53 @@ async fn two_concurrent_consumer_calls_on_different_routes_both_succeed() {
     let vaults = TwoVaults::new(&root).await;
     let home = vaults.home_member().to_string();
 
-    // Both calls open their own route and answer after a delay that overlaps the other,
-    // so neither can finish before the second one has started.
+    // Both requests must reach the stand-in before either reply is released. This
+    // proves overlap without depending on two real-time delays finishing promptly.
+    let first_reply = Held::new();
+    let second_reply = Held::new();
     vaults.callosum.answer(
         "claustrum",
         "credential.get_scoped",
-        Reply::Delayed(
-            Duration::from_millis(400),
-            Box::new(Reply::Ok(json!({ "payload": "tok" }))),
-        ),
+        Reply::Hold(first_reply.clone()),
+    );
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.list_scoped",
+        Reply::Hold(second_reply.clone()),
     );
 
+    tokio::time::pause();
     let started = Instant::now();
-    let first = call(
-        &vaults.b.outbound,
-        &home,
-        consumer_get(),
-        fed::CONSUMER_FACING_DEADLINE,
-    );
-    let second = call(
-        &vaults.b.outbound,
-        "fed-computer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        consumer_get(),
-        fed::CONSUMER_FACING_DEADLINE,
-    );
-    let (a, b) = tokio::join!(first, second);
-    a.expect("the first route answers");
-    b.expect("the second route answers");
-    // Two 400 ms replies served one after the other would take 800 ms; overlapping them
-    // keeps the pair inside one reply's delay plus scheduling slack.
+    let client = vaults.b.outbound.clone();
+    let mut first = tokio::spawn(async move {
+        call(
+            &client,
+            &home,
+            consumer_get(),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    let client = vaults.b.outbound.clone();
+    let mut second = tokio::spawn(async move {
+        call(
+            &client,
+            "fed-computer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            json!({ "method": "credential.list_scoped", "params": {} }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    first_reply.arrived_before(&mut first).await;
+    second_reply.arrived_before(&mut second).await;
+    tokio::time::advance(Duration::from_millis(400)).await;
+    first_reply.release(Reply::Ok(json!({ "payload": "tok" })));
+    second_reply.release(Reply::Ok(json!({ "credentials": [] })));
+    let (a, b) = wait_for_signal(async { tokio::join!(first, second) }).await;
+    a.expect("the first task joined")
+        .expect("the first route answers");
+    b.expect("the second task joined")
+        .expect("the second route answers");
     assert!(
         started.elapsed() < Duration::from_millis(750),
         "the two calls serialized: {:?}",
@@ -513,37 +541,39 @@ async fn a_call_that_misses_its_deadline_leaves_a_concurrent_call_unharmed() {
     let root = crate::support::temp_root("outbound-mux-deadline");
     let vaults = TwoVaults::new(&root).await;
     let home = vaults.home_member().to_string();
-    // The stand-in holds this method for 2 s: longer than the consumer deadline the
-    // first call is given, short enough that the second call, given a roomy budget,
-    // gets its answer afterwards.
+    // Both requests reach the same route before the shorter budget expires. The
+    // test releases their replies at 2 s, between the two calls' deadlines.
+    let held = Held::new();
     vaults.callosum.answer(
         "claustrum",
         "credential.get_scoped",
-        Reply::Delayed(
-            Duration::from_secs(2),
-            Box::new(Reply::Ok(json!({ "payload": "tok" }))),
-        ),
+        Reply::Hold(held.clone()),
     );
 
-    let impatient = call(
-        &vaults.b.outbound,
-        &home,
-        consumer_get(),
-        Duration::from_millis(300),
-    );
+    tokio::time::pause();
+    let client = vaults.b.outbound.clone();
+    let target = home.clone();
+    let impatient = tokio::spawn(async move {
+        call(&client, &target, consumer_get(), Duration::from_millis(300)).await
+    });
     // Same route, so the second call joins the same connection and binding.
-    let patient = call(
-        &vaults.b.outbound,
-        &home,
-        consumer_get(),
-        Duration::from_secs(4),
-    );
-    let (impatient, patient) = tokio::join!(impatient, patient);
+    let client = vaults.b.outbound.clone();
+    let patient =
+        tokio::spawn(
+            async move { call(&client, &home, consumer_get(), Duration::from_secs(4)).await },
+        );
+    wait_until(|| vaults.callosum.methods("claustrum").len() == 2).await;
+    let impatient = resolved_after_advance(impatient, Duration::from_millis(301)).await;
     assert!(
         impatient.is_err(),
         "the call with a 300 ms budget cannot get a 2 s reply"
     );
-    patient.expect("the call with a 4 s budget gets its reply on the same connection");
+    tokio::time::advance(Duration::from_millis(1_699)).await;
+    held.release(Reply::Ok(json!({ "payload": "tok" })));
+    wait_for_signal(patient)
+        .await
+        .expect("the patient task joined")
+        .expect("the call with a 4 s budget gets its reply on the same connection");
 }
 
 #[tokio::test]

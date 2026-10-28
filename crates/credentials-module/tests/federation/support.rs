@@ -43,7 +43,10 @@ pub const TARGET_MODULE: &str = "claustrum";
 
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
 
-/// Poll without waiting, so an unresolved call is evidence rather than a hung test.
+/// Inspect a call that must still be pending, without giving virtual time a chance
+/// to auto-advance. Positive completion checks need [`wait_for_signal`] instead.
+/// At a deadline boundary, pass the pinned operation future, not its `JoinHandle`:
+/// a pending handle may only mean that the spawned caller has not run yet.
 pub async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| {
@@ -55,41 +58,64 @@ pub async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
     .await
 }
 
-/// The reply fence has already let the reader dispatch the answer. Save the
-/// non-blocking result before spending the budget, then advance explicitly even
-/// when delivery regresses. Never await the possibly broken call after pausing.
+/// Poll a signal while keeping the paused runtime runnable. The stand-in runs on
+/// another runtime and uses real sockets: letting this runtime go idle can advance
+/// virtual time past a deadline before the socket reader gets a scheduler turn.
+/// Wall time only bounds a broken wait; a ready signal always ends it immediately.
+pub async fn poll_until_ready<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(result) = poll_once(future.as_mut()).await {
+            return Some(result);
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            return None;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Wait for a socket reply or stand-in event without spending any paused-time
+/// budget. Unlike a single poll, this allows the task delivering it to run.
+pub async fn wait_for_signal<F: std::future::Future>(future: F) -> F::Output {
+    poll_until_ready(future)
+        .await
+        .expect("signal did not arrive within the wall-clock hang guard")
+}
+
+/// Wait for an observable stand-in or store state, using the same bounded,
+/// clock-preserving wait as socket replies.
+pub async fn wait_until(mut observed: impl FnMut() -> bool) {
+    wait_for_signal(std::future::poll_fn(|_| {
+        if observed() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }))
+    .await;
+}
+
+/// Wait for completion before spending the budget. Only advance to diagnose a
+/// failed wait: advancing after success could time out a concurrent call whose
+/// reply is still being delivered.
 pub async fn resolved_before_deadline<T: std::fmt::Debug>(
     mut call: tokio::task::JoinHandle<T>,
 ) -> T {
-    // The refusal arrives over a real socket from the stand-in, so a single poll can run
-    // before the reader task has been scheduled to read it, which failed this check
-    // under build-server load. Give the runtime scheduler turns, without moving the
-    // paused clock, until the call resolves or a wall-clock bound passes. Only the
-    // bound uses real time; the assertion is still that the call resolved before any
-    // deadline could fire.
-    let started = std::time::Instant::now();
-    let mut before = poll_once(&mut call).await;
-    while before.is_none() && started.elapsed() < Duration::from_secs(5) {
-        tokio::task::yield_now().await;
-        before = poll_once(&mut call).await;
+    if let Some(before) = poll_until_ready(&mut call).await {
+        return before.expect("call panicked");
     }
     tokio::time::advance(CONSUMER_FACING_DEADLINE + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    let after = if before.is_none() {
-        poll_once(&mut call).await
-    } else {
-        None
-    };
+    let after = poll_until_ready(&mut call).await;
     call.abort();
-    before.unwrap_or_else(|| panic!("call had not resolved before the explicit deadline advance; after advance: {after:?}"))
-        .expect("call panicked")
+    panic!("call had not resolved before the explicit deadline advance; after advance: {after:?}")
 }
 
 /// Drive a held call past its budget and inspect it without an unbounded await.
 pub async fn resolved_after_advance<T>(mut call: tokio::task::JoinHandle<T>, by: Duration) -> T {
     tokio::time::advance(by).await;
-    tokio::task::yield_now().await;
-    let result = poll_once(&mut call).await;
+    let result = poll_until_ready(&mut call).await;
     call.abort();
     result
         .expect("call still pending after the explicit deadline advance")
@@ -423,7 +449,9 @@ impl Held {
     /// Wait until the stand-in has received the held request.
     pub async fn arrived(&self) {
         let mut arrived = self.inner.arrived.subscribe();
-        let _ = arrived.wait_for(|arrived| *arrived).await;
+        wait_for_signal(arrived.wait_for(|arrived| *arrived))
+            .await
+            .expect("the arrival signal stays open");
     }
 
     /// Answer the held request with `reply` (an `Ok` body or a refusal).
@@ -435,12 +463,14 @@ impl Held {
     /// writes it, so a call can never resolve from this reply before the signal.
     pub async fn answered(&self) {
         let mut answered = self.inner.answered.subscribe();
-        let _ = answered.wait_for(|answered| *answered).await;
+        wait_for_signal(answered.wait_for(|answered| *answered))
+            .await
+            .expect("the answer signal stays open");
     }
 
-    /// Setup runs before pausing time: an early failure must not leave the test
-    /// waiting for a request that can no longer arrive.
-    pub async fn arrived_before<T>(&self, call: &mut tokio::task::JoinHandle<T>) {
+    /// An early failure must not leave the test waiting for a request that can no
+    /// longer arrive. The arrival wait also keeps a paused clock from auto-advancing.
+    pub async fn arrived_before<F: std::future::Future + Unpin>(&self, call: &mut F) {
         tokio::select! {
             biased;
             () = self.arrived() => {}

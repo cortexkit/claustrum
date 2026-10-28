@@ -8,22 +8,25 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use claustrum_module_probe::federation::ingress::{
     project_access_token, OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE, OP_TRANSFER_DELIVER,
     REMOTE_TOKEN_INFO,
 };
-use claustrum_module_probe::federation::{HomeAnswer, HomeVault};
+use claustrum_module_probe::federation::{HomeAnswer, HomeVault, HOME_OP_DEADLINE};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::federation::{MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID};
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::SetCategoryMode;
 use serde_json::{json, Value};
+use tokio::time::Instant;
 
-use crate::support::{HomeStore, Reply, TwoVaults};
+use crate::support::{
+    resolved_after_advance, wait_for_signal, wait_until, Held, HomeStore, Reply, TwoVaults,
+};
 
 const PAIRING: &str = "pair-1";
 const TOKEN_ID: &str = "oauth:anthropic:work";
@@ -412,7 +415,7 @@ async fn a_reply_opens_only_for_the_aad_it_was_sealed_over() {
 
 #[tokio::test]
 async fn an_upstream_refresh_slower_than_the_home_budget_answers_transient_and_still_persists() {
-    let rig = Rig::new("ingress-slow-refresh").await;
+    let rig = Arc::new(Rig::new("ingress-slow-refresh").await);
     // An expired token: the next read must refresh.
     let mut record = oauth_record("anthropic", "access-0", "refresh-0", None);
     record.oauth.as_mut().unwrap().expires_at_ms = Some(crate::support::wall_ms() - 1_000);
@@ -421,8 +424,14 @@ async fn an_upstream_refresh_slower_than_the_home_budget_answers_transient_and_s
     rig.grant_exact(TOKEN_ID);
     rig.home_store.slow_upstream(Duration::from_millis(2_000));
 
+    tokio::time::pause();
     let started = Instant::now();
-    let first = rig.fetch(TOKEN_ID).await;
+    let first = {
+        let rig = Arc::clone(&rig);
+        tokio::spawn(async move { rig.fetch(TOKEN_ID).await })
+    };
+    wait_until(|| rig.home_store.upstream_calls() == 1).await;
+    let first = resolved_after_advance(first, HOME_OP_DEADLINE + Duration::from_millis(1)).await;
     let elapsed = started.elapsed();
     assert_eq!(error_code(&first), "home_unavailable", "{first}");
     assert_eq!(first["error"]["class"], "transient");
@@ -432,9 +441,11 @@ async fn an_upstream_refresh_slower_than_the_home_budget_answers_transient_and_s
     );
 
     // The refresh keeps running to completion and persists the rotated token.
-    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    tokio::time::advance(Duration::from_millis(500)).await;
+    wait_until(|| rig.store().get(TOKEN_ID).unwrap().payload.expose() == b"access-refreshed-1")
+        .await;
     rig.home_store.slow_upstream(Duration::ZERO);
-    let token = rig.served_token(TOKEN_ID).await;
+    let token = wait_for_signal(rig.served_token(TOKEN_ID)).await;
     assert_eq!(token["payload"], "access-refreshed-1");
     assert_eq!(
         rig.home_store.upstream_calls(),
@@ -609,7 +620,7 @@ async fn a_requester_with_no_announced_key_is_told_to_fix_its_own_setup() {
 
 #[tokio::test]
 async fn an_unpaired_member_is_not_found_and_a_failed_pairing_lookup_is_transient() {
-    let rig = Rig::new("ingress-pairing").await;
+    let rig = Arc::new(Rig::new("ingress-pairing").await);
     rig.add_login(TOKEN_ID, "llm-provider");
     rig.grant_exact(TOKEN_ID);
     rig.vaults.callosum.set_pairing(&rig.requester(), None);
@@ -624,11 +635,20 @@ async fn an_unpaired_member_is_not_found_and_a_failed_pairing_lookup_is_transien
     assert_eq!(error_code(&reply), "home_unavailable", "{reply}");
     assert_eq!(reply["error"]["class"], "transient");
 
-    rig.vaults
-        .callosum
-        .answer("claustrum", "callosum.paired_devices_read", Reply::Stall);
+    let lookup = Held::new();
+    rig.vaults.callosum.answer(
+        "claustrum",
+        "callosum.paired_devices_read",
+        Reply::Hold(lookup.clone()),
+    );
+    tokio::time::pause();
     let started = Instant::now();
-    let reply = rig.fetch(TOKEN_ID).await;
+    let mut request = {
+        let rig = Arc::clone(&rig);
+        tokio::spawn(async move { rig.fetch(TOKEN_ID).await })
+    };
+    lookup.arrived_before(&mut request).await;
+    let reply = resolved_after_advance(request, HOME_OP_DEADLINE + Duration::from_millis(1)).await;
     assert_eq!(error_code(&reply), "home_unavailable", "{reply}");
     assert!(
         started.elapsed() < Duration::from_millis(1_800),
@@ -1018,6 +1038,7 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
     rig.served_token(TOKEN_ID).await;
     assert_eq!(rig.audit_ops("remote_issue").len(), 1);
 
+    tokio::time::pause();
     let paused = {
         let rig = Arc::clone(&rig);
         tokio::spawn(async move {
@@ -1025,8 +1046,7 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
             (rig.fetch(TOKEN_ID).await, started.elapsed())
         })
     };
-    let resume = reached
-        .recv()
+    let resume = wait_for_signal(reached.recv())
         .await
         .expect("the second fetch reaches the audit point");
     // Delete and re-create the id at version 1 with new material.
@@ -1041,7 +1061,7 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
         .unwrap();
     rig.set_category(TOKEN_ID, "llm-provider");
     resume.send(()).unwrap();
-    let (answer, elapsed) = paused.await.unwrap();
+    let (answer, elapsed) = wait_for_signal(paused).await.unwrap();
     assert_eq!(error_code(&answer), "home_unavailable", "{answer}");
     assert!(
         elapsed < Duration::from_millis(1_200),
@@ -1054,7 +1074,10 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
     );
 
     // The next fetch serves the new material and is audited once more.
-    assert_eq!(rig.served_token(TOKEN_ID).await["payload"], "access-new");
+    assert_eq!(
+        wait_for_signal(rig.served_token(TOKEN_ID)).await["payload"],
+        "access-new"
+    );
     assert_eq!(rig.audit_ops("remote_issue").len(), 2);
 }
 
@@ -1064,6 +1087,7 @@ async fn a_refresh_between_the_serving_read_and_the_audit_releases_nothing() {
     let rig = Arc::new(Rig::build("ingress-issue-refresh", Some(gate)).await);
     rig.add_login(TOKEN_ID, "llm-provider");
     rig.grant_exact(TOKEN_ID);
+    tokio::time::pause();
     let paused = {
         let rig = Arc::clone(&rig);
         tokio::spawn(async move {
@@ -1071,18 +1095,19 @@ async fn a_refresh_between_the_serving_read_and_the_audit_releases_nothing() {
             (rig.fetch(TOKEN_ID).await, started.elapsed())
         })
     };
-    let resume = reached
-        .recv()
+    let resume = wait_for_signal(reached.recv())
         .await
         .expect("the fetch reaches the audit point");
     // A refresh lands in between: the stored material is no longer the one read.
-    rig.home_store
-        .engine
-        .get_with_refresh_status(TOKEN_ID, None, true)
-        .await
-        .expect("forced refresh");
+    wait_for_signal(
+        rig.home_store
+            .engine
+            .get_with_refresh_status(TOKEN_ID, None, true),
+    )
+    .await
+    .expect("forced refresh");
     resume.send(()).unwrap();
-    let (answer, elapsed) = paused.await.unwrap();
+    let (answer, elapsed) = wait_for_signal(paused).await.unwrap();
     assert_eq!(error_code(&answer), "home_unavailable", "{answer}");
     assert_eq!(answer["error"]["class"], "transient");
     assert!(elapsed < Duration::from_millis(1_200), "{elapsed:?}");

@@ -180,6 +180,10 @@ def main():
         if not members:
             raise RuntimeError("empty workspace; refusing an empty format scope")
         gate.job("workspace format", fmt + ["--", "--check"])
+        # CI refuses any unrecorded endpoint host or domain separator, and a new test
+        # that names a host is the common way to add one. The scan takes under a
+        # second, so run it on every fast check rather than let CI find the miss.
+        gate.job("endpoint hosts and domain separators", ["python3", "scripts/endpoint-hosts.py"])
         if any(p.startswith(("scripts/", ".github/")) for p in paths):
             print(output("python3", "--version").strip(), flush=True)
             gate.job("script contracts", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])

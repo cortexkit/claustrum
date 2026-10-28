@@ -2005,6 +2005,22 @@ paths never appear.
 Expired grants are swept only after current-pairing registration passes, with one
 `secret_grant_expire` chain row per removal.
 
+An API key and a login with live flow grants, neither used yet:
+
+<!-- golden:list.result.flow -->
+```json
+{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[],"flow_grants":[{"grant_id":"01HF7YB0000000000000000001","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version","methods":["GET"]}]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[],"flow_grants":[{"grant_id":"01HF7YB0000000000000000002","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version"}]}]}
+```
+
+`crates/credentials-core/tests/vectors/secret-list-flow-v1.json` pins four phone samples:
+an unused API-key flow grant, a used API-key flow grant with `last_use_ms`, an API key
+with both agent and flow grants, and a login flow grant without `methods`. Each case
+includes the `secret.list` request, the decoded reply inside the phone route's `result`
+envelope, and the exact reply bytes as unpadded base64url with their SHA-256. The vault
+emits these samples from real deposits, signed approvals and listing; regenerate them
+with `CK_EMIT_SECRET_VECTORS=1` and the
+`secret_list_flow_ckios_vectors_are_emitted_by_vault_code_and_pinned` test.
+
 #### `secret.delete`
 
 Two steps, told apart by their key sets. Step 1 is `{name}`; it answers

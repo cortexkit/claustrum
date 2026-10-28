@@ -59,6 +59,7 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "approve.result",
     "list.request",
     "list.result",
+    "list.result.flow",
     "delete.request.name",
     "delete.result.statement",
     "delete.request.signed",
@@ -1018,6 +1019,7 @@ async fn secret_list_flow_grant_rows_carry_the_golden_keys_and_no_expiry() {
         );
     }
     let listed = flow.phone("secret.list", json!({})).await;
+    assert_secret_reply_matches("list.result.flow", &listed);
     // Neither grant has released anything yet, so neither row carries `last_use_ms`: the
     // reply leaves it out until the first release.
     let without_methods = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {

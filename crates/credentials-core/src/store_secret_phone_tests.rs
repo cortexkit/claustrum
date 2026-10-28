@@ -6,6 +6,9 @@ use crate::{
 };
 use std::sync::{Arc, Barrier};
 
+#[path = "store_secret_list_vectors_tests.rs"]
+mod list_vectors;
+
 const FP: &str = "11111111111111111111111111111111";
 const MEMBER: &str = "fed-computer:22222222222222222222222222222222";
 const ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";

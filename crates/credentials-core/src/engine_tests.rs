@@ -1604,6 +1604,116 @@ async fn anthropic_profile_lands_on_next_refresh_without_extra_version_bump() {
 }
 
 #[tokio::test]
+async fn anthropic_profile_survives_restart_until_next_refresh_without_extra_version_bump() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 196);
+    store
+        .create("oauth:anthropic", &anthropic_plan_record())
+        .unwrap();
+    let http = plan_http(
+        vec![
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 200,
+                body: crate::plan_detection::tests::PROFILE.to_vec(),
+            }),
+            Err(RefreshError::Transport("offline".into())),
+        ],
+        2,
+        false,
+    );
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    let first = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    assert_eq!(first.record_version, 2);
+    assert_eq!(first.detected_plan, anthropic_plan_record().detected_plan);
+    assert_eq!(engine.store().get("oauth:anthropic").unwrap(), first);
+    assert_eq!(
+        engine
+            .store()
+            .with_raw_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM held_detected_plans", [], |row| {
+                    row.get::<_, usize>(0)
+                })
+            })
+            .unwrap(),
+        1,
+        "the profile must be durable before simulating a restart"
+    );
+    drop(engine);
+
+    let engine = RefreshEngine::new(
+        Arc::new(open_store(&descriptor, 196)),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    assert_eq!(engine.store().get("oauth:anthropic").unwrap(), first);
+    let second = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    assert_eq!(second.record_version, 3);
+    assert_eq!(
+        second.detected_plan.as_ref().unwrap().tier.as_deref(),
+        Some("max_20x")
+    );
+    assert_eq!(engine.store().get("oauth:anthropic").unwrap(), second);
+}
+
+#[tokio::test]
+async fn anthropic_held_plan_write_failure_does_not_fail_or_add_a_refresh_commit() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 197);
+    store
+        .create("oauth:anthropic", &anthropic_plan_record())
+        .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_held_plan BEFORE INSERT ON held_detected_plans BEGIN \
+         SELECT RAISE(FAIL, 'held plan unavailable'); END;",
+            )
+        })
+        .unwrap();
+    let http = plan_http(
+        vec![
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 200,
+                body: crate::plan_detection::tests::PROFILE.to_vec(),
+            }),
+            Err(RefreshError::Transport("offline".into())),
+        ],
+        2,
+        false,
+    );
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    for version in 2..=3 {
+        let record = engine.get("oauth:anthropic", None, true).await.unwrap();
+        http.observed.notified().await;
+        assert_eq!(record.record_version, version);
+        assert_eq!(record.detected_plan, anthropic_plan_record().detected_plan);
+        assert_eq!(engine.store().get("oauth:anthropic").unwrap(), record);
+        assert!(engine.store().list_intents().unwrap().is_empty());
+    }
+    assert_eq!(
+        engine.store().read_audit(None).unwrap().len(),
+        3,
+        "create and two refreshes only"
+    );
+}
+
+#[tokio::test]
 async fn held_anthropic_profile_cannot_follow_an_account_replacement() {
     let (_root, descriptor) = tmp_descriptor();
     let store = open_store(&descriptor, 194);

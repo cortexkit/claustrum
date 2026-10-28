@@ -3,7 +3,7 @@
 //!
 //! This layer owns persistence and the at-rest crypto wiring; it does NOT own the
 //! wire surfaces, the audit chain, or the refresh state machine (those live above
-//! it). Every durable mutation goes through `cortexkit-store`'s `with_conn_fenced`
+//! it). Credential mutations go through `cortexkit-store`'s `with_conn_fenced`
 //! so a superseded writer (an old instance still draining after a lease handover)
 //! is rejected at the database layer rather than silently clobbering a fresh write.
 //!
@@ -948,6 +948,31 @@ const MIGRATIONS: &[Migration] = &[
                          PRIMARY KEY (requester, nonce)\
                      ); \
                      CREATE INDEX secret_release_receipts_expiry ON secret_release_receipts(expires_at_ms);",
+    },
+    // A profile observation waits for the next token commit without changing the
+    // sealed record or its audit chain. Version changes and removal discard it in
+    // the same transaction, including replacements made outside the refresh engine.
+    Migration {
+        version: 32,
+        statements: "CREATE TABLE held_detected_plans (\
+                         credential_id TEXT PRIMARY KEY, \
+                         record_version INTEGER NOT NULL, \
+                         token_hash TEXT NOT NULL, \
+                         identity TEXT NOT NULL, \
+                         tier TEXT, \
+                         raw TEXT, \
+                         observed_at_ms INTEGER NOT NULL\
+                     ); \
+                     CREATE TRIGGER held_detected_plans_version AFTER UPDATE OF record_version ON credentials \
+                     WHEN OLD.record_version != NEW.record_version BEGIN \
+                         DELETE FROM held_detected_plans WHERE credential_id = OLD.credential_id; \
+                     END; \
+                     CREATE TRIGGER held_detected_plans_remove AFTER DELETE ON credentials BEGIN \
+                         DELETE FROM held_detected_plans WHERE credential_id = OLD.credential_id; \
+                     END; \
+                     CREATE TRIGGER held_detected_plans_insert AFTER INSERT ON credentials BEGIN \
+                         DELETE FROM held_detected_plans WHERE credential_id = NEW.credential_id; \
+                     END;",
     },
 ];
 
@@ -2108,7 +2133,7 @@ impl EncryptedStore {
     }
 
     /// Run a fenced write, latching [`Self::is_fenced_out`] if it is rejected by a
-    /// newer lease holder. The single choke point every durable mutation routes
+    /// newer lease holder. The single choke point credential mutations route
     /// through, so the fenced-out signal is set exactly once, at the source, rather
     /// than at each call site. Returns `Result<_, StoreError>` exactly like the
     /// underlying `with_conn_fenced`, so it is a drop-in at every call site (the
@@ -2140,8 +2165,9 @@ impl EncryptedStore {
     }
 
     // with_conn_fenced returns only after commit. Runtime mutations pass through
-    // fenced_write, except the deliberately unfenced permission observation, which
-    // also calls this hook after commit. Migrations, audit-key bootstrap and the
+    // fenced_write, except deliberately unfenced diagnostic observations. Permission
+    // observations also call this hook; held plans are not reader-visible until the
+    // next token commit. Migrations, audit-key bootstrap and the
     // enrollment sweep precede serving. Failed transactions never wake readers;
     // successful no-ops may wake them and are filtered by their projected digests.
     fn signal_commit<T>(&self, result: &Result<T, StoreError>) {
@@ -5724,6 +5750,107 @@ impl EncryptedStore {
             return Err(StoreOpError::CasMismatch);
         }
         Ok(next_version)
+    }
+
+    /// Hold a Claude profile until the next refresh, without writing the sealed record.
+    pub(crate) fn hold_detected_plan(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+        token_hash: &str,
+        identity: &RecordIdentity,
+        plan: &crate::plan_detection::DetectedPlan,
+    ) -> Result<(), StoreOpError> {
+        let identity =
+            serde_json::to_string(identity).map_err(|e| StoreOpError::Encode(e.to_string()))?;
+        // No lease fence: this disposable observation must not participate in token
+        // commit ordering. The single statement checks the live version as well as
+        // the held version, so a slow profile cannot resurrect a replaced row or
+        // overwrite a newer observation. Only a one-way access-token hash is stored.
+        self.store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO held_detected_plans \
+                     (credential_id, record_version, token_hash, identity, tier, raw, observed_at_ms) \
+                     SELECT credential_id, record_version, ?3, ?4, ?5, ?6, ?7 FROM credentials \
+                     WHERE credential_id = ?1 AND record_version = ?2 \
+                     ON CONFLICT(credential_id) DO UPDATE SET \
+                         record_version = excluded.record_version, token_hash = excluded.token_hash, \
+                         identity = excluded.identity, tier = excluded.tier, raw = excluded.raw, \
+                         observed_at_ms = excluded.observed_at_ms \
+                     WHERE held_detected_plans.record_version < excluded.record_version",
+                    rusqlite::params![
+                        credential_id,
+                        record_version as i64,
+                        token_hash,
+                        identity,
+                        plan.tier,
+                        plan.raw,
+                        plan.observed_at_ms,
+                    ],
+                )?;
+                Ok(())
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read a held profile only for the exact record and token it observed.
+    pub(crate) fn held_detected_plan(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+    ) -> Result<Option<crate::plan_detection::DetectedPlan>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let held = tx
+                    .query_row(
+                        "SELECT record_version, token_hash, identity, tier, raw, observed_at_ms \
+                         FROM held_detected_plans WHERE credential_id = ?1",
+                        [credential_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, u64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                crate::plan_detection::DetectedPlan {
+                                    tier: row.get(3)?,
+                                    raw: row.get(4)?,
+                                    observed_at_ms: row.get(5)?,
+                                },
+                            ))
+                        },
+                    )
+                    .optional()?;
+                let mut result = None;
+                if let Some((version, token_hash, identity, plan)) = held {
+                    if version == record.record_version
+                        && record.oauth.as_ref().is_some_and(|oauth| {
+                            token_hash == refresh_token_hash(oauth.access_token.expose())
+                        })
+                        && serde_json::from_str::<RecordIdentity>(&identity)
+                            .is_ok_and(|identity| identity == record.identity)
+                    {
+                        result = Some(plan);
+                    } else {
+                        // A refresh racing a replacement may still hold the old
+                        // record. Discard invalid bindings for that version, but
+                        // never let a stale reader erase the live version's plan.
+                        tx.execute(
+                            "DELETE FROM held_detected_plans WHERE credential_id = ?1 \
+                             AND (record_version = ?2 OR NOT EXISTS (\
+                                 SELECT 1 FROM credentials WHERE credential_id = ?1 \
+                                 AND credentials.record_version = held_detected_plans.record_version))",
+                            rusqlite::params![credential_id, record.record_version as i64],
+                        )?;
+                    }
+                }
+                // Valid observations remain until the refresh commit succeeds; the
+                // version-change trigger then deletes them atomically with the tokens.
+                tx.commit()?;
+                Ok(result)
+            })
+            .map_err(StoreOpError::from)
     }
 
     /// Persist the last observed GitHub App installation grant after its token commit.
@@ -9414,6 +9541,272 @@ mod tests {
         )
     }
 
+    fn held_plan_rows(store: &EncryptedStore) -> usize {
+        store
+            .with_raw_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM held_detected_plans", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap()
+    }
+
+    fn hold_test_plan(store: &EncryptedStore, record: &VaultRecord) {
+        store
+            .hold_detected_plan(
+                "oauth:anthropic",
+                record.record_version,
+                &refresh_token_hash(record.oauth.as_ref().unwrap().access_token.expose()),
+                &record.identity,
+                &crate::plan_detection::DetectedPlan {
+                    tier: Some("max_20x".into()),
+                    raw: Some("default_claude_max_20x".into()),
+                    observed_at_ms: 123,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_32_adds_held_plans_without_rewriting_records_and_refuses_older_binaries() {
+        let root = TestTempDir::new("ck-held-plan-migration");
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        migrate_through_for_test(&sqlite, 31).unwrap();
+        assert!(!sqlite
+            .with_conn(|conn| table_exists(conn, "held_detected_plans"))
+            .unwrap());
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([205; 32])).unwrap();
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let record = store.get("oauth:anthropic").unwrap();
+        let audit_before = store.read_audit(None).unwrap();
+        EncryptedStore::migrate(&store.store).unwrap();
+        EncryptedStore::migrate(&store.store).unwrap();
+        assert_eq!(store.get("oauth:anthropic").unwrap(), record);
+        let audit_after = store.read_audit(None).unwrap();
+        assert_eq!(audit_after.len(), audit_before.len());
+        assert_eq!(
+            audit_after.last().unwrap().entry_mac,
+            audit_before.last().unwrap().entry_mac
+        );
+        let columns = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare("PRAGMA table_info(held_detected_plans)")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(5)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                ("credential_id".into(), "TEXT".into(), false, true),
+                ("record_version".into(), "INTEGER".into(), true, false),
+                ("token_hash".into(), "TEXT".into(), true, false),
+                ("identity".into(), "TEXT".into(), true, false),
+                ("tier".into(), "TEXT".into(), false, false),
+                ("raw".into(), "TEXT".into(), false, false),
+                ("observed_at_ms".into(), "INTEGER".into(), true, false),
+            ]
+        );
+        let recorded = store.with_raw_conn(read_schema_version).unwrap();
+        assert_eq!(recorded, 32);
+        let error = refuse_store_ahead_of_binary(recorded, 31)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("32") && error.contains("31"), "{error}");
+        hold_test_plan(&store, &record);
+        assert_eq!(held_plan_rows(&store), 1);
+    }
+
+    #[test]
+    fn held_detected_plans_reject_and_remove_mismatched_bindings() {
+        let (_root, store) = tmp_store(201);
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let record = store.get("oauth:anthropic").unwrap();
+        for mismatch in [
+            "UPDATE held_detected_plans SET record_version = 0",
+            "UPDATE held_detected_plans SET identity = '{\"account_id\":\"other\"}'",
+            "UPDATE held_detected_plans SET token_hash = 'wrong-token-hash'",
+        ] {
+            hold_test_plan(&store, &record);
+            assert_eq!(held_plan_rows(&store), 1);
+            store
+                .with_raw_conn(|conn| conn.execute(mismatch, []))
+                .unwrap();
+            assert_eq!(
+                store
+                    .held_detected_plan("oauth:anthropic", &record)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(held_plan_rows(&store), 0, "{mismatch}");
+        }
+    }
+
+    #[test]
+    fn held_detected_plans_stale_reader_cannot_discard_newer_observation() {
+        let (_root, store) = tmp_store(206);
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let old = store.get("oauth:anthropic").unwrap();
+        store
+            .commit_refresh("oauth:anthropic", old.record_version, &old)
+            .unwrap();
+        let current = store.get("oauth:anthropic").unwrap();
+        hold_test_plan(&store, &current);
+        assert_eq!(
+            store.held_detected_plan("oauth:anthropic", &old).unwrap(),
+            None
+        );
+        assert_eq!(held_plan_rows(&store), 1);
+        assert_eq!(
+            store
+                .held_detected_plan("oauth:anthropic", &current)
+                .unwrap()
+                .unwrap()
+                .tier
+                .as_deref(),
+            Some("max_20x")
+        );
+    }
+
+    #[test]
+    fn held_detected_plans_keep_first_observation_and_clear_atomically_on_refresh() {
+        let (_root, store) = tmp_store(202);
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let record = store.get("oauth:anthropic").unwrap();
+        let audit_before = store.read_audit(None).unwrap();
+        hold_test_plan(&store, &record);
+        let plan = store
+            .held_detected_plan("oauth:anthropic", &record)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            held_plan_rows(&store),
+            1,
+            "reading must not consume a valid plan"
+        );
+        let other = crate::plan_detection::DetectedPlan {
+            tier: Some("pro".into()),
+            raw: None,
+            observed_at_ms: 999,
+        };
+        store
+            .hold_detected_plan(
+                "oauth:anthropic",
+                record.record_version,
+                &refresh_token_hash("access"),
+                &record.identity,
+                &other,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .held_detected_plan("oauth:anthropic", &record)
+                .unwrap(),
+            Some(plan.clone())
+        );
+        assert_eq!(store.get("oauth:anthropic").unwrap(), record);
+        let audit_after = store.read_audit(None).unwrap();
+        assert_eq!(audit_after.len(), audit_before.len());
+        assert_eq!(
+            audit_after.last().unwrap().entry_mac,
+            audit_before.last().unwrap().entry_mac
+        );
+
+        let mut next = record.clone();
+        next.detected_plan = Some(plan);
+        store.commit_refresh("oauth:anthropic", 1, &next).unwrap();
+        assert_eq!(held_plan_rows(&store), 0);
+        // A slow response from the previous token cannot recreate a consumed row.
+        hold_test_plan(&store, &record);
+        assert_eq!(held_plan_rows(&store), 0);
+        let next = store.get("oauth:anthropic").unwrap();
+        store
+            .hold_detected_plan(
+                "oauth:anthropic",
+                next.record_version,
+                &refresh_token_hash("access"),
+                &next.identity,
+                &other,
+            )
+            .unwrap();
+        hold_test_plan(&store, &record);
+        assert_eq!(
+            store.held_detected_plan("oauth:anthropic", &next).unwrap(),
+            Some(other)
+        );
+    }
+
+    #[test]
+    fn held_detected_plans_are_removed_with_replacement_and_removal() {
+        let (_root, store) = tmp_store(203);
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let record = store.get("oauth:anthropic").unwrap();
+        hold_test_plan(&store, &record);
+        assert_eq!(held_plan_rows(&store), 1);
+        let mut replacement = record.clone();
+        replacement.identity.account_id = Some("another-account".into());
+        store
+            .overwrite_unconditional_audited(
+                "oauth:anthropic",
+                &replacement,
+                AuditCtx::admin(AuditOp::Login),
+            )
+            .unwrap();
+        assert_eq!(held_plan_rows(&store), 0);
+        let replacement = store.get("oauth:anthropic").unwrap();
+        hold_test_plan(&store, &replacement);
+        assert_eq!(held_plan_rows(&store), 1);
+        store
+            .remove_audited("oauth:anthropic", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        assert_eq!(held_plan_rows(&store), 0);
+        hold_test_plan(&store, &replacement);
+        assert_eq!(held_plan_rows(&store), 0);
+    }
+
+    #[test]
+    fn held_detected_plans_do_not_take_the_writer_fence() {
+        let (_root, store) = tmp_store(204);
+        store.create("oauth:anthropic", &oauth_record()).unwrap();
+        let record = store.get("oauth:anthropic").unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", [])
+            })
+            .unwrap();
+        hold_test_plan(&store, &record);
+        assert_eq!(held_plan_rows(&store), 1);
+        assert!(store
+            .held_detected_plan("oauth:anthropic", &record)
+            .unwrap()
+            .is_some());
+        assert!(!store.is_fenced_out());
+        assert!(matches!(
+            store.commit_refresh("oauth:anthropic", 1, &record),
+            Err(StoreOpError::Fenced { .. })
+        ));
+        assert_eq!(
+            held_plan_rows(&store),
+            1,
+            "failed commits must retain the plan"
+        );
+    }
+
     fn openai_record(account_id: &str, payload: &[u8]) -> VaultRecord {
         use base64::Engine as _;
 
@@ -12375,7 +12768,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            31,
+            32,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

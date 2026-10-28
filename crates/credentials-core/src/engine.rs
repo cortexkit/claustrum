@@ -194,10 +194,6 @@ pub struct RefreshEngine {
     // only to look up/insert a lock handle (never across an await); the per-id
     // tokio mutex is the one held across the refresh await.
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    // Claude subscription profiles wait for the next token commit. Writing a
-    // detected tier separately would bump record_version, making a consumer's
-    // report_auth_failure for the just-served token fail the version check.
-    detected_plans: Arc<Mutex<HashMap<String, HeldPlan>>>,
     // Test-only crash seam: fired AFTER the intent is durably committed and the new
     // tokens are staged, but BEFORE the commit transaction. The kill-9 conformance
     // helper sets this to a closure that signals readiness and parks forever, so a
@@ -206,13 +202,6 @@ pub struct RefreshEngine {
     // block-before-commit path at all.
     #[cfg(feature = "kill9-test-seam")]
     pre_commit: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
-}
-
-struct HeldPlan {
-    version: u64,
-    token_hash: String,
-    identity: crate::record::RecordIdentity,
-    plan: crate::plan_detection::DetectedPlan,
 }
 
 impl RefreshEngine {
@@ -233,7 +222,6 @@ impl RefreshEngine {
             skew_ms: DEFAULT_EXPIRY_SKEW_MS,
             clock: Arc::new(now_ms),
             inflight: Mutex::new(HashMap::new()),
-            detected_plans: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "kill9-test-seam")]
             pre_commit: Mutex::new(None),
         }
@@ -495,16 +483,16 @@ impl RefreshEngine {
                     .flatten();
                 let mut new_record = apply_refreshed(record, oauth, tokens);
                 if adapter_name == "anthropic" {
-                    let held = self
-                        .detected_plans
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    if let Some(held) = held.get(credential_id) {
-                        if held.version == record.record_version
-                            && held.token_hash == refresh_token_hash(oauth.access_token.expose())
-                            && held.identity == record.identity
-                        {
-                            new_record.detected_plan = Some(held.plan.clone());
+                    // Profiles survive a restart in a side table, but still ride the
+                    // next token commit: a separate sealed write would invalidate a
+                    // consumer's report_auth_failure version for the just-served token.
+                    match self.store.held_detected_plan(credential_id, record) {
+                        Ok(Some(plan)) => new_record.detected_plan = Some(plan),
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "credential vault: could not read held detected plan: {error}"
+                            );
                         }
                     }
                 }
@@ -529,12 +517,8 @@ impl RefreshEngine {
                         if let ("anthropic", Some(new_oauth)) =
                             (adapter_name, new_record.oauth.as_ref())
                         {
-                            self.detected_plans
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .remove(credential_id);
                             let http = self.http.clone();
-                            let held = self.detected_plans.clone();
+                            let store = self.store.clone();
                             let id = credential_id.to_owned();
                             let access = new_oauth.access_token.clone();
                             let identity = new_record.identity.clone();
@@ -545,20 +529,14 @@ impl RefreshEngine {
                                 )
                                 .await
                                 {
-                                    let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
-                                    if held
-                                        .get(&id)
-                                        .is_none_or(|held| held.version < record_version)
-                                    {
-                                        held.insert(
-                                            id,
-                                            HeldPlan {
-                                                version: record_version,
-                                                token_hash: refresh_token_hash(access.expose()),
-                                                identity,
-                                                plan,
-                                            },
-                                        );
+                                    if let Err(error) = store.hold_detected_plan(
+                                        &id,
+                                        record_version,
+                                        &refresh_token_hash(access.expose()),
+                                        &identity,
+                                        &plan,
+                                    ) {
+                                        eprintln!("credential vault: could not persist held detected plan: {error}");
                                     }
                                 }
                             });

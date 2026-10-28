@@ -585,7 +585,10 @@ clear both the old override and the old detection.
 
 Automatic detection reads ChatGPT's access-token JWT at login and every refresh, and makes
 one bearer profile request for Claude at login and after each successful refresh; unknown
-plan strings give no tier rather than a guess. The exact mapping, timing and staleness
+plan strings give no tier rather than a guess. The post-refresh Claude observation is
+held durably across vault restarts and lands only with the next refresh's token commit,
+without an extra record-version bump. A failed observation write only loses that reading;
+replacing or removing the credential discards it. The exact mapping, timing and staleness
 bounds are in [the wire contract](wire-contract-v1.md#operator-asserted-plan_tier-migration-16).
 Overrides do not update automatically: reassert or clear one after an out-of-band plan change.
 

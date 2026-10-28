@@ -533,9 +533,12 @@ detected tier. Network, non-200 and malformed profile responses keep the old obs
 
 Claude login bounds its profile request at five seconds before deposit; failure prints a
 note and still deposits tokens. Refresh commits tokens immediately, then starts one
-five-second-bounded profile request in the background. Its result is held in memory,
-bound to the credential's version, token, and identity, and folded into the **next**
-refresh commit, never an extra write/version bump. A restart loses held observations.
+five-second-bounded profile request in the background. Its result is held in a separate
+durable table, bound to the credential's version, access-token hash, and identity, and
+folded into the **next** refresh commit, never an extra sealed write/version bump or
+audit entry. A saved observation survives a restart; a best-effort persistence failure
+only loses that observation. Applying it, replacing or removing the credential, or
+finding a mismatched binding discards the held row.
 
 Staleness follows token renewal: ChatGPT access tokens live about **10 days**, so a plan
 change may take that long to appear. Claude tokens live about **8 hours**; profile work

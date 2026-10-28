@@ -38,8 +38,8 @@ use credentials_core::store::{EncryptedStore, SetCategoryMode, SetProvidersMode}
 use serde_json::{json, Value};
 
 use crate::support::{
-    poll_once, resolved_after_advance, wall_ms, Held, HomeStore, Ledger, Reply, Responder,
-    TwoVaults, VaultFixture,
+    poll_once, resolved_after_advance, wait_for_signal, wall_ms, Held, HomeStore, Ledger, Reply,
+    Responder, TwoVaults, VaultFixture,
 };
 
 const API_ID: &str = "apikey:openai";
@@ -680,9 +680,9 @@ async fn a_lost_acknowledgement_resolves_stepwise_through_resume_and_accept() {
     let sender = Transfers::new(Arc::clone(&rig.a.home_store.store)).with_budget(SEND_BUDGET);
     assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
     let to = rig.b.member.clone();
+    tokio::time::pause();
     let mut send = tokio::spawn(async move { sender.send(API_ID, &to).await });
     lost_ack.arrived_before(&mut send).await;
-    tokio::time::pause();
     let sent = resolved_after_advance(send, SEND_BUDGET + Duration::from_millis(1))
         .await
         .unwrap();
@@ -1550,19 +1550,17 @@ async fn a_send_with_a_slow_key_lookup_and_a_stalled_delivery_answers_inside_the
     let sender = Transfers::new(Arc::clone(&rig.a.home_store.store));
     assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
     let to = rig.b.member.clone();
+    tokio::time::pause();
     let mut send = tokio::spawn(async move { sender.send(API_ID, &to).await });
     lookup.arrived_before(&mut send).await;
-    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
     assert!(!send.is_finished(), "the key lookup is still held");
-    tokio::time::resume();
     lookup.release(Reply::Ok(peers));
     delivery.arrived_before(&mut send).await;
     assert!(
         poll_once(&mut send).await.is_none(),
         "the delivery is still held"
     );
-    tokio::time::pause();
     let sent = resolved_after_advance(send, Duration::from_millis(4_001))
         .await
         .expect("a definite reply");
@@ -1693,10 +1691,16 @@ async fn from_sixty_three_in_total_two_concurrent_deliveries_add_one_row() {
         .a
         .hand_seal(&rig.b, &tid(1), API_ID, &body(API_ID, "api_key", b"from-a"));
     let from_c = rig.c_seal(&c, &tid(2), "apikey:groq", b"from-c");
-    let (one, two) = tokio::join!(
-        rig.serve_b(&rig.a.member, &from_a),
-        rig.serve_b(&c.member, &from_c)
-    );
+    // This is a queue-cap race, not a lookup-deadline test. Keep the home budget
+    // frozen while the two deliveries exchange real socket frames with callosum.
+    tokio::time::pause();
+    let (one, two) = wait_for_signal(async {
+        tokio::join!(
+            rig.serve_b(&rig.a.member, &from_a),
+            rig.serve_b(&c.member, &from_c)
+        )
+    })
+    .await;
     let mut answers = vec![one, two];
     answers.sort();
     assert_eq!(answers, vec!["pending", "transfer_queue_full"]);

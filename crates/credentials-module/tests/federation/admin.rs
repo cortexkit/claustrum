@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 use subc_protocol::Principal;
 
 use crate::support::{
-    poll_once, resolved_after_advance, wall_ms, Held, HomeStore, Reply, Responder, TwoVaults,
-    VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
+    poll_once, poll_until_ready, resolved_after_advance, wait_for_signal, wall_ms, Held, HomeStore,
+    Reply, Responder, TwoVaults, VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
 };
 
 const PAIRED_DEVICES_READ: &str = "callosum.paired_devices_read";
@@ -394,10 +394,10 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
         PAIRED_DEVICES_READ,
         Reply::Hold(lookup.clone()),
     );
+    tokio::time::pause();
     let mut call = a.spawn(grant(&member));
     lookup.arrived_before(&mut call).await;
     assert!(poll_once(&mut call).await.is_none());
-    tokio::time::pause();
     let stalled = refusal(resolved_after_advance(call, Duration::from_millis(801)).await);
     assert_eq!(stalled, "callosum_unavailable/transient");
     tokio::time::resume();
@@ -926,6 +926,7 @@ async fn a_stalled_key_lookup_and_a_stalled_delivery_give_a_definite_reply_insid
 
     let admin = Arc::clone(&b.admin);
     let to = receiver.clone();
+    tokio::time::pause();
     let mut send = tokio::spawn(async move {
         run_on(
             &admin,
@@ -938,17 +939,14 @@ async fn a_stalled_key_lookup_and_a_stalled_delivery_give_a_definite_reply_insid
         .await
     });
     lookup.arrived_before(&mut send).await;
-    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
     assert!(!send.is_finished(), "the key lookup is still held");
-    tokio::time::resume();
     lookup.release(Reply::Ok(peer_keys_reply(&receiver, &receiver_key)));
     delivery.arrived_before(&mut send).await;
     assert!(
         poll_once(&mut send).await.is_none(),
         "the delivery is still held"
     );
-    tokio::time::pause();
     let report = ok(resolved_after_advance(send, Duration::from_millis(4_001)).await);
     assert!(vaults.callosum.saw_method(OP_TRANSFER_DELIVER));
     assert_eq!(report["reply"], "home_unreachable");
@@ -973,6 +971,7 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
     vaults
         .callosum
         .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Hold(lookup.clone()));
+    tokio::time::pause();
     let mut call = b.spawn(AdminOpBody::TransferSend {
         v: ADMIN_OP_SCHEMA_V2,
         credential_id: API_ID.into(),
@@ -980,7 +979,6 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
     });
     lookup.arrived_before(&mut call).await;
     assert!(poll_once(&mut call).await.is_none());
-    tokio::time::pause();
     let refused = refusal(resolved_after_advance(call, Duration::from_millis(10_001)).await);
     assert_eq!(refused, "callosum_unavailable/transient");
     assert!(b.store().list_outgoing_transfers().unwrap().is_empty());
@@ -991,7 +989,7 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
 /// The record's admin lock is held only around the send's synchronous commit. While
 /// the stand-in holds the key lookup, and again (after the commit) while it holds the
 /// delivery, another admin write to the same credential takes that lock and finishes
-/// on its first poll, without waiting, and the send is still outstanding.
+/// without waiting for either outbound reply, and the send is still outstanding.
 #[tokio::test]
 async fn the_admin_lock_is_not_held_across_an_outbound_await() {
     let root = crate::support::temp_root("admin-lock");
@@ -1033,9 +1031,12 @@ async fn the_admin_lock_is_not_held_across_an_outbound_await() {
         categories: vec![category.into()],
     };
 
+    // Freeze the send's deadline so a write cannot appear to succeed only because
+    // the held lookup or delivery timed out and released the admin lock.
+    tokio::time::pause();
     // The send is waiting on its key lookup.
     lookup.arrived().await;
-    let during_lookup = poll_once(run_on(&b.admin, &set_category(CATEGORY))).await;
+    let during_lookup = poll_until_ready(run_on(&b.admin, &set_category(CATEGORY))).await;
     assert!(
         during_lookup.is_some(),
         "an admin write to the record waited while the send's key lookup was outstanding"
@@ -1048,7 +1049,7 @@ async fn the_admin_lock_is_not_held_across_an_outbound_await() {
     lookup.release(Reply::Ok(peer_keys_reply(&receiver, &hex(&[7u8; 32]))));
     delivery.arrived().await;
     assert_eq!(b.store().list_outgoing_transfers().unwrap().len(), 1);
-    let during_delivery = poll_once(run_on(&b.admin, &set_category("search"))).await;
+    let during_delivery = poll_until_ready(run_on(&b.admin, &set_category("search"))).await;
     assert!(
         during_delivery.is_some(),
         "an admin write to the record waited while the send's delivery was outstanding"
@@ -1057,7 +1058,7 @@ async fn the_admin_lock_is_not_held_across_an_outbound_await() {
     assert!(!send.is_finished(), "the send waits for its delivery");
 
     delivery.release(Reply::Ok(json!({ "state": "pending" })));
-    let report = ok(send.await.unwrap());
+    let report = ok(wait_for_signal(send).await.unwrap());
     assert_eq!(report["reply"], "pending");
     assert_eq!(report["row_kept"], true);
     let categories = b.store().categories(API_ID).unwrap();

@@ -9,6 +9,10 @@
 //! a frame-level error or a stall). So every fetch crosses a real route, is sealed by
 //! one vault and opened by the other.
 //!
+//! The requester runtime starts paused, and socket and gate waits stay runnable
+//! until their signal arrives. Only deadline tests advance Tokio time; ordinary
+//! success paths must not spend their reply budget waiting for a loaded scheduler.
+//!
 //! Setup uses the store APIs directly; these tests do not exercise the admin verbs
 //! that will call them (`transfer init`, `member grant` and `remote add`).
 
@@ -38,8 +42,8 @@ use credentials_core::store::{
 use serde_json::{json, Value};
 
 use crate::support::{
-    poll_once, resolved_after_advance, resolved_before_deadline, wall_ms, Held, HomeStore, Ledger,
-    Reply, Responder, TwoVaults, FAKE_ADAPTERS,
+    poll_once, resolved_after_advance, resolved_before_deadline, wait_for_signal, wall_ms, Held,
+    HomeStore, Ledger, Reply, Responder, TwoVaults, FAKE_ADAPTERS,
 };
 
 const PAIRING: &str = "pair-1";
@@ -119,7 +123,7 @@ struct ScriptGate {
 
 impl ScriptGate {
     async fn arrived(&self) {
-        self.arrived.notified().await;
+        wait_for_signal(self.arrived.notified()).await;
     }
 
     fn release(&self) {
@@ -472,7 +476,7 @@ impl Rig {
 
     async fn get(&self, id: &str, min_ttl_ms: Option<i64>) -> RemoteAnswer {
         let record = self.record(id);
-        self.reader.get(&record, min_ttl_ms).await
+        wait_for_signal(self.reader.get(&record, min_ttl_ms)).await
     }
 
     async fn served(&self, id: &str, min_ttl_ms: Option<i64>) -> RemoteGet {
@@ -489,11 +493,33 @@ impl Rig {
         }
     }
 
+    /// A stalled fetch spends its budget only after the stand-in receives it,
+    /// never while connection setup or socket delivery is still pending.
+    async fn refused_after_deadline(&self, id: &str, min_ttl_ms: Option<i64>) -> RemoteRefusal {
+        let held = Held::new();
+        self.then(Step::Held(held.clone()));
+        let mut read = spawn_get(self, id, min_ttl_ms);
+        held.arrived_before(&mut read).await;
+        match resolved_after_advance(
+            read,
+            claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE + Duration::from_millis(1),
+        )
+        .await
+        {
+            RemoteAnswer::Refused(refusal) => refusal,
+            RemoteAnswer::Served(get) => {
+                panic!("expected a stalled fetch to time out, got {get:?}")
+            }
+        }
+    }
+
     async fn report(&self, id: &str, version: u64, status: u16) -> Result<(), RemoteRefusal> {
         let record = self.record(id);
-        self.reader
-            .report(&record, version, status, Some("direct"), None)
-            .await
+        wait_for_signal(
+            self.reader
+                .report(&record, version, status, Some("direct"), None),
+        )
+        .await
     }
 
     /// The token requests that reached the stand-in so far.
@@ -662,7 +688,7 @@ fn the_custody_scan_finds_plaintext_in_the_store_and_wal_but_skips_only_lease_an
 // The token route, parity and custody
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_consumer_on_b_reads_an_anthropic_token_homed_on_a_and_b_matches_a() {
     let rig = Rig::new("remote-route").await;
     let mut record = oauth_record(
@@ -776,7 +802,7 @@ fn chatgpt_token(account: &str) -> String {
     format!("{header}.{payload}.sig")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn antigravity_and_chatgpt_projections_match_the_homes_local_get_and_list() {
     let rig = Rig::new("remote-parity").await;
     rig.grant_b_module("antigravity:google");
@@ -845,7 +871,7 @@ async fn antigravity_and_chatgpt_projections_match_the_homes_local_get_and_list(
 // Reply validation
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_invalid_reply_changes_only_the_fetch_outcome_and_the_cached_token_is_still_served() {
     let rig = Rig::new("remote-invalid-reply").await;
     rig.login(
@@ -920,7 +946,7 @@ async fn an_invalid_reply_changes_only_the_fetch_outcome_and_the_cached_token_is
 // Cache and clocks
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn b_forwards_the_callers_demand_plus_the_margin_without_wrapping() {
     let rig = Rig::new("remote-demand").await;
     rig.login(
@@ -939,7 +965,7 @@ async fn b_forwards_the_callers_demand_plus_the_margin_without_wrapping() {
     assert_eq!(demands, vec![62_500, i64::MAX, i64::MAX]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cache_hit_makes_no_fetch_and_residence_and_the_skew_bound_reuse() {
     let rig = Rig::new("remote-cache").await;
     rig.login(
@@ -980,7 +1006,7 @@ async fn a_cache_hit_makes_no_fetch_and_residence_and_the_skew_bound_reuse() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_630_second_token_for_a_600_second_demand_is_refreshed_on_the_home_then_served() {
     let rig = Rig::new("remote-home-refresh").await;
     rig.login(
@@ -994,7 +1020,7 @@ async fn a_630_second_token_for_a_600_second_demand_is_refreshed_on_the_home_the
     assert_eq!(rig.fetches(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fresh_reply_that_misses_the_demand_is_ttl_unsatisfiable_after_one_fetch() {
     let rig = Rig::new("remote-ttl").await;
     rig.login(
@@ -1019,7 +1045,7 @@ async fn a_fresh_reply_that_misses_the_demand_is_ttl_unsatisfiable_after_one_fet
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own() {
     let rig = Rig::new("remote-single-flight").await;
     rig.login(
@@ -1032,7 +1058,7 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
         .map(|_| {
             let reader = Arc::clone(&rig.reader);
             let record = record.clone();
-            tokio::spawn(async move { reader.get(&record, None).await })
+            tokio::spawn(async move { wait_for_signal(reader.get(&record, None)).await })
         })
         .collect();
     shared.arrived().await;
@@ -1051,7 +1077,7 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
     let small = {
         let reader = Arc::clone(&rig.reader);
         let record = record.clone();
-        tokio::spawn(async move { reader.get(&record, None).await })
+        tokio::spawn(async move { wait_for_signal(reader.get(&record, None)).await })
     };
     held.arrived().await;
     let large = rig.get(TOKEN_ID, Some(600_000)).await;
@@ -1066,7 +1092,7 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_consumers_expiry_runs_on_bs_clock_whatever_the_wall_offset() {
     let rig = Rig::new("remote-clocks").await;
     let clock = rig.vaults.b.clock.clone();
@@ -1102,7 +1128,7 @@ async fn the_consumers_expiry_runs_on_bs_clock_whatever_the_wall_offset() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_read_after_a_report_reaches_the_home_and_an_older_report_keeps_a_newer_token() {
     let rig = Rig::new("remote-report-read").await;
     // A's record was written more than the report cooldown ago.
@@ -1129,7 +1155,7 @@ async fn a_read_after_a_report_reaches_the_home_and_an_older_report_keeps_a_newe
     assert_eq!(rig.fetches(), 2, "the newer cached token is still served");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cached_token_is_served_through_a_partition() {
     let rig = Rig::new("remote-partition").await;
     rig.login(
@@ -1147,10 +1173,10 @@ async fn a_cached_token_is_served_through_a_partition() {
 /// structured `transient` refusal inside the 2.5 s consumer-facing budget, below the
 /// consumer client's 3 s reply wait. The budget is checked on tokio's paused clock: the
 /// read runs in virtual time, so the build machine's load cannot move the result.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the_budget() {
     let rig = Rig::new("remote-stalled-discovery").await;
-    // A second login, read once on the real clock, so the connection and the route to
+    // A second login, read once so the connection and the route to
     // callosum are already open: the cold read below starts at discovery.
     const WARM_ID: &str = "oauth:anthropic:warm";
     rig.login(
@@ -1173,7 +1199,6 @@ async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the
     let mut read = spawn_get(&rig, TOKEN_ID, None);
     discovery.arrived_before(&mut read).await;
     assert!(poll_once(&mut read).await.is_none());
-    tokio::time::pause();
     let answer = resolved_after_advance(
         read,
         claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE + Duration::from_millis(1),
@@ -1186,7 +1211,7 @@ async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the
     assert_eq!(rig.fetches(), fetches, "no token fetch was sent");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_no_expiry_token_stops_being_served_300_s_after_the_grant_is_revoked() {
     let rig = Rig::new("remote-no-expiry").await;
     rig.login(
@@ -1211,7 +1236,7 @@ async fn a_no_expiry_token_stops_being_served_300_s_after_the_grant_is_revoked()
     assert_eq!(code(&refusal), ("not_found", "permanent", None));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
     let rig = Rig::new("remote-rehome").await;
     rig.login(
@@ -1223,7 +1248,7 @@ async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
     let pending = {
         let reader = Arc::clone(&rig.reader);
         let old = old.clone();
-        tokio::spawn(async move { reader.get(&old, None).await })
+        tokio::spawn(async move { wait_for_signal(reader.get(&old, None)).await })
     };
     held.arrived().await;
     rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
@@ -1257,7 +1282,7 @@ async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
 // The report cooldown
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_report_cooldown_holds_back_a_second_refresh_and_releases_it_without_another_report() {
     let rig = Rig::new("remote-cooldown").await;
     rig.engine_offset.store(61_000, Ordering::SeqCst);
@@ -1300,7 +1325,7 @@ async fn the_report_cooldown_holds_back_a_second_refresh_and_releases_it_without
     assert_eq!(rig.b_status(TOKEN_ID)["stale_pending"], false);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_second_members_report_is_accepted_but_shares_the_credentials_refresh_cooldown() {
     let rig = Rig::new("remote-two-member-cooldown").await;
     rig.engine_offset.store(61_000, Ordering::SeqCst);
@@ -1334,15 +1359,14 @@ async fn a_second_members_report_is_accepted_but_shares_the_credentials_refresh_
         .with_cooldown_clock(Arc::new(move || wall_ms() + offset.load(Ordering::SeqCst)));
     assert!(home.attach_outbound(rig.vaults.a.outbound.clone()));
     rig.engine_offset.store(0, Ordering::SeqCst);
-    let accepted = home
-        .serve(
-            member_y,
-            OP_REPORT_AUTH_FAILURE,
-            &json!({
-                "credential_id": TOKEN_ID, "record_version": 2, "provider_status": 403,
-            }),
-        )
-        .await;
+    let accepted = wait_for_signal(home.serve(
+        member_y,
+        OP_REPORT_AUTH_FAILURE,
+        &json!({
+            "credential_id": TOKEN_ID, "record_version": 2, "provider_status": 403,
+        }),
+    ))
+    .await;
     assert!(
         matches!(accepted, HomeAnswer::Reply(ref body) if body == &json!({ "accepted": true }))
     );
@@ -1357,9 +1381,8 @@ async fn a_second_members_report_is_accepted_but_shares_the_credentials_refresh_
         "recipient_key_id": key_id_y })
     .to_string();
     let fetch_y = || async {
-        let HomeAnswer::Reply(body) = home
-            .serve(member_y, OP_REMOTE_TOKEN, &json!({ "aad": aad }))
-            .await
+        let HomeAnswer::Reply(body) =
+            wait_for_signal(home.serve(member_y, OP_REMOTE_TOKEN, &json!({ "aad": aad }))).await
         else {
             panic!("expected a token reply");
         };
@@ -1407,7 +1430,7 @@ async fn a_second_members_report_is_accepted_but_shares_the_credentials_refresh_
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
     let rig = Rig::new("remote-open-refusal").await;
     rig.login(
@@ -1439,13 +1462,8 @@ async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
             held.arrived_before(&mut read).await;
             held.release(Reply::Permanent(wire.into()));
             held.answered_before(&mut read).await;
-            rig.vaults
-                .callosum
-                .reply_fence(&rig.vaults.b.outbound)
-                .await;
-            tokio::time::pause();
+            wait_for_signal(rig.vaults.callosum.reply_fence(&rig.vaults.b.outbound)).await;
             let answer = resolved_before_deadline(read).await;
-            tokio::time::resume();
             let RemoteAnswer::Refused(refusal) = answer else {
                 panic!("expected a mapped refusal");
             };
@@ -1498,7 +1516,7 @@ type TableRow = (
     Option<(&'static str, &'static str)>,
 );
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_consumer_table_row_answers_and_stores_its_effect() {
     let rig = Rig::new("remote-table").await;
     rig.login(
@@ -1599,8 +1617,12 @@ async fn every_consumer_table_row_answers_and_stores_its_effect() {
         rig.served(TOKEN_ID, None).await;
         rig.vaults.b.clock.advance(300_000);
         let before = rig.record(TOKEN_ID);
-        rig.then(step);
-        let refusal = rig.refused(TOKEN_ID, None).await;
+        let refusal = if matches!(step, Step::Stall) {
+            rig.refused_after_deadline(TOKEN_ID, None).await
+        } else {
+            rig.then(step);
+            rig.refused(TOKEN_ID, None).await
+        };
         assert_eq!(
             code(&refusal),
             (want_code, want_class, want_remedy.as_deref()),
@@ -1641,7 +1663,7 @@ async fn every_consumer_table_row_answers_and_stores_its_effect() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn real_home_verdicts_not_found_and_needs_reauth_set_their_states_and_never_degrade() {
     let rig = Rig::new("remote-verdicts").await;
     rig.login(
@@ -1697,7 +1719,7 @@ async fn real_home_verdicts_not_found_and_needs_reauth_set_their_states_and_neve
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn setup_faults_name_the_member_whose_operator_must_fix_them() {
     let rig = Rig::new("remote-setup").await;
     rig.login(
@@ -1747,7 +1769,7 @@ async fn setup_faults_name_the_member_whose_operator_must_fix_them() {
         .unwrap();
     let reader = reader_for(&rig.vaults, &c);
     let record = c.store.remote_record(TOKEN_ID).unwrap().unwrap();
-    let RemoteAnswer::Refused(refusal) = reader.get(&record, None).await else {
+    let RemoteAnswer::Refused(refusal) = wait_for_signal(reader.get(&record, None)).await else {
         panic!("no self id must refuse");
     };
     assert_eq!(code(&refusal), ("transfer_key_missing", "permanent", None));
@@ -1755,7 +1777,7 @@ async fn setup_faults_name_the_member_whose_operator_must_fix_them() {
     c.store
         .set_federation_self_member_audited(c_member, AuditCtx::admin(AuditOp::FederationSelfSet))
         .unwrap();
-    let RemoteAnswer::Refused(refusal) = reader.get(&record, None).await else {
+    let RemoteAnswer::Refused(refusal) = wait_for_signal(reader.get(&record, None)).await else {
         panic!("no transfer key must refuse");
     };
     assert_eq!(
@@ -1778,7 +1800,7 @@ async fn setup_faults_name_the_member_whose_operator_must_fix_them() {
 // Failure reports
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn report_reply_classes_and_a_non_credential_status_refused_before_forwarding() {
     let rig = Rig::new("remote-reports").await;
     rig.login(
@@ -1824,11 +1846,11 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
     rig.report_then(Step::Held(stalled.clone()));
     let record = rig.record(TOKEN_ID);
     let reader = Arc::clone(&rig.reader);
-    let mut report =
-        tokio::spawn(async move { reader.report(&record, 1, 403, Some("direct"), None).await });
+    let mut report = tokio::spawn(async move {
+        wait_for_signal(reader.report(&record, 1, 403, Some("direct"), None)).await
+    });
     stalled.arrived_before(&mut report).await;
     assert!(poll_once(&mut report).await.is_none());
-    tokio::time::pause();
     let refusal = resolved_after_advance(
         report,
         claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE + Duration::from_millis(1),
@@ -1836,7 +1858,6 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
     .await
     .unwrap_err();
     assert_eq!(code(&refusal), ("home_unreachable", "transient", None));
-    tokio::time::resume();
 
     // The home answered `not_found` (the grant is gone).
     rig.a
@@ -1855,7 +1876,7 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
 // Status and list state
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn status_and_list_state_follow_only_authoritative_outcomes() {
     let rig = Rig::new("remote-state").await;
     rig.login(
@@ -1868,8 +1889,7 @@ async fn status_and_list_state_follow_only_authoritative_outcomes() {
     clock.advance(300_000);
 
     // A transient fetch failure leaves `ready` true.
-    rig.then(Step::Stall);
-    rig.refused(TOKEN_ID, None).await;
+    rig.refused_after_deadline(TOKEN_ID, None).await;
     assert_effect(&rig, TOKEN_ID, "active", Value::Null, "transient");
 
     // A home `needs_reauth` sets the state; a partitioned poll leaves it.
@@ -1930,7 +1950,7 @@ async fn status_and_list_state_follow_only_authoritative_outcomes() {
     assert_eq!(status_body(&active, false)["ready"], true);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delayed_older_report_never_lowers_the_unresolved_version_across_a_restart() {
     let rig = Rig::new("remote-reported-restart").await;
     rig.engine_offset.store(61_000, Ordering::SeqCst);
@@ -1977,7 +1997,7 @@ fn spawn_get(
 ) -> tokio::task::JoinHandle<RemoteAnswer> {
     let reader = Arc::clone(&rig.reader);
     let record = rig.record(id);
-    tokio::spawn(async move { reader.get(&record, min_ttl_ms).await })
+    tokio::spawn(async move { wait_for_signal(reader.get(&record, min_ttl_ms)).await })
 }
 
 fn token(version: u64, payload: &'static str) -> Step {
@@ -1989,7 +2009,7 @@ fn token(version: u64, payload: &'static str) -> Step {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_newer_reply_applied_before_a_delayed_older_one_keeps_version_and_cache() {
     let rig = Rig::new("remote-order-version").await;
     rig.login(
@@ -2013,7 +2033,7 @@ async fn a_newer_reply_applied_before_a_delayed_older_one_keeps_version_and_cach
     assert_eq!(rig.fetches(), fetches, "the cache holds v2");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delayed_verdict_still_applies_after_a_later_transient_failure() {
     let rig = Rig::new("remote-order-verdict").await;
     rig.login(
@@ -2047,7 +2067,7 @@ async fn a_delayed_verdict_still_applies_after_a_later_transient_failure() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn no_caller_is_served_a_fetch_started_before_a_verdict() {
     let rig = Rig::new("remote-order-flight").await;
     rig.login(
@@ -2075,7 +2095,7 @@ async fn no_caller_is_served_a_fetch_started_before_a_verdict() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_home_re_create_resets_the_version_and_a_delayed_old_reply_does_not_reassert() {
     let rig = Rig::new("remote-order-recreate").await;
     rig.login(
@@ -2108,7 +2128,7 @@ async fn a_home_re_create_resets_the_version_and_a_delayed_old_reply_does_not_re
 // B-owned metadata
 // ---------------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_it() {
     let rig = Rig::new("remote-metadata").await;
     rig.login(

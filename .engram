@@ -1,10 +1,5 @@
 # Files git doesn't hold that engram backs up nightly (format: one repo-relative path per line).
 .cortexkit/internal-docs/
-.cortexkit/alfonso/drafts/
-.cortexkit/alfonso/prompts/
-.cortexkit/alfonso/specs/
-.cortexkit/alfonso/artifacts/
-# The same folders after the alfonso to prefrontal rename; drop the alfonso lines once it has run.
 .cortexkit/prefrontal/drafts/
 .cortexkit/prefrontal/prompts/
 .cortexkit/prefrontal/specs/

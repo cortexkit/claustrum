@@ -26,13 +26,15 @@ def receipt(label, seconds, passed=None, floor=None, status="passed"):
 
 def remote_command(mode, plan=None):
     command = ["ck", "motor", "run", "--vcpus", "8", "--cwd", str(ROOT)]
+    if mode == "windows":
+        command += ["--platform", "windows"]
     arguments = []
     # Runner jobs are offline unless asked. The v0.1.2 compatibility arm downloads
     # that release once from GitHub (then reuses its verified copy from the build
     # cache). Both gates can run it: the fast gate does whenever credentials-module
     # changed. So both jobs need outbound network.
     command.append("--net")
-    if mode == "full":
+    if mode in ("full", "windows"):
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
         command += ["--sibling", sibling]
         arguments += ["--sibling", sibling]
@@ -84,19 +86,23 @@ def run_watching_capture(command, captured):
     """
     process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
+    stdout_pipe, stderr_pipe = process.stdout, process.stderr
+    assert stdout_pipe is not None and stderr_pipe is not None
     stderr_lines = []
 
     def read_stderr():
-        for line in process.stderr:
+        for line in stderr_pipe:
             stderr_lines.append(line)
             if captured is not None and line.startswith(CAPTURED_LINE):
                 captured.set()
 
     reader = threading.Thread(target=read_stderr, daemon=True)
     reader.start()
-    stdout = process.stdout.read()
+    stdout = stdout_pipe.read()
     process.wait()
     reader.join()
+    stdout_pipe.close()
+    stderr_pipe.close()
     return subprocess.CompletedProcess(command, process.returncode, stdout, "".join(stderr_lines))
 
 
@@ -108,12 +114,13 @@ class Gate:
 
     def job(self, label, command, remote=False, captured=None):
         start = time.monotonic()
+        where = remote if isinstance(remote, str) else "Linux" if remote else "local"
         try:
             result = run_watching_capture(command, captured) if remote else subprocess.run(
                 command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as error:
             self.rows.append(dict(label=label, seconds=time.monotonic() - start,
-                                  status="failed", where="Linux" if remote else "local"))
+                                  status="failed", where=where))
             raise RuntimeError(f"{label}: runner could not start: {error}" if remote else str(error)) from error
         finally:
             if captured is not None:
@@ -126,12 +133,12 @@ class Gate:
         for line in output.splitlines():
             if line.startswith(PREFIX):
                 row = json.loads(line[len(PREFIX):])
-                row["where"] = "Linux" if remote else "local"
+                row["where"] = where
                 self.rows.append(row)
         has_arms = any(line.startswith(PREFIX) for line in output.splitlines())
         self.rows.append(dict(label=label, seconds=time.monotonic() - start,
                               status="failed" if result.returncode else "passed",
-                              where="Linux job" if remote else "local lane" if has_arms else "local"))
+                              where=where + " job" if remote else "local lane" if has_arms else "local"))
         if remote:
             try:
                 validate_remote(result.returncode, output, stderr)
@@ -151,7 +158,7 @@ class Gate:
             # checkout, and the runner refuses a checkout whose watched directories
             # change while it captures ("checkout changed during capture").
             events = [threading.Event() for _ in remote]
-            futures = [pool.submit(self.job, job[0], job[1], True, event)
+            futures = [pool.submit(self.job, job[0], job[1], job[2], event)
                        for job, event in zip(remote, events)]
             for event in events:
                 event.wait()
@@ -168,7 +175,7 @@ class Gate:
         print("\nArm / lane                                          Where        Seconds  Result")
         for row in self.rows:
             print(f"{row['label']:52} {row['where']:12} {row['seconds']:7.2f}  {row['status']}")
-        arms = [row for row in self.rows if row['where'] in ("Linux", "local")]
+        arms = [row for row in self.rows if row['where'] in ("Linux", "Windows", "local")]
         print("Slowest arms: " + ", ".join(f"{r['label']} {r['seconds']:.2f}s" for r in
                                           sorted(arms, key=lambda r: r['seconds'], reverse=True)[:5]))
         print(f"Wall time: {time.monotonic() - self.start:.2f}s", flush=True)

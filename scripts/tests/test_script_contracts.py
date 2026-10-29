@@ -542,11 +542,14 @@ class ScriptContracts(unittest.TestCase):
     def test_windows_runtime_workflows_are_a_required_ci_and_gate_arm(self):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         steps = workflow['jobs']['test']['steps']
-        step = next(step for step in steps if step.get('name') == 'Windows operator filesystem workflows')
+        step = next(step for step in steps if step.get('name') == 'Windows CI checks')
         self.assertEqual(step.get('if'), "runner.os == 'Windows'")
         self.assertNotIn('continue-on-error', step)
-        self.assertEqual(step['run'], 'cargo test --locked -p credentials-module --features windows-runtime-test-seam --test windows_runtime -- --nocapture --test-threads=1')
-        gate = text('scripts/gate.sh').replace('\\\n', '').splitlines()
+        self.assertEqual(step['shell'], 'bash')
+        self.assertEqual(step['run'], 'bash scripts/gate.sh --lane windows-ci')
+        self.assertIn('windows-ci) windows_ci ;;', text('scripts/gate.sh'))
+        self.assertIn('source scripts/windows-ci.sh', text('scripts/gate.sh'))
+        gate = text('scripts/windows-ci.sh').replace('\\\n', '').splitlines()
         arm = next(line for line in gate if 'run_expect 4 "Windows operator filesystem workflows"' in line)
         self.assertIn('--features windows-runtime-test-seam', arm)
         self.assertIn('--test windows_runtime -- --nocapture --test-threads=1', arm)

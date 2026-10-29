@@ -28,7 +28,19 @@ def copy_checkout(source, destination, target):
     # survives between runs. A sibling snapshot's own target/ is read-only (and may not
     # exist), so each checkout names its cache directory explicitly.
     target.mkdir(parents=True, exist_ok=True)
-    (destination / "target").symlink_to(target, target_is_directory=True)
+    link_target(destination / "target", target)
+
+
+def link_target(link, target):
+    if os.name == "nt":
+        # Junctions need no symlink privilege. Paths travel as environment data,
+        # not shell source, so spaces and command metacharacters remain literal.
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                        "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction "
+                        "-Path $env:CK_GATE_LINK -Target $env:CK_GATE_TARGET | Out-Null"],
+                       env=dict(os.environ, CK_GATE_LINK=str(link), CK_GATE_TARGET=str(target)), check=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
 
 
 def stable_scratch(source):
@@ -76,15 +88,15 @@ def forget_binaries_from_another_copy(checkout, target):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("full", "fast"))
+    parser.add_argument("mode", choices=("full", "fast", "windows"))
     parser.add_argument("--sibling", type=Path)
     parser.add_argument("--plan")
     args = parser.parse_args(argv)
     mode = args.mode
     sibling = None
-    if mode == "full":
+    if mode in ("full", "windows"):
         if args.sibling is None:
-            parser.error("full gate requires --sibling supervisor snapshot path")
+            parser.error(f"{mode} gate requires --sibling supervisor snapshot path")
         sibling = args.sibling.resolve()
         if not sibling.is_dir():
             print(f"GATE FAILED: supervisor snapshot not found inside runner: {sibling}", file=sys.stderr)
@@ -102,6 +114,14 @@ def main(argv=None):
         # from scratch on every gate run.
         copy_checkout(sibling, supervisor, source / "target" / "gate-subconscious")
         os.environ["CRED_SUBCONSCIOUS_ROOT"] = str(supervisor)
+    elif mode == "windows":
+        assert sibling is not None
+        supervisor = scratch / "subconscious"
+        contract = Path("docs/push-sealed-payload.md")
+        (supervisor / contract).parent.mkdir(parents=True)
+        shutil.copy2(sibling / contract, supervisor / contract)
+        # Bash consumes this path; use forward slashes even under native Python.
+        os.environ["CRED_SUBCONSCIOUS_ROOT"] = supervisor.as_posix()
     else:
         os.environ["CK_FAST_PLAN"] = args.plan
     os.environ["RUSTC_WRAPPER"] = ""
@@ -109,8 +129,10 @@ def main(argv=None):
     # The tests locate artifacts under each checkout's target directory. A
     # global target override would make the supervisor/picker probe a stale file.
     os.environ.pop("CARGO_TARGET_DIR", None)
-    command = (["bash", "scripts/gate.sh", "--lane", "linux"] if mode == "full" else
-               ["python3", "scripts/fast-check.py", "--linux-worker"])
+    if mode in ("full", "windows"):
+        command = ["bash", "scripts/gate.sh", "--lane", "windows-ci" if mode == "windows" else "linux"]
+    else:
+        command = ["python3", "scripts/fast-check.py", "--linux-worker"]
     result = subprocess.run(command, cwd=checkout)
     if result.returncode == 0:
         print("CK_GATE_DONE", flush=True)

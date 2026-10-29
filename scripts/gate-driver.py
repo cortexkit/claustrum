@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full gate: cheap refusals first, then independent host and Linux lanes."""
+"""Full gate: cheap refusals first, then native Linux, Windows and host lanes."""
 import platform
 import sys
 from gate_runtime import Gate, remote_command
@@ -11,11 +11,10 @@ def main():
     try:
         gate.job("preflight", ["bash", "scripts/gate.sh", "--lane", "preflight"])
         jobs = [("Linux Rust", remote_command("full"), True),
+                ("Windows CI", remote_command("windows"), "Windows"),
                 ("TypeScript", ["bash", "scripts/gate.sh", "--lane", "typescript"], False)]
         if platform.system() == "Darwin":
             jobs.append(("host release artifact", ["bash", "scripts/gate.sh", "--lane", "release"], False))
-        elif platform.system() == "Windows" or sys.platform.startswith(("msys", "cygwin")):
-            jobs.append(("Windows native", ["bash", "scripts/gate.sh", "--lane", "windows"], False))
         gate.parallel(jobs)
     except RuntimeError as caught:
         error = str(caught)
@@ -24,11 +23,11 @@ def main():
     if error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    print("NOT covered: native Windows CI, macOS Keychain round trips, deployment or release signing.")
+    print("NOT covered: macOS Keychain round trips, deployment or release signing.")
     if gate.unchecked:
         print("GATE PASSED WITH UNCHECKED ARMS -- " + "; ".join(gate.unchecked))
     else:
-        print("GATE PASSED -- Linux checks and host artifact")
+        print("GATE PASSED -- Linux, native Windows CI and host checks")
     return 0
 
 

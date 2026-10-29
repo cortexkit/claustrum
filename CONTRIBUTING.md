@@ -23,23 +23,30 @@ The gate checks your working tree, including uncommitted edits. Format, script c
 and repository scans run locally first and fail fast without building test binaries. Then
 one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
 crash cuts, migration/release compatibility and release-artifact/picker assertions. The
-Linux job runs concurrently with the
-local Bun install/typecheck/hermetic tests and the lanes that only the host itself can
-run: on macOS, the default-feature release `ck-auth` build placed on that machine; on
-Windows, the Windows-native checks. Apart from those, no cargo check, clippy or test
-runs on the host. Every arm reports its duration, and arms with a test-count floor also
+Linux job runs concurrently with a native Windows job (`ck motor run --platform windows`)
+and local Bun install/typecheck/hermetic tests. Windows runs the same command list as
+CI (`scripts/windows-ci.sh`): frozen Bun install/build/typecheck and the Windows package
+subset, repository scans, formatting, both clippy feature sets, workspace tests, native
+Credential Manager round trips, transport-free client and feature-gated operator/crash-cut
+tests. On macOS, the default-feature release `ck-auth` build is also placed on that machine.
+Local lanes start only after **both** remote jobs print `job_id=`, so local writes cannot
+invalidate a snapshot in progress. Apart from that macOS artifact build, no cargo check,
+clippy or test runs on the host. Every arm reports its duration, and arms with a test-count floor also
 report their counts; the final table includes lane wall times and the slowest arms. Run
 it before every push.
 
 It needs:
 
 - the local Rust formatting toolchain, Bun and Python 3, plus access to `ck motor run`;
-  the Linux runner needs Rust and Python;
+  the Linux runner needs Rust and Python; the Windows runner needs native Windows
+  Rustup, Python 3, PowerShell and Git Bash (including `timeout`). The Windows lane
+  provisions stable Rust with clippy/rustfmt and Bun 1.3.14 in its writable cache;
 - a checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this
   repository (or `CRED_SUBCONSCIOUS_ROOT` pointing at one), for the real-daemon end-to-end
   tests and the inbound-contract check.
 
-The `subconscious` supervisor checkout is passed to the Linux runner with `--sibling`.
+The `subconscious` supervisor checkout is passed to both runners with `--sibling`.
+Windows only copies its inbound-contract document; it does not build the supervisor.
 Its path and the fast-check scope also travel as arguments to the worker, rather than
 environment variables that the runner may filter. A supervisor path absent inside the
 job fails before copying or building anything.
@@ -60,12 +67,13 @@ the gate: the real-daemon tests are `#[ignore]` by default and skip unless
 `CRED_REQUIRE_DAEMON=1` is set, and the crash-cut suites compile to nothing without their
 feature flags, printing `running 0 tests ... ok`. Read the counts, not the word `ok`.
 
-A green gate proves the selected Linux and host lanes, not CI's entire platform matrix.
+A green gate covers Linux and native Windows checks, plus the selected host artifact.
 The native-store integration tests exercise Linux Secret Service, not macOS Keychain;
 they report UNCHECKED if D-Bus/gnome-keyring is absent. The GNU Windows cross-check is
 also UNCHECKED unless its Rust target and MinGW compiler are installed on the runner.
-Windows-only native/ACL/filesystem checks still run locally when invoked on Windows;
-CI's native Windows leg remains necessary. Signing/hardened runtime and deployed binary
+Windows-only native/ACL/filesystem checks run on Windows, not a cross-compilation substitute.
+GitHub still supplies its own checkout/cache setup. Both remote jobs request network
+access for tool/package downloads. Signing/hardened runtime and deployed binary
 acceptance remain separate release-builder/operator checks.
 
 `./scripts/fast-check.sh [--base <ref>]` follows the same scheduling rule: local format
@@ -73,7 +81,7 @@ and conditional script contracts first, then one Linux job for diff-scoped clipp
 and the always-on Rust wire/migration checks, in parallel with local TypeScript checks.
 Scope is resolved before submission and passed explicitly, so dirty edits cannot vanish
 when the runner makes its writable copy. Fast-check still omits the full gate's
-feature-gated lint and crash-cut checks, e2e, native stores and release-artifact checks.
+feature-gated lint and crash-cut checks, e2e, native stores, native Windows and release-artifact checks.
 Both commands
 print summaries on failure too; an UNCHECKED arm is never presented as a passed arm.
 

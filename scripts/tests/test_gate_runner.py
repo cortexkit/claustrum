@@ -34,11 +34,34 @@ case "$*" in
 esac
 exec "$REAL_BASH" "$@"
 ''')
-        self.executable("ck", '''
+        self.executable("ck", r'''
 echo "$*" >> "$CALLS"
 case "${SCENARIO:-}" in
   200|201|202|203|204) exit "$SCENARIO";;
   empty) echo CK_GATE_DONE; exit 0;;
+esac
+case "$*" in
+  *--platform\ windows*)
+    case "${SCENARIO:-}" in
+      windows-empty) echo CK_GATE_DONE; exit 0;;
+      windows-floor)
+        echo 'CK_GATE_ARM {"label":"Test", "seconds":1, "passed":0, "floor":1, "status":"passed"}'
+        echo CK_GATE_DONE; exit 0;;
+      windows-incomplete)
+        echo 'CK_GATE_ARM {"label":"Test", "seconds":1, "passed":1, "floor":1, "status":"passed"}'
+        exit 0;;
+    esac
+    if [ "${SCENARIO:-}" = windows-fail ]; then
+      echo 'GATE FAILED: Fixture line endings' >&2
+      exit 1
+    fi
+    if [ "${SCENARIO:-}" = windows-refused ]; then
+      echo 'ck motor run: refused before start: Windows runner unavailable' >&2
+      exit 200
+    fi
+    echo 'CK_GATE_ARM {"label":"Windows workspace", "seconds":1, "passed":1150, "floor":1150, "status":"passed"}'
+    echo CK_GATE_DONE
+    exit 0;;
 esac
 "$REAL_BASH" scripts/gate.sh --lane linux || exit $?
 echo CK_GATE_DONE
@@ -115,17 +138,49 @@ exit "$SCENARIO"
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("workspace unit + integration ran 1 tests, expected at least 1644", result.stdout)
 
-    def test_success_keeps_counts_and_uses_one_remote_submission(self):
+    def test_success_keeps_counts_and_uses_one_submission_per_platform(self):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('"passed": 1644, "floor": 1644', result.stdout)
         self.assertIn("Slowest arms:", result.stdout)
         calls = (self.bin / "calls").read_text().splitlines()
         self.assertEqual(calls[0], "preflight")
-        self.assertEqual(sum(line.startswith("motor run ") for line in calls), 1)
+        submissions = [line for line in calls if line.startswith("motor run ")]
+        self.assertEqual(len(submissions), 2)
+        self.assertEqual(sum("--platform windows" in line for line in submissions), 1)
+        self.assertIn("Windows CI", result.stdout)
+        self.assertIn("Windows job", result.stdout)
         self.assertIn("--vcpus 8", "\n".join(calls))
         self.assertIn("--sibling ../subconscious", "\n".join(calls))
         self.assertTrue(any(line == "cargo build --release --locked --offline -p credentials-module --bin ck-auth" for line in calls))
+
+    def test_windows_step_failure_names_step_and_fails_full_gate(self):
+        result = self.gate("windows-fail")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("GATE FAILED: Windows CI: remote arm failed (exit 1): Fixture line endings", result.stdout)
+
+    def test_windows_refusal_quotes_reason_and_fails_full_gate(self):
+        result = self.gate("windows-refused")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Windows CI: runner exit 200:", result.stdout)
+        self.assertIn("ck motor run: refused before start: Windows runner unavailable", result.stdout)
+
+    def test_windows_counts_floors_and_completion_are_required(self):
+        for scenario, message in (("windows-empty", "remote job returned no counts"),
+                                  ("windows-floor", "Test ran 0 tests, expected at least 1"),
+                                  ("windows-incomplete", "missing completion receipt")):
+            with self.subTest(scenario=scenario):
+                result = self.gate(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("Windows CI:", result.stdout)
+                self.assertIn(message, result.stdout)
+
+    def test_windows_transport_selects_native_worker_and_supervisor(self):
+        command = runtime.remote_command("windows")
+        self.assertEqual(command[command.index("--platform") + 1], "windows")
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["python3", "scripts/gate-remote.py", "windows", "--sibling", "../subconscious"])
+        self.assertIn("--net", command[:command.index("--")])
 
     def test_fast_transport_has_scope_and_no_supervisor(self):
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}

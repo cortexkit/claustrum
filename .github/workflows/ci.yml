@@ -97,6 +97,7 @@ jobs:
           restore-keys: bun-packages-${{ runner.os }}-
 
       - name: Bun install
+        if: runner.os != 'Windows'
         run: bun install --frozen-lockfile
 
       - name: Install Linux native store test services
@@ -113,34 +114,20 @@ jobs:
             -o APT::Get::List-Cleanup=0
           sudo apt-get install -y --no-install-recommends dbus gnome-keyring
 
-      - name: Bun build
-        # test:hermetic already builds on Unix; the Windows subset invokes bun test directly.
-        if: runner.os == 'Windows'
-        run: bun run build
-
       - name: Bun typecheck
+        if: runner.os != 'Windows'
         run: bun run typecheck
 
       - name: Bun test packages
+        if: runner.os != 'Windows'
         # A hung test held this step for over four hours on Windows (until the job's default
         # 360-minute limit), and with it every train waiting on CI. The whole step takes
         # under five minutes when healthy, so fail it well before then.
         timeout-minutes: 20
-        # Pinned to bash: Windows runners default to pwsh and the matrix-arm `[[ ]]` test would
-        # not run there at all. GitHub Windows images ship bash; the same shell choice is used
-        # by the inbound-contract / endpoint-hosts / path-rendering / threshold-controls steps
-        # for the same reason.
-        # The hermetic env (XDG_RUNTIME_DIR / CLAUSTRUM_SUBC_CONNECTION) is set on both legs
-        # so a stray `bun test packages` invocation cannot reach for the daemon's default
-        # connection path on a runner whose env is otherwise unset.
+        # Windows runs the client's Bun tests from windows-ci.sh, with the same hermetic
+        # environment.
         shell: bash
-        run: |
-          if [[ "${{ matrix.os }}" == "windows" ]]; then
-            XDG_RUNTIME_DIR=/nonexistent CLAUSTRUM_SUBC_CONNECTION=/nonexistent/x.json \
-              bun test packages/client
-          else
-            bun run test:hermetic
-          fi
+        run: bun run test:hermetic
 
       # The public subconscious checkout supplies the real-daemon e2e binary
       # and inbound-contract spec, not a Cargo dependency.
@@ -163,6 +150,13 @@ jobs:
             claustrum -> target
             ${{ runner.os == 'Linux' && 'subconscious -> target' || '' }}
 
+      # One command list for GitHub and the local gate's native Windows runner.
+      # The shared lane retains per-step names, counts and Bun/runtime timeouts.
+      - name: Windows CI checks
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/gate.sh --lane windows-ci
+
       # The real-daemon e2e rig spawns the subc daemon (exe `ck-subc`; the PACKAGE
       # is still subc-core) as a subprocess. Build it from the sibling checkout so
       # the rig finds it under ../subconscious/target/debug.
@@ -176,11 +170,8 @@ jobs:
       # which `cargo test` has no business depending on -- and because a drift is a
       # contract question for a human rather than a failing assertion to fix locally.
       - name: Inbound contract check
-        # Pinned to bash because this job also runs on Windows, where the default
-        # shell is pwsh and the script would not execute at all. Pinning runs it on
-        # both legs; restricting it to one leg with an `if` would mean the check
-        # silently stops running the day that leg is renamed or removed, which is
-        # the failure mode this script exists to catch in a different form.
+        if: runner.os != 'Windows'
+        # The Windows copy runs inside the shared Bash lane above.
         shell: bash
         run: ./scripts/check-inbound-contracts.sh ../subconscious/docs/push-sealed-payload.md
 
@@ -189,12 +180,14 @@ jobs:
       # endpoint appears, and comparing a constant to itself proves nothing about the
       # value. A wrong host receives a live refresh token and the failure looks like
       # an ordinary dead login, so it is worth failing the build over.
-      # Pinned to bash on both legs for the same reason as the contract check above.
+      # The shared Windows lane also uses Bash for these repository scans.
       - name: Endpoint hosts
+        if: runner.os != 'Windows'
         shell: bash
         run: python3 scripts/endpoint-hosts.py
 
       - name: Path rendering
+        if: runner.os != 'Windows'
         # The scripts compare paths against posix literals in manifests. str(Path)
         # renders backslashes on Windows, which has broken this build twice --
         # both times in a script whose author had just fixed the other one.
@@ -202,12 +195,15 @@ jobs:
         run: python3 scripts/check-path-rendering.py
 
       - name: Outside path deps
+        if: runner.os != 'Windows'
         run: python3 scripts/check-outside-path-deps.py
 
       - name: Check development binary execution names
+        if: runner.os != 'Windows'
         run: python3 scripts/check-ckdev-execution.py
 
       - name: Design doc status claims
+        if: runner.os != 'Windows'
         run: python3 scripts/check-doc-status.py
 
       # Operator shell scripts use POSIX subprocess paths and macOS deploy tooling.
@@ -221,15 +217,8 @@ jobs:
           CK_NATIVE_STORE_TESTS: '1'
         run: bash scripts/test-native-store.sh
 
-      - name: Windows Credential Manager round trips
-        if: runner.os == 'Windows'
-        env:
-          CK_NATIVE_STORE_TESTS: '1'
-        # Resolve the workspace like the `cargo test --workspace --all-targets` step,
-        # allowing it to reuse this target's dependency artifacts.
-        run: cargo test --locked --workspace --test native_store -- --ignored --nocapture --test-threads=1
-
       - name: Fixture line endings
+        if: runner.os != 'Windows'
         # Guards a defect only the Windows job can see: git rewrites LF to CRLF on
         # checkout, so a byte-exact assertion against a fixture fails there and only
         # there. Runs on every platform because the CHECK is about .gitattributes
@@ -238,6 +227,7 @@ jobs:
         run: python3 scripts/check-fixture-line-endings.py
 
       - name: Threshold boundary controls
+        if: runner.os != 'Windows'
         # Bash-pinned to match its siblings. NOTE the path rendering is handled in
         # the script via as_posix(), not by this pin: the separator comes from
         # Python, so the shell choice does not affect it.
@@ -245,6 +235,7 @@ jobs:
         run: python3 scripts/threshold-controls.py
 
       - name: Format check
+        if: runner.os != 'Windows'
         # Scoped to workspace members. Before dependencies moved to crates.io,
         # --all also checked sibling sources no commit here could fix.
         # Their formatting is their CI's job. Members are DERIVED rather than typed,
@@ -261,6 +252,7 @@ jobs:
           cargo fmt $pkgs -- --check
 
       - name: Clippy
+        if: runner.os != 'Windows'
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # Lint the feature-gated code (the kill-9 pre-commit seam, the rotation and login
@@ -269,12 +261,15 @@ jobs:
       # Without this the gated binaries would rot unnoticed until the next rename, which
       # is the worst moment to discover they no longer compile.
       - name: Clippy (conformance seams)
+        if: runner.os != 'Windows'
         run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
 
       - name: Test
+        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --all-targets
 
       - name: Client without transport
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -287,11 +282,6 @@ jobs:
             exit 1
           fi
           echo "client_no_default_features_excludes_transport: passed (3 forbidden packages absent)"
-
-      - name: Windows operator filesystem workflows
-        if: runner.os == 'Windows'
-        timeout-minutes: 10
-        run: cargo test --locked -p credentials-module --features windows-runtime-test-seam --test windows_runtime -- --nocapture --test-threads=1
 
       # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
       # harness) under a real supervised subc-core. This is the ONLY layer that
@@ -331,6 +321,7 @@ jobs:
       # back to default features. Run these additional test targets rather than
       # repeating the workspace suite.
       - name: Security-conformance suite (crash-safety seams)
+        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
 
       # Probe the separately built default-feature artifact, not the seam binary.

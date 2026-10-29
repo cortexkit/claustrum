@@ -22,19 +22,9 @@
 # still diverged, because the e2e arm dropped CI's --test-threads=1. Copy the
 # flags, not just the command.
 #
-# AND EVEN A PERFECT MATCH IS NOT THE CI MATRIX. Rust runs on Linux; only the
-# host-specific lanes (a macOS release artifact, Windows-native checks) run on the
-# host itself. CI also runs Windows.
-# A green gate followed by a red build is therefore still possible for
-# anything platform-dependent, and has already happened once: the endpoint manifest
-# keyed rows by `str(Path)`, which is identical on posix and backslashed on Windows,
-# so ubuntu passed while windows reported all 29 rows removed and re-added. Nothing
-# runnable here could have caught it.
-#
-# So this gate's claim is bounded: it proves the selected Linux and host lanes. Treat
-# path rendering, line endings, and shell builtins as unverified until CI says
-# otherwise — and do not let a green run here become the reason to skip reading a
-# red one there.
+# Native Windows runs on the build server alongside Linux. Its commands live in
+# windows-ci.sh, which CI also invokes, so platform-specific checks cannot drift
+# into a type-check-only approximation of the Windows job.
 set -euo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -43,8 +33,9 @@ BUN="${BUN:-$(command -v bun || true)}"
 if [ "$#" = 0 ]; then
   exec python3 scripts/gate-driver.py
 fi
-[[ "$#" = 2 && "$1" = --lane ]] || { echo 'usage: scripts/gate.sh [--lane preflight|linux|typescript|release|windows]' >&2; exit 1; }
+[[ "$#" = 2 && "$1" = --lane ]] || { echo 'usage: scripts/gate.sh [--lane preflight|linux|typescript|release|windows|windows-ci]' >&2; exit 1; }
 LANE="$2"
+source scripts/windows-ci.sh
 
 record_arm() {
   python3 - "$1" "$2" "$3" "${4:-null}" "${5:-null}" <<'PY'
@@ -593,11 +584,8 @@ fi
 # claim below is only true while that stays so: CI grew two steps past this gate
 # (inbound contracts, release artifact) before anyone noticed, which is exactly
 # the subset-of-CI failure this file's header says it exists to prevent.
-printf '  NOT covered: cross-platform (CI also runs Windows), and whether a\n'
-printf '  deployed BINARY carries what you just built (scripts/accept-deploy.sh).\n'
-printf '  Two windows-only defects passed this gate on 2026-09-04: a fixture\n'
-printf '  setting TMPDIR (windows reads TEMP/TMP), and std::os::unix in a test\n'
-printf '  (macOS IS unix). Touching platform APIs? See the probe in this file.\n'
+printf '  NOT covered: macOS Keychain, signing, or whether a deployed BINARY\n'
+printf '  carries what you just built (scripts/accept-deploy.sh).\n'
 
 # An unchecked arm is not a passed arm. Keep the verdict last so `tail -1`
 # cannot hide an omission behind the coverage notes above.
@@ -622,6 +610,7 @@ case "$LANE" in
     ;;
   release) release_artifact ;;
   windows) windows_native ;;
+  windows-ci) windows_ci ;;
   *) fail "unknown lane: $LANE" ;;
 esac
 lane_verdict

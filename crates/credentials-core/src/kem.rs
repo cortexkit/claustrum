@@ -110,16 +110,21 @@ pub fn seal_base(
     info: &[u8],
     aad: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
+    seal_base_with_rng(public, pt, info, aad, &mut SystemRng)
+}
+
+fn seal_base_with_rng<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
+    public: &[u8],
+    pt: &[u8],
+    info: &[u8],
+    aad: &[u8],
+    rng: &mut R,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let pk = <<K as hpke::Kem>::PublicKey as Deserializable>::from_bytes(public)
         .map_err(|_| "invalid public key".to_string())?;
-    let mut rng = SystemRng;
-    let (enc, mut ctx) = hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, K, _>(
-        &OpModeS::Base,
-        &pk,
-        info,
-        &mut rng,
-    )
-    .map_err(|_| "sender setup failed".to_string())?;
+    let (enc, mut ctx) =
+        hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, K, _>(&OpModeS::Base, &pk, info, rng)
+            .map_err(|_| "sender setup failed".to_string())?;
     let ct = ctx
         .seal(pt, aad)
         .map_err(|_| "HPKE seal failed".to_string())?;
@@ -263,6 +268,27 @@ impl hpke::rand_core::RngCore for FixedEphemeralRng {
 
 #[cfg(any(test, feature = "test-support"))]
 impl hpke::rand_core::CryptoRng for FixedEphemeralRng {}
+
+/// Test-only base-mode sender with a reproducible ephemeral key, for pinned wire samples.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seal_base_with_ephemeral_ikm(
+    public: &[u8],
+    plaintext: &[u8],
+    info: &[u8],
+    aad: &[u8],
+    ikm_e: [u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    seal_base_with_rng(
+        public,
+        plaintext,
+        info,
+        aad,
+        &mut FixedEphemeralRng {
+            ikm: ikm_e,
+            used: false,
+        },
+    )
+}
 
 /// Test-only: `seal_auth` with the ephemeral key derived from `ikm_e` instead of fresh
 /// randomness, so a test can reproduce a published vector or a pinned wire sample
@@ -434,8 +460,13 @@ mod tests {
         let helper = "seal_base";
         assert!(include_str!("kem.rs").contains("pub fn seal_base("));
         for (surface, source) in [("route dispatch", daemon), ("CLI verbs", cli)] {
+            // Match the complete identifier, not the test-only fixed-ephemeral helper.
+            let qualified = format!("kem::{helper}");
             assert!(
-                !source.contains(&format!("kem::{helper}")),
+                source.match_indices(&qualified).all(|(start, name)| {
+                    source[start + name.len()..]
+                        .starts_with(|next: char| next.is_ascii_alphanumeric() || next == '_')
+                }),
                 "{surface} cannot exercise the public sender helper"
             );
             assert!(

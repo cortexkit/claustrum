@@ -9671,6 +9671,9 @@ mod tests {
     /// separate HPKE implementation using those same scalars. The same vault KEM key
     /// also yields the second `credential.public_key` sample, so clients decode the
     /// X25519 reply the vault really sends, not only the Ed25519 one.
+    /// The base-mode open sample targets that same vault key, with ephemeral input
+    /// keying material (IKM) bytes 128..160 and opaque row metadata followed by
+    /// bytes 160..192 as aad.
     #[tokio::test]
     async fn key_and_scoped_wire_fixture_pins_real_success_replies() {
         use base64::Engine as _;
@@ -9740,8 +9743,10 @@ mod tests {
         for (id, operation) in [
             (key_id, GrantOperation::Sign),
             (key_id, GrantOperation::Read),
+            (key_id, GrantOperation::Open),
             ("oauth:anthropic", GrantOperation::Read),
             (kem_id, GrantOperation::Seal),
+            (kem_id, GrantOperation::Open),
             (kem_id, GrantOperation::Read),
         ] {
             store
@@ -9760,6 +9765,121 @@ mod tests {
         let payload_b64 =
             base64::engine::general_purpose::STANDARD.encode(b"fixture-ed25519-message");
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (open_public, _) = credentials_core::kem::public_half(
+            &credentials_core::kem::pem_from_scalar(&scalar(32)),
+        )
+        .unwrap();
+        let info = b"plexus-sent-text/v1";
+        let aad = [b"row:42|conn:7|recipients:".as_slice(), &scalar(160)].concat();
+        let plaintext = "Hello, Plexus! 👋";
+        let (enc, ciphertext) = credentials_core::kem::seal_base_with_ephemeral_ikm(
+            &open_public,
+            plaintext.as_bytes(),
+            info,
+            &aad,
+            scalar(128),
+        )
+        .expect("seal deterministic base-mode fixture");
+        let open_request = json!({
+            "credential_id": kem_id,
+            "enc_b64": encode(&enc),
+            "ciphertext_b64": encode(&ciphertext),
+            "info_b64": encode(info),
+            "aad_b64": encode(&aad),
+        });
+        let open_reply =
+            scoped_route_request(&surface, &admin, 22, OP_OPEN, open_request.clone()).await;
+        assert_eq!(
+            open_reply["result"]["plaintext_b64"],
+            encode(plaintext.as_bytes())
+        );
+
+        store
+            .create(
+                "kem:wire-ungranted",
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    credentials_core::kem::pem_from_scalar(&scalar(32)).into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create ungranted KEM key");
+        let mut modified_ciphertext = ciphertext.clone();
+        modified_ciphertext[0] ^= 1;
+        let mut refusal_cases = Vec::new();
+        let mut refusal_requests = Vec::new();
+        let mut refusals = Vec::new();
+        for (outcome, field, value, code) in [
+            (
+                "modified ciphertext",
+                "ciphertext_b64",
+                encode(&modified_ciphertext),
+                "open_failed",
+            ),
+            (
+                "wrong aad",
+                "aad_b64",
+                encode(b"row:43|conn:7|recipients:"),
+                "open_failed",
+            ),
+            (
+                "non-KEM credential",
+                "credential_id",
+                key_id.to_string(),
+                "kind_not_openable",
+            ),
+            (
+                "no open grant",
+                "credential_id",
+                "kem:wire-ungranted".to_string(),
+                "not_found",
+            ),
+            (
+                "malformed base64",
+                "enc_b64",
+                "%%%".to_string(),
+                "malformed_encoding",
+            ),
+        ] {
+            let mut request = open_request.clone();
+            request[field] = value.into();
+            let reply = scoped_route_request(&surface, &admin, 22, OP_OPEN, request.clone()).await;
+            assert_eq!(
+                reply,
+                json!({"result": {"error": {"class": "permanent", "code": code}}}),
+                "{outcome}"
+            );
+            refusal_cases.push(outcome);
+            refusal_requests.push(serde_json::to_string(&request).unwrap());
+            refusals.push(serde_json::to_string(&reply).unwrap());
+        }
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let open_row = json!({
+            "op": OP_OPEN,
+            "request": serde_json::to_string(&open_request).unwrap(),
+            "success": [serde_json::to_string(&open_reply).unwrap()],
+            "refusal_cases": refusal_cases,
+            "refusal_requests": refusal_requests,
+            "refusals": refusals,
+            "hpke": {
+                "mode": "base",
+                "kem_id": 0x0020,
+                "kdf_id": 0x0001,
+                "aead_id": 0x0003,
+                "recipient_public_key_hex": hex(&open_public),
+                "enc_hex": hex(&enc),
+                "ephemeral_ikm_hex": hex(&scalar(128)),
+                "info": std::str::from_utf8(info).unwrap(),
+                "aad_hex": hex(&aad),
+                "plaintext": plaintext,
+            },
+        });
         // Each request names the fixture field that pins its input, or None when only
         // its reply is pinned. A row's replies are pinned in request order: the first
         // request for an op is `success[0]`, the next `success[1]`.
@@ -9817,6 +9937,55 @@ mod tests {
             "../tests/fixtures/enrollment_wire_contract.json"
         ))
         .expect("decode wire fixture");
+        let pinned_open = fixture["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["op"] == OP_OPEN);
+        if std::env::var_os("UPDATE_FIXTURES").is_some() {
+            // Replace only the generated row so unrelated fixture bytes stay untouched.
+            let render = |row: &serde_json::Value| {
+                serde_json::to_string_pretty(row)
+                    .unwrap()
+                    .lines()
+                    .map(|line| format!("    {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/enrollment_wire_contract.json");
+            let text = std::fs::read_to_string(&path).unwrap();
+            let (old, new) = if let Some(old) = pinned_open {
+                (render(old), render(&open_row))
+            } else {
+                let anchor = "    {\n      \"op\": \"credential.seal\",";
+                (
+                    anchor.to_string(),
+                    format!("{},\n{anchor}", render(&open_row)),
+                )
+            };
+            assert_eq!(text.matches(&old).count(), 1, "unique open fixture row");
+            std::fs::write(path, text.replacen(&old, &new, 1)).unwrap();
+        } else {
+            assert_eq!(
+                Some(&open_row),
+                pinned_open,
+                "regenerate credential.open with UPDATE_FIXTURES=1 and review the diff"
+            );
+        }
+        let public_key_row = fixture["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["op"] == OP_PUBLIC_KEY)
+            .unwrap();
+        let x25519: serde_json::Value =
+            serde_json::from_str(public_key_row["success"][1].as_str().unwrap()).unwrap();
+        assert_eq!(
+            open_row["hpke"]["recipient_public_key_hex"],
+            x25519["result"]["public_key_hex"]
+        );
+        assert_eq!(open_reply["result"]["key_id"], x25519["result"]["key_id"]);
         let pinned: Vec<_> = produced
             .iter()
             .enumerate()

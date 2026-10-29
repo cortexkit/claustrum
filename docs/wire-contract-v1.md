@@ -429,6 +429,7 @@ report `chatgpt`; antigravity still has `type: "oauth"`.
 | `Oauth` | `gmail` (login id `oauth:gmail[:<label>]`) | omitted |
 | `Oauth` | `xai` | `oauth` |
 | `Oauth` | `kimi` | `oauth` |
+| `Oauth` | `meta` | `oauth` |
 | `Oauth` | `cursor` | `oauth` |
 | `Oauth` | `github-copilot` | `oauth` |
 | `Oauth` | `antigravity` | `antigravity` |

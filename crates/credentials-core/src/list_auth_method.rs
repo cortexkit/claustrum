@@ -169,6 +169,30 @@ mod tests {
         assert_eq!(names.len(), 13, "each adapter name is listed once");
     }
 
+    /// The wire contract's table is what consumers code against, so every adapter here
+    /// must have its own row there with the same value. The meta adapter shipped with
+    /// no row, and a consumer reading the doc would have expected `auth_method` omitted
+    /// for a login the vault reports as `oauth`.
+    #[test]
+    fn the_wire_contract_table_lists_every_adapter_with_its_value() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/wire-contract-v1.md"),
+        )
+        .expect("docs/wire-contract-v1.md");
+        for (adapter, value) in OAUTH_TABLE {
+            let cell = value.map_or("omitted".to_string(), |v| format!("`{v}`"));
+            let row = format!("| `Oauth` | `{adapter}`");
+            let line = doc
+                .lines()
+                .find(|line| line.starts_with(&row))
+                .unwrap_or_else(|| panic!("wire contract has no row for adapter {adapter}"));
+            assert!(
+                line.trim_end().ends_with(&format!("| {cell} |")),
+                "wire contract row for {adapter} disagrees with the code ({cell}): {line}"
+            );
+        }
+    }
+
     #[test]
     fn the_credential_id_is_never_consulted() {
         // The function takes no id, and these pairs are what an id that disagrees with

@@ -18,6 +18,13 @@ import gate_runtime as runtime
 
 class RunnerContracts(unittest.TestCase):
     def setUp(self):
+        # The gate honours CRED_SUBCONSCIOUS_ROOT, which an operator sets when running it
+        # from a worktree whose ../subconscious doesn't exist. These tests pin the default,
+        # so the caller's value must not leak into them.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("CRED_SUBCONSCIOUS_ROOT", None)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         # Resolved: on macOS the temp dir sits under /var, a symlink to /private/var,

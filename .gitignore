@@ -11,7 +11,10 @@ bun.lockb
 # Agent tooling
 .alfonso
 .opencode
-.cortexkit
+# Under .cortexkit/ only the worker rules file is tracked; everything else there is
+# internal (designs, scripts, drafts) and backed up by engram, not git.
+.cortexkit/*
+!.cortexkit/WORKER.md
 _bmad-output
 .bmad
 

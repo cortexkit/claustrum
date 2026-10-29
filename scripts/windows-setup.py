@@ -1,33 +1,15 @@
 #!/usr/bin/env python3
-"""Provision the Windows gate with CI's Rust components and pinned Bun release."""
-from pathlib import Path
+"""Verify the Windows lane's existing tools without installing or downloading."""
 import subprocess
-import urllib.request
-import zipfile
-
-BUN_VERSION = "1.3.14"
 
 
 def main():
-    subprocess.run(["rustup", "toolchain", "install", "stable", "--profile", "minimal",
-                    "--component", "clippy,rustfmt"], check=True)
-    directory = Path("target/windows-tools")
-    binary = directory / "bun.exe"
-    version = (subprocess.check_output([str(binary.resolve()), "--version"], text=True).strip()
-               if binary.exists() else None)
-    if version != BUN_VERSION:
-        directory.mkdir(parents=True, exist_ok=True)
-        archive = directory / "bun.zip"
-        url = f"https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/bun-windows-x64.zip"
-        urllib.request.urlretrieve(url, archive)
-        # Extract only the executable, never arbitrary paths supplied by the archive.
-        with zipfile.ZipFile(archive) as release:
-            binary.write_bytes(release.read("bun-windows-x64/bun.exe"))
-        archive.unlink()
-    version = subprocess.check_output([str(binary.resolve()), "--version"], text=True).strip()
-    if version != BUN_VERSION:
-        raise RuntimeError(f"expected Bun {BUN_VERSION}, found {version}")
-    print(f"Windows setup: stable Rust with clippy/rustfmt; Bun {version}", flush=True)
+    clippy = subprocess.check_output(["cargo", "clippy", "--version"], text=True).strip()
+    rustfmt = subprocess.check_output(["cargo", "fmt", "--version"], text=True).strip()
+    bun = subprocess.check_output(["bun", "--version"], text=True).strip()
+    if bun.partition(".")[0] != "1":
+        raise RuntimeError(f"expected Bun major version 1 on PATH, found {bun}")
+    print(f"Windows setup: {clippy}; {rustfmt}; Bun {bun} from PATH", flush=True)
 
 
 if __name__ == "__main__":

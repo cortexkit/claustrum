@@ -29,11 +29,11 @@ def remote_command(mode, plan=None):
     if mode == "windows":
         command += ["--platform", "windows"]
     arguments = []
-    # Runner jobs are offline unless asked. The v0.1.2 compatibility arm downloads
-    # that release once from GitHub (then reuses its verified copy from the build
-    # cache). Both gates can run it: the fast gate does whenever credentials-module
-    # changed. So both jobs need outbound network.
-    command.append("--net")
+    # Linux's full and fast gates can download the released v0.1.2 binary used by
+    # the migration-compatibility test.
+    # Windows has an offline registry/tool image and refuses network-enabled jobs.
+    if mode != "windows":
+        command.append("--net")
     if mode in ("full", "windows"):
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
         command += ["--sibling", sibling]

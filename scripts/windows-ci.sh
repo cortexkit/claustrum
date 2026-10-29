@@ -7,10 +7,16 @@ windows_ci() {
     *) fail "Windows CI lane refuses to run on this host" ;;
   esac
   run_check "Windows setup" python3 scripts/windows-setup.py
-  export RUSTUP_TOOLCHAIN=stable
   export CARGO_TERM_COLOR=always
-  BUN="$PWD/target/windows-tools/bun.exe"
-  run_check "Bun install" "$BUN" install --frozen-lockfile
+  BUN=bun
+  local install_args=(--frozen-lockfile)
+  # Only GitHub CI may fill dependency caches. Motor workers force offline even
+  # if a caller supplied GitHub's environment variables; a cache miss must fail.
+  if [[ "${GITHUB_ACTIONS:-}" != true || "${CK_WINDOWS_GATE_OFFLINE:-}" = 1 ]]; then
+    export CARGO_NET_OFFLINE=true
+    install_args+=(--offline)
+  fi
+  run_check "Bun install" "$BUN" install "${install_args[@]}"
   run_check "Bun build" "$BUN" run build
   run_check "Bun typecheck" "$BUN" run typecheck
   run_check "Bun test packages" env XDG_RUNTIME_DIR=/nonexistent CLAUSTRUM_SUBC_CONNECTION=/nonexistent/x.json \

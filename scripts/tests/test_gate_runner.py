@@ -187,7 +187,7 @@ exit "$SCENARIO"
         self.assertEqual(command[command.index("--platform") + 1], "windows")
         self.assertEqual(command[command.index("--") + 1:],
                          ["python3", "scripts/gate-remote.py", "windows", "--sibling", "../subconscious"])
-        self.assertIn("--net", command[:command.index("--")])
+        self.assertNotIn("--net", command[:command.index("--")])
 
     def test_fast_transport_has_scope_and_no_supervisor(self):
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}

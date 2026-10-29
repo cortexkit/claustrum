@@ -93,6 +93,9 @@ def main(argv=None):
     parser.add_argument("--plan")
     args = parser.parse_args(argv)
     mode = args.mode
+    if mode == "windows":
+        os.environ["CK_WINDOWS_GATE_OFFLINE"] = "1"
+        os.environ["CARGO_NET_OFFLINE"] = "true"
     sibling = None
     if mode in ("full", "windows"):
         if args.sibling is None:

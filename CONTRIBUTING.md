@@ -39,8 +39,9 @@ It needs:
 
 - the local Rust formatting toolchain, Bun and Python 3, plus access to `ck motor run`;
   the Linux runner needs Rust and Python; the Windows runner needs native Windows
-  Rustup, Python 3, PowerShell and Git Bash (including `timeout`). The Windows lane
-  provisions stable Rust with clippy/rustfmt and Bun 1.3.14 in its writable cache;
+  Rust with working clippy/rustfmt, Bun 1.x on PATH, Python 3, PowerShell and Git
+  Bash (including `timeout`). Setup reports the installed versions, accepts Bun
+  1.4.x as well as CI's 1.3.x, and never downloads or installs tools;
 - a checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this
   repository (or `CRED_SUBCONSCIOUS_ROOT` pointing at one), for the real-daemon end-to-end
   tests and the inbound-contract check.
@@ -72,8 +73,12 @@ The native-store integration tests exercise Linux Secret Service, not macOS Keyc
 they report UNCHECKED if D-Bus/gnome-keyring is absent. The GNU Windows cross-check is
 also UNCHECKED unless its Rust target and MinGW compiler are installed on the runner.
 Windows-only native/ACL/filesystem checks run on Windows, not a cross-compilation substitute.
-GitHub still supplies its own checkout/cache setup. Both remote jobs request network
-access for tool/package downloads. Signing/hardened runtime and deployed binary
+GitHub supplies its own checkout/tool setup and may populate dependency caches.
+Only the Linux job requests network access. Windows motor jobs are offline by design:
+Cargo uses the image's registry built from the committed lockfile, and frozen Bun install
+uses only its local package cache. A missing tool or cache entry fails rather than fetching.
+The inbound-contract check reads the sibling document, never a URL.
+Signing/hardened runtime and deployed binary
 acceptance remain separate release-builder/operator checks.
 
 `./scripts/fast-check.sh [--base <ref>]` follows the same scheduling rule: local format

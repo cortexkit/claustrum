@@ -875,6 +875,32 @@ consumer's side can distinguish them.
 
 Checks run in order: (1) shape decode (a transport `Error` frame with code `invalid_params` and **no class**, per §1a); (2) combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`, then standard base64 decode (malformed byte field: the in-result code `malformed_encoding`, class permanent); (3) combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise `sign_payload_too_large`, context_overflow; (4) connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect); (5) scoped authorization for `open` (`not_found` on unknown or ungranted id); (6) KEM kind fence (`kind_not_openable`, permanent); (7) PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient, modified ciphertext, wrong aad or wrong info and corrupt stored payload). Each step runs only after its predecessors pass. Refusals at step 5 alone increment the connection counter; it recovers after 60 seconds. Authorized opens do not increment it. `info_b64` and `aad_b64` are uninterpreted associated bytes: the vault does not inspect machine identity or verify a signature inside the plaintext.
 
+Example request and reply, taken from the producer's
+`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json`:
+
+```json
+{"aad_b64":"cm93OjQyfGNvbm46N3xyZWNpcGllbnRzOqChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/","ciphertext_b64":"ZbKhMI+TD2ckFKtRYEc4Au/mxq/Mc2QwtibT12l8LkxNq00=","credential_id":"kem:wire-fixture","enc_b64":"evA98Vni11dRwaiOtanoeYjxONznWW69o61/C7BKhzQ=","info_b64":"cGxleHVzLXNlbnQtdGV4dC92MQ=="}
+```
+
+```json
+{"result":{"key_id":"a0289810032eb417","plaintext_b64":"SGVsbG8sIFBsZXh1cyEg8J+Riw=="}}
+```
+
+This opens to `Hello, Plexus! 👋`. The fixture uses RFC 9180 base mode with
+DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305 (suite IDs
+`0x0020 / 0x0001 / 0x0003`) at sequence zero. Its `hpke` block records the
+recipient public key, encapsulated ephemeral public key, test-only ephemeral input
+keying material (IKM), info (`plexus-sent-text/v1`), aad and plaintext. The aad is the
+UTF-8 bytes of `row:42|conn:7|recipients:` followed by these 32 bytes (hex):
+`a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf`.
+The generator uses publicly known synthetic keys and a fixed ephemeral IKM only for
+reproducibility; real senders must use fresh randomness. Regenerate just this fixture
+entry with `UPDATE_FIXTURES=1 cargo test -p credentials-module --bin ck-claustrum
+tests::key_and_scoped_wire_fixture_pins_real_success_replies -- --exact`, and verify
+the independent receiver and sender with `python3 scripts/hpke-independent-open.py`.
+The entry's `refusal_cases`, `refusal_requests` and `refusals` arrays correspond by
+index and pin the real dispatcher's permanent error replies.
+
 ## 11. Cookie deposit (`credential.deposit_cookie`)
 
 A supervised module identified by its route-bound `reserved:<module>` principal

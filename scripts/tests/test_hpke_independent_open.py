@@ -29,6 +29,8 @@ class IndependentHpkeOpen(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('opened all 257 published RFC 9180 mode-2 encryptions', result.stdout)
         self.assertIn('vault seal: opened 20 bytes under the vault key', result.stdout)
+        self.assertIn('opened all 257 published RFC 9180 mode-0 encryptions', result.stdout)
+        self.assertIn('vault open: independently opened and resealed 19 bytes', result.stdout)
         self.assertEqual(result.stdout.count('tamper control:'), 3, result.stdout)
 
     def test_the_receiver_refuses_a_seal_from_another_sender(self):

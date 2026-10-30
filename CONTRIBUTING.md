@@ -24,11 +24,14 @@ and repository scans run locally first and fail fast without building test binar
 one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
 crash cuts, migration/release compatibility and release-artifact/picker assertions. The
 Linux job runs concurrently with a native Windows job (`ck motor run --platform windows`)
-and local Bun install/typecheck/hermetic tests. Windows runs the same command list as
-CI (`scripts/windows-ci.sh`): frozen Bun install/build/typecheck and the Windows package
-subset, repository scans, formatting, both clippy feature sets, workspace tests, native
-Credential Manager round trips, transport-free client and feature-gated operator/crash-cut
-tests. On macOS, the default-feature release `ck-auth` build is also placed on that machine.
+and local Bun install/typecheck/hermetic tests. Windows shares its command list with
+CI (`scripts/windows-ci.sh`): repository scans, formatting, both clippy feature sets,
+workspace tests, native Credential Manager round trips, transport-free client and
+feature-gated operator/crash-cut
+tests. Windows Bun install/build/typecheck and package tests currently run only in GitHub
+CI; the full-gate Windows runner reports all four as UNCHECKED because its offline Bun
+cache is not yet available. On macOS, the default-feature release `ck-auth` build is also
+placed on that machine.
 Local lanes start only after **both** remote jobs print `job_id=`, so local writes cannot
 invalidate a snapshot in progress. Apart from that macOS artifact build, no cargo check,
 clippy or test runs on the host. Every arm reports its duration, and arms with a test-count floor also
@@ -81,9 +84,13 @@ they report UNCHECKED if D-Bus/gnome-keyring is absent. The GNU Windows cross-ch
 also UNCHECKED unless its Rust target and MinGW compiler are installed on the runner.
 Windows-only native/ACL/filesystem checks run on Windows, not a cross-compilation substitute.
 GitHub supplies its own checkout/tool setup and may populate dependency caches.
-Only the Linux job requests network access. Windows motor jobs are offline by design:
-Cargo uses the image's registry built from the committed lockfile, and frozen Bun install
-uses only its local package cache. A missing tool or cache entry fails rather than fetching.
+Only the Linux job requests network access. Windows build-server jobs are offline by design:
+Cargo uses the image's registry built from the committed lockfile. The four Windows Bun
+steps are UNCHECKED with the reason "Windows jobs have no offline Bun cache yet; GitHub CI
+runs these". Once offline Windows jobs have cached bun.lock packages, flip
+`WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=1` in `scripts/windows-ci.sh` to enable them with frozen,
+offline install; no other switch is needed. Missing required tools or Cargo cache entries
+still fail rather than fetching.
 The inbound-contract check reads the sibling document, never a URL.
 Signing/hardened runtime and deployed binary
 acceptance remain separate release-builder/operator checks.

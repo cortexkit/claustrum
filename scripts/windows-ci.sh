@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Shared by the Windows CI job and the full gate's native Windows runner.
 # gate.sh supplies run_check/run_expect so both callers enforce the same receipts.
+# Flip to 1 once offline Windows jobs have a cache of bun.lock packages.
+WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=0
+
 windows_ci() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -13,17 +16,27 @@ windows_ci() {
   export CARGO_TERM_COLOR=always
   BUN=bun
   local install_args=(--frozen-lockfile)
-  # Only GitHub CI may fill dependency caches. Motor workers force offline even
-  # if a caller supplied GitHub's environment variables; a cache miss must fail.
+  local offline=0
+  # Only GitHub CI can fetch dependencies. The full gate's Windows runner stays
+  # offline even if GitHub's environment is inherited; enabled Bun installs cannot
+  # fetch missing packages.
   if [[ "${GITHUB_ACTIONS:-}" != true || "${CK_WINDOWS_GATE_OFFLINE:-}" = 1 ]]; then
+    offline=1
     export CARGO_NET_OFFLINE=true
     install_args+=(--offline)
   fi
-  run_check "Bun install" "$BUN" install "${install_args[@]}"
-  run_check "Bun build" "$BUN" run build
-  run_check "Bun typecheck" "$BUN" run typecheck
-  run_check "Bun test packages" env XDG_RUNTIME_DIR=/nonexistent CLAUSTRUM_SUBC_CONNECTION=/nonexistent/x.json \
-    timeout 1200 "$BUN" test packages/client
+  if [[ "$offline" = 0 || "$WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE" = 1 ]]; then
+    run_check "Bun install" "$BUN" install "${install_args[@]}"
+    run_check "Bun build" "$BUN" run build
+    run_check "Bun typecheck" "$BUN" run typecheck
+    run_check "Bun test packages" env XDG_RUNTIME_DIR=/nonexistent CLAUSTRUM_SUBC_CONNECTION=/nonexistent/x.json \
+      timeout 1200 "$BUN" test packages/client
+  else
+    local label reason="Windows jobs have no offline Bun cache yet; GitHub CI runs these"
+    for label in "Bun install" "Bun build" "Bun typecheck" "Bun test packages"; do
+      windows_unchecked "$label" "$reason"
+    done
+  fi
   run_check "Inbound contract check" bash scripts/check-inbound-contracts.sh \
     "${CRED_SUBCONSCIOUS_ROOT:-../subconscious}/docs/push-sealed-payload.md"
   run_check "Endpoint hosts" python3 scripts/endpoint-hosts.py
@@ -56,11 +69,15 @@ windows_git_check() {
   if [[ -e .git ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     run_check "$label" "$@"
   else
-    local reason="Git metadata unavailable in this Windows checkout (.git missing or unusable)"
-    printf '\n=== %s: UNCHECKED ===\nSKIPPING %s: %s\n' "$label" "$label" "$reason"
-    GATE_UNCHECKED="${GATE_UNCHECKED:-}$label ($reason) "
-    record_arm "$label" 0 unchecked
+    windows_unchecked "$label" "Git metadata unavailable in this Windows checkout (.git missing or unusable)"
   fi
+}
+
+windows_unchecked() {
+  local label="$1" reason="$2"
+  printf '\n=== %s: UNCHECKED ===\nSKIPPING %s: %s\n' "$label" "$label" "$reason"
+  GATE_UNCHECKED="${GATE_UNCHECKED:-}$label ($reason) "
+  record_arm "$label" 0 unchecked
 }
 
 windows_format() {

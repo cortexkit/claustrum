@@ -74,22 +74,28 @@ class WindowsLane(unittest.TestCase):
         bun_step = next(step for step in steps if step.get("uses") == "oven-sh/setup-bun@v2")
         self.assertEqual(bun_step["with"]["bun-version"].partition(".")[0], "1")
 
-    def test_windows_command_order_features_environment_and_floors(self):
+    def windows_rows(self, github="false", forced="1", cache_available="1"):
         # Spy at the command boundary, not on source text: shell quoting and
         # continuations must deliver the same argv to CI and the remote runner.
         spy = 'import json,sys; print(json.dumps(sys.argv[1:]))'
         shell = '''
 source scripts/windows-ci.sh
+WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE="$TEST_BUN_CACHE"
 uname() { echo MINGW64_NT; }
 run_check() { python3 -c "$SPY" check "$@"; }
 windows_git_check() { python3 -c "$SPY" git-check "$@"; }
 run_expect() { python3 -c "$SPY" expect "$@"; }
+windows_unchecked() { python3 -c "$SPY" unchecked "$@"; }
 windows_ci
 '''
         result = subprocess.run(["bash", "-c", shell], cwd=ROOT, text=True,
-                                env={**os.environ, "SPY": spy, "CK_WINDOWS_GATE_OFFLINE": "1"},
+                                env={**os.environ, "SPY": spy, "GITHUB_ACTIONS": github,
+                                     "CK_WINDOWS_GATE_OFFLINE": forced, "TEST_BUN_CACHE": cache_available},
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
-        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        return [json.loads(line) for line in result.stdout.splitlines()]
+
+    def test_windows_command_order_features_environment_and_floors(self):
+        rows = self.windows_rows()
         labels = [row[2] if row[0] == "expect" else row[1] for row in rows]
         self.assertEqual(labels, [
             "Windows setup", "Bun install", "Bun build", "Bun typecheck", "Bun test packages",
@@ -126,6 +132,45 @@ windows_ci
         self.assertEqual(floors["Windows Credential Manager round trips"], 1)
         self.assertEqual(floors["Windows operator filesystem workflows"], 4)
         self.assertEqual(floors["Security-conformance suite (crash-safety seams)"], 3)
+
+    def test_missing_windows_bun_cache_skips_only_bun_but_ci_runs_them(self):
+        labels = ("Bun install", "Bun build", "Bun typecheck", "Bun test packages")
+        reason = "Windows jobs have no offline Bun cache yet; GitHub CI runs these"
+        ci = self.windows_rows(github="true", forced="", cache_available="0")
+        ci_bun = [row for row in ci if row[1] in labels]
+        self.assertEqual([row[1] for row in ci_bun], list(labels))
+        self.assertTrue(all(row[0] == "check" for row in ci_bun))
+        self.assertEqual(ci_bun[0][2:], ["bun", "install", "--frozen-lockfile"])
+        for github, forced in (("false", ""), ("true", "1")):
+            with self.subTest(github=github, forced=forced):
+                local = self.windows_rows(github=github, forced=forced, cache_available="0")
+                self.assertEqual([row for row in local if row[1] in labels],
+                                 [["unchecked", label, reason] for label in labels])
+                self.assertEqual([row for row in local if row[1] not in labels],
+                                 [row for row in ci if row[1] not in labels])
+
+    def test_missing_windows_bun_cache_records_four_unchecked_receipts(self):
+        shell = '''
+source scripts/windows-ci.sh
+WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=0
+uname() { echo MINGW64_NT; }
+run_check() { printf 'CHECK:%s\\n' "$1"; }
+windows_git_check() { :; }
+run_expect() { :; }
+record_arm() { printf 'ARM:%s:%s:%s\\n' "$1" "$2" "$3"; }
+windows_ci
+printf 'SUMMARY:%s\\n' "$GATE_UNCHECKED"
+'''
+        result = subprocess.run(["bash", "-c", shell], cwd=ROOT, text=True, check=True,
+                                env={**os.environ, "GITHUB_ACTIONS": "true", "CK_WINDOWS_GATE_OFFLINE": "1"},
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(sum(line.startswith("ARM:") for line in result.stdout.splitlines()), 4)
+        for label in ("Bun install", "Bun build", "Bun typecheck", "Bun test packages"):
+            self.assertIn(f"ARM:{label}:0:unchecked", result.stdout)
+            self.assertIn(f"{label} (Windows jobs have no offline Bun cache yet; GitHub CI runs these)", result.stdout)
+        self.assertNotIn("CHECK:Bun", result.stdout)
+        self.assertIn("CHECK:Clippy", result.stdout)
+        self.assertIn("CHECK:Endpoint hosts", result.stdout)
 
     def test_git_dependent_windows_check_is_unchecked_without_metadata(self):
         import tempfile
@@ -168,6 +213,7 @@ windows_git_check 'Git-dependent probe' command argument
                'pathconv=os.getenv("MSYS_NO_PATHCONV"), arg_conv_excl=os.getenv("MSYS2_ARG_CONV_EXCL"))))')
         shell = '''
 source scripts/windows-ci.sh
+WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=1
 uname() { echo MINGW64_NT; }
 run_check() { if [[ "$1" = "Bun install" ]]; then python3 -c "$SPY" "${@:2}"; fi; }
 windows_git_check() { run_check "$@"; }

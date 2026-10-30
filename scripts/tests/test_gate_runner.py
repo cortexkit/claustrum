@@ -16,6 +16,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import gate_runtime as runtime
 
 
+class RunnerOutputDecoding(unittest.TestCase):
+    def test_runner_output_that_is_not_utf8_still_returns_a_verdict(self):
+        # 0x97 is an em dash in Windows-1252, which Windows tools print. A strict decode
+        # used to raise here and crash the driver, losing the lane's verdict.
+        script = ("import sys; sys.stdout.buffer.write(b'before \\x97 after'); "
+                  "sys.stderr.write('" + runtime.CAPTURED_LINE + "x\\n'); sys.exit(3)")
+        captured = runtime.threading.Event()
+        result = runtime.run_watching_capture([sys.executable, "-c", script], captured)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("before", result.stdout)
+        self.assertIn("after", result.stdout)
+        self.assertTrue(captured.is_set())
+
+
 class RunnerContracts(unittest.TestCase):
     def setUp(self):
         # The gate honours CRED_SUBCONSCIOUS_ROOT, which an operator sets when running it

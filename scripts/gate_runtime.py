@@ -98,8 +98,11 @@ def run_watching_capture(command, captured):
     handed off, so local writes after that line can't affect the job. The event is
     also set when the process ends, so a refusal never leaves local lanes waiting.
     """
-    process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
+    # errors="replace": a Windows job's tools can print bytes that aren't UTF-8 (an em
+    # dash in a Windows code page). A strict decode raised inside this lane's thread and
+    # crashed the whole driver, so the lane's verdict was lost instead of reported.
+    process = subprocess.Popen(command, cwd=ROOT, text=True, errors="replace",
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_pipe, stderr_pipe = process.stdout, process.stderr
     assert stdout_pipe is not None and stderr_pipe is not None
     stderr_lines = []
@@ -131,7 +134,8 @@ class Gate:
         where = remote if isinstance(remote, str) else "Linux" if remote else "local"
         try:
             result = run_watching_capture(command, captured) if remote else subprocess.run(
-                command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                command, cwd=ROOT, text=True, errors="replace", stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
         except OSError as error:
             self.rows.append(dict(label=label, seconds=time.monotonic() - start,
                                   status="failed", where=where))

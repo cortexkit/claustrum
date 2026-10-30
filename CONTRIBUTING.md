@@ -56,12 +56,14 @@ shared Bash lane's children. Linux keeps its existing sibling-path handoff. Thes
 and fast-check's diff-selected files/crates travel as arguments rather than environment
 variables the runner may filter. A supervisor path absent inside the job fails before
 copying or building anything.
-Remote workers copy both checkout snapshots to
-writable scratch trees, preserving dirty content and history, because the checks and the
-supervisor build must not write into the runner's read-only snapshots. Build
-output uses the runner's writable `target` caches. Snapshot clones use command-scoped
-Git trust for each exact source `.git` path; they never change global Git configuration
-or trust all repositories. Runner refusal/unreachability, unknown
+Remote workers use writable scratch trees because checks and the supervisor build must
+not write into the runner's staged inputs. Linux copies both checkouts with dirty content
+and history; its clones use command-scoped Git trust for each exact source `.git` path,
+never global trust. Windows snapshots contain plain files without `.git`: its worker
+copies those files, excluding build output and host-only Git pointers, without cloning.
+Git-dependent Windows checks report UNCHECKED with a reason when metadata is unavailable;
+CI's Windows checkout still runs them when Git metadata is present. Build output uses
+the runner's writable `target` caches. Runner refusal/unreachability, unknown
 outcome, timeout, cancellation and bad arguments all fail the gate; a successful exit
 without test counts or a completion receipt also fails. There is no local-build fallback.
 Runner failures include the last `ck motor run:` stderr diagnostic in the final failure

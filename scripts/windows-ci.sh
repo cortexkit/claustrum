@@ -33,7 +33,7 @@ windows_ci() {
   run_check "Design doc status claims" python3 scripts/check-doc-status.py
   run_expect 1 "Windows Credential Manager round trips" env CK_NATIVE_STORE_TESTS=1 \
     cargo test --locked --workspace --test native_store -- --ignored --nocapture --test-threads=1
-  run_check "Fixture line endings" python3 scripts/check-fixture-line-endings.py
+  windows_git_check "Fixture line endings" python3 scripts/check-fixture-line-endings.py
   run_check "Threshold boundary controls" python3 scripts/threshold-controls.py
   run_check "Format check" windows_format
   run_check "Clippy" cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -49,6 +49,18 @@ windows_ci() {
   run_expect 3 "Security-conformance suite (crash-safety seams)" \
     cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
     --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
+}
+
+windows_git_check() {
+  local label="$1"; shift
+  if [[ -e .git ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    run_check "$label" "$@"
+  else
+    local reason="Git metadata unavailable in this Windows checkout (.git missing or unusable)"
+    printf '\n=== %s: UNCHECKED ===\nSKIPPING %s: %s\n' "$label" "$label" "$reason"
+    GATE_UNCHECKED="${GATE_UNCHECKED:-}$label ($reason) "
+    record_arm "$label" 0 unchecked
+  fi
 }
 
 windows_format() {

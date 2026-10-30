@@ -31,6 +31,15 @@ def copy_checkout(source, destination, target):
     link_target(destination / "target", target)
 
 
+def copy_windows_snapshot(source, destination, target):
+    # Windows snapshots contain staged files, not a Git repository. Preserve
+    # those exact files without following a worktree's host-only .git pointer.
+    shutil.copytree(source, destination, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git", "target", "node_modules", ".cortexkit", "__pycache__"))
+    target.mkdir(parents=True, exist_ok=True)
+    link_target(destination / "target", target)
+
+
 def link_target(link, target):
     if os.name == "nt":
         # Junctions need no symlink privilege. Paths travel as environment data,
@@ -109,7 +118,10 @@ def main(argv=None):
     source = Path.cwd()
     scratch = stable_scratch(source)
     checkout = scratch / "claustrum"
-    copy_checkout(source, checkout, source / "target")
+    if mode == "windows":
+        copy_windows_snapshot(source, checkout, source / "target")
+    else:
+        copy_checkout(source, checkout, source / "target")
     forget_binaries_from_another_copy(checkout, source / "target")
     if mode == "full":
         supervisor = scratch / "subconscious"

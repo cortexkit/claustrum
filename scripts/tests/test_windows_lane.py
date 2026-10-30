@@ -82,6 +82,7 @@ class WindowsLane(unittest.TestCase):
 source scripts/windows-ci.sh
 uname() { echo MINGW64_NT; }
 run_check() { python3 -c "$SPY" check "$@"; }
+windows_git_check() { python3 -c "$SPY" git-check "$@"; }
 run_expect() { python3 -c "$SPY" expect "$@"; }
 windows_ci
 '''
@@ -98,6 +99,7 @@ windows_ci
             "Format check", "Clippy", "Clippy (conformance seams)", "Test", "Client without transport",
             "Windows operator filesystem workflows", "Security-conformance suite (crash-safety seams)"])
         commands = {label: row[3:] if row[0] == "expect" else row[2:] for label, row in zip(labels, rows)}
+        self.assertEqual([row[1] for row in rows if row[0] == "git-check"], ["Fixture line endings"])
         self.assertEqual(commands["Bun install"], ["bun", "install", "--frozen-lockfile", "--offline"])
         self.assertEqual(commands["Inbound contract check"], [
             "bash", "scripts/check-inbound-contracts.sh",
@@ -125,6 +127,41 @@ windows_ci
         self.assertEqual(floors["Windows operator filesystem workflows"], 4)
         self.assertEqual(floors["Security-conformance suite (crash-safety seams)"], 3)
 
+    def test_git_dependent_windows_check_is_unchecked_without_metadata(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            shell = '''
+source "$WINDOWS_CI"
+run_check() { echo 'unexpected Git-dependent check ran'; exit 7; }
+record_arm() { printf 'ARM:%s:%s:%s\\n' "$1" "$2" "$3"; }
+windows_git_check 'Git-dependent probe' false
+printf 'UNCHECKED:%s\\n' "$GATE_UNCHECKED"
+'''
+            result = subprocess.run(["bash", "-c", shell], cwd=directory, text=True, check=True,
+                                    env={**os.environ, "WINDOWS_CI": str(ROOT / "scripts/windows-ci.sh")},
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertIn("SKIPPING Git-dependent probe: Git metadata unavailable", result.stdout)
+            self.assertIn("ARM:Git-dependent probe:0:unchecked", result.stdout)
+            self.assertIn("UNCHECKED:Git-dependent probe", result.stdout)
+            self.assertNotIn("unexpected", result.stdout)
+
+    def test_git_dependent_windows_check_runs_when_ci_has_metadata(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".git").mkdir()
+            shell = '''
+source "$WINDOWS_CI"
+git() { [[ "$*" = 'rev-parse --is-inside-work-tree' ]]; }
+run_check() { printf 'CHECK:%s:%s:%s\\n' "$1" "$2" "$3"; }
+record_arm() { echo 'unexpected skip receipt'; exit 7; }
+windows_git_check 'Git-dependent probe' command argument
+'''
+            result = subprocess.run(["bash", "-c", shell], cwd=directory, text=True, check=True,
+                                    env={**os.environ, "WINDOWS_CI": str(ROOT / "scripts/windows-ci.sh")},
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertIn("CHECK:Git-dependent probe:command:argument", result.stdout)
+            self.assertNotIn("SKIPPING", result.stdout)
+
     def test_only_github_ci_can_populate_dependency_caches(self):
         spy = ('import json,os,sys; print(json.dumps(dict(args=sys.argv[1:], '
                'cargo_offline=os.getenv("CARGO_NET_OFFLINE"), toolchain=os.getenv("RUSTUP_TOOLCHAIN"), '
@@ -133,6 +170,7 @@ windows_ci
 source scripts/windows-ci.sh
 uname() { echo MINGW64_NT; }
 run_check() { if [[ "$1" = "Bun install" ]]; then python3 -c "$SPY" "${@:2}"; fi; }
+windows_git_check() { run_check "$@"; }
 run_expect() { :; }
 windows_ci
 '''
@@ -202,12 +240,47 @@ windows_ci
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(remote, "stable_scratch", return_value=scratch), \
-                    patch.object(remote, "copy_checkout") as copy, \
+                    patch.object(remote, "copy_windows_snapshot") as copy, \
+                    patch.object(remote, "copy_checkout", side_effect=AssertionError("Windows must not clone Git history")), \
                     patch.object(remote, "forget_binaries_from_another_copy"), \
                     patch.dict(remote.os.environ), \
                     patch.object(remote.subprocess, "run", side_effect=worker):
                 self.assertEqual(remote.main(["windows", "--sibling", str(sibling)]), 0)
             copy.assert_called_once()
+
+    def test_windows_worker_copies_staged_source_without_git_metadata(self):
+        remote = module("gate_remote", "scripts/gate-remote.py")
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "snapshot"
+            source.mkdir()
+            (source / "staged.txt").write_bytes(b"staged, uncommitted bytes\n")
+            (source / "target").mkdir()
+            (source / "target/old-artifact").write_text("cached, not copied")
+            sibling = root / "sibling"
+            (sibling / "docs").mkdir(parents=True)
+            (sibling / "docs/push-sealed-payload.md").write_text("contract document")
+            scratch = root / "working"
+            scratch.mkdir()
+            self.assertFalse((source / ".git").exists())
+
+            def worker(command, **kwargs):
+                self.assertEqual(command, ["bash", "scripts/gate.sh", "--lane", "windows-ci"],
+                                 "Windows staged files must not trigger git clone/read-tree")
+                checkout = kwargs["cwd"]
+                self.assertEqual((checkout / "staged.txt").read_bytes(), b"staged, uncommitted bytes\n")
+                self.assertFalse((checkout / ".git").exists())
+                self.assertTrue((checkout / "target").is_symlink())
+                self.assertEqual((checkout / "target").resolve(), source / "target")
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(remote.Path, "cwd", return_value=source), \
+                    patch.object(remote, "stable_scratch", return_value=scratch), \
+                    patch.object(remote, "forget_binaries_from_another_copy"), \
+                    patch.dict(remote.os.environ), \
+                    patch.object(remote.subprocess, "run", side_effect=worker):
+                self.assertEqual(remote.main(["windows", "--sibling", str(sibling)]), 0)
 
 
 if __name__ == "__main__":

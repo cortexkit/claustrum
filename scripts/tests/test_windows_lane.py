@@ -252,7 +252,9 @@ windows_ci
         remote = module("gate_remote", "scripts/gate-remote.py")
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # Resolved: on macOS the temp dir sits under /var, a symlink to /private/var,
+            # so the target link's resolved path would never equal an unresolved source.
+            root = Path(directory).resolve()
             source = root / "snapshot"
             source.mkdir()
             (source / "staged.txt").write_bytes(b"staged, uncommitted bytes\n")

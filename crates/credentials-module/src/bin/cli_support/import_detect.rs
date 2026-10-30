@@ -85,9 +85,7 @@ fn home_relative(env: &(impl EnvLookup + ?Sized), suffix: &str) -> PathBuf {
         .join(suffix)
 }
 
-/// Resolve opencode's auth file with the same XDG/HOME fallback as the existing
-/// `opencode_files::default_auth_path()` function, whose zero-argument API remains
-/// unchanged for its existing callers.
+/// Resolve opencode's auth file using its platform data directory and XDG overrides.
 pub fn opencode_default_auth_path(env: &(impl EnvLookup + ?Sized)) -> PathBuf {
     data_home(env, cfg!(windows))
         .join("opencode")

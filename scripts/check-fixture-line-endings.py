@@ -8,12 +8,9 @@ the machine that reads it, and the failure surfaces as a mismatch on one platfor
 that reads like a broken test rather than a mangled file.
 
 `.gitattributes` already carried that reasoning and the instruction "any future
-vendored fixture whose CONTENT is asserted belongs in this list". It was written
-after the same defect hit a signed manifest in August. IT DID NOT PREVENT THE NEXT
-ONE: `packages/opencode/golden/` arrived in September, outside every listed path,
-and its golden handle file checked out with CRLF on the Windows runner --
-`the_golden_handle_file_matches_the_rust_contract_byte_for_byte` failed there with
-`\\n` on the left and `\\r\\n` on the right.
+vendored fixture whose CONTENT is asserted belongs in this list". A new fixture
+directory can still arrive outside every listed path and check out with CRLF on
+Windows.
 
 A CONVENTION STATED IN A FILE IS ONLY FOLLOWED BY PEOPLE WHO OPEN THAT FILE. This
 script is the same rule with a failure mode: it refuses rather than advises.
@@ -45,7 +42,7 @@ FIXTURE_DIR_NAMES = {"golden", "fixtures", "vectors"}
 # would pass every directory, and the green run would read exactly like a clean repo.
 # These samples are checked on every run in both directions: (path, patterns, expected).
 MATCHER_CONTROL: tuple[tuple[str, tuple[str, ...], bool], ...] = (
-    ("packages/opencode/golden", ("packages/opencode/golden/**",), True),
+    ("packages/example/golden", ("packages/example/golden/**",), True),
     ("crates/a/tests/fixtures", ("crates/b/tests/fixtures/**",), False),
     ("crates/a/tests/fixtures", ("*.pem",), False),
     ("keys/root.pem", ("*.pem",), True),

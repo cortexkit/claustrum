@@ -97,7 +97,7 @@ class ReleaseFastPath(unittest.TestCase):
         # count check run in this fixture instead of stubbing that refusal away.
         source = self.root / 'crates/example/src/seams.rs'
         source.parent.mkdir(parents=True)
-        source.write_text('cfg(debug_assertions)\n' * 5)
+        source.write_text('cfg(debug_assertions)\n')
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         self.env = dict(os.environ, HOME=os.fspath(self.root), PROBE='none: hermetic policy test',

@@ -18,27 +18,6 @@
 /// line). Each entry must match exactly one line, so a moved or removed site makes the
 /// list fail instead of quietly allowing a new rename elsewhere.
 const ALLOWED: &[(&str, &str)] = &[
-    // Manifest lock release: moves the lock DIRECTORY aside to release it. Must fail
-    // if the target exists, which a replace would not, so it is not a file publish.
-    (
-        "crates/credentials-module/src/bin/cli_support/opencode_files.rs",
-        "if fs::rename(lock, &release).is_err() {",
-    ),
-    // Manifest lock release: puts a directory that turned out not to be ours back.
-    (
-        "crates/credentials-module/src/bin/cli_support/opencode_files.rs",
-        "let _ = fs::rename(&release, lock);",
-    ),
-    // Stale manifest lock eviction: moves the lock directory to a quarantine name.
-    (
-        "crates/credentials-module/src/bin/cli_support/opencode_files.rs",
-        "let rename_result = fs::rename(&lock, &stale);",
-    ),
-    // Stale manifest lock eviction: puts back a directory that had a different owner.
-    (
-        "crates/credentials-module/src/bin/cli_support/opencode_files.rs",
-        "let _ = fs::rename(&stale, &lock);",
-    ),
     // Test code (a #[cfg(test)] module file): moves a fixture file aside on purpose.
     (
         "crates/credentials-module/src/account_token_tests.rs",

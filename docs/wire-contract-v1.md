@@ -558,8 +558,8 @@ Both omitted values contribute absence bytes; switching source changes the view 
 when the effective tier stays equal. Deployment changes nonempty views once; empty
 inventory views remain unchanged.
 
-Replacement deposits (`put --replace`, CAS replace, native re-login, import replace,
-OpenCode migration/picker replacement, and cookie replacement) compare the stored and
+Replacement deposits (`put --replace`, compare-and-swap replace, native re-login,
+import/picker replacement, and cookie replacement) compare the stored and
 resulting normalized `account_id`; `set-identity` also compares those identities. A different account clears the old override and
 old detected observation; a fresh observation from the incoming login can be retained.
 The override clear is audited in the same transaction as replacement. Equal account ids, including two

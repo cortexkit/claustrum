@@ -9366,12 +9366,11 @@ mod tests {
     /// EVERY write path refuses custody-tombstone material, not merely the importer
     /// that happens to parse it.
     ///
-    /// A tombstone is the sentinel the vault writes INTO a consumer's credential store
-    /// to mark "the real material lives in the vault". It is the one string that is
+    /// A custody tombstone is a sentinel in a consumer's credential store marking
+    /// "the real material lives in the vault". It is the one string that is
     /// never a credential, and storing it inverts custody: the vault would then serve
     /// the marker that means the vault holds the secret, and the real family would
-    /// exist nowhere. The refusal existed only at the OpenCode import entrances
-    /// (`opencode_migration`, `opencode_accounts`, the OAuth source parsers), so a
+    /// exist nowhere. When refusal was enforced only by individual importers, a
     /// generic `put --replace --payload 'claustrum-tombstone:v1:...'` reached the store
     /// and replaced a working credential with the marker.
     ///

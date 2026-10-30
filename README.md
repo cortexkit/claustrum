@@ -13,7 +13,6 @@ key and recorded in a tamper-evident audit chain.
 | [`crates/credentials-module`](crates/credentials-module) | The daemon `ck-claustrum` and the operator CLI `ck-auth` (`ck auth <verb>`). |
 | [`crates/claustrum-client`](crates/claustrum-client) | `cortexkit-claustrum-client`, the Rust client for supervised modules. |
 | [`packages/client`](packages/client) | `@cortexkit/claustrum-client`, the TypeScript client. |
-| [`packages/opencode`](packages/opencode) | `@cortexkit/opencode-claustrum`, an OpenCode plugin that serves provider slots from the vault. |
 
 How the parts fit together, and the rules they keep, is in
 [`docs/architecture.md`](docs/architecture.md).
@@ -83,6 +82,10 @@ from the release page; `ck setup claustrum` installs it first.
 - [Wire contract](docs/wire-contract-v1.md): the consumer-facing read surface.
 - [Manifest signing](docs/gh-manifest-signing.md): the `gh` routing-manifest signing ceremony.
 - [Security policy](SECURITY.md): how to report a vulnerability, and the threat model.
+
+## Connect OpenCode or Pi
+
+TODO(CKCRED): install and approval steps from claustrum-auth.
 
 ## License
 

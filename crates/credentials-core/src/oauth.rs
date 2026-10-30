@@ -378,7 +378,7 @@ impl std::fmt::Display for ImportError {
             }
             ImportError::CustodyTombstone => write!(
                 f,
-                "refusing Claustrum tombstone material; run ck auth migrate-opencode or ck auth migrate-opencode --restore"
+                "refusing Claustrum tombstone material; import an actual login instead"
             ),
         }
     }
@@ -524,12 +524,20 @@ mod tests {
         let api = br#"{"deepseek":{"type":"api","key":"claustrum-tombstone:v1:deepseek"}}"#;
         let error =
             import_api_key("opencode", api, "deepseek").expect_err("tombstone api key must refuse");
-        assert!(error.to_string().contains("migrate-opencode"));
+        assert!(matches!(error, ImportError::CustodyTombstone));
+        assert_eq!(
+            error.to_string(),
+            "refusing Claustrum tombstone material; import an actual login instead"
+        );
 
         let oauth = br#"{"anthropic":{"type":"oauth","refresh":"claustrum-tombstone:v1:anthropic","access":"claustrum-tombstone:v1:anthropic","expires":0}}"#;
         let error = OAuthCredential::import_provider("opencode", oauth, "anthropic")
             .expect_err("tombstone oauth tokens must refuse");
-        assert!(error.to_string().contains("migrate-opencode"));
+        assert!(matches!(error, ImportError::CustodyTombstone));
+        assert_eq!(
+            error.to_string(),
+            "refusing Claustrum tombstone material; import an actual login instead"
+        );
     }
 
     #[test]

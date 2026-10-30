@@ -340,10 +340,8 @@ client id come from the refresh adapter, not the file.
   or index, default the active one) and is the source for an `antigravity:google` id. An
   opencode-minted Google token cannot be refreshed by either and fails closed to
   `needs_reauth`.
-- **Claustrum tombstones are not importable.** After `migrate-opencode`, a tombstoned entry
-  is an ownership marker. Re-run `ck auth migrate-opencode` to converge, or use
-  `ck auth migrate-opencode --restore <provider>` to return the credential to OpenCode
-  (see [the OpenCode plugin](opencode-plugin.md)).
+- **Claustrum tombstones are not importable.** An ownership marker is not credential
+  material; import an actual login instead.
 - `--replace` overwrites an existing id unconditionally (re-seal at version+1, reset to
   `active`) and keeps its handles. Without it, `import` is create-only.
 - `--account-id <id>` attaches non-secret account metadata; `--email` and `--org-name`
@@ -698,6 +696,10 @@ moment the new one is minted. The consumer-side ceremony is in
 [the wire contract](wire-contract-v1.md#21-enrollment-for-a-consumer-with-no-supervised-identity).
 
 ---
+
+## Connect OpenCode or Pi
+
+TODO(CKCRED): install and approval steps from claustrum-auth.
 
 ## 6. Start the daemon; consumers read over the route channel
 

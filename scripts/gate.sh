@@ -380,7 +380,7 @@ assert_floor_not_lowered() {
 # counting off-platform no-ops. `assert_floor_not_lowered` below stops a branch from lowering
 # the floor below its merge target. The history of each raise is in git log.
 linux_tests() {
-run_expect 1150 "workspace unit + integration" \
+run_expect 1644 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 case "$(uname -s)" in
@@ -493,22 +493,6 @@ run_expect 2 "login crash cut" \
 run_expect 3 "migration tools" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
   --test key_verify_takes_nothing
-# These debug-only seams prove the custody cleanup paths without making an
-# environment-triggered interruption reachable in a release binary.
-# --nocapture IS LOAD-BEARING, NOT TIDINESS. Both arms can now print a SKIPPING notice
-# (their seams are cfg(debug_assertions), so they skip when pointed at a staged release
-# binary). Without --nocapture cargo swallows that notice, and the skip check reads an
-# empty stream and passes the arm WITHOUT EVER SEEING IT SKIP -- a suite that silently
-# ran nothing, reported as coverage. The gate refuses this combination by name, which is
-# how this line came to exist: adding the skip notices made it fire.
-run_expect 1 "opencode tombstone reread crash cut" \
-  cargo test --locked --workspace --features credentials-core/test-support \
-    --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun \
-    -- --nocapture
-run_expect 1 "opencode account handle-write crash cut" \
-  cargo test --locked --workspace --features credentials-core/test-support \
-    --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle \
-    -- --nocapture
 # Rebuild the shipped CLI with default features so every later check and the caller use
 # the production release artifact rather than a test-profile seam build.
 release_artifact

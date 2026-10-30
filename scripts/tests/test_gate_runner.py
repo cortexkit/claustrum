@@ -48,7 +48,7 @@ echo "cargo $*" >> "$CALLS"
 case "$*" in
   *clippy*) if [ "${SCENARIO:-}" = fail ]; then echo 'planted remote clippy failure'; exit 1; fi;;
   *test*)
-    n=1150
+    n=1644
     if [ "${SCENARIO:-}" = floor ]; then n=1; fi
     echo "test result: ok. $n passed; 0 failed; 0 ignored";;
 esac
@@ -106,19 +106,19 @@ exit "$SCENARIO"
     def test_remote_floor_shortfall_fails_gate(self):
         result = self.gate("floor")
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("workspace unit + integration ran 1 tests, expected at least 1150", result.stdout)
+        self.assertIn("workspace unit + integration ran 1 tests, expected at least 1644", result.stdout)
 
     def test_linux_lane_enforces_floor_before_returning(self):
         result = subprocess.run([self.env["REAL_BASH"], "scripts/gate.sh", "--lane", "linux"],
             cwd=ROOT, env=dict(self.env, SCENARIO="floor"), text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("workspace unit + integration ran 1 tests, expected at least 1150", result.stdout)
+        self.assertIn("workspace unit + integration ran 1 tests, expected at least 1644", result.stdout)
 
     def test_success_keeps_counts_and_uses_one_remote_submission(self):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('"passed": 1150, "floor": 1150', result.stdout)
+        self.assertIn('"passed": 1644, "floor": 1644', result.stdout)
         self.assertIn("Slowest arms:", result.stdout)
         calls = (self.bin / "calls").read_text().splitlines()
         self.assertEqual(calls[0], "preflight")

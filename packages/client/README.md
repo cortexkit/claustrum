@@ -13,8 +13,8 @@ credential caching, refresh, account scheduling, and retry policy.
   expiry-skew refresh can take seconds. Request paths should peek cached state,
   not call `get` speculatively.
 • `permanent` with `not_found` means the handle is unknown OR revoked — uniform refusal
-  by design (the vault cannot enumerate which). Treat it as gone either way: re-run
-  `ck auth migrate-opencode` to mint a fresh handle; the prior record, if any, is kept.
+  by design (the vault cannot enumerate which). Treat it as gone either way; the
+  prior record, if any, is kept.
 • `auth_required` means the record is latched and needs reauthentication.
 • `statusCredential` on an unknown or revoked handle RESOLVES, it does not throw: it
   returns `ready: false, lastErrorCode: 'not_found'` with `recordVersion`, `credentialId`

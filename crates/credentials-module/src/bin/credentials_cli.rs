@@ -28,7 +28,6 @@
 //!   sign --id <id> --payload-file <path|->
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   set-identity <id> --account-id <id> [--email <email>] [--org-name <name>] | --clear
-//!   migrate-opencode [--dry-run] [--replace] [--force-shape] [--restore <provider>]
 //!   invalidate --id <id>
 //!   rotate-master-key
 //!   mint-handle --id <id>                      print a fresh handle (once)
@@ -54,9 +53,6 @@ mod api_key_login;
 mod browser_login;
 #[allow(dead_code)]
 mod cli_support;
-#[allow(dead_code)]
-#[path = "cli_support/credential_client.rs"]
-mod credential_client;
 #[path = "cli_support/google_login.rs"]
 mod google_login;
 #[path = "cli_support/import_picker.rs"]
@@ -65,13 +61,6 @@ mod import_picker;
 mod login_listener;
 #[path = "cli_support/login_wire.rs"]
 mod login_wire;
-#[path = "cli_support/opencode_accounts.rs"]
-mod opencode_accounts;
-#[allow(dead_code)]
-#[path = "cli_support/opencode_files.rs"]
-mod opencode_files;
-#[path = "cli_support/opencode_migration.rs"]
-mod opencode_migration;
 #[path = "cli_support/provider_login.rs"]
 mod provider_login;
 #[path = "cli_support/route_client.rs"]
@@ -377,8 +366,6 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "set-providers" => cmd_set_providers(&global, &args),
         "set-plan" => cmd_set_plan(&global, &args),
         "reclassify" => cmd_reclassify(&global, &args),
-        "migrate-opencode" => opencode_migration::cmd_migrate_opencode(&global, &args),
-        "opencode-account" => opencode_accounts::cmd_opencode_account(&global, &args),
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
         "reactivate" => cmd_reactivate(&global, &args),
@@ -482,20 +469,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "set-category" => &["--set", "--add", "--remove"],
         "set-providers" => &["--id"],
         "set-plan" => &["--id", "--tier"],
-        "migrate-opencode" => &[
-            "--restore",
-            "--auth-file",
-            "--handle-file",
-            "--provider",
-            "--serve-by",
-        ],
-        "opencode-account" => &[
-            "--provider",
-            "--label",
-            "--key-file",
-            "--before",
-            "--handle-file",
-        ],
         "login" => &[
             "--provider",
             "--approve-on",
@@ -543,7 +516,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "set-identity" | "set-plan" => &["--clear"],
         "reclassify" => &["--from-registry", "--force"],
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
-        "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
         _ => &[],
@@ -563,10 +535,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         // `enroll` shipped that way and the whole suite stayed green: every help and
         // flag test drives FLAGS, and no test invoked `ck auth enroll list`. It failed
         // on the live daemon at the first probe, during a migration window, which is the
-        // most expensive place to find it. A table rather than a second `command ==`
-        // chain because there are two now and the next one should only have to add a row.
+        // most expensive place to find it. Keep subcommands in one table so a new
+        // verb can declare its positional actions alongside the existing ones.
         let subcommands: &[&str] = match command {
-            "opencode-account" => &["add", "remove", "list"],
             "enroll" => &["list", "approve", "deny", "revoke", "reissue"],
             "transfer" => &["init", "send", "receive", "accept", "reject"],
             "remote" => &["add", "remove", "list"],
@@ -651,8 +622,6 @@ fn usage_short() -> String {
            set-providers       replace/add/remove catalog provider ids\n\
            set-plan            set/clear an operator-asserted subscription tier\n\
           reclassify          apply registry category defaults atomically\n\
-         migrate-opencode    custody OpenCode api auth entries idempotently\n\
-         opencode-account    add/remove/list labeled OpenCode api accounts\n\
         mint-handle         mint a capability handle for a credential\n\
         revoke-handle       revoke one capability handle\n\
         revoke-all-handles  revoke every handle for a credential\n\
@@ -1108,62 +1077,6 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Enumeration and all category transitions use one fenced transaction."
-        }
-        "migrate-opencode" => {
-            "ck auth migrate-opencode [--dry-run] [--replace] [--force-shape]\n\
-             \x20                        [--restore <provider>] [--auth-file <path>]\n\
-             \x20                        [--handle-file <path>]\n\
-             \x20                        [--provider <id>]... [--serve-by <plugin-id>]\n\
-             \n\
-             \x20 --dry-run               print non-secret compare verdicts and stop before\n\
-             \x20                         every write\n\
-             \x20 --replace               explicitly allow replacement when material differs\n\
-             \x20 --force-shape           override the availability-only refusal for unsafe\n\
-             \x20                         provider shapes and print the concrete sentinel\n\
-             \x20                         consequence\n\
-             \x20 --restore <provider>    safely write an api entry back, revoke recorded\n\
-             \x20                         handles, and remove that provider from the handle\n\
-             \x20                         file; cannot combine with dry-run, replace,\n\
-             \x20                         force-shape, or provider\n\
-             \x20 --auth-file <path>      OpenCode auth file; defaults to\n\
-             \x20                         <data_home>/opencode/auth.json\n\
-             \x20 --handle-file <path>    handle file; defaults to\n\
-             \x20                         <config_home>/cortexkit/opencode-handles.json\n\
-             \x20 --provider <id>         select a provider; repeatable, preserving requested\n\
-             \x20                         order\n\
-             \x20 --serve-by <plugin-id>  serving plugin; only opencode-claustrum is supported\n\
-             \n\
-             NOTES\n\
-             Move OpenCode api entries into the vault as apikey:<provider>:main, write a\n\
-             capability handle file, then replace the auth entry with a provider tombstone.\n\
-             Re-running identical material is a no-op. OAuth and wellknown entries are\n\
-             skipped by default.\n\
-             \n\
-             Providers whose api key leaves the generic fetch seam are refused with source\n\
-             citations."
-        }
-        "opencode-account" => {
-            "ck auth opencode-account add --provider <id> --label <label> --key-file <path|->\n\
-             \x20                        [--before <label>] [--handle-file <path>]\n\
-             \n\
-             \x20 --provider <id>       provider already migrated; required for add/remove,\n\
-             \x20                       optional for list\n\
-             \x20 --label <label>       account label to add or remove\n\
-             \x20 --key-file <path|->   add: key from a file or stdin (-), never argv; stdin\n\
-             \x20                       trims one terminal LF or CRLF\n\
-             \x20 --before <label>      add: insert before an existing account label\n\
-             \x20 --handle-file <path>  handle file; defaults to\n\
-             \x20                       <config_home>/cortexkit/opencode-handles.json\n\
-             \n\
-             NOTES\n\
-             Add, remove, or list labeled api accounts in a provider already migrated by\n\
-             migrate-opencode. List prints labels, credential ids, lifecycle state, and\n\
-             record versions only.\n\
-             \n\
-             ck auth opencode-account remove --provider <id> --label <label>\n\
-             \x20                        [--handle-file <path>]\n\
-             \n\
-             ck auth opencode-account list [--provider <id>] [--handle-file <path>]"
         }
         "mint-handle" => {
             "ck auth mint-handle --id <id>\n\
@@ -6004,7 +5917,6 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
             global.data_dir.display()
         )));
     }
-    warn_unsafe_opencode_tombstones();
     let conn = usable::open_store_read_only(&db).map_err(|e| CliError::Io(e.to_string()))?;
 
     // Resolve the slot the STORE names, exactly as the daemon does. A rotation that
@@ -6168,40 +6080,6 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
     println!("  for a provider-rejected credential is the `needs_reauth` state, which a");
     println!("  consumer sets via report_auth_failure and the health gauge already counts.");
     Ok(())
-}
-
-fn warn_unsafe_opencode_tombstones() {
-    let auth_path = opencode_files::default_auth_path();
-    if !auth_path.exists() {
-        return;
-    }
-    let entries = match opencode_files::read_auth_entries(&auth_path) {
-        Ok(entries) => entries,
-        Err(error) => {
-            println!(
-                "WARN: OpenCode auth file {} could not be inspected for unsafe custody tombstones: {error}",
-                auth_path.display()
-            );
-            return;
-        }
-    };
-    for (provider, entry) in entries {
-        if !opencode_migration::is_api_tombstone(&entry, &provider) {
-            continue;
-        }
-        match opencode_migration::unsafe_provider_shape(&provider) {
-            Ok(Some(shape)) => println!(
-                "WARN: OpenCode tombstone provider={provider} shape={} why={} source={}; run ck auth migrate-opencode --restore {provider}",
-                shape.shape_names(),
-                shape.why(),
-                shape.sites(),
-            ),
-            Ok(None) => {}
-            Err(error) => println!(
-                "WARN: OpenCode provider shape table could not classify {provider}: {error}"
-            ),
-        }
-    }
 }
 
 /// Verify the tamper-evidence chain, WITHOUT stopping the daemon.

@@ -20,6 +20,13 @@ use ring::signature::{UnparsedPublicKey, ED25519};
 mod common;
 use common::tmp_root;
 
+#[allow(dead_code)]
+#[path = "../src/bin/cli_support/credential_client.rs"]
+mod credential_client;
+#[allow(dead_code)]
+#[path = "../src/bin/cli_support/route_client.rs"]
+mod route_client;
+
 /// Point this suite at a specific `ck-auth` instead of the one cargo just built.
 ///
 /// `CARGO_BIN_EXE_*` resolves per-profile and cargo rebuilds before running, so
@@ -578,6 +585,123 @@ fn grant_row_fields<'a>(stdout: &'a str, credential_prefix: &str) -> Vec<&'a str
         .collect()
 }
 
+mod capability_reads {
+    use super::credential_client;
+    use crate::common::{route_daemon::spawn_route_daemon, tmp_root};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn an_online_get_uses_an_owned_capability_without_an_admin_read() {
+        let root = tmp_root("online-get");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let conn = spawn_route_daemon(
+            &root,
+            observed.clone(),
+            json!({
+                "result": {"payload": [115, 101, 99, 114, 101, 116], "record_version": 12, "expires_at_ms": 99}
+            }),
+        );
+
+        let served = credential_client::get_online(&conn, &root, "ckh_owned_capability")
+            .expect("capability read succeeds");
+        assert_eq!(served.payload, b"secret");
+        assert_eq!(served.record_version, 12);
+        assert_eq!(served.expires_at_ms, Some(99));
+        let methods = observed.lock().expect("methods").clone();
+        assert_eq!(methods, vec!["route.open", "credential.get"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_online_get_maps_needs_reauth_without_returning_material() {
+        let root = tmp_root("needs-reauth");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let conn = spawn_route_daemon(
+            &root,
+            observed,
+            json!({
+                "result": {"error": {"class":"auth_required", "code":"needs_reauth"}}
+            }),
+        );
+
+        let err = credential_client::get_online(&conn, &root, "ckh_owned_capability")
+            .expect_err("needs reauth is typed");
+        assert!(matches!(
+            err,
+            credential_client::CredentialReadError::NeedsReauth
+        ));
+        let text = format!("{err:?} {err}");
+        assert!(
+            !text.contains("ckh_owned_capability"),
+            "handle leaked: {text}"
+        );
+        assert!(!text.contains("secret"), "payload leaked: {text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn snowflake_provider_logout_retires_every_account() {
+    let rig = GrantCliVault::new("snowflake-logout");
+    rig.bootstrap();
+    let payload = rig.root.join("payload");
+    std::fs::write(&payload, b"fixture-key").unwrap();
+    for id in [
+        "oauth:snowflake:org-a",
+        "oauth:snowflake:org-b",
+        "apikey:deepseek",
+    ] {
+        let out = rig.run(&[
+            "put",
+            "--id",
+            id,
+            "--kind",
+            "api_key",
+            "--payload-file",
+            payload.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = rig.run(&["logout", "--provider", "snowflake"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = rig.run(&["status"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    for id in ["oauth:snowflake:org-a", "oauth:snowflake:org-b"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains(id) && line.contains("retired")),
+            "{text}"
+        );
+    }
+    assert!(
+        text.lines()
+            .any(|line| line.contains("apikey:deepseek") && line.contains("active")),
+        "{text}"
+    );
+}
+
+#[test]
+fn kem_replace_reports_replacement_not_creation() {
+    let rig = GrantCliVault::new("kem-replace-message");
+    rig.bootstrap();
+    assert!(rig
+        .run(&["mint-kem-key", "--id", "kem:operator"])
+        .status
+        .success());
+    let out = rig.run(&["mint-kem-key", "--id", "kem:operator", "--replace"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("replaced kem:operator"));
+}
+
 // BOTH ARMS, because the fix and the defect it replaced are each correct for one of them.
 // The restatement exists so a refusal buried under a verb's help page still reads as a
 // refusal in a tailed transcript. It was firing unconditionally, so a one-line refusal
@@ -835,13 +959,10 @@ const KNOWN_BUT_UNADVERTISED: &[(&str, &str)] =
 /// which needs a vault. A refusal naming the subcommand as unexpected is the defect.
 #[test]
 fn verbs_with_positional_subcommands_accept_them_before_dispatch() {
-    for (verb, subs) in [
-        (
-            "enroll",
-            &["list", "approve", "deny", "revoke", "reissue"][..],
-        ),
-        ("opencode-account", &["add", "remove", "list"][..]),
-    ] {
+    for (verb, subs) in [(
+        "enroll",
+        &["list", "approve", "deny", "revoke", "reissue"][..],
+    )] {
         for sub in subs {
             let output = cli().args([verb, sub]).output().expect("run");
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -5021,7 +5142,7 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // federation verbs (transfer, remote, member, federation), and secret controls.
     assert_eq!(
         verbs.len(),
-        39,
+        37,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

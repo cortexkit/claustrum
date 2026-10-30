@@ -21,7 +21,6 @@ are easy to break. The consumer-facing wire surface is specified in
 | `ck-auth` | `crates/credentials-module/src/bin/credentials_cli.rs` | The operator CLI, run as `ck auth <verb>`. It is the only write surface an operator uses: login, import, put, grants, handles, enrollment, audit. Helpers live in `src/bin/cli_support/`. |
 | `cortexkit-claustrum-client` | `crates/claustrum-client` | The Rust client for supervised modules. |
 | `@cortexkit/claustrum-client` | `packages/client` | The TypeScript client. Both clients live here so their decoders are tested against the producer's own serialized replies. |
-| `@cortexkit/opencode-claustrum` | `packages/opencode` | An OpenCode plugin that serves OpenCode provider slots from the vault. See [the OpenCode plugin](opencode-plugin.md). |
 | `ck_key_verify`, `ck_key_move` | `crates/credentials-core/src/bin/` | Feature-gated operator tools for checking and moving the master key. |
 
 The two programs share one data directory, `<data_home>/cortexkit/claustrum/`, which

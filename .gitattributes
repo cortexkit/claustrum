@@ -18,7 +18,6 @@
 *.pem -text
 crates/credentials-core/tests/fixtures/** -text
 crates/credentials-module/tests/fixtures/** -text
-packages/opencode/golden/** -text
 crates/credentials-core/tests/vectors/** -text
 crates/credentials-module/tests/vectors/** -text
 # The agent-secret contract tests read golden JSON blocks out of this doc byte for

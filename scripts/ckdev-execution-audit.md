@@ -16,7 +16,6 @@ where it names `ckdev_command`, read `dev_command(ckdev_binary(...))`.
 | Same / `both_binaries_report_a_build_revision_without_a_supervisor` | Cargo `ck-claustrum`, plus `cli()` | Scratch `ckdev-claustrum`, `ckdev-auth` |
 | Same / `a_temp_dir_connection_file_is_found_and_ambiguity_refuses` (`run` and `boot`) | Cargo `ck-auth` | Scratch `ckdev-auth` |
 | Same / `test_escape_hatches_are_absent_from_a_release_build` | Cargo builds `target/release/ck-auth`; test reads bytes | **No change**: builds and byte scans, not execution |
-| `crates/credentials-module/tests/cli_opencode.rs` / `cli` | Override or Cargo `ck-auth` | Scratch `ckdev-auth`; covers `MigrationRig` and all stdin/crash-cut CLI commands |
 | `crates/credentials-module/tests/gmail_cli.rs` / `login` | Cargo `ck-auth` | Scratch `ckdev-auth` |
 | `crates/credentials-module/tests/v012_release_compat.rs` / `current_cli`, `released_cli` | Cargo `ck-auth` and downloaded v0.1.2 `ck-auth` | Scratch `ckdev-auth`; downloading, checksum verification and unpacking remain unchanged |
 | `crates/credentials-module/tests/import_picker.rs` / `Fixture::command` | Seam-enabled and shipped `ck-auth` | Fixture-owned scratch `ckdev-auth`; covers all picker calls and the `openpty`/`pre_exec` harness |
@@ -29,19 +28,17 @@ where it names `ckdev_command`, read `dev_command(ckdev_binary(...))`.
 | `scripts/release-build.sh` / staged `--version` loop | `target/staged/<rev>/ck-{claustrum,auth}` | `ckdev_binary` → smoke scratch `ckdev-{claustrum,auth}`; signed artifacts and sidecars are unchanged |
 | Same / `verify` | Invokes Cargo with staged binary override environment | **No direct binary execution**; overridden binaries are now wrapped in the Rust factories above |
 | Same / deployed-revision retention check | `$HOME/.local/share/cortexkit/bin/ck-auth` | **No change**: allowed production executable, whose exact placed image must be checked |
-| `scripts/accept-opencode-custody.sh` / `ck_auth` | Worktree `target/release/ck-auth` | Link made after build in the rig's existing scratch root; executes `ckdev-auth` |
 | `.github/workflows/release.yml` / packaged revision verification | Unpacked temporary `ck-{claustrum,auth}[.exe]` | Shared shell helper → temporary `ckdev-{claustrum,auth}[.exe]`; packaging/signing/upload names stay unchanged |
 | `scripts/accept-deploy.sh` / revision, status, mint/revoke checks | `$HOME/.local/share/cortexkit/bin/ck-*` | **No change**: checks exact production placement; linking would weaken dead-placement diagnosis |
 | `scripts/tests/test_script_contracts.py` / acceptance fixtures | Fake `ck-*` shell scripts interpreted by `/bin/bash` | **No change**: no native fleet binary is executed; the interpreter image is Bash. Fixtures must preserve the production acceptance script's name/path/signature assertions |
 | `scripts/gate.sh`, `.github/workflows/ci.yml` / shipped CLI export | Set `CK_AUTH_IMPORT_SHIPPED_BINARY` to release artifact | **No direct binary execution**; `Fixture::command` now wraps it |
-| `packages/opencode/src/tests/enroll.test.ts` / subprocess | `Bun.spawn(["bun", ...])` | **No change**: executable is Bun, not a fleet binary |
 | `packages/client/src/tests/manifest-lock.test.ts` / subprocess | `spawnSync("chmod", ...)` | **No change**: system executable |
 | `crates/credentials-module/examples/`, remaining tests/scripts/workflows | Wire probes, system commands, Cargo/Bun/tool runners, data/signature/name checks | **No other `ck-*` execution found** |
 | `crates/credentials-module/src/bin/credentials_cli.rs` / test `current_exe` child | Cargo unit-test executable `ck_auth-<hash>` | **No change**: underscore test artifact, not the shipped `ck-auth`; production source untouched |
 
 ## Fence and non-vacuity
 
-`python3 scripts/check-ckdev-execution.py` checks 79 Rust, TS/JS, shell,
+`python3 scripts/check-ckdev-execution.py` checks Rust, TS/JS, shell,
 Python and workflow sources. It is run by the local gate and CI. Rust/TS
 constructor arguments are balanced expressions in individual statements, not a
 fixed look-back window. Current bindings are examined, and function boundaries

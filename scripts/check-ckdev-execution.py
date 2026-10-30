@@ -250,7 +250,7 @@ def source_paths(root):
     scopes = ('crates/credentials-module/tests', 'crates/credentials-core/tests',
               'crates/credentials-module/examples', 'crates/credentials-core/examples',
               'crates/credentials-core/src/bin', 'scripts',
-              'packages/client/src/tests', 'packages/opencode/src/tests', '.github/workflows')
+              'packages/client/src/tests', '.github/workflows')
     return sorted({p for scope in scopes for p in (root / scope).rglob('*')
                    if p.is_file() and p.suffix in ('.rs', '.ts', '.tsx', '.js', '.sh', '.py', '.yml', '.yaml')})
 

@@ -610,28 +610,6 @@ class ScriptContracts(unittest.TestCase):
         (docs.DOCS / 'design.md').write_bytes(b'**Status: SHIPPED**\n\xff')
         self.assertEqual(docs.main(), 0)
 
-    def test_custody_scratch_is_removed_on_early_refusal(self):
-        self.executable('opencode', 'echo wrong-version')
-        self.executable('mktemp', 'mkdir "$HOME/scratch"; echo "$HOME/scratch"')
-        source = text('scripts/accept-opencode-custody.sh')
-        source = source[:source.index('cargo build')]
-        env = dict(self.env, WT=os.fspath(ROOT), TMPDIR=os.fspath(self.root))
-        result = self.run_shell(source, env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ['bin'])
-
-    def test_custody_model_match_drains_large_output(self):
-        source = text('scripts/accept-opencode-custody.sh')
-        start = source.index('models=') if 'models=' in source else source.index('MODEL_ID=')
-        block = source[start:source.index('if [[ -z "$MODEL_ID"', start)]
-        self.executable('opencode', 'echo synthetic/hf:moonshotai/Kimi-K3; python3 -c "print(\'x\' * 2097152)"')
-        # The defect this guards is a hang (a reader that stops draining leaves the writer
-        # blocked forever), so the timeout only has to end a hang, not measure speed. The
-        # default 10s failed under a loaded gate with the pipeline still making progress.
-        result = self.run_shell(block + '\necho "$MODEL_ID"', timeout=120)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('synthetic/hf:moonshotai/Kimi-K3', result.stdout)
-
     def test_windows_skip_is_in_unchecked_verdict(self):
         source = text('scripts/gate.sh')
         start = source.index('if rustup target list')

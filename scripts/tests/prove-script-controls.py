@@ -35,8 +35,6 @@ CONTROLS = {
     'scripts/check-path-rendering.py': ['typescript_exclusions_are_checkout_relative'],
     'scripts/check-inbound-contracts.sh': ['inbound_missing_key_has_diagnostic'],
     'scripts/check-doc-status.py': ['doc_status_checks_all_markers_and_identifier_boundaries', 'non_utf8_doc_is_readable'],
-    'scripts/accept-opencode-custody.sh': ['custody_scratch_is_removed_on_early_refusal', 'custody_model_match_drains_large_output'],
-    'scripts/spikes/opencode-config-fetch.sh': ['stub_startup_budget_exceeds_cold_start'],
 }
 
 

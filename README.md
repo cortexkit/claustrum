@@ -85,7 +85,19 @@ from the release page; `ck setup claustrum` installs it first.
 
 ## Connect OpenCode or Pi
 
-TODO(CKCRED): install and approval steps from claustrum-auth.
+OpenCode (1 and 2) and Pi read their model logins from the vault through the
+[claustrum-auth](https://github.com/cortexkit/claustrum-auth) plugin. Quit OpenCode and Pi,
+then run:
+
+```sh
+npx @cortexkit/opencode-claustrum-auth setup
+```
+
+Setup registers the plugin in each host it finds and asks the vault for access. Approve
+each request in another terminal, as the
+[runbook](docs/operator-runbook.md#connect-opencode-or-pi) describes. The plugin's
+[setup guide](https://github.com/cortexkit/claustrum-auth/blob/main/docs/setup.md) covers
+the rest.
 
 ## License
 

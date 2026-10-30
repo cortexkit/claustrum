@@ -695,11 +695,35 @@ before re-enrolling a name. `reissue` writes a new token; the previous one stops
 moment the new one is minted. The consumer-side ceremony is in
 [the wire contract](wire-contract-v1.md#21-enrollment-for-a-consumer-with-no-supervised-identity).
 
+### Connect OpenCode or Pi
+
+The [claustrum-auth](https://github.com/cortexkit/claustrum-auth) plugin serves OpenCode 1,
+OpenCode 2 and Pi from the vault through an enrollment. It never reads handle files.
+
+1. Quit OpenCode and Pi, then run `npx @cortexkit/opencode-claustrum-auth setup`. It
+   registers the plugin in each host it finds and proposes one enrollment per host:
+   `claustrum-auth-opencode` and `claustrum-auth-pi`.
+2. While setup waits, approve each request with the id it prints, and grant the name read
+   access to the `llm-provider` category:
+
+   ```sh
+   ck auth enroll approve --request-id <id> --name claustrum-auth-opencode
+   ck auth grant --principal enrolled:claustrum-auth-opencode \
+     --selector-kind category --selector llm-provider --operation read
+   ```
+
+   Repeat both with `claustrum-auth-pi` for Pi. If setup stops waiting first, approve the
+   request and run setup again.
+3. Turn each provider on in its host: `/claustrum use <provider>` in OpenCode 1 and Pi, or
+   `opencode auth login <provider> --method claustrum-auth` in OpenCode 2. Setup prints the
+   exact commands for the providers it found.
+
+The plugin skips OpenAI, Anthropic and Antigravity credentials, which their own plugins
+serve. The plugin's
+[setup guide](https://github.com/cortexkit/claustrum-auth/blob/main/docs/setup.md) has the
+full steps.
+
 ---
-
-## Connect OpenCode or Pi
-
-TODO(CKCRED): install and approval steps from claustrum-auth.
 
 ## 6. Start the daemon; consumers read over the route channel
 

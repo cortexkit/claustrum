@@ -48,9 +48,14 @@ It needs:
 
 The `subconscious` supervisor checkout is passed to both runners with `--sibling`.
 Windows only copies its inbound-contract document; it does not build the supervisor.
-Its path and the fast-check scope also travel as arguments to the worker, rather than
-environment variables that the runner may filter. A supervisor path absent inside the
-job fails before copying or building anything.
+For Windows, the caller's supervisor path is only a snapshot input: the worker receives
+the relative path from the workspace to that sibling. The runner mirrors both caller
+paths under the same root, so this also resolves siblings outside a worktree's parent.
+Windows disables MSYS argument path conversion before native Python starts and for the
+shared Bash lane's children. Linux keeps its existing sibling-path handoff. These paths
+and fast-check's diff-selected files/crates travel as arguments rather than environment
+variables the runner may filter. A supervisor path absent inside the job fails before
+copying or building anything.
 Remote workers copy both checkout snapshots to
 writable scratch trees, preserving dirty content and history, because the checks and the
 supervisor build must not write into the runner's read-only snapshots. Build

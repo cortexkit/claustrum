@@ -186,8 +186,22 @@ exit "$SCENARIO"
         command = runtime.remote_command("windows")
         self.assertEqual(command[command.index("--platform") + 1], "windows")
         self.assertEqual(command[command.index("--") + 1:],
-                         ["python3", "scripts/gate-remote.py", "windows", "--sibling", "../subconscious"])
+                         ["env", "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*",
+                          "python3", "scripts/gate-remote.py", "windows", "--sibling", "../subconscious"])
         self.assertNotIn("--net", command[:command.index("--")])
+
+    def test_windows_worktree_uses_relative_sibling_without_host_absolute_argv(self):
+        sibling = "/Users/operator/Work/Projects/CortexKit/subconscious"
+        workspace = Path("/Users/operator/.local/share/cortexkit/worktrees/task/repo")
+        with patch.object(runtime, "ROOT", workspace), patch.dict(os.environ, CRED_SUBCONSCIOUS_ROOT=sibling):
+            command = runtime.remote_command("windows")
+        capture, worker = command[:command.index("--")], command[command.index("--") + 1:]
+        self.assertEqual(capture[capture.index("--sibling") + 1], sibling)
+        self.assertEqual(worker[worker.index("--sibling") + 1],
+                         "../../../../../../Work/Projects/CortexKit/subconscious")
+        self.assertFalse(any("/Users/" in argument for argument in worker), worker)
+        self.assertNotIn(sibling, worker)
+        self.assertEqual(worker[:3], ["env", "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*"])
 
     def test_fast_transport_has_scope_and_no_supervisor(self):
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}
@@ -228,15 +242,18 @@ exit "$SCENARIO"
         sibling.mkdir()
         plan = json.dumps(dict(crates=["credentials-core"], paths=["crates/credentials-core/new.rs"]))
         env = dict(os.environ, RUSTC_WRAPPER="unusable", CARGO_BUILD_RUSTC_WRAPPER="unusable",
-                   CARGO_TARGET_DIR="unusable")
+                   CARGO_TARGET_DIR="unusable", CARGO_NET_OFFLINE="false")
         env.pop("CRED_SUBCONSCIOUS_ROOT", None)
         env.pop("CK_FAST_PLAN", None)
+        env.pop("CK_WINDOWS_GATE_OFFLINE", None)
         for mode, arguments in (("full", ["--sibling", str(sibling)]), ("fast", ["--plan", plan])):
             with self.subTest(mode=mode):
                 def worker(command, cwd):
                     self.assertEqual(os.environ["RUSTC_WRAPPER"], "")
                     self.assertEqual(os.environ["CARGO_BUILD_RUSTC_WRAPPER"], "")
                     self.assertNotIn("CARGO_TARGET_DIR", os.environ)
+                    self.assertEqual(os.environ["CARGO_NET_OFFLINE"], "false")
+                    self.assertNotIn("CK_WINDOWS_GATE_OFFLINE", os.environ)
                     if mode == "full":
                         self.assertEqual(Path(os.environ["CRED_SUBCONSCIOUS_ROOT"]), cwd.parent / "subconscious")
                     else:

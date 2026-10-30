@@ -37,12 +37,26 @@ def remote_command(mode, plan=None):
     if mode in ("full", "windows"):
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
         command += ["--sibling", sibling]
-        arguments += ["--sibling", sibling]
+        if mode == "windows":
+            # Windows mirrors caller paths below one drive root. The relative
+            # delta survives that mapping, including non-adjacent worktrees.
+            host_sibling = Path(sibling)
+            if not host_sibling.is_absolute():
+                host_sibling = ROOT / host_sibling
+            arguments += ["--sibling", os.path.relpath(host_sibling, ROOT)]
+        else:
+            arguments += ["--sibling", sibling]
     if plan is not None:
         arguments += ["--plan", json.dumps(plan)]
-    # The runner filters environment names; argv preserves both supervisor location
-    # and dirty-tree scope without relying on its environment allowlist.
-    command += ["--", "python3", "scripts/gate-remote.py", mode, *arguments]
+    # The runner filters environment names; argv preserves the diff-selected
+    # files/crates (including uncommitted edits) and the sibling path without
+    # relying on that allowlist.
+    worker = ["python3", "scripts/gate-remote.py", mode, *arguments]
+    if mode == "windows":
+        # Set these before Git Bash launches native Python; setting them inside
+        # Python is too late to prevent rewriting its path arguments.
+        worker = ["env", "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*", *worker]
+    command += ["--", *worker]
     return command
 
 

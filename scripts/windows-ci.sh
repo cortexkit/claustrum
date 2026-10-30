@@ -6,6 +6,9 @@ windows_ci() {
     MINGW*|MSYS*|CYGWIN*) ;;
     *) fail "Windows CI lane refuses to run on this host" ;;
   esac
+  # CI invokes this Bash lane directly rather than through the motor launcher.
+  # Preserve native paths on all child argv, including Cargo and Python probes.
+  export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
   run_check "Windows setup" python3 scripts/windows-setup.py
   export CARGO_TERM_COLOR=always
   BUN=bun

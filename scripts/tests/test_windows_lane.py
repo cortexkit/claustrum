@@ -127,7 +127,8 @@ windows_ci
 
     def test_only_github_ci_can_populate_dependency_caches(self):
         spy = ('import json,os,sys; print(json.dumps(dict(args=sys.argv[1:], '
-               'cargo_offline=os.getenv("CARGO_NET_OFFLINE"), toolchain=os.getenv("RUSTUP_TOOLCHAIN"))))')
+               'cargo_offline=os.getenv("CARGO_NET_OFFLINE"), toolchain=os.getenv("RUSTUP_TOOLCHAIN"), '
+               'pathconv=os.getenv("MSYS_NO_PATHCONV"), arg_conv_excl=os.getenv("MSYS2_ARG_CONV_EXCL"))))')
         shell = '''
 source scripts/windows-ci.sh
 uname() { echo MINGW64_NT; }
@@ -146,6 +147,8 @@ windows_ci
                 self.assertEqual(row["args"], ["bun", "install", "--frozen-lockfile"] + (["--offline"] if offline else []))
                 self.assertEqual(row["cargo_offline"], "true" if offline else "")
                 self.assertEqual(row["toolchain"], "preinstalled-toolchain")
+                self.assertEqual(row["pathconv"], "1")
+                self.assertEqual(row["arg_conv_excl"], "*")
 
     def test_windows_target_junction_treats_paths_as_data(self):
         remote = module("gate_remote", "scripts/gate-remote.py")

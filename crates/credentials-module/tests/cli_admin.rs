@@ -4963,10 +4963,18 @@ fn hash_revoke_cli_stops_a_previously_resolving_handle() {
         open().resolve_handle(&raw),
         Err(credentials_core::store::StoreOpError::NotFound)
     ));
+    // A revoke that matched nothing must fail, with its own exit code, so a script never
+    // goes on as if the handle were gone.
     let repeat = vault.run(&["revoke-handle", "--hash", &hash]);
-    assert!(repeat.status.success());
-    assert!(String::from_utf8_lossy(&repeat.stdout)
+    assert_eq!(
+        repeat.status.code(),
+        Some(6),
+        "{}",
+        String::from_utf8_lossy(&repeat.stderr)
+    );
+    assert!(String::from_utf8_lossy(&repeat.stderr)
         .contains("no live handle matched that value; nothing changed."));
+    assert!(!String::from_utf8_lossy(&repeat.stdout).contains("revoked handle"));
 }
 
 #[test]

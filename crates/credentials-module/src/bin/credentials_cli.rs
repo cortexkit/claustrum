@@ -187,6 +187,11 @@ enum CliError {
     /// An admin op was dispatched to the running module but its outcome is unknown
     /// (connection dropped after send). The op may have committed.
     RouteIndeterminate(String),
+    /// A revoke found nothing live to revoke. It changed nothing, so a script must not
+    /// carry on as if access had been removed: a mistyped value leaves the handle it
+    /// meant serving. It has its own exit code so a script that revokes the same value
+    /// twice on purpose can accept exactly this case.
+    NothingRevoked(String),
 }
 
 impl CliError {
@@ -197,6 +202,7 @@ impl CliError {
             // A dispatched-but-unknown outcome gets its own code so a script does not
             // treat it as a clean failure and blindly retry a possibly-committed op.
             CliError::RouteIndeterminate(_) => ExitCode::from(5),
+            CliError::NothingRevoked(_) => ExitCode::from(6),
             _ => ExitCode::FAILURE,
         }
     }
@@ -250,6 +256,7 @@ impl std::fmt::Display for CliError {
                 "could not prepare the op on this side (nothing was sent): {m}"
             ),
             CliError::RouteIndeterminate(m) => write!(f, "{m}"),
+            CliError::NothingRevoked(m) => write!(f, "{m}"),
         }
     }
 }
@@ -1178,7 +1185,9 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Revoke one capability handle (audited). The credential and its other handles\n\
-             keep serving. Supply exactly one form."
+             keep serving. Supply exactly one form. When no live handle matches (a\n\
+             mistyped value, or one already revoked), nothing changes and the command\n\
+             exits 6."
         }
         "revoke-all-handles" => {
             "ck auth revoke-all-handles --id <id>\n\
@@ -4914,12 +4923,19 @@ fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliErro
     //
     // Falls back to the old wording against a daemon too old to send the field, rather
     // than claiming nothing matched: absent and null mean different things here.
+    //
+    // And FAIL when nothing matched: a script that read success here went on to delete the
+    // handle from its consumer's file while the handle kept serving.
     match result.get("credential_id") {
         Some(serde_json::Value::String(id)) => println!("revoked handle for {id} via {form}"),
-        Some(serde_json::Value::Null) => println!(
-            "no live handle matched that value; nothing changed.\n  \
-             check for a truncated paste — a handle is one unbroken ckh_ token."
-        ),
+        Some(serde_json::Value::Null) => {
+            return Err(CliError::NothingRevoked(
+                "no live handle matched that value; nothing changed.\n  \
+                 check for a truncated paste — a handle is one unbroken ckh_ token. \
+                 --hash takes the handle_hash column, not the sha256 of the raw token."
+                    .into(),
+            ))
+        }
         _ => println!("revoked handle"),
     }
     Ok(())

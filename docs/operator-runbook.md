@@ -703,8 +703,8 @@ OpenCode 2 and Pi from the vault through an enrollment. It never reads handle fi
 1. Quit OpenCode and Pi, then run `npx @cortexkit/opencode-claustrum-auth setup`. It
    registers the plugin in each host it finds and proposes one enrollment per host:
    `claustrum-auth-opencode` and `claustrum-auth-pi`.
-2. While setup waits, approve each request with the id it prints, and grant the name read
-   access to the `llm-provider` category:
+2. While setup waits, approve each request with the id it prints. Then grant the name read
+   access to the `llm-provider` category, at any time before you turn a provider on:
 
    ```sh
    ck auth enroll approve --request-id <id> --name claustrum-auth-opencode

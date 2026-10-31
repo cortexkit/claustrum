@@ -19,7 +19,7 @@ import gate_runtime as runtime
 class RunnerOutputDecoding(unittest.TestCase):
     def test_runner_output_that_is_not_utf8_still_returns_a_verdict(self):
         # 0x97 is an em dash in Windows-1252, which Windows tools print. A strict decode
-        # used to raise here and crash the driver, losing the lane's verdict.
+        # used to raise here and crash the driver, losing the job's verdict.
         script = ("import sys; sys.stdout.buffer.write(b'before \\x97 after'); "
                   "sys.stderr.write('" + runtime.CAPTURED_LINE + "x\\n'); sys.exit(3)")
         captured = runtime.threading.Event()
@@ -227,7 +227,7 @@ exit "$SCENARIO"
 
     def test_windows_symlinked_sibling_is_captured_and_addressed_at_its_real_path(self):
         # The scratch folder holds links to the real repositories, so `../subconscious`
-        # is a symlink there. The runner captures it at its real path; a delta taken
+        # is a symlink there. The runner captures it at its real path; a relative path taken
         # from the link pointed at a folder the job never received.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

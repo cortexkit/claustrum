@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared by the Windows CI job and the full gate's native Windows runner.
-# gate.sh supplies run_check/run_expect so both callers enforce the same receipts.
+# gate.sh supplies run_check/run_expect, so both callers apply the same checks and the
+# same minimum test counts.
 # Flip to 1 once offline Windows jobs have a cache of bun.lock packages.
 WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=0
 

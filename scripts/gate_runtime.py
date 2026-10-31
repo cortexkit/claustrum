@@ -37,11 +37,11 @@ def remote_command(mode, plan=None):
     if mode in ("full", "windows"):
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
         if mode == "windows":
-            # Windows mirrors caller paths below one drive root. The relative
-            # delta survives that mapping, including non-adjacent worktrees.
+            # Windows mirrors caller paths below one drive root. A path relative to
+            # this checkout survives that mapping, including non-adjacent worktrees.
             # Resolved first: the runner captures a symlinked sibling (the scratch
-            # folder links each real repository) at its real path, so a delta taken
-            # from the link would point where nothing was copied.
+            # folder links each real repository) at its real path, so a relative path
+            # taken from the link would point where nothing was copied.
             host_sibling = Path(sibling)
             if not host_sibling.is_absolute():
                 host_sibling = ROOT / host_sibling
@@ -104,8 +104,8 @@ def run_watching_capture(command, captured):
     also set when the process ends, so a refusal never leaves local lanes waiting.
     """
     # errors="replace": a Windows job's tools can print bytes that aren't UTF-8 (an em
-    # dash in a Windows code page). A strict decode raised inside this lane's thread and
-    # crashed the whole driver, so the lane's verdict was lost instead of reported.
+    # dash in a Windows code page). A strict decode raised while reading this job's output
+    # and crashed the whole driver, so the job's verdict was lost instead of reported.
     process = subprocess.Popen(command, cwd=ROOT, text=True, errors="replace",
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_pipe, stderr_pipe = process.stdout, process.stderr

@@ -24,11 +24,11 @@ and repository scans run locally first and fail fast without building test binar
 one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
 crash cuts, migration/release compatibility and release-artifact/picker assertions. The
 Linux job runs concurrently with a native Windows job (`ck motor run --platform windows`)
-and local Bun install/typecheck/hermetic tests. Windows shares its command list with
-CI (`scripts/windows-ci.sh`): repository scans, formatting, both clippy feature sets,
-workspace tests, native Credential Manager round trips, transport-free client and
-feature-gated operator/crash-cut
-tests. Windows Bun install/build/typecheck and package tests currently run only in GitHub
+and local Bun install, typecheck and tests (run with no daemon reachable). Windows shares
+its command list with CI (`scripts/windows-ci.sh`): repository scans, formatting, both
+clippy feature sets, workspace tests, native Credential Manager round trips, the
+transport-free client, and the feature-gated operator tests that interrupt a write at a
+chosen point to prove recovery. Windows Bun install/build/typecheck and package tests currently run only in GitHub
 CI; the full-gate Windows runner reports all four as UNCHECKED because its offline Bun
 cache is not yet available. On macOS, the default-feature release `ck-auth` build is also
 placed on that machine.

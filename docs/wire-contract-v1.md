@@ -2124,8 +2124,8 @@ stamp's `attributes.agent_id`. Showing a person-readable name for the agent is t
 approval card's job (Cingulate's), not the vault's. A request that still carries
 `display_name` is refused with `invalid_params` as an unknown key.
 
-**Stamp grammar**, from subc-protocol 0.33.0 `ScopeStamp` (`crates/subc-protocol/src/scope.rs`
-in the subconscious repository; the version is the one locked in `Cargo.lock`):
+**Stamp grammar**, from subc-protocol's `ScopeStamp` (`crates/subc-protocol/src/scope.rs`
+in the subconscious repository, at the version locked in `Cargo.lock`):
 
 | Field | Required | Shape | Used for |
 |---|---|---|---|

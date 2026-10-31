@@ -14,6 +14,11 @@ use cortexkit_test_support::{ckdev_binary, dev_command};
 use credentials_core::test_support::TestTempDir;
 use serde_json::{json, Value};
 
+/// How long a test waits for a step (a line of output, the process to exit, the token
+/// exchange) before it gives up. This only stops a real hang; it isn't a speed check.
+/// It's generous because loaded build hosts can take many seconds to start the CLI.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 #[path = "support/isolated_cli.rs"]
 mod isolated_cli;
 
@@ -95,7 +100,7 @@ impl Fixture {
         let listener = self.token_server.try_clone().unwrap();
         listener.set_nonblocking(true).unwrap();
         thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(12);
+            let deadline = Instant::now() + HANG_GUARD;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -108,9 +113,7 @@ impl Fixture {
                     other => panic!("token exchange was not reached: {other:?}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut first = String::new();
             reader.read_line(&mut first).unwrap();
@@ -245,7 +248,7 @@ impl Login {
     }
 
     fn until(&mut self, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + HANG_GUARD;
         while !self.output.contains(needle) {
             match self
                 .lines
@@ -275,7 +278,7 @@ impl Login {
     }
 
     fn finish(mut self, success: bool) -> String {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + HANG_GUARD;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
@@ -365,9 +368,7 @@ fn browser_callback_wins_without_waiting_for_stdin_to_close() {
         param(&url, "state")
     )
     .unwrap();
-    browser
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    browser.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut page = String::new();
     browser.read_to_string(&mut page).unwrap();
     assert!(page.contains("Authentication successful"));
@@ -602,7 +603,7 @@ fn manual_this_computer_and_another_device_transcripts() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG_GUARD;
         let mut output = String::new();
         let mut stage = 0;
         let mut inputs = Vec::new();

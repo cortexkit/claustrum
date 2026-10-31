@@ -356,9 +356,35 @@ material, keeps the lifecycle state, and bumps `record_version`.
 
 ### Put a static credential
 
-For an API key, DSN, opaque secret or session cookie. Use `--payload-file <path>` so the
-secret never appears in the process list or shell history; trailing whitespace is stripped
-(cookie bytes are kept exactly):
+For an API key, database connection string (DSN), opaque secret or session cookie,
+run this at a terminal:
+
+```sh
+ck auth put
+```
+
+Pick the kind, name it, and paste the value at the hidden prompt. The value is not echoed
+and never enters shell history, argv or a temporary file. Surrounding whitespace and
+newlines are trimmed; an empty value asks again. API keys take a provider and optional
+label (`daytona` or `daytona:work`, stored as `apikey:daytona[:work]`). Cookies ask for a
+lowercase domain and account label (`cookie:example.com:work`). DSNs and opaque secrets
+take a credential id with no required prefix.
+
+For a provider known to `ck auth login`, the picker suggests that command, which checks
+the key where the provider offers a check. By default it prints the command and exits
+without storing; explicitly confirm to store unchecked. Signing and key encapsulation
+(KEM) keys are generated with `ck auth mint-signing-key` and `ck auth mint-kem-key`;
+OAuth uses `ck auth login`.
+
+An existing id asks **Replace it?**, default **No**, before reading the value. Answering
+Yes uses `--replace`, preserving existing capability handles so consumers can fetch the
+new value without being issued new handles. You can also pass `--id` to skip the kind
+and name prompts and paste only the value (`--kind` still defaults to `api_key`, except
+cookie ids).
+
+For scripts, keep `--id` and `--payload-file <path>` so the secret never appears in the
+process list or shell history. File input strips trailing whitespace for non-cookie
+records, while cookie file bytes are kept exactly:
 
 ```sh
 ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key

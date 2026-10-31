@@ -63,6 +63,8 @@ mod login_listener;
 mod login_wire;
 #[path = "cli_support/provider_login.rs"]
 mod provider_login;
+#[path = "cli_support/put_prompt.rs"]
+mod put_prompt;
 #[path = "cli_support/route_client.rs"]
 mod route_client;
 
@@ -612,7 +614,7 @@ fn usage_short() -> String {
        enroll              admit, revoke or reissue a consumer enrollment\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-         put                 ingest an api key, session cookie, or opaque secret\n\
+         put                 store an API key, cookie, DSN or opaque secret\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
@@ -975,7 +977,7 @@ fn help_verb(verb: &str) -> String {
              be enabled for this path."
         }
         "put" => {
-            "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
+            "ck auth put [--id <id>] [--payload <v> | --payload-file <path>]\n\
              \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
              \x20           [--replace | --expected-hash <hex>] [--client-id <id>]\n\
              \n\
@@ -999,6 +1001,20 @@ fn help_verb(verb: &str) -> String {
              NOTES\n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
              default. A cookie:<domain> id always creates a session-cookie record.\n\
+             \n\
+             At a terminal, omit flags to pick API key, cookie, DSN or opaque secret,\n\
+             then name it and paste a hidden value. API keys use apikey:<provider>\n\
+             or apikey:<provider>:<label>; cookies use cookie:<domain>:<account>.\n\
+             DSN and opaque ids have no required prefix. An explicit --id skips naming\n\
+             and kind selection; without --kind it keeps the api_key default (except\n\
+             cookie ids). Existing ids ask Replace it? with default No unless --replace\n\
+             or --expected-hash is given. The hidden value is trimmed at both ends,\n\
+             must not be empty, and never enters argv or a temporary file.\n\
+             Known API-key providers suggest ck auth login --provider <name> instead\n\
+             of storing unchecked; declining unchecked storage writes nothing.\n\
+             Without a terminal, --id and a payload source are required as before.\n\
+             Generated keys: ck auth mint-signing-key / ck auth mint-kem-key.\n\
+             OAuth logins: ck auth login.\n\
              \n\
              A one-line secret file gives the same bytes as $(cat file). A value that must\n\
              END in whitespace cannot come from a file; use a cookie: id, whose bytes are\n\
@@ -1963,6 +1979,11 @@ fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
 
 fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let ids = provider_id_flags(args)?;
+    let mut prepared_args = args.to_vec();
+    if !put_prompt::prepare(global, &mut prepared_args)? {
+        return Ok(());
+    }
+    let args = prepared_args.as_slice();
     let id = required(args, "--id")?;
     let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
@@ -1970,7 +1991,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "signing keys must be generated with mint-signing-key, not put".to_string(),
         ));
     }
-    // Payload from EITHER --payload <value> (exact bytes) OR --payload-file <path>.
+    // Payload from --payload (exact bytes), --payload-file, or a hidden terminal prompt.
     // Ordinary key files drop their terminal line ending, but a cookie header is sent
     // verbatim upstream, so its file bytes cannot be trimmed or normalized.
     // --payload-file keeps a real secret OUT of argv (process list / shell history).
@@ -2009,6 +2030,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
             raw.trim_end().as_bytes().to_vec()
         }
+        (None, None) if put_prompt::is_terminal() => put_prompt::payload()?,
         (None, None) => {
             return Err(CliError::Usage(
                 "--payload <value> or --payload-file <path> is required".to_string(),

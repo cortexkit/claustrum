@@ -1,5 +1,5 @@
 {
-  "caller": "reserved:occipital",
+  "caller": "reserved:claustrum",
   "cases": [
     {
       "name": "empty",
@@ -63,10 +63,22 @@
       }
     },
     {
+      "caller": "reserved:occipital",
+      "name": "occipital_caller",
+      "reply": {
+        "code": "fed_not_authorized",
+        "message": "callosum.paired_devices_read requires reserved:claustrum"
+      },
+      "request": {
+        "method": "callosum.paired_devices_read",
+        "params": {}
+      }
+    },
+    {
       "name": "wrong_caller",
       "reply": {
         "code": "fed_not_authorized",
-        "message": "callosum.paired_devices_read requires reserved:occipital or reserved:claustrum"
+        "message": "callosum.paired_devices_read requires reserved:claustrum"
       },
       "request": {
         "method": "callosum.paired_devices_read",

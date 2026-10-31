@@ -278,7 +278,7 @@ fn refusal_code<'a>(body: &'a Value, reply_member: &str) -> Option<&'a str> {
 /// Decode a `callosum.paired_devices_read` reply into `member_id`'s current pairing id.
 ///
 /// The reply shape is callosum's current one, not yet checked against the vector
-/// files callosum publishes for it (tag `paired-devices-vectors-v1.3`); once those
+/// files callosum publishes for it (tag `paired-devices-vectors-v1.4`); once those
 /// are vendored, the tests below should read them. The shape:
 /// `{"devices":[{"class","fingerprint","pairing_id"}]}`,
 /// sorted by fingerprint, with an optional top-level `self` (version 1.3) that this
@@ -330,7 +330,7 @@ pub fn decode_paired_devices(body: &Value, member_id: &str) -> Lookup<String> {
 /// `vault_transfer_x25519` key.
 ///
 /// The reply shape is callosum's current one, not yet checked against the vector
-/// files callosum publishes for it (tag `paired-devices-vectors-v1.3`). The shape:
+/// files callosum publishes for it (tag `paired-devices-vectors-v1.4`). The shape:
 /// `{"peers":[{"fingerprint", "key_record":{"keys":
 /// {"vault_transfer_x25519":{"pub":"<hex>","version":"<n>"}}}}]}`, every admitted
 /// peer, no filter, `machine_id`/`key_record`/`registry_platform` optional. The entry
@@ -1636,7 +1636,7 @@ impl HomeVault {
 mod tests {
     //! The two callosum decoders, fed literal bodies in the shapes callosum sends today.
     //! Callosum publishes vector files for these replies (tag
-    //! `paired-devices-vectors-v1.3`); once vendored, they replace these literals.
+    //! `paired-devices-vectors-v1.4`); once vendored, they replace these literals.
 
     use super::*;
 

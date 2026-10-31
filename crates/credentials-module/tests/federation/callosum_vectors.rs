@@ -39,7 +39,7 @@ fn reply(file: &[u8], name: &str) -> Value {
 fn the_vendored_vectors_are_the_bytes_callosum_published() {
     assert_eq!(
         sha256_hex(PAIRED_DEVICES),
-        "9f0b260a7476c468f3816031073d18de1925c94c052bfc9083af845d56749a93",
+        "0f96177ffd63fceaacd5253f39fe5e2bc61818bf6d8f4d336655acea4e324228",
         "paired-devices vectors must match VENDORED.md"
     );
     assert_eq!(

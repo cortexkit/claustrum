@@ -1428,7 +1428,7 @@ fn route_error_frame(channel: u16, epoch: u32, corr: u64, code: &str) -> Frame {
 /// no reply was scripted for them.
 ///
 /// The shapes are callosum's current ones, not yet checked against the vector files
-/// callosum publishes for them (tag `paired-devices-vectors-v1.3`): `paired_devices_read` lists `{class, fingerprint, pairing_id}`
+/// callosum publishes for them (tag `paired-devices-vectors-v1.4`): `paired_devices_read` lists `{class, fingerprint, pairing_id}`
 /// sorted by fingerprint plus the 1.3 `self` member; `peer_keys_read` lists every
 /// admitted peer with its `key_record`.
 fn callosum_lookup_reply(state: &StandInState, method: &str) -> Option<Reply> {

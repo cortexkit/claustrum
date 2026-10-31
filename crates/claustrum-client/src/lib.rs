@@ -630,16 +630,13 @@ impl std::fmt::Debug for ClaustrumCredentialResolver {
 
 #[cfg(feature = "transport")]
 impl ClaustrumCredentialResolver {
-    pub fn new(
-        connection_file_path: PathBuf,
-        project_root: PathBuf,
-        consumer_module_id: impl Into<String>,
-    ) -> Self {
+    /// Creates a lazy resolver for a supervised consumer. Bind identity carries
+    /// harness/session labels only; a route's project comes from its session scope.
+    pub fn new(connection_file_path: PathBuf, consumer_module_id: impl Into<String>) -> Self {
         Self {
             target: Arc::new(LiveCredentialGetTarget::new(
                 Arc::new(LiveCredentialConnector {
                     connection_file_path,
-                    project_root,
                     consumer_module_id: consumer_module_id.into(),
                 }),
                 CREDENTIAL_CALL_DEADLINE,
@@ -648,17 +645,16 @@ impl ClaustrumCredentialResolver {
         }
     }
 
+    /// Creates a resolver with an explicit supervised consumer module ID.
     #[doc(hidden)]
     pub fn with_live_consumer_identity(
         connection_file_path: PathBuf,
-        project_root: PathBuf,
         consumer_module_id: String,
     ) -> Self {
         Self {
             target: Arc::new(LiveCredentialGetTarget::new(
                 Arc::new(LiveCredentialConnector {
                     connection_file_path,
-                    project_root,
                     consumer_module_id,
                 }),
                 CREDENTIAL_CALL_DEADLINE,
@@ -927,7 +923,6 @@ trait CredentialConsumerConnector: Send + Sync {
 #[cfg(feature = "transport")]
 struct LiveCredentialConnector {
     connection_file_path: PathBuf,
-    project_root: PathBuf,
     consumer_module_id: String,
 }
 
@@ -940,13 +935,9 @@ impl CredentialConsumerConnector for LiveCredentialConnector {
         Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
     > {
         Box::pin(async move {
-            ClaustrumConsumer::connect(
-                &self.connection_file_path,
-                &self.project_root,
-                &self.consumer_module_id,
-            )
-            .await
-            .map(|consumer| Box::new(consumer) as Box<dyn CredentialConsumerConnection>)
+            ClaustrumConsumer::connect(&self.connection_file_path, &self.consumer_module_id)
+                .await
+                .map(|consumer| Box::new(consumer) as Box<dyn CredentialConsumerConnection>)
         })
     }
 }
@@ -1224,7 +1215,6 @@ struct ClaustrumConsumer {
 impl ClaustrumConsumer {
     async fn connect(
         connection_file_path: &Path,
-        project_root: &Path,
         consumer_module_id: &str,
     ) -> Result<Self, CredentialResolverError> {
         let connection = connection_file::read(connection_file_path).map_err(|error| {
@@ -1263,9 +1253,8 @@ impl ClaustrumConsumer {
             route_epoch: 0,
             next_corr: 1,
         };
-        (consumer.route_channel, consumer.route_epoch) = consumer
-            .route_open(project_root, consumer_module_id)
-            .await?;
+        (consumer.route_channel, consumer.route_epoch) =
+            consumer.route_open(consumer_module_id).await?;
         Ok(consumer)
     }
 
@@ -1277,13 +1266,12 @@ impl ClaustrumConsumer {
 
     async fn route_open(
         &mut self,
-        project_root: &Path,
         consumer_module_id: &str,
     ) -> Result<(u16, u32), CredentialResolverError> {
         let correlation = self.next_correlation();
         // A missing launch nonce refuses here, before anything is written: the route
         // must never open unscoped.
-        let body = route_open_body(project_root, consumer_module_id)?;
+        let body = route_open_body(consumer_module_id)?;
         self.write_request(0, 0, correlation, Priority::Passive, body)
             .await?;
         let reply = self.read_reply(0, 0, correlation).await?;
@@ -1914,10 +1902,7 @@ fn classify_error_value(value: &Value) -> CredentialResolverError {
 /// claustrum silently treats the caller as unscoped. Route opening must therefore
 /// fail before scoped reads are reduced to an ambiguous `not_found`.
 #[cfg(feature = "transport")]
-fn route_open_body(
-    project_root: &Path,
-    consumer_module_id: &str,
-) -> Result<Value, CredentialResolverError> {
+fn route_open_body(consumer_module_id: &str) -> Result<Value, CredentialResolverError> {
     // The process-wide accessor, never the environment: after the first read
     // closes the pipe the daemon handed over, a second independent reader
     // would read whatever the process opened next at that descriptor number.
@@ -1925,7 +1910,6 @@ fn route_open_body(
         .map(|nonce| nonce.map(|nonce| nonce.value().to_owned()))
         .map_err(|error| error.to_string());
     Ok(route_open_body_with_nonce(
-        project_root,
         consumer_module_id,
         &required_launch_nonce(read)?,
     ))
@@ -1955,11 +1939,7 @@ fn required_launch_nonce(
 }
 
 #[cfg(feature = "transport")]
-fn route_open_body_with_nonce(
-    project_root: &Path,
-    consumer_module_id: &str,
-    launch_nonce: &str,
-) -> Value {
+fn route_open_body_with_nonce(consumer_module_id: &str, launch_nonce: &str) -> Value {
     json!({
         "op": "route.open",
         "target": {
@@ -1967,7 +1947,6 @@ fn route_open_body_with_nonce(
             "module_id": CREDENTIAL_MODULE_ID,
         },
         "identity": {
-            "project_root": project_root,
             "harness": consumer_module_id,
             "session": "campaign-credential-consumer",
         },
@@ -2843,9 +2822,23 @@ mod tests {
 
     #[cfg(feature = "transport")]
     #[test]
+    fn route_open_body_omits_project_fields() {
+        let body = route_open_body_with_nonce("prefrontal-core", "nonce-under-test");
+        assert_eq!(
+            body["identity"],
+            json!({
+                "harness": "prefrontal-core",
+                "session": "campaign-credential-consumer",
+            })
+        );
+        assert!(body.get("project_root").is_none());
+        assert!(body.get("project_id").is_none());
+    }
+
+    #[cfg(feature = "transport")]
+    #[test]
     fn route_open_body_carries_the_reserved_consumer_identity_when_the_nonce_is_present() {
-        let root = Path::new("/probe/root");
-        let body = route_open_body_with_nonce(root, "prefrontal-core", "nonce-under-test");
+        let body = route_open_body_with_nonce("prefrontal-core", "nonce-under-test");
         assert_eq!(
             body.pointer("/consumer_identity/module_id")
                 .and_then(Value::as_str),
@@ -2862,8 +2855,7 @@ mod tests {
     #[cfg(feature = "transport")]
     #[test]
     fn motor_credential_route_presents_its_launch_nonce() {
-        let body =
-            route_open_body_with_nonce(Path::new("/motor-project"), "ck-motor", "motor-nonce");
+        let body = route_open_body_with_nonce("ck-motor", "motor-nonce");
         assert_eq!(body["op"], "route.open");
         assert_eq!(body["target"]["module_id"], "claustrum");
         assert_eq!(
@@ -2950,11 +2942,7 @@ mod tests {
     #[cfg(feature = "transport")]
     #[test]
     fn route_open_body_carries_prefrontal_routing_as_consumer_id() {
-        let body = route_open_body_with_nonce(
-            Path::new("/probe/routing"),
-            "prefrontal-routing",
-            "routing-nonce-under-test",
-        );
+        let body = route_open_body_with_nonce("prefrontal-routing", "routing-nonce-under-test");
 
         assert_eq!(
             body.pointer("/consumer_identity/module_id")

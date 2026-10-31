@@ -537,9 +537,7 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
 
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    let project_root = unique_temp_dir("cred-real-daemon-project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     let response = credential_get(&mut consumer, route_channel, 2, &seeded.handle).await;
     let result = &response["result"];
@@ -551,8 +549,6 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
         bytes, seeded.payload,
         "served the seeded credential payload"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }
 
 /// THE DEPLOY REACHABILITY PROBE for stale-not-dead: a report against a REFRESHABLE
@@ -618,9 +614,7 @@ async fn a_report_leaves_a_refreshable_credential_active_rather_than_latching() 
 
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
-    let project_root = unique_temp_dir("cred-stale-probe-project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route = route_open(&mut consumer, &project_root, 1).await;
+    let route = route_open(&mut consumer, 1).await;
 
     // Report at the CURRENT version: the arm that used to latch.
     let response =
@@ -670,8 +664,6 @@ async fn a_report_leaves_a_refreshable_credential_active_rather_than_latching() 
         events.contains("consumer_report_stale"),
         "auth_events must name the stale arm, not the latch arm. events were:\n{events}"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }
 
 /// The module-driven admin path end-to-end: while the daemon holds the lease, the
@@ -791,9 +783,7 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     // 4) The route-minted handle is REAL: a live credential.get resolves it to the
     //    seeded payload, proving the write landed in the daemon's own store. Reuse
     //    the consumer connection opened above (already catalog-confirmed).
-    let project_root = unique_temp_dir("cred-real-daemon-admin");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
     let response = credential_get(&mut consumer, route_channel, 2, &minted).await;
     let payload = response["result"]["payload"]
         .as_array()
@@ -803,8 +793,6 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
         bytes, seeded.payload,
         "the route-minted handle serves the seeded credential"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 
     // Once the daemon is stopped, the same read follows the offline lease path. The
     // bytes printed must remain identical: routing changes where admin.status runs, not
@@ -840,9 +828,7 @@ async fn real_daemon_unknown_handle_is_not_found() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    let project_root = unique_temp_dir("cred-real-daemon-unknown");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     let response = credential_get(&mut consumer, route_channel, 2, "ckh_unknown_handle").await;
     assert_eq!(
@@ -865,8 +851,6 @@ async fn real_daemon_unknown_handle_is_not_found() {
          alone is what the error-class contract asks for, and a destructive consumer \
          acts on exactly this pair"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }
 
 /// Malicious-local-client, on the wire: an over-cap `get_many` is REJECTED (not
@@ -878,9 +862,7 @@ async fn real_daemon_over_cap_get_many_is_rejected() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    let project_root = unique_temp_dir("cred-real-daemon-overcap");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     // 9 handles in one get_many exceeds the cap of 8: the whole call is rejected
     // with too_many_items, NOT silently truncated to 8.
@@ -896,8 +878,6 @@ async fn real_daemon_over_cap_get_many_is_rejected() {
         results[0]["error"]["code"], "too_many_items",
         "over-cap get_many is rejected, not truncated"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }
 
 /// Malicious-local-client, on the wire: a connection that sweeps many distinct
@@ -910,9 +890,7 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    let project_root = unique_temp_dir("cred-real-daemon-sweep");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     // NEGATIVE CONTROL, on a SEPARATE CONNECTION: a handful of probes is under the
     // distinct ceiling and must raise nothing. The limiter is connection-scoped and
@@ -923,9 +901,7 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
     // one and looks identical from the sweep alone.
     let mut quiet = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut quiet, MODULE_ID, SETUP_TIMEOUT).await;
-    let quiet_root = unique_temp_dir("cred-real-daemon-sweep-quiet");
-    std::fs::create_dir_all(&quiet_root).unwrap();
-    let quiet_channel = route_open(&mut quiet, &quiet_root, 1).await;
+    let quiet_channel = route_open(&mut quiet, 1).await;
     for i in 0..4u32 {
         let handle = format!("ckh_quiet_{i}");
         let _ = credential_get(&mut quiet, quiet_channel, 900 + i as u64, &handle).await;
@@ -954,9 +930,6 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
         alarms, 1,
         "only the sweeping connection may raise an alarm; the under-ceiling one must stay silent"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
-    let _ = std::fs::remove_dir_all(&quiet_root);
 }
 
 /// Malicious-local-client, on the wire: a malformed route request (not a valid
@@ -969,9 +942,7 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    let project_root = unique_temp_dir("cred-real-daemon-malformed");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     // An unknown method is a typed wire error, not a panic/disconnect.
     let frame = common::raw_route_frame(
@@ -999,8 +970,6 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
         response["result"]["ready"], true,
         "daemon still serving after malformed input"
     );
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }
 
 /// Operator dogfood on a DISPOSABLE FIXTURE — the exact real operator flow, but on a
@@ -1259,9 +1228,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
 
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
-    let project_root = unique_temp_dir("cred-dogfood-project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let route_channel = route_open(&mut consumer, 1).await;
 
     // The consumer reads the imported credential by its minted handle, over the
     // route channel, through the real supervised daemon.
@@ -1306,6 +1273,4 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         String::from_utf8_lossy(&verify.stderr)
     );
     assert!(String::from_utf8_lossy(&verify.stdout).contains("intact"));
-
-    let _ = std::fs::remove_dir_all(&project_root);
 }

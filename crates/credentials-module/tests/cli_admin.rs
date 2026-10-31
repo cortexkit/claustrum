@@ -603,7 +603,7 @@ mod capability_reads {
             }),
         );
 
-        let served = credential_client::get_online(&conn, &root, "ckh_owned_capability")
+        let served = credential_client::get_online(&conn, "ckh_owned_capability")
             .expect("capability read succeeds");
         assert_eq!(served.payload, b"secret");
         assert_eq!(served.record_version, 12);
@@ -625,7 +625,7 @@ mod capability_reads {
             }),
         );
 
-        let err = credential_client::get_online(&conn, &root, "ckh_owned_capability")
+        let err = credential_client::get_online(&conn, "ckh_owned_capability")
             .expect_err("needs reauth is typed");
         assert!(matches!(
             err,

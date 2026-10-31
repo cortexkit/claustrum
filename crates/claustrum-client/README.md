@@ -6,19 +6,21 @@ decoders can be tested against the producer's serialized replies.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.7.0"
+cortexkit-claustrum-client = "0.8.0"
 ```
 
 The default `transport` feature provides the resolver and live watch connection.
 If you already own a bus connection, use `cortexkit-claustrum-client = { version =
-"0.7.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.8.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains for the reply error
 codes; no socket or authentication code is built in this mode.
 
-Construct `ClaustrumCredentialResolver::new(connection_file_path, project_root,
-consumer_module_id)` and import the `CredentialResolver` trait to call it. The
-resolver lazily opens a route to `claustrum`, presenting the reserved consumer
+Construct `ClaustrumCredentialResolver::new(connection_file_path,
+consumer_module_id)` and import the `CredentialResolver` trait to call it. Bind
+identity carries only harness/session labels; a route's project comes from its
+session scope, not a caller-supplied project path. The resolver lazily opens a
+route to `claustrum`, presenting the reserved consumer
 identity and launch nonce obtained through `subc_os`. Scoped calls require a
 supervised process with that nonce and the corresponding vault grants; the
 client does not acquire grants or enroll a consumer.
@@ -176,6 +178,12 @@ and decodes its reply's exact bytes.
 
 ## Changes
 
+- 0.8.0 (breaking): `ClaustrumCredentialResolver::new` and the hidden
+  `with_live_consumer_identity` constructor no longer take `project_root`.
+  `route.open` omits project fields, matching subc-protocol 0.34. Bind identity
+  carries only harness/session labels; project attribution comes from the
+  route's session scope. The transport-free decoders, `WatchNotice`, and
+  `WatchTracker` are unchanged.
 - 0.7.0 (breaking): `CredentialPublicKey::algorithm` is now the
   `PublicKeyAlgorithm` enum instead of a `String`, and `decode_public_key_reply`
   accepts X25519 KEM public keys as well as Ed25519 signing keys. Callers that

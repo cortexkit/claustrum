@@ -181,7 +181,7 @@ async fn commit_async(
 
     // Wire v2: route identity is (channel, epoch); every route frame must carry
     // the epoch the route was opened under, or the daemon's relay drops it.
-    let route = match route_client::open_route(stream, &config.data_dir, "ck-auth", "admin").await {
+    let route = match route_client::open_route(stream, "ck-auth", "admin").await {
         Ok(route) => route,
         Err(e) => return RouteCommit::NoLiveModule(format!("route.open: {e}")),
     };

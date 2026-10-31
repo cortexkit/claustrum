@@ -59,7 +59,6 @@ impl std::error::Error for CredentialReadError {}
 
 pub fn get_online(
     connection_file: &Path,
-    project_root: &Path,
     handle: &str,
 ) -> Result<ServedCredential, CredentialReadError> {
     // No environment handling is needed here. A shell spawned by a supervised module
@@ -72,18 +71,17 @@ pub fn get_online(
         .enable_all()
         .build()
         .map_err(|e| CredentialReadError::Transport(format!("runtime: {e}")))?;
-    runtime.block_on(get_online_async(connection_file, project_root, handle))
+    runtime.block_on(get_online_async(connection_file, handle))
 }
 
 async fn get_online_async(
     connection_file: &Path,
-    project_root: &Path,
     handle: &str,
 ) -> Result<ServedCredential, CredentialReadError> {
     let stream = route_client::connect(connection_file)
         .await
         .map_err(|e| CredentialReadError::Transport(format!("connect: {e}")))?;
-    let mut route = route_client::open_route(stream, project_root, "ck-auth", "opencode-read")
+    let mut route = route_client::open_route(stream, "ck-auth", "opencode-read")
         .await
         .map_err(|e| CredentialReadError::Transport(format!("route.open: {e}")))?;
     let frame = route_client::route_request(

@@ -57,7 +57,6 @@ pub async fn catalog_has_module(stream: &mut TcpStream) -> Result<bool, String> 
 
 pub async fn open_route(
     stream: TcpStream,
-    project_root: &Path,
     harness: &str,
     session: &str,
 ) -> Result<OpenRoute, String> {
@@ -65,12 +64,10 @@ pub async fn open_route(
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
-    // `BindIdentity::new` rather than a struct literal: 0.20 made the type
-    // `#[non_exhaustive]` so an additive identity field cannot force a construction-site
-    // migration across the fleet. It also leaves `project_id` absent, which is the
-    // correct answer here rather than a gap -- the CLI is not a registered project and
-    // subc's own contract says a producer that cannot answer CONSISTENTLY must answer
-    // `None` consistently, because alternating silently forks the consumer's lineage.
+    // `BindIdentity::new` rather than a struct literal: the type is `#[non_exhaustive]`,
+    // so an additive identity field cannot force a construction-site migration across the
+    // fleet. Since subc-protocol 0.34 it carries no project: a route's project comes only
+    // from a session scope, and the CLI opens no scope.
     //
     // Worth stating once at the only place this crate builds one: every field here is
     // client-supplied and unattested, per the normative comment on the type. Nothing
@@ -79,7 +76,7 @@ pub async fn open_route(
     // daemon attested as `reserved:callosum`, a harness starting `fed-` marks a call
     // forwarded from another computer, and the vault serves it with no principal. This
     // CLI binds as `Direct`, so its harness is never read.
-    let identity = BindIdentity::new(project_root, harness, session);
+    let identity = BindIdentity::new(harness, session);
     // Deliberately no `consumer_identity`. The CLI is never a supervised module, and a
     // shell spawned by one inherits that module's SUBC_MODULE_ID and launch nonce;
     // copying them here (as subc's client libraries do by default) would open this

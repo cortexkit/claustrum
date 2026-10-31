@@ -67,8 +67,7 @@ fn main() {
         opened.clone(),
         json!({ "result": { "payload": [1], "record_version": 1 } }),
     );
-    credential_client::get_online(&conn, &root, "ckh_owned_capability")
-        .expect("capability read succeeds");
+    credential_client::get_online(&conn, "ckh_owned_capability").expect("capability read succeeds");
     drop(conn);
 
     let open = opened

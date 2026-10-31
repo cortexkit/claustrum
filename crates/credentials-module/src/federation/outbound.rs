@@ -897,7 +897,7 @@ pub fn management_surface(module_id: &str) -> RouteTarget {
 /// it exists so the target's bind is attributable, and the target authorizes on the
 /// principal its daemon stamps from `consumer_identity`, never on these.
 pub fn bind_identity() -> BindIdentity {
-    BindIdentity::new(".", "claustrum-outbound", "claustrum-federation")
+    BindIdentity::new("claustrum-outbound", "claustrum-federation")
 }
 
 #[cfg(test)]

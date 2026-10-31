@@ -176,19 +176,13 @@ pub async fn wait_for_catalog(stream: &mut TcpStream, module_id: &str, wait: Dur
     }
 }
 
-fn json_route_open(project_root: &Path) -> Value {
+fn json_route_open() -> Value {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
-    // `BindIdentity::new` rather than a literal: 0.20 made the type non-exhaustive so an
-    // additive field cannot force a construction-site migration. `project_id` stays
-    // absent, which subc's contract calls the correct answer for a producer that cannot
-    // answer consistently -- alternating forks the consumer's lineage silently.
-    let identity = BindIdentity::new(
-        project_root.to_path_buf(),
-        "credentials-e2e".to_string(),
-        "session-1".to_string(),
-    );
+    // BindIdentity carries only client-supplied harness/session labels. A route's
+    // project comes from its session scope, and this helper opens no scope.
+    let identity = BindIdentity::new("credentials-e2e", "session-1");
     serde_json::json!({
         "op": "route.open",
         "target": target,
@@ -197,8 +191,8 @@ fn json_route_open(project_root: &Path) -> Value {
 }
 
 /// `route.open` the management surface; returns the route binding.
-pub async fn route_open(stream: &mut TcpStream, project_root: &Path, corr: u64) -> Route {
-    let frame = control_rpc(stream, corr, json_route_open(project_root)).await;
+pub async fn route_open(stream: &mut TcpStream, corr: u64) -> Route {
+    let frame = control_rpc(stream, corr, json_route_open()).await;
     assert_eq!(
         frame.header.ty,
         FrameType::Response,

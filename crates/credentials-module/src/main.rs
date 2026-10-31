@@ -2157,10 +2157,13 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     // Protocol 0.33.2 stamps flow_version, flow_code_hash and flow_install_id only
     // for readers providing flow-identity-scopes/v1. This vault reads those fields
     // from sender params; it still refuses flow-scoped transport route binds.
+    // The vault never reads project fields from route.bind, so the supervisor can
+    // omit its legacy project-root compatibility field on binds to this target.
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
         provides: vec![
             "permissions/v1".to_owned(),
             subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
+            subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
         ],
         requires: Vec::new(),
         must_never_reach: Vec::new(),
@@ -2631,12 +2634,21 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+    fn the_manifest_declares_project_free_route_binds() {
         let m = manifest("claustrum", None);
         assert_eq!(
             m.capabilities.as_ref().unwrap().provides,
-            vec!["permissions/v1", "flow-identity-scopes/v1"]
+            vec![
+                "permissions/v1",
+                "flow-identity-scopes/v1",
+                "bind-no-project/v1"
+            ]
         );
+    }
+
+    #[test]
+    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+        let m = manifest("claustrum", None);
         let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
             panic!("management surface")
         };
@@ -4975,7 +4987,7 @@ mod tests {
             target: subc_protocol::RouteTarget::ToolProvider {
                 module_id: credentials_core::contract::MODULE_ID.to_string(),
             },
-            identity: subc_protocol::BindIdentity::new("/tmp/p", harness, "s"),
+            identity: subc_protocol::BindIdentity::new(harness, "s"),
             principal: Some(subc_protocol::Principal::Reserved {
                 module_id: module_id.to_string(),
             }),
@@ -11125,7 +11137,7 @@ mod tests {
                 target: subc_protocol::RouteTarget::ToolProvider {
                     module_id: credentials_core::contract::MODULE_ID.to_string(),
                 },
-                identity: subc_protocol::BindIdentity::new("/tmp/p", "h", "s"),
+                identity: subc_protocol::BindIdentity::new("h", "s"),
                 principal: Some(subc_protocol::Principal::Reserved {
                     module_id: "prefrontal-core".to_string(),
                 }),

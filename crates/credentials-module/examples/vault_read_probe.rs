@@ -11,7 +11,7 @@
 //!
 //! Usage:
 //!   cargo run -p credentials-module --example vault_read_probe -- \
-//!     --subc <connection-file> --handle <ckh_...> [--root <path>]
+//!     --subc <connection-file> --handle <ckh_...>
 //!
 //! It deliberately does NOT print the credential payload bytes (only its length and
 //! a short fingerprint), so running it against a real credential does not splash the
@@ -33,7 +33,6 @@ async fn main() {
     let mut subc: Option<PathBuf> = None;
     let mut handle: Option<String> = None;
     let mut handle_file: Option<PathBuf> = None;
-    let mut root = std::env::temp_dir();
     let mut force_refresh = false;
     let mut describe = false;
     let mut min_ttl_ms: Option<i64> = None;
@@ -78,11 +77,6 @@ async fn main() {
             // keeps it in a mode-600 file the process reads itself, so the secret never
             // appears in a place that is copied by default.
             "--handle-file" => handle_file = args.next().map(PathBuf::from),
-            "--root" => {
-                if let Some(value) = args.next() {
-                    root = PathBuf::from(value);
-                }
-            }
             // Force a refresh-on-read regardless of the token's recorded expiry. This
             // makes the "google's token is dead, the vault refreshes it live" proof
             // DETERMINISTIC: without it, a credential whose auth.json carried no
@@ -370,7 +364,7 @@ async fn main() {
     wait_for_catalog(&mut stream).await;
     eprintln!("[probe] vault module '{MODULE_ID}' is catalog-live");
 
-    let (route_channel, route_epoch) = route_open(&mut stream, &root, as_module.as_deref()).await;
+    let (route_channel, route_epoch) = route_open(&mut stream, as_module.as_deref()).await;
     eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
 
     if let Some(secs) = watch_scoped_secs {
@@ -1115,23 +1109,13 @@ async fn wait_for_catalog(stream: &mut TcpStream) {
 /// opens. It is NOT downgraded to `Direct`. That matters — a silent downgrade would make
 /// a forged claim indistinguishable from no claim, and a consumer whose nonce had gone
 /// stale would see scoped refusals and go looking at its grants.
-async fn route_open(
-    stream: &mut TcpStream,
-    root: &std::path::Path,
-    as_module: Option<&str>,
-) -> (u16, u32) {
+async fn route_open(stream: &mut TcpStream, as_module: Option<&str>) -> (u16, u32) {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
-    // `BindIdentity::new` rather than a literal: 0.20 made the type non-exhaustive so an
-    // additive field cannot force a construction-site migration. `project_id` stays
-    // absent, which subc's contract calls the correct answer for a producer that cannot
-    // answer consistently -- alternating forks the consumer's lineage silently.
-    let identity = BindIdentity::new(
-        root.to_path_buf(),
-        "vault-read-probe".to_string(),
-        "probe-1".to_string(),
-    );
+    // BindIdentity carries only client-supplied harness/session labels. A route's
+    // project comes from its session scope, and the probe opens no scope.
+    let identity = BindIdentity::new("vault-read-probe", "probe-1");
     let mut body = json!({ "op": "route.open", "target": target, "identity": identity });
     if let Some(module_id) = as_module {
         // The nonce comes from the environment the supervisor injected, never from a

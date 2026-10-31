@@ -36,15 +36,20 @@ def remote_command(mode, plan=None):
         command.append("--net")
     if mode in ("full", "windows"):
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
-        command += ["--sibling", sibling]
         if mode == "windows":
             # Windows mirrors caller paths below one drive root. The relative
             # delta survives that mapping, including non-adjacent worktrees.
+            # Resolved first: the runner captures a symlinked sibling (the scratch
+            # folder links each real repository) at its real path, so a delta taken
+            # from the link would point where nothing was copied.
             host_sibling = Path(sibling)
             if not host_sibling.is_absolute():
                 host_sibling = ROOT / host_sibling
+            host_sibling = host_sibling.resolve()
+            command += ["--sibling", str(host_sibling)]
             arguments += ["--sibling", os.path.relpath(host_sibling, ROOT)]
         else:
+            command += ["--sibling", sibling]
             arguments += ["--sibling", sibling]
     if plan is not None:
         arguments += ["--plan", json.dumps(plan)]

@@ -197,7 +197,15 @@ exit "$SCENARIO"
                 self.assertIn(message, result.stdout)
 
     def test_windows_transport_selects_native_worker_and_supervisor(self):
-        command = runtime.remote_command("windows")
+        # A workspace with a plain sibling directory, so the answer doesn't depend on
+        # whether this checkout's own ../subconscious happens to be a symlink.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "subconscious").mkdir()
+            (root / "claustrum").mkdir()
+            with patch.object(runtime, "ROOT", root / "claustrum"), patch.dict(os.environ, clear=False):
+                os.environ.pop("CRED_SUBCONSCIOUS_ROOT", None)
+                command = runtime.remote_command("windows")
         self.assertEqual(command[command.index("--platform") + 1], "windows")
         self.assertEqual(command[command.index("--") + 1:],
                          ["env", "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*",
@@ -216,6 +224,24 @@ exit "$SCENARIO"
         self.assertFalse(any("/Users/" in argument for argument in worker), worker)
         self.assertNotIn(sibling, worker)
         self.assertEqual(worker[:3], ["env", "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*"])
+
+    def test_windows_symlinked_sibling_is_captured_and_addressed_at_its_real_path(self):
+        # The scratch folder holds links to the real repositories, so `../subconscious`
+        # is a symlink there. The runner captures it at its real path; a delta taken
+        # from the link pointed at a folder the job never received.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            real = root / "Projects" / "subconscious"
+            real.mkdir(parents=True)
+            workspace = root / "scratch" / "claustrum"
+            workspace.mkdir(parents=True)
+            (root / "scratch" / "subconscious").symlink_to(real)
+            with patch.object(runtime, "ROOT", workspace), patch.dict(os.environ, clear=False):
+                os.environ.pop("CRED_SUBCONSCIOUS_ROOT", None)
+                command = runtime.remote_command("windows")
+        capture, worker = command[:command.index("--")], command[command.index("--") + 1:]
+        self.assertEqual(capture[capture.index("--sibling") + 1], str(real))
+        self.assertEqual(worker[worker.index("--sibling") + 1], "../../Projects/subconscious")
 
     def test_fast_transport_has_scope_and_no_supervisor(self):
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}

@@ -2,6 +2,8 @@
 //! by the daemon and operator CLI. A file backend records its absolute path.
 
 use super::{fsync_parent_dir, write_key_file, KeySource, MasterKeyError, ResolverConfig};
+use crate::store::AUDIT_KEY_SECRET_NAME;
+use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = "version:1";
@@ -115,6 +117,15 @@ pub fn key_source_with_overrides(
     flag_path: Option<&Path>,
     env_path: Option<&Path>,
 ) -> Result<KeySource, MasterKeyError> {
+    key_source_for_platform(data_dir, flag_path, env_path, std::env::consts::OS)
+}
+
+fn key_source_for_platform(
+    data_dir: &Path,
+    flag_path: Option<&Path>,
+    env_path: Option<&Path>,
+    platform: &str,
+) -> Result<KeySource, MasterKeyError> {
     let flag = flag_path.map(file_source).transpose()?;
     let env = env_path.map(file_source).transpose()?;
     if let (Some(flag), Some(env)) = (&flag, &env) {
@@ -133,15 +144,48 @@ pub fn key_source_with_overrides(
         }
         return Ok(recorded);
     }
-    // Do not reinterpret an existing unrecorded database as a fresh native vault.
-    // A fresh vault's OS default is only a choice of store, not a fallback on failure.
-    Ok(requested.unwrap_or_else(|| {
-        if data_dir.join("store.db").exists() {
-            KeySource::Keychain
-        } else {
-            super::native_source_for(std::env::consts::OS)
+    if let Some(requested) = requested {
+        return Ok(requested);
+    }
+    // Bootstrap opens the database before provisioning a key. Only the sealed
+    // audit-key row proves that an unrecorded store was ever opened with a key.
+    if store_was_keyed(data_dir)? {
+        Ok(KeySource::Keychain)
+    } else {
+        Ok(super::native_source_for(platform))
+    }
+}
+
+fn store_was_keyed(data_dir: &Path) -> Result<bool, MasterKeyError> {
+    let path = data_dir.join("store.db");
+    let inspection_error = |error: &dyn std::fmt::Display| {
+        MasterKeyError::KeySourceInvalid(format!(
+            "cannot determine whether {} was keyed: {error}",
+            path.display()
+        ))
+    };
+    if !path.try_exists().map_err(|e| inspection_error(&e))? {
+        return Ok(false);
+    }
+    // SQLITE_OPEN_READ_ONLY is SQLite's mode=ro: no lease, migrations or database
+    // creation. An unreadable store must not become a fresh-vault key choice.
+    let inspect = || -> rusqlite::Result<bool> {
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let has_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'vault_secrets')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_table {
+            return Ok(false);
         }
-    }))
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vault_secrets WHERE name = ?1)",
+            [AUDIT_KEY_SECRET_NAME],
+            |row| row.get(0),
+        )
+    };
+    inspect().map_err(|e| inspection_error(&e))
 }
 
 /// The entry points share environment handling as well as record parsing.
@@ -204,7 +248,9 @@ mod tests {
     use crate::resolver::{
         bootstrap, resolve, resolve_for_db, resolve_with_backend, KeySlot, MasterKeyStore,
     };
+    use crate::store::EncryptedStore;
     use crate::test_support::TestTempDir;
+    use cortexkit_store::{open_sqlite, Isolation, SqliteStore, StorageBackend, StorageDescriptor};
 
     fn fixture(tag: &str) -> (TestTempDir, ResolverConfig) {
         let root = TestTempDir::new(format!("ck-cred-{tag}-{}", std::process::id()));
@@ -218,6 +264,24 @@ mod tests {
             },
         };
         (root, config)
+    }
+
+    fn migrated_store(data_dir: &Path) -> SqliteStore {
+        let store = open_sqlite(&StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: data_dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        EncryptedStore::migrate(&store).unwrap();
+        store
+    }
+
+    fn write_keyed_store(data_dir: &Path, key: MasterKey) {
+        EncryptedStore::open(migrated_store(data_dir), key).unwrap();
     }
 
     #[test]
@@ -262,15 +326,22 @@ mod tests {
             let dir = config.data_dir.join(name);
             std::fs::create_dir(&dir).unwrap();
             record_source(&dir, &source).unwrap();
+            // A record is authoritative; selection need not inspect the database.
+            std::fs::write(dir.join("store.db"), b"not a database").unwrap();
             assert_eq!(
                 std::fs::read_to_string(dir.join("key-source")).unwrap(),
                 format!("version:1\n{name}\n")
             );
-            assert_eq!(key_source_with_overrides(&dir, None, None).unwrap(), source);
-            for (flag, env) in [(Some(path.as_path()), None), (None, Some(path.as_path()))] {
-                let error = key_source_with_overrides(&dir, flag, env).unwrap_err();
-                assert!(matches!(error, MasterKeyError::KeySourceConflict { .. }));
-                assert!(error.to_string().contains(name));
+            for platform in ["macos", "linux", "windows"] {
+                assert_eq!(
+                    key_source_for_platform(&dir, None, None, platform).unwrap(),
+                    source
+                );
+                for (flag, env) in [(Some(path.as_path()), None), (None, Some(path.as_path()))] {
+                    let error = key_source_for_platform(&dir, flag, env, platform).unwrap_err();
+                    assert!(matches!(error, MasterKeyError::KeySourceConflict { .. }));
+                    assert!(error.to_string().contains(name));
+                }
             }
         }
     }
@@ -278,15 +349,111 @@ mod tests {
     #[test]
     fn fresh_native_default_does_not_reinterpret_legacy_database() {
         let (_root, config) = fixture("native-default");
-        assert_eq!(
-            key_source_with_overrides(&config.data_dir, None, None).unwrap(),
-            super::super::native_source_for(std::env::consts::OS)
-        );
-        std::fs::write(config.data_dir.join("store.db"), []).unwrap();
-        assert_eq!(
-            key_source_with_overrides(&config.data_dir, None, None).unwrap(),
-            KeySource::Keychain
-        );
+        write_keyed_store(&config.data_dir, MasterKey::from_bytes([7; 32]));
+        for platform in ["macos", "linux", "windows"] {
+            let source = key_source_for_platform(&config.data_dir, None, None, platform).unwrap();
+            assert_eq!(source, KeySource::Keychain);
+            let refusal = super::super::refuse_unsupported_bootstrap(&source, false, platform);
+            if platform == "macos" {
+                refusal.unwrap();
+            } else {
+                let error = refusal.unwrap_err();
+                assert!(matches!(error, MasterKeyError::KeySourceInvalid(_)));
+                assert_eq!(error.to_string(), "invalid key-source: this vault predates the key-source record; start it with --key-path <its key file> or CK_MASTER_KEY_PATH=<its key file> (no new key was generated)");
+            }
+            let KeySource::OperatorPath { path } = &config.source else {
+                unreachable!()
+            };
+            for (flag, env) in [(Some(path.as_path()), None), (None, Some(path.as_path()))] {
+                assert_eq!(
+                    key_source_for_platform(&config.data_dir, flag, env, platform).unwrap(),
+                    config.source
+                );
+            }
+        }
+        assert!(!config.data_dir.join("key-source").exists());
+    }
+
+    #[test]
+    fn never_keyed_databases_use_each_platforms_native_source_without_writes() {
+        for state in ["missing", "zero-byte", "empty", "unmigrated", "schema"] {
+            let (_root, config) = fixture(&format!("native-fresh-{state}"));
+            let db = config.data_dir.join("store.db");
+            // Keep the migrated store's lease held: source selection must inspect
+            // the schema without acquiring the single-writer lease itself.
+            let _schema_store = if state == "schema" {
+                Some(migrated_store(&config.data_dir))
+            } else {
+                None
+            };
+            match state {
+                "missing" => {}
+                "zero-byte" => std::fs::write(&db, []).unwrap(),
+                "empty" => Connection::open(&db)
+                    .unwrap()
+                    .execute_batch("VACUUM")
+                    .unwrap(),
+                "unmigrated" => Connection::open(&db)
+                    .unwrap()
+                    .execute_batch("CREATE TABLE unrelated (value TEXT)")
+                    .unwrap(),
+                "schema" => {}
+                _ => unreachable!(),
+            }
+            let before = std::fs::read(&db).ok();
+            let files = || {
+                let mut names: Vec<_> = std::fs::read_dir(&config.data_dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                names.sort();
+                names
+            };
+            let before_files = files();
+            for (platform, expected) in [
+                ("macos", KeySource::Keychain),
+                ("linux", KeySource::SecretService),
+                ("windows", KeySource::CredentialManager),
+            ] {
+                assert_eq!(
+                    key_source_for_platform(&config.data_dir, None, None, platform).unwrap(),
+                    expected,
+                    "{state} on {platform}"
+                );
+            }
+            assert_eq!(std::fs::read(&db).ok(), before, "{state}");
+            assert_eq!(files(), before_files, "{state}");
+        }
+    }
+
+    #[test]
+    fn unrecorded_database_inspection_errors_fail_closed() {
+        for state in ["corrupt", "directory", "bad-schema"] {
+            let (_root, config) = fixture(&format!("native-unreadable-{state}"));
+            let db = config.data_dir.join("store.db");
+            match state {
+                "corrupt" => std::fs::write(&db, b"not a database").unwrap(),
+                "directory" => std::fs::create_dir(&db).unwrap(),
+                "bad-schema" => Connection::open(&db)
+                    .unwrap()
+                    .execute_batch("CREATE TABLE vault_secrets (wrong_column TEXT)")
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            for platform in ["macos", "linux", "windows"] {
+                let error =
+                    key_source_for_platform(&config.data_dir, None, None, platform).unwrap_err();
+                assert!(matches!(error, MasterKeyError::KeySourceInvalid(_)));
+                let message = error.to_string();
+                assert!(
+                    message.contains("cannot determine whether")
+                        && message.contains("store.db")
+                        && message.contains("was keyed:"),
+                    "{message}"
+                );
+            }
+            assert!(!config.data_dir.join("key-source").exists());
+        }
     }
 
     #[test]
@@ -402,14 +569,13 @@ mod tests {
         assert!(resolve(&config, None).is_err());
         assert!(!config.data_dir.join("key-source").exists());
         let key = bootstrap(&config).unwrap();
+        let key_id = key.key_id();
+        write_keyed_store(&config.data_dir, key);
         std::fs::remove_file(config.data_dir.join("key-source")).unwrap();
         let wrong_id = MasterKey::from_bytes([17; 32]).key_id();
         assert!(resolve_for_db(&config, wrong_id).is_err());
         assert!(!config.data_dir.join("key-source").exists());
-        assert_eq!(
-            resolve_for_db(&config, key.key_id()).unwrap().key_id(),
-            key.key_id()
-        );
+        assert_eq!(resolve_for_db(&config, key_id).unwrap().key_id(), key_id);
         assert_eq!(
             read_key_source(&config.data_dir).unwrap(),
             Some(config.source.clone())
@@ -440,7 +606,7 @@ mod tests {
     fn migration_records_keychain_only_after_successful_load() {
         let (_root, mut config) = fixture("source-migrate-keychain");
         config.source = KeySource::Keychain;
-        std::fs::write(config.data_dir.join("store.db"), []).unwrap();
+        write_keyed_store(&config.data_dir, MasterKey::from_bytes([7; 32]));
         assert!(resolve_with_backend(&config, None, &TestKeychain { available: false }).is_err());
         assert!(!config.data_dir.join("key-source").exists());
         resolve_with_backend(&config, None, &TestKeychain { available: true }).unwrap();

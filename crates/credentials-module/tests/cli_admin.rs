@@ -324,6 +324,60 @@ fn the_ck_domain_probe_answers_with_one_line_and_needs_nothing() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn failed_colocated_bootstrap_leaves_a_fresh_native_vault() {
+    let root = tmp_root("bootstrap-retry-native");
+    let data_dir = root.join("vault");
+    let colocated = data_dir.join("master.key");
+    let external = root.join("master.key");
+    let run = |key_path: Option<&std::path::Path>| {
+        let mut command = cli();
+        command
+            .args(["bootstrap", "--data-dir"])
+            .arg(&data_dir)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("DBUS_SESSION_BUS_PID");
+        if let Some(path) = key_path {
+            command.arg("--key-path").arg(path);
+        }
+        command.output().expect("run ck-auth bootstrap")
+    };
+
+    let refused = run(Some(&colocated));
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains("forbidden co-location"), "{error}");
+    assert!(data_dir.join("store.db").is_file());
+    assert!(!colocated.exists());
+    assert!(!data_dir.join("key-source").exists());
+
+    let native = run(None);
+    assert!(!native.status.success());
+    let error = String::from_utf8_lossy(&native.stderr);
+    assert!(
+        error.contains("secret-service master-key store unavailable:")
+            && error.contains("pass --key-path")
+            && !error.contains("not supported on this platform"),
+        "the never-keyed store must still select Secret Service: {error}"
+    );
+    assert!(!data_dir.join("key-source").exists());
+
+    let file = run(Some(&external));
+    assert!(
+        file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&file.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("key-source")).unwrap(),
+        format!(
+            "version:1\nfile:{}\n",
+            external.canonicalize().unwrap().display()
+        )
+    );
+}
+
+#[test]
 fn bootstrap_is_idempotent_but_a_real_key_store_failure_is_not() {
     let root = tmp_root("bootstrap-idem");
     let data_dir = root.join("vault");

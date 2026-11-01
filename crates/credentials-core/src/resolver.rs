@@ -665,6 +665,11 @@ fn refuse_unsupported_bootstrap(
         KeySource::OperatorPath { .. } => true,
     };
     if !recorded && !supported {
+        if matches!(source, KeySource::Keychain) && matches!(platform, "linux" | "windows") {
+            return Err(MasterKeyError::KeySourceInvalid(
+                "this vault predates the key-source record; start it with --key-path <its key file> or CK_MASTER_KEY_PATH=<its key file> (no new key was generated)".into(),
+            ));
+        }
         return Err(MasterKeyError::KeySourceInvalid(
             "the selected native master-key backend is not supported on this platform; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to bootstrap a new vault (no fallback)".into(),
         ));

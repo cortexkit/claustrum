@@ -6,17 +6,22 @@ brief.
 
 ## Building and testing
 
-- Build and test on the build server: use the bash tool with `runon: "linux,8c"` (or
-  `linux,16c` for the whole workspace). Don't run cargo on the Mac. The local gate
-  (`scripts/gate.sh`) needs the supervisor checkout and may not run inside a worker sandbox.
-- Before you deliver, run every check that doesn't need the supervisor:
-  `cargo fmt --all -- --check`; clippy with
+- Build and test on the build server: use the bash tool with `runon: "linux,8c"`. Don't
+  run cargo on the Mac. Keep the normal build directory; a separate `CARGO_TARGET_DIR`
+  forces a cold build every run.
+- Run only the tests for what you changed, by name or module filter, for example
+  `cargo test --locked -p credentials-core --features test-support <filter>`. Never run a
+  whole crate's suite, the workspace suite, `scripts/fast-check.sh` or `scripts/gate.sh`:
+  the head runs the full suite once, over several merged deliveries. If a test outside your
+  change fails, rerun that one test by name on your base commit, never the suite.
+- Before you deliver, also run: `cargo fmt --all -- --check`; clippy with
   `--features credentials-core/test-support --all-targets -- -D warnings` for every crate
-  you touched; the full test suites of those crates (with `--features test-support` for
-  credentials-core); `python3 scripts/endpoint-hosts.py`;
-  `python3 -m unittest discover -s scripts/tests` if you touched `scripts/` or
-  `.github/`; and `bun test` plus `bun run typecheck` if you touched `packages/`.
-  Report which checks ran and their results.
+  you touched; `python3 scripts/endpoint-hosts.py`; the script tests in
+  `scripts/tests` for any script you touched; and `bun test` on the test files you changed
+  plus `bun run typecheck` if you touched `packages/`. Report which checks ran and their
+  results.
+- A filtered test run that takes more than about 15 minutes means the filter is too broad.
+  Don't wait on it in a loop; narrow it.
 - Run a sidekick comment review on your changes before delivering, and fix what it flags.
 - A bug fix ships with a test that fails without the fix. Say how you showed it failing.
 - No mutation-testing work: the `ckdev-mutate` catalogue (`mutations.toml`) was removed

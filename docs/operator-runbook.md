@@ -88,6 +88,7 @@ Exit codes:
 | 3 | the daemon holds the lease and this verb is offline-only | stop the daemon, retry |
 | 4 | master key could not be resolved (OS credential store locked, key absent, or wrong) | unlock the OS credential store (Keychain on macOS, Secret Service on Linux, Credential Manager on Windows), or check `--key-path` |
 | 5 | **indeterminate**: the op reached the daemon but the reply was lost | see below |
+| 6 | `revoke-handle` matched no live handle | check the handle or stored `handle_hash`; accept 6 only if an already-revoked handle is expected |
 | 1 | usage, IO or other error | read the message |
 
 **Exit code 5 needs care.** The operation was sent to the running daemon and the
@@ -108,8 +109,9 @@ supervisor core first by construction. The binaries live in
 `~/.local/share/cortexkit/bin/`, with `ck-auth` also symlinked into `~/.local/bin/` for the
 `ck` dispatcher.
 
-**Claustrum releases require subc-core (the supervisor core), version 0.20.83 or newer.**
-Upgrade the supervisor before installing from the release page; `ck setup claustrum` installs it first.
+**Claustrum releases require subc-core (the supervisor core), version 0.20.154 or newer.**
+Before installing v0.3.0, run `ck upgrade` to get `ck` 0.20.155 or newer, the public build
+carrying that core. Do this before `ck setup claustrum` or a release-page install.
 
 The supervisor runs the daemon from its `subc.jsonc`, with the vault module marked
 `reserved: true` and a `sqlite` storage section. `reserved: true` means only the process
@@ -165,6 +167,12 @@ or `CK_MASTER_KEY_PATH=<file>` when bootstrapping. Use a directory outside the v
 that the daemon user owns (for example `~/.config/cortexkit/secrets/master.key`), with
 the parent directory at mode `0700`, created beforehand; bootstrap creates the key file.
 There is no automatic fallback from a missing or locked native store.
+
+An empty or never-keyed `store.db` left by a failed setup is still a fresh vault. Make
+the OS key store available to the vault user (see the requirements above), then retry
+`ck auth bootstrap --data-dir "$DATA_DIR"`. The file's mere presence does not require a
+legacy key file. An existing keyed vault keeps its recorded key source; never delete its
+store or generate a replacement master key to retry setup.
 
 On Unix every load checks that the key file is a regular file, not a symlink, owned by
 the current effective user, with no group or other permission bits. Use `chmod 600 <file>`
@@ -397,11 +405,16 @@ App JWT issuer.
 
 ### Agent secrets: keys an agent uses without seeing them
 
-Agent secrets are a separate record kind that no credential id, handle, grant or transfer
-can reach. An agent (AFT for an API key, Cerebellum for a login) asks the vault to *use*
-one; the vault hands back the key with the header, query or JSON-pointer location to put
-it in, or the username, password and TOTP code for a login. Material is released only to
-those two senders, and only under a grant.
+Agent secrets are a separate record kind that no credential id, handle, credential grant
+or transfer can reach. An agent (AFT for an API key, Cerebellum for a login) asks the vault
+to *use* one; the vault hands back the key with the header, query or JSON-pointer location
+to put it in, or the username, password and time-based one-time code (TOTP) for a login.
+Agent-scoped material is released only to those two senders, and only under a secret
+grant approved on a paired phone. Basal flows can also use secrets under a phone-approved
+grant tied to the flow's version, code and installation, rather than an agent's scope.
+Phone operations require both `ck auth federation mapping on` and
+`ck auth secret phone-gate on`; enable them only after the authenticated peer setup in
+[Federation setup and recovery](#federation-setup-and-recovery).
 
 ```sh
 ck auth secret put ops-github --kind api-key --host api.github.com \
@@ -589,8 +602,11 @@ empty by not rerunning reclassify, or clear it again afterward. A transition wri
 
 ### Provider ids and subscription tier
 
-Provider ids are operator-written catalog mappings, not authorization categories. Neither
-provider ids nor plan tiers are inferred from the credential's name:
+Provider ids are catalog mappings, not authorization categories. Without `--provider-id`,
+`ck auth login` supplies `anthropic`, `openai`, `xai`, `meta`, or `google` for the
+corresponding subscription login (Antigravity uses `google`), only when the id has no
+stored provider ids. Other logins get no defaults. Upgrade does not backfill existing
+records; operators can set the mappings and override detected plan tiers explicitly:
 
 ```sh
 ck auth set-providers --id oauth:anthropic --set anthropic claude-code
@@ -620,8 +636,9 @@ Overrides do not update automatically: reassert or clear one after an out-of-ban
 sixth header word, `PLAN_TIER`, after `PROVIDERS`, and every row has a sixth field (the tier
 or `-`). Detected tiers carry a `*` suffix, e.g. `max_20x*`, explained in a footnote. An
 optional `by=<principal>` follows as a trailing annotation with no header word. With no
-tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header is unchanged. Parsers
-must accept both layouts; no field value contains whitespace.
+tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header is unchanged.
+Scripts should use `ck auth list --json` rather than parse the human table. It emits one
+versioned JSON inventory, sorted by id, with metadata but no payloads, handles or emails.
 
 ---
 
@@ -654,12 +671,16 @@ consumer**: handles are the revocation unit, so cutting off one consumer is one
 `revoke-handle` and nobody else notices. Handles survive `login --replace`.
 
 ```sh
-ck auth revoke-handle --handle <ckh_...>      # or --hash <64 hex> when the raw value is gone
+ck auth revoke-handle --handle <ckh_...>      # or --hash <stored handle_hash> when the raw value is gone
 ck auth revoke-all-handles --id <id>          # the record stays refreshable
 ```
 
 To verify, the consumer's next `credential.get` succeeds; after a revoke it answers
 `not_found` (indistinguishable from an unknown handle, by design).
+
+`revoke-handle` exits 6 if no live handle matched. A script that deliberately revokes the
+same handle twice can accept that code; otherwise check the target before proceeding.
+`--hash` takes the stored `handle_hash`, not a SHA-256 digest of the raw token.
 
 ### Grants
 
@@ -679,6 +700,7 @@ and none implies another:
 | `read` | `credential.get_scoped` (the token itself), and scoped `status`, `public_key` and `report_auth_failure` |
 | `sign` | `credential.sign` with a signing key |
 | `open` | `credential.open` with a KEM key |
+| `seal` | Encrypt a message as a vault-held key's authenticated sender ([HPKE encryption](wire-contract-v1.md#13-credentialseal)); exact selectors only |
 | `list` | the row in `credential.list_scoped`, with its identity (`account_id`, `email`, `org_name`) and `refresh_adapter`, and nothing else |
 | `deposit` | `credential.deposit_cookie` for `cookie:` records only; requires a reserved principal and the `browser-session` category; grants no read access |
 

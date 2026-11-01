@@ -74,8 +74,9 @@ A bug fix ships with a test that fails without the fix.
 ## Install and operate
 
 `ck setup claustrum` installs the vault. **Claustrum releases require subc-core (the
-supervisor core), version 0.20.83 or newer.** Upgrade the supervisor first when installing
-from the release page; `ck setup claustrum` installs it first.
+supervisor core), version 0.20.154 or newer.** Before installing v0.3.0, run `ck upgrade`
+to get `ck` 0.20.155 or newer, the public build carrying that core. This applies whether
+you install with `ck setup claustrum` or from the release page.
 
 - [Operator runbook](docs/operator-runbook.md): install, master key, logins, grants and
   enrollments, backups and restore, key rotation, deploy and rollback.

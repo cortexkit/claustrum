@@ -23,8 +23,22 @@ pub fn scratch_home() -> PathBuf {
     home
 }
 
+/// A session-bus address that nothing listens on. Removing `DBUS_SESSION_BUS_ADDRESS`
+/// is not enough: with it unset, zbus falls back to `$XDG_RUNTIME_DIR/bus`, and with
+/// that unset too, to `/run/user/<effective user id>/bus`. On a Linux desktop that is the user's
+/// real session bus, so a bootstrap without `--key-path` would store a master key in
+/// their keyring. Pointing the variable at a missing socket makes the Secret Service
+/// unreachable for every isolated command.
+pub fn unreachable_session_bus() -> String {
+    format!(
+        "unix:path={}",
+        scratch_home().join("no-session-bus").display()
+    )
+}
+
 /// Point every location `ck-auth` discovers on its own at the scratch home, and drop
-/// the variables that would select a real master key or a real daemon connection.
+/// the variables that would select a real master key, a real daemon connection or the
+/// user's keyring.
 pub fn isolate(command: &mut Command) -> &mut Command {
     let home = scratch_home();
     let tmp = home.join("tmp");
@@ -41,6 +55,8 @@ pub fn isolate(command: &mut Command) -> &mut Command {
         .env("TMP", &tmp)
         .env("TEMP", &tmp)
         .env_remove("XDG_RUNTIME_DIR")
+        .env("DBUS_SESSION_BUS_ADDRESS", unreachable_session_bus())
+        .env_remove("DBUS_SESSION_BUS_PID")
         .env_remove("CK_MASTER_KEY_PATH")
         .env_remove("SUBC_CONNECTION_FILE")
 }
@@ -54,6 +70,15 @@ pub fn assert_isolated(command: &Command) {
         .and_then(|(_, value)| value.map(PathBuf::from))
         .expect("the ck-auth test command must set HOME");
     assert_eq!(home, scratch_home(), "ck-auth test command is not isolated");
+    let bus = command
+        .get_envs()
+        .find(|(key, _)| *key == "DBUS_SESSION_BUS_ADDRESS")
+        .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()));
+    assert_eq!(
+        bus.as_deref(),
+        Some(unreachable_session_bus().as_str()),
+        "ck-auth test command must not reach the user's session bus"
+    );
     for removed in ["CK_MASTER_KEY_PATH", "SUBC_CONNECTION_FILE"] {
         assert!(
             command

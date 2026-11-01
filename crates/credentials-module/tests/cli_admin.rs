@@ -332,11 +332,10 @@ fn failed_colocated_bootstrap_leaves_a_fresh_native_vault() {
     let external = root.join("master.key");
     let run = |key_path: Option<&std::path::Path>| {
         let mut command = cli();
-        command
-            .args(["bootstrap", "--data-dir"])
-            .arg(&data_dir)
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
-            .env_remove("DBUS_SESSION_BUS_PID");
+        // `cli()` points the session bus at a missing socket, so the Secret Service is
+        // unreachable here even on a desktop. Removing the variable instead would let
+        // zbus fall back to the user's real bus.
+        command.args(["bootstrap", "--data-dir"]).arg(&data_dir);
         if let Some(path) = key_path {
             command.arg("--key-path").arg(path);
         }

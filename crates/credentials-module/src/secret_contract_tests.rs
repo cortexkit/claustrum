@@ -47,6 +47,8 @@ const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
 const SECRET_GOLDEN_STRING_IDS: &[&str] = &["envelope.flow.bytes", "federation.secret_use.aad"];
 
 const SECRET_GOLDEN_IDS: &[&str] = &[
+    "usage.report_scoped.request",
+    "usage.report_scoped.result",
     "phone_keys_register.request",
     "phone_keys_register.result",
     "deposit_keys.request",
@@ -106,7 +108,7 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "federation.secret_revoke_flow_grants.result",
 ];
 
-/// The raw JSON text of one `<!-- golden:<id> -->` block in §15.
+/// The raw JSON text of one `<!-- golden:<id> -->` block in the wire contract.
 fn secret_golden_text(id: &str) -> &'static str {
     let marker = format!("<!-- golden:{id} -->\n```json\n");
     let found: Vec<usize> = SECRET_CONTRACT_DOC
@@ -129,8 +131,8 @@ fn secret_golden(id: &str) -> serde_json::Value {
     secret_optional_golden(id).unwrap_or_else(|| panic!("golden `{id}` is missing from §15"))
 }
 
-/// The golden's value, or `None` when §15 carries no such block. Only the one block that
-/// pins an optional key uses this; every other caller wants `secret_golden`.
+/// The golden's value, or `None` when the wire contract carries no such block.
+/// Only the block that pins an optional key uses this; other callers want `secret_golden`.
 fn secret_optional_golden(id: &str) -> Option<serde_json::Value> {
     let marker = format!("<!-- golden:{id} -->\n```json\n");
     let blocks: Vec<usize> = SECRET_CONTRACT_DOC

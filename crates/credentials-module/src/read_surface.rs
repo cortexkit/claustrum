@@ -249,6 +249,16 @@ pub struct GetScopedParams {
     pub credential_id: String,
 }
 
+/// A quota reading relayed only after the caller's ordinary scoped read check.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+pub struct UsageReportScopedParams {
+    pub credential_id: String,
+    pub reading: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
+}
+
 /// `credential.list_scoped` lists every row covered by the caller's grants.
 ///
 /// `enrollment_token` is how a host-launched consumer says who it is. A supervised module
@@ -943,6 +953,7 @@ pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
     account_tokens: account_token::AccountTokens,
     pub(crate) watches: crate::watch_scoped::WatchHub,
+    pub(crate) usage: Arc<crate::usage_forwarder::UsageForwarder>,
     /// Serves the remote records (rotating logins whose home is another member's
     /// vault). Every op that can see a remote id asks it first.
     remote: Arc<crate::federation::RemoteReader>,
@@ -1316,6 +1327,7 @@ impl ReadSurface {
             engine,
             account_tokens: account_token::AccountTokens::new(),
             watches: crate::watch_scoped::WatchHub::default(),
+            usage: Arc::new(crate::usage_forwarder::UsageForwarder::default()),
             remote,
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),
@@ -2645,6 +2657,32 @@ impl ReadSurface {
             Ok(()) => serde_json::json!({ "accepted": true }),
             Err(refusal) => serde_json::json!({ "accepted": false, "error": refusal.body() }),
         }
+    }
+
+    pub fn report_usage_scoped(
+        &self,
+        principal: Option<&Principal>,
+        params: &UsageReportScopedParams,
+    ) -> Result<(), ReadError> {
+        let (kind, id) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        )?;
+        // The dispatcher validates before authorization, so neither caller-supplied
+        // attribution nor an oversized reading can reach the queue.
+        self.usage.enqueue(crate::usage_forwarder::vouched_row(
+            params
+                .reading
+                .as_object()
+                .expect("validated reading")
+                .clone(),
+            &params.credential_id,
+            kind,
+            &id,
+        ));
+        Ok(())
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.

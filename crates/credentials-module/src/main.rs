@@ -74,6 +74,7 @@ use tokio::{
 };
 
 use limiter::{Caps, FetchLimiter};
+mod usage_forwarder;
 use read_surface::{
     DepositCookieParams, EnrollPollParams, EnrollProposeParams, EnrollRotateParams, GetManyParams,
     GetParams, GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface,
@@ -107,6 +108,7 @@ const OP_DEPOSIT_COOKIE: &str = "credential.deposit_cookie";
 const OP_ACCOUNT_TOKEN: &str = "credential.account_token";
 const OP_GET: &str = "credential.get";
 const OP_GET_SCOPED: &str = "credential.get_scoped";
+const OP_USAGE_REPORT_SCOPED: &str = "usage.report_scoped";
 const OP_LIST_SCOPED: &str = "credential.list_scoped";
 const OP_WATCH_SCOPED: &str = "auth.watch_scoped";
 const OP_GET_MANY: &str = "credential.get_many";
@@ -371,20 +373,21 @@ where
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
     // The outbound client: this vault's own connection to subc for calls it makes as a
-    // consumer (callosum's pairing and key lookups, a peer vault). Built once, from the
-    // module id and the launch nonce `ModuleConfig::from_env` already read; the nonce is
-    // never read again. It connects lazily on its first call, so building it here costs
-    // nothing and a vault that never federates never dials.
+    // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
+    // from the module id and the launch nonce `ModuleConfig::from_env` already read;
+    // the nonce is never read again. It connects lazily on its first call, so building
+    // it here costs nothing and a vault that makes no outbound calls never dials.
     let outbound = federation::OutboundClient::for_daemon(
         &config.connection_file_path,
         &config.module_id,
         config.launch_nonce.as_deref(),
     );
-    // One client, two roles: the home side asks callosum about pairings and keys, and
-    // the remote read fetches tokens from other members' vaults. Clones share one
-    // connection and one binding cache.
+    // The home side asks callosum about pairings and keys, the remote reader fetches
+    // tokens from other members' vaults, and the usage relay sends insula batches.
+    // Clones share one connection and one binding cache.
     admin.home().attach_outbound(outbound.clone());
-    surface.remote().attach_outbound(outbound);
+    surface.remote().attach_outbound(outbound.clone());
+    let _usage_guard = AbortOnDrop(Arc::clone(&surface.usage).spawn(outbound));
     // `remote add` fetches through this same reader, so it validates a home reply
     // against exactly the adapter set and reply type a consumer read uses.
     admin.attach_remote_reader(Arc::clone(surface.remote()));
@@ -1168,7 +1171,7 @@ async fn handle_control_request(
             // when the store is unreadable (real serving inability); a credential
             // needing re-auth is `degraded` detail, never `failing`, so a healthy
             // vault is never restart-flapped.
-            health_report(&surface.health_snapshot())
+            health_report_with_usage(surface)
         }
     };
     let body = serde_json::to_vec(&response_body).map_err(ModuleError::Json)?;
@@ -1278,6 +1281,28 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         detail,
         metrics: Some(metrics),
     }
+}
+
+fn health_report_with_usage(surface: &ReadSurface) -> ModuleControlResponse {
+    let mut report = health_report(&surface.health_snapshot());
+    if let ModuleControlResponse::HealthCheck {
+        metrics: Some(metrics),
+        ..
+    } = &mut report
+    {
+        metrics
+            .as_object_mut()
+            .expect("health metrics object")
+            .extend(
+                surface
+                    .usage
+                    .metrics()
+                    .as_object()
+                    .expect("usage metrics object")
+                    .clone(),
+            );
+    }
+    report
 }
 
 /// A read-surface request body: `{ "method": "...", "params": { ... } }`.
@@ -1681,6 +1706,24 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
         },
+        OP_USAGE_REPORT_SCOPED => {
+            match serde_json::from_value::<read_surface::UsageReportScopedParams>(request.params) {
+                Ok(params) if usage_forwarder::valid_reading(&params.reading) => {
+                    match surface.report_usage_scoped(principal.as_ref(), &params) {
+                        Ok(()) => wrap_result(json!({"accepted": true})),
+                        Err(code) => wrap_result(json!({
+                            "error": read_surface::ErrorBody { code, class: code.class() }
+                        })),
+                    }
+                }
+                _ => {
+                    return invalid_params(
+                        writer, ver, channel, epoch, corr,
+                        "reading must be an object of at most 15360 bytes without credentialId or vouched",
+                    ).await;
+                }
+            }
+        }
         OP_LIST_SCOPED => match serde_json::from_value::<ListScopedParams>(request.params) {
             Ok(params) => match surface.list_scoped(principal.as_ref(), &params) {
                 Ok(result) => wrap_result(result),
@@ -2388,6 +2431,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
+                name: OP_USAGE_REPORT_SCOPED.to_string(),
+                description: Some("Queue a quota reading for insula after checking the caller's read grant. No credential or audit-chain mutation.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
                 name: OP_LIST_SCOPED.to_string(),
                 description: Some("List the non-secret credentials and caller grants visible to one reserved principal. Never returns credential material.".to_string()),
                 kind: ManagementOperationKind::Query,
@@ -2545,6 +2593,9 @@ pub mod probe {
 
 #[cfg(test)]
 mod tests {
+    mod usage_report_tests {
+        include!("usage_report_tests.rs");
+    }
     include!("watch_scoped_tests.rs");
     include!("secret_contract_tests.rs");
     include!("secret_flow_contract_tests.rs");

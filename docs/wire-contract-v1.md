@@ -788,6 +788,58 @@ turn a loud classification defect into a quiet one.
 
 ---
 
+## 5a. Reporting a quota reading (`usage.report_scoped`)
+
+Plugins can relay quota readings without being attested modules. Parameters are
+`{credential_id, reading, enrollment_token?}`. The optional enrollment token resolves
+the same way as on `credential.get_scoped`; otherwise the route's reserved principal
+is used. The caller must hold an exact or category `read` grant for the credential.
+Unknown ids, ungranted callers and revoked enrollments/grants return the byte-identical
+`not_found`/`permanent` reply used by `credential.get_scoped`.
+
+`reading` must be a JSON object whose compact serialization is at most **15,360 bytes**.
+Top-level `credentialId` and `vouched` keys are forbidden, even if null. Invalid shapes,
+reserved keys and oversized readings produce a transport `invalid_params` Error frame,
+not a credential verdict. Provider-specific fields are opaque to the vault.
+
+The response means only that the reading was queued in memory, never that insula
+accepted it. No audit-chain row is written. First use is recorded once per credential
+and principal in `auth_events`, as on the other scoped read operations.
+
+Golden request (a reserved reader can omit `enrollment_token`):
+
+<!-- golden:usage.report_scoped.request -->
+```json
+{"method":"usage.report_scoped","params":{"credential_id":"oauth:claude:synthetic","reading":{"observedAtMs":1793600000000,"provider":"claude","headers":{"anthropic-ratelimit-unified-5h-utilization":"0.41"}}}}
+```
+
+Golden response:
+
+<!-- golden:usage.report_scoped.result -->
+```json
+{"result":{"accepted":true}}
+```
+
+The vault adds `credentialId` from its checked id and
+`vouched: {principal: "enrolled:<name>" | "reserved:<module>", credentialId: <checked id>}`.
+It sends one `usage.observe` batch to insula about every five seconds over its outbound
+module-attested connection as `reserved:claustrum`. The pending queue holds at most 16
+credentials and coalesces each credential's readings: the greatest numeric
+`observedAtMs` wins, with the latest received winning a tie. If either timestamp is
+missing or non-numeric, the latest received wins and insula judges its validity. At
+capacity a new credential evicts the least recently received pending credential.
+
+Each batch gets one delivery attempt with a two-second deadline. No retries or disk
+storage are involved. Reports and credential reads never wait for insula. Health
+metrics include `usageForwardedRows` (rows in batches with a complete insula reply,
+including ignored rows), `usageDroppedRows` (coalesced, evicted or failed-delivery rows),
+and `usageIgnoredReasons` (insula's ignored counts keyed by reason). Invalid or
+incomplete replies count the whole batch as dropped. These counters are process-local.
+
+`usage_report_scoped_wire_contract_goldens_are_checked` checks the golden examples;
+`usage_report_scoped_insula_vectors_match_row_and_decode_ignored_reason` checks the
+vendored insula contract, including its `unknown_credential` ignored reason.
+
 ## 6. Health
 
 The supervisor's health probe reports a cached snapshot recomputed every 5 s off the

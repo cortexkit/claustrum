@@ -401,6 +401,29 @@ export class ClaustrumClient {
   }
 
   /**
+   * Fire-and-forget quota reporting: `accepted` means queued, never that the
+   * usage-processing module insula applied the reading.
+   * Callers should coalesce per credential and never await this on a request path.
+   *
+   * Reading contents are not validated here. The vault rejects top-level `credentialId`
+   * and `vouched` keys and compact JSON readings over 15,360 bytes with `invalid_params`.
+   */
+  async reportUsageScoped(input: {
+    credentialId: string
+    reading: Record<string, unknown>
+    enrollmentToken?: string
+  }): Promise<void> {
+    const response = await this.#call('usage.report_scoped', {
+      credential_id: input.credentialId,
+      reading: input.reading,
+      enrollment_token: input.enrollmentToken,
+    })
+    if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', this.#logger)
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+    if (result?.accepted !== true) throw asCredentialError(response, 'invalid_response', this.#logger)
+  }
+
+  /**
    * Propose an enrollment. The consumer mints `requestSecret` itself and sends only its
    * hash; the raw secret NEVER leaves the process, and it is what authorizes the poll.
    *

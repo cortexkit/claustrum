@@ -52,6 +52,13 @@ credential caching, refresh, account scheduling, and retry policy.
   before categories existed). Both are `undefined` against a vault too old to send
   them; treat that as unknown, not as zero. A present but malformed value refuses the
   reply like any other malformed field.
+• Since 0.14.0, `reportUsageScoped({ credentialId, reading, enrollmentToken? })`
+  sends fire-and-forget quota readings. `accepted` means queued, never that the
+  usage-processing module insula applied the reading. Coalesce per credential and
+  never await it on a request path.
+  The client leaves reading validation to the vault, which refuses top-level
+  `credentialId` and `vouched` keys and compact JSON readings over 15,360 bytes with
+  `invalid_params`.
 
 The client sends `consumerIdentity: null` for every managed request so inherited
 `SUBC_MODULE_ID` and `SUBC_LAUNCH_NONCE` cannot impersonate a supervising host.

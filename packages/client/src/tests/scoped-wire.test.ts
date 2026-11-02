@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ClaustrumClient } from '../wire.js'
+import { rejectionOf } from './settle'
 
 // These successes are produced by key_and_scoped_wire_fixture_pins_real_success_replies
 // through the vault's real dispatcher over synthetic records, not client-written replies.
@@ -17,14 +18,18 @@ function fixtureReply(op: string): unknown {
   return JSON.parse(successes[0]!)
 }
 
-async function clientFor(op: string, capture: (params: unknown) => void = () => {}): Promise<ClaustrumClient> {
+async function clientFor(
+  op: string,
+  capture: (params: unknown) => void = () => {},
+  reply: () => unknown = () => fixtureReply(op),
+): Promise<ClaustrumClient> {
   return ClaustrumClient.connect({
     logger: () => {},
     connector: async () => ({
       call: async (_module: string, method: string, params: unknown) => {
         expect(method).toBe(op)
         capture(params)
-        return fixtureReply(op)
+        return reply()
       },
       close: () => {},
     }) as never,
@@ -78,3 +83,59 @@ test('producer report_auth_failure receipt is accepted by both addressing method
     client.close()
   }
 })
+
+test('reportUsageScoped sends the scoped quota reading and accepts a queued receipt', async () => {
+  const requests: unknown[] = []
+  const client = await clientFor('usage.report_scoped', (params) => requests.push(params), () => ({
+    result: { accepted: true },
+  }))
+  try {
+    expect(await client.reportUsageScoped({
+      credentialId: 'oauth:anthropic',
+      reading: { observedAtMs: 1_793_600_000_000, provider: 'claude', utilization: 0.41 },
+      enrollmentToken: 'fixture-token',
+    })).toBeUndefined()
+    expect(requests).toEqual([{
+      credential_id: 'oauth:anthropic',
+      reading: { observedAtMs: 1_793_600_000_000, provider: 'claude', utilization: 0.41 },
+      enrollment_token: 'fixture-token',
+    }])
+  } finally {
+    client.close()
+  }
+})
+
+test('reportUsageScoped preserves a not_found credential error', async () => {
+  const client = await clientFor('usage.report_scoped', undefined, () => ({
+    result: { error: { code: 'not_found', class: 'permanent' } },
+  }))
+  try {
+    expect(await rejectionOf(client.reportUsageScoped({
+      credentialId: 'oauth:anthropic',
+      reading: {},
+    }))).toMatchObject({ code: 'not_found', class: 'permanent' })
+  } finally {
+    client.close()
+  }
+})
+
+for (const [label, reply] of [
+  ['missing accepted', { result: {} }],
+  ['false accepted', { result: { accepted: false } }],
+  ['string accepted', { result: { accepted: 'true' } }],
+  ['numeric accepted', { result: { accepted: 1 } }],
+  ['missing result', {}],
+  ['null reply', null],
+] as const) {
+  test(`reportUsageScoped refuses ${label} as invalid_response`, async () => {
+    const client = await clientFor('usage.report_scoped', undefined, () => reply)
+    try {
+      expect(await rejectionOf(client.reportUsageScoped({
+        credentialId: 'oauth:anthropic',
+        reading: {},
+      }))).toMatchObject({ code: 'invalid_response' })
+    } finally {
+      client.close()
+    }
+  })
+}

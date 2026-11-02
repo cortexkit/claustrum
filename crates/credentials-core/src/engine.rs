@@ -464,7 +464,10 @@ impl RefreshEngine {
             .open_intent(credential_id, record.record_version, &old_hash)?;
 
         // The provider call (rotating). Tokens are staged in memory only.
-        match adapter.refresh(oauth, &*self.http).await {
+        match adapter
+            .refresh_for_record(credential_id, oauth, &*self.http)
+            .await
+        {
             Ok(tokens) if tokens.access_token.expose().is_empty() => {
                 // A successful provider response with no access token is not a valid
                 // rotation. Clear txn1 while preserving the old record/version; otherwise

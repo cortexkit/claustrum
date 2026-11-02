@@ -52,6 +52,77 @@ struct AppJwtClaims<'a> {
 struct Installation {
     id: u64,
     client_id: String,
+    app_slug: Option<String>,
+}
+
+/// Read-only observation from GitHub's authenticated installations list.
+#[derive(Debug)]
+pub enum GithubAppCheck {
+    Ok { installation_id: u64, slug: String },
+    Mismatch { slug: String, record_id: String },
+    NotInstalled,
+    SeveralInstallations(usize),
+}
+
+impl GithubAppCheck {
+    pub fn observed_slug(&self) -> Option<&str> {
+        match self {
+            Self::Ok { slug, .. } | Self::Mismatch { slug, .. } => Some(slug),
+            _ => None,
+        }
+    }
+
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Ok { .. } => "ok",
+            Self::Mismatch { .. } => "mismatch",
+            Self::NotInstalled => "not installed",
+            Self::SeveralInstallations(_) => "several installations",
+        }
+    }
+
+    /// Refuse permanent identity/configuration failures before any token mint or write.
+    pub fn require_match(self) -> Result<u64, RefreshError> {
+        match self {
+            Self::Ok {
+                installation_id, ..
+            } => Ok(installation_id),
+            Self::Mismatch { slug, record_id } => Err(RefreshError::InvalidGrant(format!(
+                "the App's GitHub slug is `{slug}` but this record is `{record_id}`; \
+                 deposit it again as `github_app:{slug}`"
+            ))),
+            Self::NotInstalled => Err(RefreshError::InvalidGrant(
+                "GitHub returned no installation for this App client_id".into(),
+            )),
+            Self::SeveralInstallations(count) => Err(RefreshError::InvalidGrant(format!(
+                "this App is installed on {count} accounts, and the vault will not choose one; \
+                 remove the extra installations or use one App per account"
+            ))),
+        }
+    }
+}
+
+/// Check a record's slug without minting an installation token or changing the vault.
+pub async fn check_github_app(
+    record_id: &str,
+    cred: &OAuthCredential,
+    http: &dyn HttpTransport,
+) -> Result<GithubAppCheck, RefreshError> {
+    let client_id = cred
+        .client_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
+    let jwt = GithubAppAdapter::mint_app_jwt(cred, now_secs())?;
+    let authorization = format!("Bearer {jwt}");
+    GithubAppAdapter::new()
+        .discover_installation_id(
+            record_id,
+            client_id,
+            &GithubAppAdapter::auth_headers(&authorization),
+            http,
+        )
+        .await
 }
 
 #[derive(Deserialize)]
@@ -132,10 +203,11 @@ impl GithubAppAdapter {
 
     async fn discover_installation_id(
         &self,
+        record_id: &str,
         client_id: &str,
         headers: &[(&str, &str)],
         http: &dyn HttpTransport,
-    ) -> Result<u64, RefreshError> {
+    ) -> Result<GithubAppCheck, RefreshError> {
         let response = http.get(INSTALLATIONS_URL, headers).await?;
         // A 401 HERE IS NOT A DEATH STATEMENT, so it must not become one.
         //
@@ -171,8 +243,7 @@ impl GithubAppAdapter {
             .map_err(|error| RefreshError::Decode(error.to_string()))?;
         let mut matching = installations
             .into_iter()
-            .filter(|installation| installation.client_id == client_id)
-            .map(|installation| installation.id);
+            .filter(|installation| installation.client_id == client_id);
         let first = matching.next();
         let others = matching.count();
         // AN APP INSTALLED ON SEVERAL ACCOUNTS HAS NO ANSWER HERE, SO REFUSE RATHER THAN
@@ -185,13 +256,9 @@ impl GithubAppAdapter {
         // remove the extra installations (or deposit a separate App per account), then
         // `ck auth reactivate`.
         if others > 0 {
-            return Err(RefreshError::InvalidGrant(format!(
-                "this App is installed on {} accounts, and the vault will not choose one; \
-                 remove the extra installations or use one App per account",
-                others + 1
-            )));
+            return Ok(GithubAppCheck::SeveralInstallations(others + 1));
         }
-        first.ok_or_else(|| {
+        let Some(installation) = first else {
             // INVALID_GRANT, NOT DECODE, and the distinction is the difference
             // between a retry loop and a repair.
             //
@@ -213,9 +280,24 @@ impl GithubAppAdapter {
             // `needs_reauth`, so an uninstalled App becomes visible in `ck auth list`
             // and in health instead of being discovered at rollout time, and the
             // repair after installing is `ck auth reactivate`.
-            RefreshError::InvalidGrant(
-                "GitHub returned no installation for this App client_id".into(),
-            )
+            return Ok(GithubAppCheck::NotInstalled);
+        };
+        // Missing vendor data is retryable; it is not evidence of a wrong record id.
+        let slug = installation
+            .app_slug
+            .ok_or_else(|| RefreshError::Decode("GitHub installation has no app_slug".into()))?;
+        let expected = record_id.strip_prefix("github_app:").ok_or_else(|| {
+            RefreshError::Decode("GitHub App record id must start with github_app:".into())
+        })?;
+        if slug != expected {
+            return Ok(GithubAppCheck::Mismatch {
+                slug,
+                record_id: record_id.to_owned(),
+            });
+        }
+        Ok(GithubAppCheck::Ok {
+            installation_id: installation.id,
+            slug,
         })
     }
 
@@ -237,6 +319,17 @@ impl RefreshAdapter for GithubAppAdapter {
 
     async fn refresh(
         &self,
+        _cred: &OAuthCredential,
+        _http: &dyn HttpTransport,
+    ) -> Result<RefreshedTokens, RefreshError> {
+        Err(RefreshError::Decode(
+            "GitHub App refresh requires a record id".into(),
+        ))
+    }
+
+    async fn refresh_for_record(
+        &self,
+        record_id: &str,
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
@@ -250,8 +343,9 @@ impl RefreshAdapter for GithubAppAdapter {
         let headers = Self::auth_headers(&authorization);
 
         let installation_id = self
-            .discover_installation_id(client_id, &headers, http)
-            .await?;
+            .discover_installation_id(record_id, client_id, &headers, http)
+            .await?
+            .require_match()?;
         let url = format!("{ACCESS_TOKENS_URL_PREFIX}{installation_id}/access_tokens");
         let response = http
             .post(&url, &headers, "application/json", b"{}".to_vec())
@@ -408,7 +502,9 @@ mod tests {
             let body = serde_json::to_vec(&serde_json::json!({"message": message})).unwrap();
             let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, &body)]);
             assert!(matches!(
-                GithubAppAdapter::new().refresh(&credential(), &http).await,
+                GithubAppAdapter::new()
+                    .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                    .await,
                 Err(RefreshError::InvalidGrant(_))
             ));
         }
@@ -424,7 +520,9 @@ mod tests {
             ),
         ]);
         assert!(matches!(
-            GithubAppAdapter::new().refresh(&credential(), &http).await,
+            GithubAppAdapter::new()
+                .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                .await,
             Err(RefreshError::Status(403, _))
         ));
     }
@@ -433,7 +531,9 @@ mod tests {
     async fn secondary_rate_limit_at_token_exchange_remains_transient() {
         let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#)]);
         assert!(matches!(
-            GithubAppAdapter::new().refresh(&credential(), &http).await,
+            GithubAppAdapter::new()
+                .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                .await,
             Err(RefreshError::Status(403, _))
         ));
     }
@@ -448,7 +548,9 @@ mod tests {
         ] {
             let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, body)]);
             assert!(matches!(
-                GithubAppAdapter::new().refresh(&credential(), &http).await,
+                GithubAppAdapter::new()
+                    .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                    .await,
                 Err(RefreshError::Status(403, _))
             ));
         }
@@ -467,9 +569,14 @@ mod tests {
             (200, &body),
         ]);
         let adapter = GithubAppAdapter::new();
-        adapter.refresh(&credential(), &http).await.unwrap();
+        adapter
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+            .await
+            .unwrap();
         assert!(matches!(
-            adapter.refresh(&credential(), &http).await,
+            adapter
+                .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                .await,
             Err(RefreshError::InvalidGrant(_))
         ));
         assert_eq!(http.requests().len(), 3);
@@ -525,6 +632,73 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[tokio::test]
+    async fn github_app_slug_mismatch_refuses_before_token_exchange() {
+        let http = fixture_transport(vec![
+            (200, RECORDED_INSTALLATIONS),
+            (201, RECORDED_ACCESS_TOKENS),
+        ]);
+        let error = GithubAppAdapter::new()
+            .refresh_for_record("github_app:wrong-name", &credential(), &http)
+            .await
+            .expect_err("a record with the wrong slug cannot mint");
+        match error {
+            RefreshError::InvalidGrant(message) => assert_eq!(
+                message,
+                "the App's GitHub slug is `plex-alfonso` but this record is \
+                 `github_app:wrong-name`; deposit it again as `github_app:plex-alfonso`"
+            ),
+            other => panic!("a slug mismatch needs operator repair: {other:?}"),
+        }
+        assert_eq!(http.requests().len(), 1, "no token request may be sent");
+    }
+
+    #[tokio::test]
+    async fn github_app_refresh_without_record_id_refuses_before_network() {
+        let http = fixture_transport(vec![]);
+        assert!(matches!(
+            GithubAppAdapter::new().refresh(&credential(), &http).await,
+            Err(RefreshError::Decode(_))
+        ));
+        assert!(http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_app_selected_installation_without_slug_is_retryable() {
+        let mut installations: Vec<Value> = serde_json::from_slice(RECORDED_INSTALLATIONS).unwrap();
+        installations[0].as_object_mut().unwrap().remove("app_slug");
+        // Missing slugs on unrelated installations must not mask the selected one.
+        let mut unrelated = installations[0].clone();
+        unrelated["client_id"] = serde_json::json!("another-app");
+        installations.push(unrelated);
+        let body = serde_json::to_vec(&installations).unwrap();
+        let http = fixture_transport(vec![(200, &body)]);
+        assert!(matches!(
+            GithubAppAdapter::new()
+                .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+                .await,
+            Err(RefreshError::Decode(_))
+        ));
+        assert_eq!(http.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn github_app_matching_slug_mints_despite_unrelated_missing_slug() {
+        let mut installations: Vec<Value> = serde_json::from_slice(RECORDED_INSTALLATIONS).unwrap();
+        let mut unrelated = installations[0].clone();
+        unrelated["client_id"] = serde_json::json!("another-app");
+        unrelated.as_object_mut().unwrap().remove("app_slug");
+        installations.insert(0, unrelated);
+        let body = serde_json::to_vec(&installations).unwrap();
+        let http = fixture_transport(vec![(200, &body), (201, RECORDED_ACCESS_TOKENS)]);
+        let tokens = GithubAppAdapter::new()
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+            .await
+            .expect("the selected App's slug matches");
+        assert!(!tokens.access_token.expose().is_empty());
+        assert_eq!(http.requests().len(), 2);
     }
 
     /// GitHub's JWT issuer is the App client id, not its still-accepted numeric app id.
@@ -592,7 +766,7 @@ mod tests {
         // returns for an App that exists and is installed nowhere.
         let transport = fixture_transport(vec![(200, b"[]")]);
         let error = adapter
-            .refresh(&credential(), &transport)
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &transport)
             .await
             .expect_err("an App with no installation cannot mint");
 
@@ -622,7 +796,7 @@ mod tests {
         let transport = fixture_transport(vec![(200, body.as_slice())]);
 
         let error = GithubAppAdapter::new()
-            .refresh(&credential(), &transport)
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &transport)
             .await
             .expect_err("an App on two accounts has no single installation to mint for");
 
@@ -651,8 +825,14 @@ mod tests {
         ]);
         let adapter = GithubAppAdapter::new();
 
-        let first = adapter.refresh(&cred, &http).await.unwrap();
-        let second = adapter.refresh(&cred, &http).await.unwrap();
+        let first = adapter
+            .refresh_for_record("github_app:plex-alfonso", &cred, &http)
+            .await
+            .unwrap();
+        let second = adapter
+            .refresh_for_record("github_app:plex-alfonso", &cred, &http)
+            .await
+            .unwrap();
 
         assert_eq!(first.refresh_token.expose(), TEST_PRIVATE_KEY);
         assert_eq!(second.refresh_token.expose(), TEST_PRIVATE_KEY);
@@ -785,7 +965,9 @@ mod tests {
             (201, RECORDED_ACCESS_TOKENS),
         ]);
         let adapter = GithubAppAdapter::new();
-        let _ = adapter.refresh(&credential(), &http).await;
+        let _ = adapter
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
+            .await;
 
         let requests = http.requests();
         assert!(
@@ -827,7 +1009,7 @@ mod tests {
         )]);
         let adapter = GithubAppAdapter::new();
         let err = adapter
-            .refresh(&credential(), &http)
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
             .await
             .expect_err("a 401 must fail the refresh");
         assert!(
@@ -847,7 +1029,7 @@ mod tests {
             (201, RECORDED_ACCESS_TOKENS),
         ]);
         let tokens = GithubAppAdapter::new()
-            .refresh(&credential(), &http)
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
             .await
             .unwrap();
 
@@ -883,7 +1065,7 @@ mod tests {
         ]);
 
         let tokens = GithubAppAdapter::new()
-            .refresh(&credential(), &http)
+            .refresh_for_record("github_app:plex-alfonso", &credential(), &http)
             .await
             .expect("an absent diagnostic field must not discard a valid installation token");
         assert_eq!(tokens.access_token.expose(), "ghs_without_permissions");

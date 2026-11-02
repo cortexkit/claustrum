@@ -276,6 +276,16 @@ pub trait RefreshAdapter: Send + Sync {
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError>;
 
+    /// Refresh with the vault id available for providers that bind identity to it.
+    async fn refresh_for_record(
+        &self,
+        _record_id: &str,
+        cred: &OAuthCredential,
+        http: &dyn HttpTransport,
+    ) -> Result<RefreshedTokens, RefreshError> {
+        self.refresh(cred, http).await
+    }
+
     /// Read-only validity probe used ONLY by recovery (never rotates). `None` (the
     /// default) means this provider exposes no non-mutating check, so a dangling
     /// intent resolves to `needs_reauth`.

@@ -313,6 +313,49 @@ fn github_app_record() -> VaultRecord {
     record
 }
 
+#[tokio::test]
+async fn github_app_engine_passes_record_id_and_latches_slug_mismatch() {
+    use crate::refresh_adapters::fixture::FixtureTransport;
+    use crate::refresh_adapters::github_app::GithubAppAdapter;
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 97);
+    let mut record = github_app_record();
+    let oauth = record.oauth.as_mut().unwrap();
+    oauth.refresh_token = include_str!("../tests/fixtures/github_app/test_private_key.pem")
+        .to_owned()
+        .into();
+    oauth.client_id = Some("Iv23lilSfNz1vScb8un3".into());
+    store.create("github_app:wrong", &record).unwrap();
+    let http = Arc::new(FixtureTransport::ok(
+        200,
+        include_bytes!("../tests/fixtures/github_app/installations.json").to_vec(),
+    ));
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(GithubAppAdapter::new())],
+        http.clone(),
+    );
+    let error = engine
+        .get("github_app:wrong", None, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::engine::EngineError::RefreshFailed(RefreshError::InvalidGrant(_))
+    ));
+    assert!(matches!(
+        engine.store().get("github_app:wrong"),
+        Err(StoreOpError::NeedsReauth)
+    ));
+    assert!(engine
+        .store()
+        .read_intent("github_app:wrong")
+        .unwrap()
+        .is_none());
+    assert_eq!(http.requests().len(), 1);
+}
+
 fn github_permissions_engine(
     store: EncryptedStore,
     grants: Vec<BTreeMap<String, String>>,

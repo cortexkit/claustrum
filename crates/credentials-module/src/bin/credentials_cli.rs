@@ -53,6 +53,8 @@ mod api_key_login;
 mod browser_login;
 #[allow(dead_code)]
 mod cli_support;
+#[path = "cli_support/github_apps.rs"]
+mod github_apps;
 #[path = "cli_support/google_login.rs"]
 mod google_login;
 #[path = "cli_support/import_picker.rs"]
@@ -389,6 +391,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "events" => cmd_events(&global, &args),
         "usable" => cmd_usable(&global),
         "verify-audit" => cmd_verify_audit(&global),
+        "verify-github-apps" => github_apps::cmd_verify(&global),
         "transfer" => cli_support::federation_cli::cmd_transfer(&global, &args),
         "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
@@ -635,6 +638,7 @@ fn usage_short() -> String {
        events              why credentials failed to authenticate\n\
        usable              which credentials can still serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
+       verify-github-apps  check GitHub App record ids against GitHub's slugs\n\
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
@@ -976,6 +980,18 @@ fn help_verb(verb: &str) -> String {
              public_key_hex and signature_hex (lowercase hex). Root keys must never\n\
              be enabled for this path."
         }
+        "verify-github-apps" => {
+            "ck auth verify-github-apps\n\
+             \n\
+             NOTES\n\
+             Check every github_app: record against GitHub's installations list.\n\
+             Prints id, observed slug (or -), and ok, mismatch, not installed,\n\
+             several installations, or unreachable. Exit 0 only if every App is ok.\n\
+             \n\
+             Requires the operator master key and network access to GitHub. Opens\n\
+             the store read-only, without a lease; works while the daemon runs.\n\
+             Never stores, refreshes, or prints keys, JWTs, or installation tokens."
+        }
         "put" => {
             "ck auth put [--id <id>] [--payload <v> | --payload-file <path>]\n\
              \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
@@ -1015,6 +1031,8 @@ fn help_verb(verb: &str) -> String {
              Without a terminal, --id and a payload source are required as before.\n\
              Generated keys: ck auth mint-signing-key / ck auth mint-kem-key.\n\
              OAuth logins: ck auth login.\n\
+             GitHub App ids must be github_app:<GitHub slug>. The App JWT checks\n\
+             the slug with GitHub before storing; an unavailable check refuses.\n\
              \n\
              A one-line secret file gives the same bytes as $(cat file). A value that must\n\
              END in whitespace cannot come from a file; use a cookie: id, whose bytes are\n\
@@ -2124,6 +2142,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 client_secret: None,
                 scopes: Vec::new(),
             };
+            github_apps::check_deposit(&id, &oauth)?;
             VaultRecord::new_oauth("operator", "github_app", oauth, Vec::new())
         }
         None if kind == CredentialKind::Cookie => VaultRecord::new_cookie("operator", payload),

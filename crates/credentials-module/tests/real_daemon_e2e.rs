@@ -580,30 +580,54 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn a_report_leaves_a_refreshable_credential_active_rather_than_latching() {
-    // Seed a REFRESHABLE record. `put --client-id` builds the OAuth-shaped github_app
-    // record whose durable half is the key and whose access token starts empty, which
-    // is the shape the stale arm exists for. A static `put` would take the latch arm
-    // and prove nothing about this change.
+    // Seed refreshable material directly, before the daemon takes the writer lease.
+    // This probe tests stale-report routing, not GitHub identity or network access;
+    // checked deposits require a real App key and an authenticated installations list.
     let seeded = match start_vault_with_seed(|ctx| {
-        let pem = std::path::Path::new(&ctx.data_dir).join("probe-key.pem");
-        std::fs::write(
-            &pem,
-            "-----BEGIN RSA PRIVATE KEY-----\nprobe\n-----END RSA PRIVATE KEY-----\n",
+        let descriptor = StorageDescriptor {
+            module_id: MODULE_ID.to_string(),
+            storage_namespace: "default".to_string(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: std::path::Path::new(&ctx.data_dir)
+                    .join("store.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        };
+        let key = credentials_core::resolver::resolve(
+            &ResolverConfig {
+                data_dir: PathBuf::from(&ctx.data_dir),
+                source: KeySource::OperatorPath {
+                    path: PathBuf::from(&ctx.key_path),
+                },
+            },
+            None,
         )
         .unwrap();
-        run_cli(&[
-            "put",
-            "--id",
-            "github_app:deploy-probe",
-            "--payload-file",
-            pem.to_str().unwrap(),
-            "--client-id",
-            "Iv1.deployprobe",
-            "--data-dir",
-            &ctx.data_dir,
-            "--key-path",
-            &ctx.key_path,
-        ]);
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        EncryptedStore::migrate_with_key(&sqlite, &key).unwrap();
+        let store = EncryptedStore::open(sqlite, key).unwrap();
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: String::new().into(),
+            refresh_token: "probe-private-key".to_string().into(),
+            expires_at_ms: None,
+            token_url: String::new(),
+            client_id: Some("Iv1.deployprobe".into()),
+            client_secret: None,
+            scopes: Vec::new(),
+        };
+        store
+            .create(
+                "github_app:deploy-probe",
+                &credentials_core::record::VaultRecord::new_oauth(
+                    "operator",
+                    "github_app",
+                    oauth,
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
         ("github_app:deploy-probe".to_string(), Vec::new())
     })
     .await

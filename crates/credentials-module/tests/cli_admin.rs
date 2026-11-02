@@ -439,6 +439,7 @@ fn bootstrap_is_idempotent_but_a_real_key_store_failure_is_not() {
     );
 }
 
+#[cfg(all(debug_assertions, feature = "test-support"))]
 #[test]
 fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
     let rig = tmp_root("github-app-put");
@@ -447,15 +448,15 @@ fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
     write_operator_master_key(&key, &"11".repeat(32));
     let data_dir = rig.join("vault");
     let pem = rig.join("app.pem");
-    // Shape only -- this test never signs, so PEM-looking text is enough.
-    std::fs::write(
-        &pem,
-        "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----",
-    )
-    .unwrap();
+    std::fs::write(&pem, github_app_oauth().refresh_token.expose()).unwrap();
+    let mut installations = github_app_installations();
+    installations[0]["app_slug"] = serde_json::json!("probe");
+    installations[0]["client_id"] = serde_json::json!("Iv23TESTCLIENT");
+    let server = GithubAppServer::new(vec![(200, installations)]);
 
     let run = |args: &[&str]| {
         let out = cli()
+            .env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
             .args([
                 "--data-dir",
                 data_dir.to_str().unwrap(),
@@ -518,8 +519,255 @@ fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
         pem.to_str().unwrap(),
     ]);
     assert!(e2.contains("needs --client-id"), "got: {e2}");
+    server.finish();
 
     let _ = std::fs::remove_dir_all(&rig);
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+fn github_app_oauth() -> credentials_core::oauth::OAuthCredential {
+    credentials_core::oauth::OAuthCredential {
+        access_token: String::new().into(),
+        refresh_token: include_str!(
+            "../../credentials-core/tests/fixtures/github_app/test_private_key.pem"
+        )
+        .to_owned()
+        .into(),
+        expires_at_ms: Some(0),
+        token_url: String::new(),
+        client_id: Some("Iv23lilSfNz1vScb8un3".into()),
+        client_secret: None,
+        scopes: Vec::new(),
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+fn github_app_installations() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../credentials-core/tests/fixtures/github_app/installations.json"
+    ))
+    .unwrap()
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+struct GithubAppServer {
+    url: String,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+impl GithubAppServer {
+    fn new(responses: Vec<(u16, serde_json::Value)>) -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/app/installations",
+            listener.local_addr().unwrap()
+        );
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(120)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim_end(), "GET /app/installations HTTP/1.1");
+                let mut authenticated = false;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    authenticated |= line
+                        .to_ascii_lowercase()
+                        .starts_with("authorization: bearer ");
+                }
+                assert!(authenticated, "discovery must use an App JWT");
+                let body = serde_json::to_vec(&body).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            tx.send(()).unwrap();
+        });
+        Self { url, done }
+    }
+
+    fn wire(&self) -> String {
+        serde_json::json!({"github_app_installations_url": self.url}).to_string()
+    }
+
+    fn finish(self) {
+        self.done
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("installations requests completed");
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+#[test]
+fn github_app_deposit_refusals_store_nothing() {
+    let vault = GrantCliVault::new("github-app-refusals");
+    vault.bootstrap();
+    assert!(vault
+        .run(&["put", "--id", "apikey:seed", "--payload", "seed"])
+        .status
+        .success());
+    let pem = vault.root.join("app.pem");
+    std::fs::write(&pem, github_app_oauth().refresh_token.expose()).unwrap();
+    let mut several = github_app_installations();
+    let second = several[0].clone();
+    several.as_array_mut().unwrap().push(second);
+    for (status, body, message) in [
+        (200, github_app_installations(), "the App's GitHub slug is `plex-alfonso` but this record is `github_app:wrong`; deposit it again as `github_app:plex-alfonso`"),
+        (200, serde_json::json!([]), "GitHub returned no installation for this App client_id"),
+        (200, several, "this App is installed on 2 accounts"),
+        (503, serde_json::json!({"message": "unavailable"}), "the App's GitHub slug couldn't be checked"),
+    ] {
+        let before = std::fs::read(vault.data_dir.join("store.db")).unwrap();
+        let server = GithubAppServer::new(vec![(status, body)]);
+        let out = cli().env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
+            .args(["put", "--id", "github_app:wrong", "--client-id", "Iv23lilSfNz1vScb8un3", "--payload-file"])
+            .arg(&pem).arg("--data-dir").arg(&vault.data_dir).arg("--key-path").arg(&vault.key_path).output().unwrap();
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(message));
+        assert_eq!(std::fs::read(vault.data_dir.join("store.db")).unwrap(), before);
+        server.finish();
+    }
+    // A closed loopback listener is a real connection failure, not an HTTP refusal.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let wire = serde_json::json!({"github_app_installations_url": format!("http://{}/app/installations", listener.local_addr().unwrap())}).to_string();
+    drop(listener);
+    let out = cli()
+        .env("CK_AUTH_TEST_LOGIN_WIRE", wire)
+        .args([
+            "put",
+            "--id",
+            "github_app:wrong",
+            "--client-id",
+            "Iv23lilSfNz1vScb8un3",
+            "--payload-file",
+        ])
+        .arg(&pem)
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the App's GitHub slug couldn't be checked")
+    );
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    assert!(matches!(
+        store.get("github_app:wrong"),
+        Err(credentials_core::store::StoreOpError::NotFound)
+    ));
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+#[test]
+fn verify_github_apps_reports_mismatch_without_writing_under_writer_lease() {
+    let vault = GrantCliVault::new("github-app-verify");
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let record = credentials_core::record::VaultRecord::new_oauth(
+        "operator",
+        "github_app",
+        github_app_oauth(),
+        Vec::new(),
+    );
+    // Seed a legacy misnamed record directly: checked deposits can no longer create it.
+    for id in ["github_app:plex-alfonso", "github_app:wrong"] {
+        store.create(id, &record).unwrap();
+    }
+    let tip = store.audit_tip().unwrap();
+    let snapshot =
+        || ["store.db", "store.db-wal"].map(|name| std::fs::read(vault.data_dir.join(name)).ok());
+    let before = snapshot();
+    let server = GithubAppServer::new(vec![
+        (200, github_app_installations()),
+        (200, github_app_installations()),
+    ]);
+    let out = cli()
+        .env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
+        .arg("verify-github-apps")
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "github_app:plex-alfonso\tplex-alfonso\tok\ngithub_app:wrong\tplex-alfonso\tmismatch\n"
+    );
+    server.finish();
+    assert_eq!(
+        snapshot(),
+        before,
+        "verification must leave the store byte-identical"
+    );
+    assert_eq!(store.audit_tip().unwrap(), tip);
+    for id in ["github_app:plex-alfonso", "github_app:wrong"] {
+        assert_eq!(store.get(id).unwrap().record_version, 1);
+        assert!(store.read_intent(id).unwrap().is_none());
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+#[test]
+fn verify_github_apps_reports_installation_failures_and_exits_zero_only_for_ok() {
+    let vault = GrantCliVault::new("github-app-verify-statuses");
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let record = credentials_core::record::VaultRecord::new_oauth(
+        "operator",
+        "github_app",
+        github_app_oauth(),
+        Vec::new(),
+    );
+    store.create("github_app:plex-alfonso", &record).unwrap();
+    let mut several = github_app_installations();
+    let second = several[0].clone();
+    several.as_array_mut().unwrap().push(second);
+    let mut missing_slug = github_app_installations();
+    missing_slug[0].as_object_mut().unwrap().remove("app_slug");
+    for (code, body, slug, status) in [
+        (200, serde_json::json!([]), "-", "not installed"),
+        (200, several, "-", "several installations"),
+        (503, serde_json::json!({}), "-", "unreachable"),
+        (200, missing_slug, "-", "unreachable"),
+        (200, github_app_installations(), "plex-alfonso", "ok"),
+    ] {
+        let server = GithubAppServer::new(vec![(code, body)]);
+        let out = cli()
+            .env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
+            .arg("verify-github-apps")
+            .arg("--data-dir")
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), status == "ok");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("github_app:plex-alfonso\t{slug}\t{status}\n")
+        );
+        server.finish();
+    }
 }
 
 #[test]
@@ -5195,7 +5443,7 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // federation verbs (transfer, remote, member, federation), and secret controls.
     assert_eq!(
         verbs.len(),
-        37,
+        38,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -6738,7 +6986,9 @@ fn open_leased_store(data_dir: &std::path::Path, key_path: &std::path::Path) -> 
         None,
     )
     .unwrap();
-    EncryptedStore::open(open_sqlite(&descriptor).unwrap(), key).unwrap()
+    let sqlite = open_sqlite(&descriptor).unwrap();
+    EncryptedStore::migrate_with_key(&sqlite, &key).unwrap();
+    EncryptedStore::open(sqlite, key).unwrap()
 }
 
 /// The canary used everywhere a test needs a value that must never surface.

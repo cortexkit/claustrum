@@ -401,7 +401,17 @@ ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_ke
 `put` is create-only. To rotate a static key in place, pass `--replace` (unconditional,
 keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:<label>` id
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the
-App JWT issuer.
+App JWT issuer. Its id must be `github_app:<slug>`, where `<slug>` is the App's real
+GitHub slug (and its bot login is `<slug>[bot]`). Deposit and every refresh check the
+authenticated installations list before storing or minting. A wrong slug requires
+re-depositing under the correct id; a missing or ambiguous installation also refuses.
+If GitHub cannot be reached, deposit refuses rather than storing an unchecked App.
+
+Run `ck auth verify-github-apps` to check every existing GitHub App record. It prints
+the id, observed slug, and status, exits non-zero unless every record is `ok`, and
+never writes or refreshes tokens. It opens the store read-only without a lease, so
+the daemon can keep running. The check needs the operator master key and network
+access to GitHub.
 
 ### Agent secrets: keys an agent uses without seeing them
 

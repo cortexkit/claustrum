@@ -30,8 +30,8 @@ brief.
 ## Pre-approved: do these without asking
 
 - **Test-only hosts.** A new test that names a host fails `scripts/endpoint-hosts.py`. Run
-  `python3 scripts/endpoint-hosts.py --update`, check the diff adds only your test file's
-  rows, and commit it.
+  `python3 scripts/endpoint-hosts.py --update` locally (it needs no cargo), check the diff
+  adds only your test file's rows, and commit it.
 - **Schema pins.** A new migration moves the tests that pin the newest migration number.
   Advance those pins. Never rewrite a historical schema snapshot or an old migration.
 - **Generated files.** `docs/endpoint-hosts.txt` and `docs/domain-separators.txt` are
@@ -39,6 +39,8 @@ brief.
 - **Vector files** that a test generates and pins (rerun the test with
   `CK_EMIT_SECRET_VECTORS=1`): regenerate them with their generator when the change is the
   one your brief asked for, and list each changed case in your report. Never hand-edit one.
+  Build-server Linux jobs can't write tracked files, so name each regenerated file in the
+  bash tool's `return_paths`; that's the only way the new bytes reach your checkout.
 - **Line endings.** Files whose exact bytes are tested go under a `-text` rule in
   `.gitattributes` (fixtures, golden and vectors directories are already covered).
 - **Limits.** A new numeric limit needs a test on both sides of its boundary (the last

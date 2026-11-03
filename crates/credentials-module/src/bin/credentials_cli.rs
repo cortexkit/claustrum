@@ -5009,6 +5009,18 @@ fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliEr
 
 fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let (principal_kind, principal_id) = parse_grant_principal(&required(args, "--principal")?)?;
+    // A grant to a name `enroll approve` can never accept would sit unusable forever, so
+    // creation applies the approval grammar. Revocation deliberately does not: it must
+    // still remove grants that older builds created without this check.
+    if principal_kind == "enrolled"
+        && !credentials_core::enrollment::valid_enrollment_name(&principal_id)
+    {
+        return Err(CliError::Usage(format!(
+            "invalid_principal: enrolled name '{principal_id}' is not one `enroll approve` \
+             accepts. Names are 2 to 32 lowercase letters, digits and dashes; pick a \
+             shorter name and use it for both approve and grant"
+        )));
+    }
     let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()

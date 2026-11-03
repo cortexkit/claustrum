@@ -3254,9 +3254,14 @@ impl EncryptedStore {
             )
             .map_err(|_| StoreOpError::TransferKeyReserved)?;
         }
+        // An enrolled name outside the approval grammar could never be held, so a grant
+        // to it is unusable. Only creation checks this: revocation keeps the wider rule
+        // so grants created before this check can still be removed.
         if !matches!(principal_kind, "reserved" | "enrolled")
             || principal_id.is_empty()
             || principal_id.contains('|')
+            || (principal_kind == "enrolled"
+                && !crate::enrollment::valid_enrollment_name(principal_id))
         {
             return Err(StoreOpError::InvalidPrincipal);
         }
@@ -15902,6 +15907,56 @@ mod migration_10_tests {
 
     fn enrollment_secret(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn grant_to_an_enrolled_name_approve_cannot_accept_is_refused_at_creation_only() {
+        let (_root, store) = rig("grant-unapprovable-enrolled-name", 162);
+        // 33 bytes: one past the approval grammar's 32-byte limit.
+        let too_long = "a".repeat(33);
+        assert!(!crate::enrollment::valid_enrollment_name(&too_long));
+        let before = store.audit_tip().unwrap();
+        let created = store.create_read_grant_audited(
+            "enrolled",
+            &too_long,
+            SelectorKind::Category,
+            "llm-provider",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        );
+        assert!(
+            matches!(created, Err(StoreOpError::InvalidPrincipal)),
+            "{created:?}"
+        );
+        assert_eq!(store.audit_tip().unwrap(), before);
+
+        // 32 bytes is the largest name approval accepts, so it must still be grantable.
+        let longest = "a".repeat(32);
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                &longest,
+                SelectorKind::Category,
+                "llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+
+        // Revocation keeps the wider rule: a grant an older build created under an
+        // unapprovable name must stay removable, so the principal is not what refuses.
+        let revoked = store.revoke_read_grant_audited(
+            "enrolled",
+            &too_long,
+            SelectorKind::Category,
+            "llm-provider",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantRevoke),
+        );
+        assert!(
+            !matches!(revoked, Err(StoreOpError::InvalidPrincipal)),
+            "revocation must not apply the approval grammar: {revoked:?}"
+        );
     }
 
     #[test]

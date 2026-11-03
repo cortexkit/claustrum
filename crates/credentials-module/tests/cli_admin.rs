@@ -5765,6 +5765,31 @@ fn enrollment_regression_unknown_approval_without_name_refuses_before_admin() {
 }
 
 #[test]
+fn grant_refuses_an_enrolled_name_approve_cannot_accept() {
+    let vault = GrantCliVault::new("grant-unapprovable-name");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    // 34 bytes, so `approve` refuses this name: it rejects any name over 32.
+    let (ok, stdout, stderr) = grant_on(
+        &vault,
+        "enrolled:antigravity-auth-opencode-thalamus",
+        "category",
+        "llm-provider",
+        "read",
+    );
+    assert!(!ok, "an unapprovable name must refuse:\n{stdout}");
+    assert!(
+        stderr.contains("is not one `enroll approve` accepts"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("2 to 32"), "{stderr}");
+    let grants = open_leased_store(&vault.data_dir, &vault.key_path)
+        .list_read_grants()
+        .unwrap();
+    assert!(grants.is_empty(), "nothing may be created: {grants:?}");
+}
+
+#[test]
 fn enrollment_regression_grant_warns_for_an_unenrolled_name_and_can_be_revoked() {
     let vault = GrantCliVault::new("grant-unenrolled-name");
     vault.bootstrap();

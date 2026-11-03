@@ -2961,7 +2961,7 @@ impl EncryptedStore {
                 )
                 .optional()?;
             let Some((state, expires_at_ms)) = state else {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Ok(None);
             };
             if state != "pending" || expires_at_ms <= now {
                 if state == "pending" && expires_at_ms <= now {
@@ -3011,8 +3011,7 @@ impl EncryptedStore {
             Ok(Some(enrollment_id.clone()))
         })
         .map_err(StoreOpError::from)?
-        // An expired request is gone for approval purposes. NotFound, not a store error,
-        // so the operator is not told the vault failed when the request simply lapsed.
+        // Missing and expired requests are gone for approval purposes, not store faults.
         .ok_or(StoreOpError::NotFound)
     }
 
@@ -3037,7 +3036,7 @@ impl EncryptedStore {
                 [request_id],
             )?;
             if changed != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Ok(false);
             }
             append_audit_tx(
                 tx,
@@ -3057,7 +3056,7 @@ impl EncryptedStore {
             if denied {
                 Ok(())
             } else {
-                // Same reasoning as approval: a lapsed request is NotFound, not a fault.
+                // Missing and lapsed requests are NotFound, not store faults.
                 Err(StoreOpError::NotFound)
             }
         })
@@ -3122,8 +3121,10 @@ impl EncryptedStore {
                     [name],
                     |row| row.get::<_, String>(0),
                 )
-                .optional()?
-                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                .optional()?;
+            let Some(enrollment_id) = enrollment_id else {
+                return Ok(None);
+            };
             tx.execute(
                 "UPDATE enrolled_consumers SET revoked_at_ms = ?1 WHERE enrollment_id = ?2",
                 rusqlite::params![now, enrollment_id],
@@ -3139,9 +3140,10 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(())
+            Ok(Some(()))
         })
-        .map_err(StoreOpError::from)
+        .map_err(StoreOpError::from)?
+        .ok_or(StoreOpError::NotFound)
     }
 
     /// Gate-2 repair for a lost poll response. It has no expected-generation argument.
@@ -3152,15 +3154,17 @@ impl EncryptedStore {
     ) -> Result<EnrollmentRotation, StoreOpError> {
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
-            let (enrollment_id, generation) = tx
+            let enrollment = tx
                 .query_row(
                     "SELECT enrollment_id, token_generation FROM enrolled_consumers \
                      WHERE name = ?1 AND revoked_at_ms IS NULL",
                     [name],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )
-                .optional()?
-                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                .optional()?;
+            let Some((enrollment_id, generation)) = enrollment else {
+                return Ok(None);
+            };
             let token = mint_hex_32_sqlite()?;
             let token_hash = enrollment_secret_hash(&token)
                 .expect("a freshly minted 32-byte hex token is valid");
@@ -3183,12 +3187,13 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(EnrollmentRotation {
+            Ok(Some(EnrollmentRotation {
                 token,
                 token_generation: next_generation as u64,
-            })
+            }))
         })
-        .map_err(StoreOpError::from)
+        .map_err(StoreOpError::from)?
+        .ok_or(StoreOpError::NotFound)
     }
 
     fn sweep_pending_enrollments_on_open(&self, now: i64) -> Result<(), StoreOpError> {
@@ -15897,6 +15902,42 @@ mod migration_10_tests {
 
     fn enrollment_secret(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn missing_enrollment_approve_returns_not_found_without_audit() {
+        let (_root, store) = rig("missing-enrollment-approve", 158);
+        let before = store.audit_tip().unwrap();
+        let result = store.approve_enrollment(&enrollment_secret(40), "consumer", "operator");
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(matches!(result, Err(StoreOpError::NotFound)), "{result:?}");
+    }
+
+    #[test]
+    fn missing_enrollment_deny_returns_not_found_without_audit() {
+        let (_root, store) = rig("missing-enrollment-deny", 159);
+        let before = store.audit_tip().unwrap();
+        let result = store.deny_enrollment(&enrollment_secret(40), "operator");
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(matches!(result, Err(StoreOpError::NotFound)), "{result:?}");
+    }
+
+    #[test]
+    fn missing_enrollment_revoke_returns_not_found_without_audit() {
+        let (_root, store) = rig("missing-enrollment-revoke", 160);
+        let before = store.audit_tip().unwrap();
+        let result = store.revoke_enrollment("consumer", "operator");
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(matches!(result, Err(StoreOpError::NotFound)), "{result:?}");
+    }
+
+    #[test]
+    fn missing_enrollment_reissue_returns_not_found_without_audit() {
+        let (_root, store) = rig("missing-enrollment-reissue", 161);
+        let before = store.audit_tip().unwrap();
+        let result = store.reissue_enrollment("consumer", "operator").map(|_| ());
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(matches!(result, Err(StoreOpError::NotFound)), "{result:?}");
     }
 
     #[test]

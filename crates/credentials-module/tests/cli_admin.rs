@@ -5698,6 +5698,194 @@ fn put_on(vault: &GrantCliVault, id: &str) {
     );
 }
 
+fn assert_unknown_enrollment_approval(name: Option<&str>) {
+    let vault = GrantCliVault::new(if name.is_some() {
+        "missing-enrollment-named"
+    } else {
+        "missing-enrollment-default"
+    });
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let before = store.audit_tip().unwrap();
+    let request_id = "ab".repeat(32);
+    let mut args = vec!["enroll", "approve", "--request-id", &request_id];
+    if let Some(name) = name {
+        args.extend(["--name", name]);
+    }
+    // Holding the writer lease proves the CLI refuses before opening an admin writer.
+    let out = vault.run(&args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(out.stdout.is_empty(), "refusal must not print success");
+    assert!(
+        stderr.contains(&format!(
+            "no pending request with id {request_id} on this vault"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("15 minutes after it is proposed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("vault on the computer where the consumer ran its setup"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("approve on that computer"), "{stderr}");
+    assert!(
+        stderr.contains("`ck auth enroll list` shows the pending ones"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("store error"), "{stderr}");
+    assert_eq!(store.audit_tip().unwrap(), before);
+    let conn = rusqlite::Connection::open_with_flags(
+        vault.data_dir.join("store.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let consumers: i64 = conn
+        .query_row("SELECT COUNT(*) FROM enrolled_consumers", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        consumers, 0,
+        "an unknown request must not create a consumer"
+    );
+}
+
+#[test]
+fn enrollment_regression_unknown_approval_with_name_refuses_before_admin() {
+    assert_unknown_enrollment_approval(Some("consumer"));
+}
+
+#[test]
+fn enrollment_regression_unknown_approval_without_name_refuses_before_admin() {
+    assert_unknown_enrollment_approval(None);
+}
+
+#[test]
+fn enrollment_regression_grant_warns_for_an_unenrolled_name_and_can_be_revoked() {
+    let vault = GrantCliVault::new("grant-unenrolled-name");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    let (ok, stdout, stderr) = grant_on(
+        &vault,
+        "enrolled:future-consumer",
+        "category",
+        "llm-provider",
+        "read",
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("reaches 1 credential"), "{stdout}");
+    assert!(
+        stderr.contains("warning: no live enrollment holds the name 'future-consumer'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("nothing can use this grant now"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Whoever is later approved under exactly this name gets it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "ck auth revoke-grant --principal enrolled:future-consumer \
+                         --selector-kind category --selector 'llm-provider' --operation read"
+        ),
+        "{stderr}"
+    );
+    let grants = open_leased_store(&vault.data_dir, &vault.key_path)
+        .list_read_grants()
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    let grant = &grants[0];
+    assert_eq!(
+        (
+            grant.principal_kind.as_str(),
+            grant.principal_id.as_str(),
+            grant.selector_kind.as_str(),
+            grant.selector.as_str(),
+            grant.operation.as_str(),
+        ),
+        (
+            "enrolled",
+            "future-consumer",
+            "category",
+            "llm-provider",
+            "read"
+        )
+    );
+    let revoke = vault.run(&[
+        "revoke-grant",
+        "--principal",
+        "enrolled:future-consumer",
+        "--selector-kind",
+        "category",
+        "--selector",
+        "llm-provider",
+        "--operation",
+        "read",
+    ]);
+    assert!(
+        revoke.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    assert!(open_leased_store(&vault.data_dir, &vault.key_path)
+        .list_read_grants()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn enrollment_regression_grant_does_not_warn_for_a_live_name_but_warns_after_revoke() {
+    let vault = GrantCliVault::new("grant-live-name");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let secret = "ac".repeat(32);
+        let proposal = store
+            .propose_enrollment(
+                "consumer",
+                &credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap(),
+            )
+            .unwrap();
+        store
+            .approve_enrollment(&proposal.request_id, "consumer", "operator")
+            .unwrap();
+        store
+            .poll_enrollment(&proposal.request_id, &secret)
+            .unwrap();
+    }
+    let (ok, _, stderr) = grant_on(&vault, "enrolled:consumer", "exact", "apikey:zai", "read");
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    open_leased_store(&vault.data_dir, &vault.key_path)
+        .revoke_enrollment("consumer", "operator")
+        .unwrap();
+    let (ok, stdout, stderr) = grant_on(&vault, "enrolled:consumer", "exact", "apikey:zai", "read");
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("already granted (no change)"), "{stdout}");
+    assert!(
+        stderr.contains("no live enrollment holds the name 'consumer'"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn enrollment_regression_grant_does_not_warn_for_a_reserved_principal() {
+    let vault = GrantCliVault::new("grant-reserved-name");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    let (ok, _, stderr) = grant_on(&vault, "reserved:consumer", "exact", "apikey:zai", "read");
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
 // `ck auth grant` USED TO PRINT ONLY `granted ...`, so a grant that reached nothing read
 // exactly like one that worked. A consumer was granted a category none of its credentials
 // carried and could only report an empty vault. The reach line is counted the same way as

@@ -614,7 +614,7 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
-       enroll              admit, revoke or reissue a consumer enrollment\n\
+       enroll              manage this vault's pending requests and enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
          put                 store an API key, cookie, DSN or opaque secret\n\
@@ -630,7 +630,7 @@ fn usage_short() -> String {
         mint-handle         mint a capability handle for a credential\n\
         revoke-handle       revoke one capability handle\n\
         revoke-all-handles  revoke every handle for a credential\n\
-        grant               grant a principal an exact, category or audience selector\n\
+        grant               grant a module or consumer an explicit selector\n\
         revoke-grant        revoke a reserved module's prefix or category selector\n\
        invalidate          mark a credential needs-reauth\n\
        reactivate          clear needs-reauth without replacing the secret\n\
@@ -861,6 +861,8 @@ fn help_verb(verb: &str) -> String {
              authenticated by the request secret it generated, so neither an operator nor a\n\
              squatter can collect a token for a name they do not hold. --name overrides the\n\
              proposed spelling, which is a stranger's claim rather than a fact.\n\
+             Requests are short-lived and stay on the vault on the computer\n\
+             where the consumer ran setup. Approve there; `enroll list` shows pending ones.\n\
              revoke keeps the consumer's grants: they record what reach existed and they\n\
              block re-enrolling the name, so a later consumer cannot inherit that reach.\n\
              reissue prints the new token on stdout ALONE so it can be piped into a 0600\n\
@@ -1146,11 +1148,11 @@ fn help_verb(verb: &str) -> String {
              itself is untouched (still refreshable; mint new handles later)."
         }
         "grant" => {
-            "ck auth grant --principal <id|reserved:id>\n\
+            "ck auth grant --principal <id|reserved:id|enrolled:name>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
              \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
              \n\
-             \x20 --principal <id|reserved:id>  reserved module principal\n\
+             \x20 --principal <principal>       reserved module or enrolled consumer name\n\
              \x20 --selector-kind <kind>        required: exact, category or audience\n\
              \x20 --selector <value>            credential id, category name or audience string\n\
              \x20 --operation <operation>        grant authority (no `--op` alias)\n\
@@ -1182,7 +1184,10 @@ fn help_verb(verb: &str) -> String {
              listing the categories that exist and the fix (deposit grants are not\n\
              warned). A category grant also names uncategorized credentials whose\n\
              registry defaults include it, and points at\n\
-             `ck auth reclassify --from-registry`."
+             `ck auth reclassify --from-registry`.\n\
+             An enrolled name with no live enrollment still gets the grant, with a\n\
+             warning: nothing can use it now; whoever is later approved under exactly\n\
+             that name gets it. Revoke the grant if granting ahead was a mistake."
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
@@ -1336,7 +1341,27 @@ fn commit_admin(
     global: &GlobalArgs,
     op: credentials_core::admin_ops::AdminOpBody,
 ) -> Result<serde_json::Value, CliError> {
+    let not_found = match &op {
+        AdminOpBody::EnrollApprove { request_id, .. }
+        | AdminOpBody::EnrollDeny { request_id, .. } => Some(missing_pending_request(request_id)),
+        AdminOpBody::EnrollRevoke { name, .. } | AdminOpBody::EnrollReissue { name, .. } => Some(
+            format!("no live enrollment named {name} (list them with `ck auth enroll list`)"),
+        ),
+        _ => None,
+    };
     commit_admin_with_key(global, op, None)
+        .map_err(|error| enrollment_admin_error(error, not_found))
+}
+
+fn enrollment_admin_error(error: CliError, not_found: Option<String>) -> CliError {
+    // The route carries NotFound as its existing display text, not a typed error code.
+    // Limit the translation to enrollment ops so other missing records keep their meaning.
+    let missing = matches!(&error, CliError::Store(StoreOpError::NotFound))
+        || matches!(&error, CliError::RouteRefused(reason) if reason == &StoreOpError::NotFound.to_string());
+    match not_found {
+        Some(message) if missing => CliError::Usage(message),
+        _ => error,
+    }
 }
 
 fn commit_login_admin(
@@ -5023,6 +5048,30 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         operation.as_str(),
         selector_kind.as_str()
     );
+    if principal_kind == "enrolled" {
+        // Enrollment liveness is advisory, just like credential reach: the grant already
+        // exists, and granting a name before approval is allowed.
+        match credentials_core::store::list_enrollments_read_only(&store_path(global)) {
+            Ok(rows) if !live_enrollment_named(&rows, &principal_id) => {
+                eprintln!(
+                    "warning: no live enrollment holds the name '{principal_id}', so nothing \
+                     can use this grant now.\n  Whoever is later approved under exactly this \
+                     name gets it."
+                );
+                eprintln!(
+                    "  If this was a mistake: ck auth revoke-grant --principal \
+                     enrolled:{principal_id} --selector-kind {} --selector '{}' --operation {}",
+                    selector_kind.as_str(),
+                    selector.replace('\'', "'\\''"),
+                    operation.as_str()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("  (enrollment not checked: could not read enrollments: {error})")
+            }
+        }
+    }
     // The grant is committed by now. Reading reach back is advisory: if the status read
     // fails, say so in one line and still succeed, because failing here would report a
     // grant that exists as one that does not.
@@ -5559,12 +5608,10 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         "list" => cmd_enroll_list(global),
         "approve" => {
             let request_id = required(rest, "--request-id")?;
+            let proposed_name = pending_proposed_name(global, &request_id)?;
             // The name defaults to what was proposed, and `--name` is how an operator
             // corrects it. A name a stranger chose is a claim, not a fact.
-            let final_name = match optional(rest, "--name") {
-                Some(name) => name,
-                None => pending_proposed_name(global, &request_id)?,
-            };
+            let final_name = optional(rest, "--name").unwrap_or(proposed_name);
             commit_admin(
                 global,
                 AdminOpBody::EnrollApprove {
@@ -5771,7 +5818,7 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
     lines
 }
 
-/// Read the proposed name for a pending request so `approve` can default to it.
+/// Require a pending request on this vault and read its proposed name for `approve`.
 ///
 /// Reading it here rather than defaulting inside the store keeps the DECISION visible:
 /// the operator sees the name in the success line and can override it with `--name`.
@@ -5783,11 +5830,17 @@ fn pending_proposed_name(global: &GlobalArgs, request_id: &str) -> Result<String
     rows.into_iter()
         .find(|row| row.key == request_id && row.state == "pending")
         .map(|row| row.name)
-        .ok_or_else(|| {
-            CliError::Usage(format!(
-                "no pending request {request_id} (list them with `ck auth enroll list`)"
-            ))
-        })
+        .ok_or_else(|| CliError::Usage(missing_pending_request(request_id)))
+}
+
+fn missing_pending_request(request_id: &str) -> String {
+    let ttl_minutes = credentials_core::enrollment::ENROLLMENT_PENDING_TTL_MS / 60_000;
+    format!(
+        "no pending request with id {request_id} on this vault. A request lapses \
+         {ttl_minutes} minutes after it is proposed. It is held by the vault on the \
+         computer where the consumer ran its setup; approve on that computer. \
+         `ck auth enroll list` shows the pending ones."
+    )
 }
 
 /// Refuse `revoke` or `reissue` for a name with no live enrollment, before the admin op.
@@ -6844,6 +6897,31 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enrollment_regression_raced_not_found_is_a_usage_error() {
+        use super::{enrollment_admin_error, CliError, StoreOpError};
+
+        for error in [
+            CliError::Store(StoreOpError::NotFound),
+            CliError::RouteRefused("credential not found".into()),
+        ] {
+            let mapped =
+                enrollment_admin_error(error, Some("no pending request on this vault".into()));
+            assert!(
+                matches!(&mapped, CliError::Usage(message) if message == "no pending request on this vault")
+            );
+            assert_eq!(mapped.exit_code(), std::process::ExitCode::FAILURE);
+        }
+        let unrelated =
+            enrollment_admin_error(CliError::RouteRefused("credential not found".into()), None);
+        assert!(matches!(unrelated, CliError::RouteRefused(_)));
+        let other_refusal = enrollment_admin_error(
+            CliError::RouteRefused("store error: storage backend unavailable".into()),
+            Some("no pending request on this vault".into()),
+        );
+        assert!(matches!(other_refusal, CliError::RouteRefused(_)));
+    }
+
     fn enrollment_row(
         key: &str,
         name: &str,

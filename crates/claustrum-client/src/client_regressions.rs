@@ -289,6 +289,7 @@ mod retry {
     struct ErrorConnector {
         code: &'static str,
         dials: Arc<std::sync::atomic::AtomicUsize>,
+        failing_dials: usize,
     }
 
     impl CredentialConsumerConnector for ErrorConnector {
@@ -299,9 +300,9 @@ mod retry {
             Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
         > {
             Box::pin(async move {
-                let first = self.dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                let dial = self.dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(Box::new(ErrorConsumer {
-                    code: first.then_some(self.code),
+                    code: (dial < self.failing_dials).then_some(self.code),
                 }) as Box<dyn CredentialConsumerConnection>)
             })
         }
@@ -364,6 +365,7 @@ mod retry {
                 Arc::new(ErrorConnector {
                     code,
                     dials: dials.clone(),
+                    failing_dials: 1,
                 }),
                 Duration::from_secs(1),
             ));
@@ -374,6 +376,29 @@ mod retry {
                 .expect("unknown Error codes must retry on a fresh connection");
             assert_eq!(credential.expose(), b"A");
             assert_eq!(dials.load(Ordering::SeqCst), 2, "{code}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_unary_error_codes_preserve_the_surfaced_code_after_retry_exhaustion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for code in ["route_closed", "future_transport_code", "unknown_module"] {
+            let dials = Arc::new(AtomicUsize::new(0));
+            let target = Arc::new(LiveCredentialGetTarget::new(
+                Arc::new(ErrorConnector {
+                    code,
+                    dials: dials.clone(),
+                    failing_dials: 3,
+                }),
+                Duration::from_secs(1),
+            ));
+            let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 2);
+            let error = resolver.resolve("handle", None, false).await.unwrap_err();
+            assert_eq!(error.class, CredentialErrorClass::Transport);
+            assert!(error.retryable());
+            assert_eq!(error.code(), code);
+            assert_eq!(dials.load(Ordering::SeqCst), 3, "{code}");
+            assert!(target.consumer.lock().await.is_none());
         }
     }
 
@@ -392,6 +417,7 @@ mod retry {
                 Arc::new(ErrorConnector {
                     code,
                     dials: dials.clone(),
+                    failing_dials: 1,
                 }),
                 Duration::from_secs(1),
             ));

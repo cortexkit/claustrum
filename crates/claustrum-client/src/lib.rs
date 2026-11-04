@@ -1853,7 +1853,13 @@ pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
     ) {
         CredentialResolverError::unclassified(code, message)
     } else {
-        CredentialResolverError::transport(format!("{code}: {message}"))
+        // Wire codes distinguish route refusals from local failures such as a
+        // dropped socket, even though both require a fresh connection.
+        CredentialResolverError {
+            class: CredentialErrorClass::Transport,
+            code: code.to_owned(),
+            safe_message: message.to_owned(),
+        }
     }
 }
 

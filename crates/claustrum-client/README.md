@@ -86,6 +86,8 @@ the reads that retry transport failures retry them, because they say the credent
 module was not reachable rather than anything about the request.
 Unrecognized `Error` codes, including `route_closed`, also return `Transport` and
 clear the cached connection so a retry or the next call opens a fresh route.
+Their exact wire code remains available through `code()`, distinguishing a route
+refusal from a local transport failure without an Error frame.
 
 ## Watching for changes
 

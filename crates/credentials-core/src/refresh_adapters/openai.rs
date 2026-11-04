@@ -46,11 +46,12 @@ pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 /// The redirect target registered for the Codex client. OpenAI matches this string
 /// EXACTLY against the client's registered redirect URI, so it MUST be `localhost`
 /// (not `127.0.0.1`) and MUST use port 1455 — a mismatch fails authorize with
-/// `authorize_hydra_invalid_request`. The vault CLI runs NO listener on this port:
-/// the browser's navigation to it fails (connection refused) and the operator pastes
-/// the full URL from the address bar back into the CLI. The code in that URL is
-/// useless to any local interceptor without the PKCE verifier, which never leaves
-/// the CLI process.
+/// `authorize_hydra_invalid_request`. Local approval attempts a one-shot listener
+/// while also accepting pasted callbacks. With `--approve-on other`, `--no-listener`,
+/// or a failed bind, no listener runs: paste the full browser address-bar URL after
+/// its loopback navigation fails. The code is useless to a local interceptor
+/// without its matching Proof Key for Code Exchange (PKCE) verifier. Only the
+/// initiating CLI holds that verifier until it redeems the code at the token endpoint.
 pub const LOGIN_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
 /// The OAuth scopes requested at login (the first-party plugin's proven set —

@@ -54,10 +54,10 @@ pub const ADAPTER_NAME: &str = "xai";
 /// xAI's authorization endpoint (the interactive half). Distinct from [`TOKEN_URL`].
 pub const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
 
-/// The registered loopback redirect. The vault runs NO listener (zero inbound
-/// surface): the browser lands on a connection-refused page whose address bar carries
-/// `?code=..&state=..`, which the operator pastes back — the same posture as the
-/// OpenAI login. The plugin's local listener is a convenience we deliberately omit.
+/// The registered loopback redirect. Local approval attempts a one-shot listener
+/// while also accepting pasted callbacks. With `--approve-on other`, `--no-listener`,
+/// or a failed bind, no listener runs: paste the full browser address-bar URL,
+/// including `?code=..&state=..`, after its loopback navigation fails.
 pub const LOGIN_REDIRECT_URI: &str = "http://127.0.0.1:56121/callback";
 
 /// The login scope set. `offline_access` is what grants the refresh token; `openid`

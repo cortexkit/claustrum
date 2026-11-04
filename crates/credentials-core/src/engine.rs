@@ -15,6 +15,9 @@
 //! resolves fail-safe. A lease handover that fences step 3 (`StoreError::Fenced`)
 //! leaves the EXACT same durable state as that crash — a dangling intent + the old
 //! tokens — so a single reconciliation path covers both (the convergence property).
+//! A failed commit in a live engine leaves the same uncertainty. Reads that observe
+//! an intent recheck it under the single-flight lock and refuse until reconciliation
+//! or an admin replacement resolves it, even if the access token has not expired.
 //!
 //! ## Single-flight
 //!
@@ -35,7 +38,7 @@
 //! single-flight.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::audit::{AlarmReason, AuditCtx, AuditOp, AuthEventKind};
 use crate::oauth::OAuthCredential;
@@ -193,9 +196,10 @@ pub struct RefreshEngine {
     // keep the real clock, so a test pinning the cooldown cannot move expiry.
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     // Per-credential single-flight locks, created on demand. The map mutex is held
-    // only to look up/insert a lock handle (never across an await); the per-id
-    // tokio mutex is the one held across the refresh await.
-    inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    // only to prune/look up/insert a lock handle (never across an await); the per-id
+    // tokio mutex is the one held across the refresh await. Weak entries let unused
+    // ids be reclaimed without evicting locks still owned by holders or waiters.
+    inflight: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     // Test-only crash seam: fired AFTER the intent is durably committed and the new
     // tokens are staged, but BEFORE the commit transaction. The kill-9 conformance
     // helper sets this to a closure that signals readiness and parks forever, so a
@@ -331,8 +335,42 @@ impl RefreshEngine {
                 hook();
             }
         }
-        let stale_pending = initial.mark.pending;
+        // Fresh reads need no per-credential lock unless they observe an intent.
+        // An intent may still belong to a live exchange, so wait for its holder
+        // before deciding whether the stored tokens are safe to serve or reuse.
+        let has_intent = self.store.has_refresh_intent(credential_id)?;
+        let wants_refresh =
+            force_refresh || initial.mark.pending || self.is_stale(&initial.record, min_ttl_ms);
+        if !has_intent && !wants_refresh {
+            return Ok(GetWithRefreshStatus {
+                incarnation,
+                record: initial.record,
+                refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: initial.stored_digest_hex,
+            });
+        }
         let initial_version = initial.record.record_version;
+        let lock = self.inflight_lock(credential_id);
+        let _guard = lock.lock().await;
+        let initial = self.store.get_snapshot(credential_id, &incarnation)?;
+        // An intent surviving the prior holder is unresolved just as it would be
+        // at boot; a fresh access token cannot prove its refresh token survived.
+        if self.store.has_refresh_intent(credential_id)? {
+            return Err(StoreOpError::NeedsReauth.into());
+        }
+        // A prior holder already refreshed or an admin replaced the row. Preserve
+        // single-flight even for forced reads, without claiming our own TTL exchange.
+        if initial.record.record_version != initial_version {
+            return Ok(GetWithRefreshStatus {
+                incarnation,
+                record: initial.record,
+                refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: initial.stored_digest_hex,
+            });
+        }
+        let stale_pending = initial.mark.pending;
         if stale_pending && !initial.record.is_refreshable() {
             // A stale marker means a consumer already refused this exact token. A
             // non-refreshable record cannot replace it, so defer to the existing
@@ -403,26 +441,7 @@ impl RefreshEngine {
             });
         }
 
-        // Single-flight: serialize refreshes for this credential.
-        let lock = self.inflight_lock(credential_id);
-        let _guard = lock.lock().await;
-
-        // Re-read under the lock: a prior holder may have already refreshed. If the
-        // version moved, that holder did the upstream call — return their result
-        // without a second one (this is what makes N concurrent gets ⇒ 1 call, and
-        // it is correct even under force_refresh). It also means this request has no
-        // exchange proof of its own for a later TTL refusal.
-        let current = self.store.get_snapshot(credential_id, &incarnation)?;
-        if current.record.record_version != initial_version {
-            return Ok(GetWithRefreshStatus {
-                incarnation,
-                record: current.record,
-                refreshed_for_min_ttl: false,
-                refresh_deferred_until_ms: None,
-                stored_digest_hex: current.stored_digest_hex,
-            });
-        }
-        self.do_refresh(credential_id, &current.record).await?;
+        self.do_refresh(credential_id, &served.record).await?;
         let refreshed = self.store.get_snapshot(credential_id, &incarnation)?;
         Ok(GetWithRefreshStatus {
             incarnation,
@@ -781,10 +800,9 @@ impl RefreshEngine {
     /// read-modify-write sequence an admin op and a refresh each perform; taking the
     /// per-id lock makes admin-write and refresh-for-the-same-credential strictly
     /// mutually exclusive end-to-end, so an admin replace can never interleave with a
-    /// refresh's commit (Oracle finding 5), and a get arriving during a live refresh
-    /// that also needs to write waits for the intent to resolve rather than acting on
-    /// a mid-refresh view (Oracle finding 6). Reads (`get`) that only SERVE are
-    /// unaffected — they still take the lock only when they themselves refresh.
+    /// refresh's commit. Gets that observe an intent also take this lock before
+    /// serving, so they cannot bypass an unresolved intent from a failed commit.
+    /// Fresh reads with no intent do not wait for admin operations on the same id.
     ///
     /// The closure receives the store; it must perform exactly one credential-scoped
     /// admin mutation. Different credential ids use different locks, so admin ops for
@@ -802,9 +820,13 @@ impl RefreshEngine {
     /// Look up or create the single-flight lock for a credential.
     fn inflight_lock(&self, credential_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
-        map.entry(credential_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        map.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = map.get(credential_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        map.insert(credential_id.to_string(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -844,4 +866,133 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod lock_registry_tests {
+    use super::*;
+    use crate::{
+        key::MasterKey, refresh_adapters::fixture::FixtureTransport, test_support::TestTempDir,
+    };
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn engine() -> (TestTempDir, RefreshEngine) {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let dir = TestTempDir::new(format!(
+            "lock-registry-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let raw = open_sqlite(&StorageDescriptor {
+            module_id: "lock-registry".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        EncryptedStore::migrate(&raw).unwrap();
+        let store = EncryptedStore::open(raw, MasterKey::from_bytes([23; 32])).unwrap();
+        (
+            dir,
+            RefreshEngine::new(
+                Arc::new(store),
+                vec![],
+                Arc::new(FixtureTransport::new(vec![])),
+            ),
+        )
+    }
+
+    #[test]
+    fn single_flight_registry_prunes_removed_credential_ids() {
+        let (_dir, engine) = engine();
+        for index in 0..128 {
+            let id = format!("test:{index}");
+            let record = VaultRecord::new_static(
+                crate::record::CredentialKind::ApiKey,
+                "test",
+                b"key".to_vec(),
+                None,
+            );
+            engine.store.create(&id, &record).unwrap();
+            let lock = engine.inflight_lock(&id);
+            engine
+                .store
+                .remove_audited(&id, AuditCtx::vault(AuditOp::Remove))
+                .unwrap();
+            drop(lock);
+        }
+        assert!(engine.inflight.lock().unwrap().len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn single_flight_pruning_preserves_holders_and_queued_waiters() {
+        let (_dir, engine) = engine();
+        let holder = engine.inflight_lock("same").lock_owned().await;
+        let waiting_lock = engine.inflight_lock("same");
+        let waiter = waiting_lock.clone().lock_owned();
+        tokio::pin!(waiter);
+        // Poll once to establish a queued waiter without relying on scheduling or time.
+        std::future::poll_fn(|cx| {
+            assert!(waiter.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(engine.inflight_lock("churn"));
+        assert!(Arc::ptr_eq(&waiting_lock, &engine.inflight_lock("same")));
+        drop(waiting_lock);
+        drop(holder);
+        // Only the pending lock future now owns the original lock.
+        drop(engine.inflight_lock("churn"));
+        assert!(engine.inflight_lock("same").try_lock().is_err());
+        let waiter_guard = waiter.await;
+        drop(engine.inflight_lock("churn"));
+        assert!(engine.inflight_lock("same").try_lock().is_err());
+        drop(waiter_guard);
+    }
+
+    #[tokio::test]
+    async fn fresh_read_does_not_wait_for_a_lock_without_an_intent() {
+        let (_dir, engine) = engine();
+        let record = VaultRecord::new_oauth(
+            "test",
+            "unused",
+            OAuthCredential {
+                access_token: "fresh-access".to_string().into(),
+                refresh_token: "fresh-refresh".to_string().into(),
+                expires_at_ms: Some(i64::MAX),
+                token_url: crate::refresh_adapters::xai::TOKEN_URL.into(),
+                client_id: None,
+                client_secret: None,
+                scopes: vec![],
+            },
+            b"fresh-access".to_vec(),
+        );
+        engine.store.create("oauth:fresh", &record).unwrap();
+        let lock = engine.inflight_lock("oauth:fresh");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _guard = lock.lock_owned().await;
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        entered_rx.await.unwrap();
+        assert!(!engine.store.has_refresh_intent("oauth:fresh").unwrap());
+        let read = engine.get("oauth:fresh", None, false);
+        tokio::pin!(read);
+        // A ready first poll proves this read never queued behind the held lock.
+        let served = std::future::poll_fn(|cx| match read.as_mut().poll(cx) {
+            std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
+            std::task::Poll::Pending => panic!("fresh read queued behind an unrelated lock holder"),
+        })
+        .await
+        .unwrap();
+        assert_eq!(served.payload.expose(), b"fresh-access");
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+    }
 }

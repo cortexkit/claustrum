@@ -12,9 +12,9 @@
 //!   reliable canonical body, so this adapter keys the dead-token decision on the
 //!   status code rather than matching a body string we could not verify.
 //! - HTTP 403 is an ENTITLEMENT/tier denial (the subscription lapsed), which is
-//!   DISTINCT from a dead refresh token: it is surfaced as a status error, not
-//!   `invalid_grant`, so the credential is not branded `needs_reauth` for what is
-//!   actually a billing/tier problem.
+//!   DISTINCT from a dead refresh token: it is surfaced as `SubscriptionRequired`,
+//!   not `invalid_grant`. Both latch `needs_reauth`; restore the xAI subscription
+//!   and then log in again rather than repeatedly retrying the exchange.
 //!
 //! The refresh token rotates optionally, so a response that omits `refresh_token`
 //! reuses the existing one. xAI exposes a revocation endpoint but no non-mutating
@@ -54,10 +54,10 @@ pub const ADAPTER_NAME: &str = "xai";
 /// xAI's authorization endpoint (the interactive half). Distinct from [`TOKEN_URL`].
 pub const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
 
-/// The registered loopback redirect. The vault runs NO listener (zero inbound
-/// surface): the browser lands on a connection-refused page whose address bar carries
-/// `?code=..&state=..`, which the operator pastes back — the same posture as the
-/// OpenAI login. The plugin's local listener is a convenience we deliberately omit.
+/// The registered loopback redirect. Local approval attempts a one-shot listener
+/// while also accepting pasted callbacks. With `--approve-on other`, `--no-listener`,
+/// or a failed bind, no listener runs: paste the full browser address-bar URL,
+/// including `?code=..&state=..`, after its loopback navigation fails.
 pub const LOGIN_REDIRECT_URI: &str = "http://127.0.0.1:56121/callback";
 
 /// The login scope set. `offline_access` is what grants the refresh token; `openid`
@@ -171,13 +171,10 @@ impl RefreshAdapter for XaiAdapter {
                 "xai refresh rejected with status {}",
                 resp.status
             ))),
-            // 403 is an entitlement/tier denial (subscription lapsed), NOT a dead
-            // refresh token — do not brand the credential needs_reauth for a billing
-            // problem; surface it as a status error the operator can act on.
-            403 => Err(RefreshError::Status(
-                403,
-                "xai entitlement denied (subscription/tier) — not a dead refresh token".to_string(),
-            )),
+            // No verified body/code distinguishes subscription denials here; the
+            // endpoint's status contract identifies 403 as a lapsed subscription.
+            // Restore the xAI subscription, then log in again to replace the latch.
+            403 => Err(RefreshError::SubscriptionRequired),
             other => Err(RefreshError::Status(
                 other,
                 String::from_utf8_lossy(&resp.body).into_owned(),
@@ -260,13 +257,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_403_is_entitlement_not_dead_token() {
-        // The important distinction: a tier/billing denial must NOT brand the
-        // credential needs_reauth.
+    async fn status_403_requires_subscription_repair() {
         let http = FixtureTransport::ok(403, b"forbidden".to_vec());
         match XaiAdapter::new().refresh(&cred(), &http).await {
-            Err(RefreshError::Status(403, _)) => {}
-            other => panic!("expected Status(403), got {other:?}"),
+            Err(RefreshError::SubscriptionRequired) => {}
+            other => panic!("expected SubscriptionRequired, got {other:?}"),
         }
     }
 }

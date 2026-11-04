@@ -5864,6 +5864,20 @@ impl EncryptedStore {
 
     // ---- refresh intent log (crash-safe rotation) -----------------------
 
+    /// Whether a refresh has not yet committed or been reconciled. The engine
+    /// checks this under its per-credential lock so live exchanges finish first.
+    pub(crate) fn has_refresh_intent(&self, credential_id: &str) -> Result<bool, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM refresh_intent WHERE credential_id = ?1)",
+                    [credential_id],
+                    |row| row.get(0),
+                )
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Durably open a refresh intent (txn1 of the refresh state machine): the
     /// fsynced marker written BEFORE the provider's rotating endpoint is called.
     ///
@@ -5872,8 +5886,9 @@ impl EncryptedStore {
     /// guaranteeing a crash during the subsequent network call leaves a recoverable
     /// intent. `record_version` is the version being refreshed from (the commit's
     /// CAS guard); `old_refresh_hash` is [`refresh_token_hash`] of the current
-    /// refresh token. Replaces any existing intent for the id (single-flight means
-    /// there is at most one, but a re-open after a transient failure is idempotent).
+    /// refresh token. The engine must check for an unresolved intent under its
+    /// per-credential lock before calling this method, not overwrite a surviving
+    /// intent after an unsuccessful commit.
     pub fn open_intent(
         &self,
         credential_id: &str,

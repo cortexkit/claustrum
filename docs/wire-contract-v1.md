@@ -56,7 +56,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `seal_rate_limited` | transient | this connection has reached the scoped refusal threshold `credential.open` and `credential.seal` share |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
 | `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
-| `needs_reauth` | auth_required | the credential is latched dead, or deliberately retired |
+| `needs_reauth` | auth_required | the credential is latched dead, deliberately retired, or has an unresolved refresh intent |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
 | `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
@@ -71,6 +71,14 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `seal_input_too_large` | context_overflow | a `credential.seal` plaintext over 64 KiB, or info or aad over 1 KiB |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
+
+An xAI refresh HTTP 403 is a subscription denial: it returns
+`needs_reauth`/`auth_required`, not `refresh_failed`/`transient`, and latches the
+credential. Restore the xAI subscription and then log in again. Provider 5xx responses
+remain transient. An unresolved refresh intent also prevents reads with
+`needs_reauth`/`auth_required`: a storage failure after rotation must not cause the old
+refresh token to be sent again, even if its access token is still fresh. Reconciliation
+or an operator replacement must resolve that intent before the credential is served.
 
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
 `invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`

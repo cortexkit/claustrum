@@ -243,11 +243,23 @@ that can tell a bad key from a good one (for example `opencode-go`, `vercel-ai-g
 `cline-pass`); for those, login prints a `NOTE:` line saying the key was stored without
 being checked.
 
-OAuth logins open a browser and complete automatically: a one-shot listener on the
-loopback redirect captures the code, so **when the browser shows a paste code, ignore it;
-the CLI has already finished.** If the port is busy, the listen fails, or you pass
-`--no-listener`, the flow falls back to pasting the address-bar URL. Pasted values are read
-from stdin only, never argv, and never logged.
+For browser OAuth logins, choose whether to open, copy or show the authorization URL.
+The common browser flow (including Anthropic, OpenAI and xAI) attempts a one-shot
+loopback listener for local approval and accepts pasted callbacks while it listens.
+With `--approve-on other`, `--no-listener`, or a failed bind, it continues without a
+listener: OpenAI and xAI require the full address-bar URL after the loopback navigation
+fails; Anthropic instead displays a `code#state` value to paste.
+
+Google-family and DigitalOcean local-listener bind failures instead
+stop before the authorization URL is shown. Retry with `--approve-on other` or
+`--no-listener` for a paste-only flow. DigitalOcean waits for its bound listener first,
+then offers paste if no callback arrives. Pasted values are read from stdin only,
+never argv, and never logged.
+
+An xAI refresh HTTP 403 means the subscription needs repair, not a transient provider
+failure. It latches `needs_reauth`: restore the xAI subscription and then log in again
+with `ck auth login --provider xai --replace`. Retrying refresh or logging in before
+restoring the subscription does not repair the entitlement.
 
 ```sh
 ck auth login --provider xai --replace

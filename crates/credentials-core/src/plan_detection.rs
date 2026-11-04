@@ -61,13 +61,16 @@ pub fn anthropic_profile(body: &[u8]) -> Result<DetectedPlan, RefreshError> {
     let profile: Profile =
         serde_json::from_slice(body).map_err(|e| RefreshError::Decode(e.to_string()))?;
     let org = profile.organization;
-    let raw = org.rate_limit_tier.or(org.organization_type);
-    let tier = match raw.as_deref() {
-        Some("default_claude_max_20x") => Some("max_20x"),
-        Some("default_claude_max_5x") => Some("max_5x"),
-        Some("default_claude_pro") | Some("claude_pro") => Some("pro"),
+    let tier = match (
+        org.rate_limit_tier.as_deref(),
+        org.organization_type.as_deref(),
+    ) {
+        (Some("default_claude_max_20x"), _) => Some("max_20x"),
+        (Some("default_claude_max_5x"), _) => Some("max_5x"),
+        (Some("default_claude_pro"), _) | (None, Some("claude_pro")) => Some("pro"),
         _ => None,
     };
+    let raw = org.rate_limit_tier.or(org.organization_type);
     Ok(DetectedPlan::observed(raw, tier))
 }
 

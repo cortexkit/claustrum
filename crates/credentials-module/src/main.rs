@@ -10413,8 +10413,9 @@ mod tests {
         let request = store
             .propose_enrollment("probe-consumer", &secret_hash)
             .expect("propose");
+        // The grant is pre-provisioned on purpose; approval explicitly accepts its reach.
         store
-            .approve_enrollment(&request.request_id, "probe-consumer", "operator")
+            .approve_enrollment_with_grants(&request.request_id, "probe-consumer", true, "operator")
             .expect("approve");
         let token = match store
             .poll_enrollment(&request.request_id, request_secret)

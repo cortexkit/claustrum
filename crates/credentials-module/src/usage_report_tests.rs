@@ -10,8 +10,9 @@ fn usage_enrollment(store: &EncryptedStore) -> String {
     let secret = "c".repeat(64);
     let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
     let proposed = store.propose_enrollment("synthetic", &hash).unwrap();
+    // Callers deliberately pre-provision enrolled:synthetic read grants; approval opts in.
     store
-        .approve_enrollment(&proposed.request_id, "synthetic", "operator")
+        .approve_enrollment_with_grants(&proposed.request_id, "synthetic", true, "operator")
         .unwrap();
     match store
         .poll_enrollment(&proposed.request_id, &secret)

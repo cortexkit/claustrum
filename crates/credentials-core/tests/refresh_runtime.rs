@@ -178,7 +178,7 @@ async fn failed_rotating_commit_never_replays_expired_refresh_token() {
 }
 
 #[tokio::test]
-async fn xai_subscription_denial_latches_but_server_failure_stays_retryable() {
+async fn xai_entitlement_and_server_failures_stay_retryable() {
     for status in [403, 503] {
         let (_dir, store, _conn) = store();
         store.create("oauth:xai", &record("xai", 0)).unwrap();
@@ -189,34 +189,18 @@ async fn xai_subscription_denial_latches_but_server_failure_stays_retryable() {
             http.clone(),
         );
         let error = engine.get("oauth:xai", None, false).await.unwrap_err();
-        if status == 403 {
-            assert!(
-                matches!(
-                    error,
-                    EngineError::RefreshFailed(RefreshError::SubscriptionRequired)
-                ),
-                "{error:?}"
-            );
-            assert!(matches!(
-                engine.get("oauth:xai", None, false).await,
-                Err(EngineError::Store(StoreOpError::NeedsReauth))
-            ));
-            assert_eq!(http.calls.load(Ordering::SeqCst), 1);
-            assert!(matches!(
-                store.get("oauth:xai"),
-                Err(StoreOpError::NeedsReauth)
-            ));
-        } else {
-            assert!(
-                matches!(
-                    error,
-                    EngineError::RefreshFailed(RefreshError::Status(503, _))
-                ),
-                "{error:?}"
-            );
-            assert!(store.get("oauth:xai").is_ok());
-        }
+        assert!(
+            matches!(error, EngineError::RefreshFailed(RefreshError::Status(code, _)) if code == status),
+            "{error:?}"
+        );
+        assert!(store.get("oauth:xai").is_ok());
         assert!(store.list_intents().unwrap().is_empty());
+        // Billing repair must be able to recover this credential without a new login.
+        assert!(matches!(
+            engine.get("oauth:xai", None, false).await,
+            Err(EngineError::RefreshFailed(RefreshError::Status(code, _))) if code == status
+        ));
+        assert_eq!(http.calls.load(Ordering::SeqCst), 2);
     }
 }
 

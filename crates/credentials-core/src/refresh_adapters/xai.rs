@@ -12,9 +12,9 @@
 //!   reliable canonical body, so this adapter keys the dead-token decision on the
 //!   status code rather than matching a body string we could not verify.
 //! - HTTP 403 is an ENTITLEMENT/tier denial (the subscription lapsed), which is
-//!   DISTINCT from a dead refresh token: it is surfaced as `SubscriptionRequired`,
-//!   not `invalid_grant`. Both latch `needs_reauth`; restore the xAI subscription
-//!   and then log in again rather than repeatedly retrying the exchange.
+//!   DISTINCT from a dead refresh token: it is surfaced as a status error, not
+//!   `invalid_grant`, so the credential is not branded `needs_reauth` for what is
+//!   actually a billing/tier problem.
 //!
 //! The refresh token rotates optionally, so a response that omits `refresh_token`
 //! reuses the existing one. xAI exposes a revocation endpoint but no non-mutating
@@ -171,10 +171,13 @@ impl RefreshAdapter for XaiAdapter {
                 "xai refresh rejected with status {}",
                 resp.status
             ))),
-            // No verified body/code distinguishes subscription denials here; the
-            // endpoint's status contract identifies 403 as a lapsed subscription.
-            // Restore the xAI subscription, then log in again to replace the latch.
-            403 => Err(RefreshError::SubscriptionRequired),
+            // 403 is an entitlement/tier denial (subscription lapsed), NOT a dead
+            // refresh token — do not brand the credential needs_reauth for a billing
+            // problem; surface it as a status error the operator can act on.
+            403 => Err(RefreshError::Status(
+                403,
+                "xai entitlement denied (subscription/tier) — not a dead refresh token".to_string(),
+            )),
             other => Err(RefreshError::Status(
                 other,
                 String::from_utf8_lossy(&resp.body).into_owned(),
@@ -257,11 +260,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_403_requires_subscription_repair() {
+    async fn status_403_is_entitlement_not_dead_token() {
+        // The important distinction: a tier/billing denial must NOT brand the
+        // credential needs_reauth.
         let http = FixtureTransport::ok(403, b"forbidden".to_vec());
         match XaiAdapter::new().refresh(&cred(), &http).await {
-            Err(RefreshError::SubscriptionRequired) => {}
-            other => panic!("expected SubscriptionRequired, got {other:?}"),
+            Err(RefreshError::Status(403, _)) => {}
+            other => panic!("expected Status(403), got {other:?}"),
         }
     }
 }

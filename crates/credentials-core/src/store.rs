@@ -5864,8 +5864,9 @@ impl EncryptedStore {
 
     // ---- refresh intent log (crash-safe rotation) -----------------------
 
-    /// Whether a refresh has not yet committed or been reconciled. The engine
-    /// checks this under its per-credential lock so live exchanges finish first.
+    /// Whether a refresh has not yet committed or been reconciled. A read that
+    /// observes an intent rechecks under its per-credential lock, allowing a live
+    /// exchange to finish before treating the intent as unresolved.
     pub(crate) fn has_refresh_intent(&self, credential_id: &str) -> Result<bool, StoreOpError> {
         self.store
             .with_conn(|conn| {

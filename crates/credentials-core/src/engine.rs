@@ -15,9 +15,9 @@
 //! resolves fail-safe. A lease handover that fences step 3 (`StoreError::Fenced`)
 //! leaves the EXACT same durable state as that crash — a dangling intent + the old
 //! tokens — so a single reconciliation path covers both (the convergence property).
-//! A failed commit in a live engine leaves the same uncertainty. Reads check the
-//! intent under the single-flight lock and refuse until reconciliation or an admin
-//! replacement resolves it, even if the old access token has not expired.
+//! A failed commit in a live engine leaves the same uncertainty. Reads that observe
+//! an intent recheck it under the single-flight lock and refuse until reconciliation
+//! or an admin replacement resolves it, even if the access token has not expired.
 //!
 //! ## Single-flight
 //!
@@ -335,14 +335,27 @@ impl RefreshEngine {
                 hook();
             }
         }
+        // Fresh reads need no per-credential lock unless they observe an intent.
+        // An intent may still belong to a live exchange, so wait for its holder
+        // before deciding whether the stored tokens are safe to serve or reuse.
+        let has_intent = self.store.has_refresh_intent(credential_id)?;
+        let wants_refresh =
+            force_refresh || initial.mark.pending || self.is_stale(&initial.record, min_ttl_ms);
+        if !has_intent && !wants_refresh {
+            return Ok(GetWithRefreshStatus {
+                incarnation,
+                record: initial.record,
+                refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: initial.stored_digest_hex,
+            });
+        }
         let initial_version = initial.record.record_version;
-        // Every read waits for a live exchange to finish before deciding whether
-        // the stored tokens are safe to serve or exchange again. A surviving intent
-        // after the prior holder exits is unresolved just as it would be at boot;
-        // a still-fresh access token cannot prove that its refresh token survived.
         let lock = self.inflight_lock(credential_id);
         let _guard = lock.lock().await;
         let initial = self.store.get_snapshot(credential_id, &incarnation)?;
+        // An intent surviving the prior holder is unresolved just as it would be
+        // at boot; a fresh access token cannot prove its refresh token survived.
         if self.store.has_refresh_intent(credential_id)? {
             return Err(StoreOpError::NeedsReauth.into());
         }
@@ -787,8 +800,9 @@ impl RefreshEngine {
     /// read-modify-write sequence an admin op and a refresh each perform; taking the
     /// per-id lock makes admin-write and refresh-for-the-same-credential strictly
     /// mutually exclusive end-to-end, so an admin replace can never interleave with a
-    /// refresh's commit. Every get also takes this lock before serving, so it cannot
-    /// bypass an unresolved intent left by a failed refresh commit.
+    /// refresh's commit. Gets that observe an intent also take this lock before
+    /// serving, so they cannot bypass an unresolved intent from a failed commit.
+    /// Fresh reads with no intent do not wait for admin operations on the same id.
     ///
     /// The closure receives the store; it must perform exactly one credential-scoped
     /// admin mutation. Different credential ids use different locks, so admin ops for
@@ -938,5 +952,47 @@ mod lock_registry_tests {
         drop(engine.inflight_lock("churn"));
         assert!(engine.inflight_lock("same").try_lock().is_err());
         drop(waiter_guard);
+    }
+
+    #[tokio::test]
+    async fn fresh_read_does_not_wait_for_a_lock_without_an_intent() {
+        let (_dir, engine) = engine();
+        let record = VaultRecord::new_oauth(
+            "test",
+            "unused",
+            OAuthCredential {
+                access_token: "fresh-access".to_string().into(),
+                refresh_token: "fresh-refresh".to_string().into(),
+                expires_at_ms: Some(i64::MAX),
+                token_url: crate::refresh_adapters::xai::TOKEN_URL.into(),
+                client_id: None,
+                client_secret: None,
+                scopes: vec![],
+            },
+            b"fresh-access".to_vec(),
+        );
+        engine.store.create("oauth:fresh", &record).unwrap();
+        let lock = engine.inflight_lock("oauth:fresh");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _guard = lock.lock_owned().await;
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        entered_rx.await.unwrap();
+        assert!(!engine.store.has_refresh_intent("oauth:fresh").unwrap());
+        let read = engine.get("oauth:fresh", None, false);
+        tokio::pin!(read);
+        // A ready first poll proves this read never queued behind the held lock.
+        let served = std::future::poll_fn(|cx| match read.as_mut().poll(cx) {
+            std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
+            std::task::Poll::Pending => panic!("fresh read queued behind an unrelated lock holder"),
+        })
+        .await
+        .unwrap();
+        assert_eq!(served.payload.expose(), b"fresh-access");
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
     }
 }

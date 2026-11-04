@@ -256,11 +256,6 @@ stop before the authorization URL is shown. Retry with `--approve-on other` or
 then offers paste if no callback arrives. Pasted values are read from stdin only,
 never argv, and never logged.
 
-An xAI refresh HTTP 403 means the subscription needs repair, not a transient provider
-failure. It latches `needs_reauth`: restore the xAI subscription and then log in again
-with `ck auth login --provider xai --replace`. Retrying refresh or logging in before
-restoring the subscription does not repair the entitlement.
-
 ```sh
 ck auth login --provider xai --replace
 ck auth login --provider anthropic --id oauth:anthropic:work   # a second, labeled account

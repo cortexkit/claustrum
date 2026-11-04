@@ -129,11 +129,13 @@ working is not evidence, because it can outlive a rotated refresh token. The res
 is stated rather than hidden: a crash in that narrow window costs one re-login, never a
 silently dead token.
 
-The same intent gate applies without a restart: every read takes the per-credential
-lock before serving or refreshing. If a failed commit leaves an intent after the
-previous holder exits, the credential is unservable (`needs_reauth`), even when its
-stored access token is still fresh. The engine does not repeat the rotating exchange
-or overwrite the unresolved intent. Boot reconciliation uses the rules above; an
+The same intent gate applies without a restart: reads first check for an intent
+without taking the per-credential lock. Fresh reads with no intent serve without
+that lock. Reads that observe an intent or need a refresh take the lock, reread the
+record and recheck the intent. If a failed commit leaves an intent after the previous
+holder exits, the credential is unservable (`needs_reauth`), even when its stored
+access token is still fresh. The engine does not repeat the rotating exchange or
+overwrite the unresolved intent. Boot reconciliation uses the rules above; an
 operator replacement can also clear the intent by atomically installing new material.
 
 There are 13 adapters, one per provider family the vault can refresh: `anthropic`,

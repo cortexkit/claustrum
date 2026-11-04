@@ -72,10 +72,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `seal_input_too_large` | context_overflow | a `credential.seal` plaintext over 64 KiB, or info or aad over 1 KiB |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
 
-An xAI refresh HTTP 403 is a subscription denial: it returns
-`needs_reauth`/`auth_required`, not `refresh_failed`/`transient`, and latches the
-credential. Restore the xAI subscription and then log in again. Provider 5xx responses
-remain transient. An unresolved refresh intent also prevents reads with
+An unresolved refresh intent prevents reads with
 `needs_reauth`/`auth_required`: a storage failure after rotation must not cause the old
 refresh token to be sent again, even if its access token is still fresh. Reconciliation
 or an operator replacement must resolve that intent before the credential is served.

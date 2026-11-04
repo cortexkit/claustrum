@@ -403,6 +403,45 @@ class ScriptContracts(unittest.TestCase):
         self.assertNotIn('cargo update', workflow)
         self.assertIn('cargo build --locked', workflow)
 
+    def test_release_assets_use_only_the_ancestry_checked_commit(self):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
+        prepare = workflow['jobs']['prepare']
+        self.assertEqual(prepare.get('outputs', {}).get('checked_sha'), '${{ steps.checked.outputs.sha }}')
+        checked = self.release_step('Refuse a tag that is not on master')
+        self.assertEqual(checked['id'], 'checked')
+        self.assertIn('git merge-base --is-ancestor "$checked_sha" origin/master', checked['run'])
+        self.assertIn('echo "sha=$checked_sha" >> "$GITHUB_OUTPUT"', checked['run'])
+        self.assertLess(checked['run'].index('exit 1'), checked['run'].index('echo "sha=$checked_sha"'))
+
+        assets = workflow['jobs']['assets']
+        self.assertEqual(assets['needs'], 'prepare')
+        checkouts = [step for step in assets['steps'] if step.get('uses', '').startswith('actions/checkout@')]
+        self.assertTrue(checkouts)
+        for checkout in checkouts:
+            self.assertEqual(checkout['with']['ref'], '${{ needs.prepare.outputs.checked_sha }}')
+        revision = self.release_step('Resolve the built revision')
+        self.assertEqual(revision['env']['CHECKED_SHA'], '${{ needs.prepare.outputs.checked_sha }}')
+        self.assertLess(assets['steps'].index(next(step for step in assets['steps'] if step.get('id') == 'rev')),
+                        next(index for index, step in enumerate(assets['steps']) if 'cargo build' in step.get('run', '')))
+
+    def test_release_asset_revision_refuses_a_different_checked_commit(self):
+        built_sha = 'a' * 40
+        self.executable('git', f'[[ "$*" == "rev-parse HEAD" ]] || exit 1; echo {built_sha}')
+        step = self.release_step('Resolve the built revision')
+        output = self.root / 'output'
+        for checked_sha in (built_sha, 'b' * 40, ''):
+            with self.subTest(checked_sha=checked_sha):
+                output.write_text('')
+                env = dict(self.env, CHECKED_SHA=checked_sha, GITHUB_OUTPUT=os.fspath(output))
+                result = self.run_shell(step['run'], env, cwd=self.root)
+                if checked_sha == built_sha:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(output.read_text(), f'sha={built_sha}\n')
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn('REFUSING:', result.stdout)
+                    self.assertEqual(output.read_text(), '')
+
     def release_step(self, label, path='.github/workflows/release.yml'):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / path))
         for job in workflow['jobs'].values():
@@ -413,6 +452,9 @@ class ScriptContracts(unittest.TestCase):
                     lines = text(path).splitlines()
                     index = lines.index('      - name: ' + label)
                     while lines[index] != '        run: |':
+                        if lines[index].startswith('        run: '):
+                            step['run'] = lines[index][len('        run: '):] + '\n'
+                            return step
                         index += 1
                     index += 1
                     body = []

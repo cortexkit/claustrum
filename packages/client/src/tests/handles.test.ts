@@ -4,6 +4,7 @@ import { privatePathContext, readHandleFile } from './injected-files.js'
 import { afterAll, afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -16,7 +17,7 @@ import {
 } from '../handles.js'
 import { throwerOf } from './settle'
 
-// Only Unix chmod/mode and symlink fixtures are skipped on Windows. The valid read
+// Only Unix chmod/mode, symlink and FIFO fixtures are skipped on Windows. The valid read
 // test runs on every platform and uses the store's native ACL verification on Windows.
 const posix = process.platform !== 'win32'
 
@@ -243,5 +244,32 @@ describe('client handle-file contract', () => {
       }),
     }))).toThrow('handle file exceeds 256 KiB'))
   })
+
+  // Windows has no POSIX FIFO fixture. No writer is ever opened, so each native
+  // reader must reach the regular-file refusal without waiting for a peer.
+  test.skipIf(!posix)('refuses a FIFO without a writer for both handle readers', async () => {
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    const path = join(root, 'handles.fifo')
+    execFileSync('mkfifo', ['-m', '600', path])
+    const source = `
+      import { readHandleFile, handleFileRevision, HandleFileValidationError } from ${JSON.stringify(new URL('../handles.ts', import.meta.url).href)};
+      for (const read of [readHandleFile, handleFileRevision]) {
+        let refusal;
+        try { await read(${JSON.stringify(path)}); } catch (error) { refusal = error; }
+        if (!(refusal instanceof HandleFileValidationError) || refusal.message !== 'handle file must be a regular file') {
+          throw new Error('expected regular-file refusal, got ' + refusal);
+        }
+      }
+      console.log('both readers refused the FIFO');
+    `
+    // Isolate the native open so a blocking regression can be killed and cannot
+    // strand the test runner's I/O threads. The deadline is only a hang guard;
+    // assertions check the refusal and successful child exit, not elapsed time.
+    const result = spawnSync('bun', ['--eval', source], { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(result.stdout.trim()).toBe('both readers refused the FIFO')
+  }, 20_000)
 
 })

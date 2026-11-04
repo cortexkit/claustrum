@@ -54,6 +54,8 @@ jobs:
       contents: write
     name: Ensure the release exists
     runs-on: ubuntu-latest
+    outputs:
+      checked_sha: ${{ steps.checked.outputs.sha }}
     steps:
       # A TAG CAN POINT AT A COMMIT THAT IS NOT ON master, and nothing else here notices.
       #
@@ -85,10 +87,12 @@ jobs:
           fetch-depth: 0
 
       - name: Refuse a tag that is not on master
+        id: checked
         run: |
           set -euo pipefail
           git fetch --quiet origin master
-          if ! git merge-base --is-ancestor HEAD origin/master; then
+          checked_sha=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$checked_sha" origin/master; then
             echo "REFUSING: $(git rev-parse --short HEAD) is not an ancestor of origin/master." >&2
             echo "  A released binary is installed by other seats. Off master it has not" >&2
             echo "  passed the ubuntu + windows suite, and this workflow does not run it." >&2
@@ -96,6 +100,7 @@ jobs:
             exit 1
           fi
           echo "tag commit $(git rev-parse --short HEAD) is on master"
+          echo "sha=$checked_sha" >> "$GITHUB_OUTPUT"
 
       - name: Resolve minimum core version
         id: core
@@ -206,23 +211,23 @@ jobs:
         uses: actions/checkout@v5
         with:
           path: claustrum
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.checked_sha }}
 
-      # THE STAMP MUST NAME THE COMMIT THAT WAS CHECKED OUT, WHICH IS NOT `github.sha`.
-      # On a workflow_dispatch for an existing tag, `github.sha` is the DISPATCHED ref
-      # (master) while the checkout above used `inputs.tag`. v0.1.0 shipped that way: the
-      # source was the tag and the stamp was master, so the published binaries reported a
-      # revision they were not built from. Harmless there only because the two commits
-      # differed by zero non-workflow files -- luck, not design. Dispatching for an older
-      # tag after code has moved would put a confidently wrong commit in a credential
-      # vault's --version, which is the value an operator uses to find the source they are
-      # running.
-      #
-      # `git rev-parse HEAD` in the checkout answers what was ACTUALLY built.
+      # A tag can move after prepare checks its ancestry. Build and stamp only that
+      # checked commit, not a newly resolved tag or the workflow dispatch's github.sha.
       - name: Resolve the built revision
         id: rev
         shell: bash
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          CHECKED_SHA: ${{ needs.prepare.outputs.checked_sha }}
+        run: |
+          set -euo pipefail
+          built_sha=$(git rev-parse HEAD)
+          if [[ "$built_sha" != "$CHECKED_SHA" ]]; then
+            echo "REFUSING: asset checkout differs from the ancestry-checked commit." >&2
+            exit 1
+          fi
+          echo "sha=$built_sha" >> "$GITHUB_OUTPUT"
 
       # THE TAG AND THE CRATE VERSION MUST AGREE, and this gate exists because they did
       # not in v0.1.1 and it broke the installer for every new user on every platform.

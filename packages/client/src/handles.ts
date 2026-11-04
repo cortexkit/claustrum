@@ -203,7 +203,9 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
   const stat = io.stat ?? nodeStat
   const lstat = io.lstat ?? nodeLstat
   const read = io.readFile ?? readFile
-  const openFd = io.open ?? ((candidate: string) => nodeOpen(candidate, constants.O_RDONLY | constants.O_NOFOLLOW))
+  // Do not wait for a FIFO writer before the descriptor's regular-file check.
+  const nonblock = process.platform === 'win32' ? 0 : constants.O_NONBLOCK
+  const openFd = io.open ?? ((candidate: string) => nodeOpen(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | nonblock))
   let descriptor: HandleFileDescriptor | undefined
   try {
     let metadata: HandleFileStat

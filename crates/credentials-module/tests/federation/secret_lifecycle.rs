@@ -379,6 +379,76 @@ async fn a_permanent_receipt_ends_when_the_phone_revokes_or_the_secret_is_recrea
 }
 
 #[tokio::test]
+async fn local_and_forwarded_flow_approvals_enforce_the_flow_id_grammar() {
+    let rig = Rig::new("secret-flow-id-grammar").await;
+    let principal = Principal::Reserved {
+        module_id: "basal".into(),
+    };
+    let now = rig.vaults.a.clock.wall_ms();
+    let mut params = golden("request_flow_approval.request.api_key");
+    for id in [
+        "x".repeat(257),
+        "line\nbreak".into(),
+        "control\u{7f}".into(),
+        "non-ascii-é".into(),
+        String::new(),
+    ] {
+        params["flow"]["flow_id"] = json!(id);
+        assert!(
+            matches!(
+                claustrum_module_probe::secret_use::serve_flow_approval(
+                    &rig.a.store,
+                    Some(&principal),
+                    &params,
+                    || now
+                ),
+                claustrum_module_probe::secret_use::UseAnswer::InvalidParams
+            ),
+            "local: {id:?}"
+        );
+        let call = claustrum_module_probe::secret_use::sender_call(
+            "secret.request_flow_approval",
+            Some(&principal),
+            &params,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                rig.reader.route_secret_call(call).await,
+                SecretRoute::Answer(SecretForwardAnswer::InvalidParams)
+            ),
+            "forwarded: {id:?}"
+        );
+    }
+    assert_eq!(
+        count(&rig, "SELECT COUNT(*) FROM secret_pending_requests"),
+        0
+    );
+    for id in ["x".into(), "x".repeat(256)] {
+        params["flow"]["flow_id"] = json!(id);
+        let claustrum_module_probe::secret_use::UseAnswer::Reply(local) =
+            claustrum_module_probe::secret_use::serve_flow_approval(
+                &rig.a.store,
+                Some(&principal),
+                &params,
+                || now,
+            )
+        else {
+            panic!("valid local flow id: {id:?}")
+        };
+        assert_eq!(local["status"], "approval_required");
+        let forwarded = rig
+            .on_b("basal", "secret.request_flow_approval", &params)
+            .await;
+        assert_eq!(forwarded["status"], "approval_required");
+    }
+    assert_eq!(
+        count(&rig, "SELECT COUNT(*) FROM secret_pending_requests"),
+        4
+    );
+}
+
+#[tokio::test]
 async fn a_forwarded_flow_is_approved_and_revoked_only_for_its_asking_computer() {
     let rig = Rig::new("secret-flow-lifecycle").await;
     let c = rig.other_asker().await;

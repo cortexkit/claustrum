@@ -50,7 +50,10 @@ use super::ingress::{
     decode_paired_devices, decode_peer_transfer_key, Lookup, PeerKey, CALLOSUM_MODULE_ID,
     OP_TRANSFER_DELIVER,
 };
-use super::outbound::{management_surface, OutboundClient, RouteCall, ADMIN_OP_BUDGET};
+use super::outbound::{
+    is_permanent_callosum_class, management_surface, OutboundClient, OutboundError, RouteCall,
+    ADMIN_OP_BUDGET,
+};
 use super::remote_read::fed_provider_module;
 
 /// The HPKE `info` of a transfer envelope. A token reply uses a different literal, so
@@ -888,11 +891,7 @@ fn classify_delivery(reply: &Value) -> DeliveryReply {
         return DeliveryReply::refused(code, class);
     }
     if let Some(code) = reply.get("code").and_then(Value::as_str) {
-        let permanent_route_fault = matches!(
-            code,
-            "fed_not_exposed" | "fed_unknown_module" | "fed_bad_call"
-        ) || code.starts_with("fed_payload_");
-        return if permanent_route_fault {
+        return if is_permanent_callosum_class(code) {
             DeliveryReply::refused("federation_setup_invalid", "permanent")
         } else if code.starts_with("fed_") {
             DeliveryReply::refused("home_unreachable", "transient")
@@ -1341,6 +1340,9 @@ impl Transfers {
             .await
         {
             Ok(reply) => classify_delivery(&reply),
+            Err(OutboundError::Refused { code, .. }) if is_permanent_callosum_class(&code) => {
+                DeliveryReply::refused("federation_setup_invalid", "permanent")
+            }
             Err(_) => unreachable(),
         }
     }

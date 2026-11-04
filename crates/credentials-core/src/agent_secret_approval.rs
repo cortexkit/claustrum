@@ -68,7 +68,8 @@ pub struct FlowIdentity {
 
 impl FlowIdentity {
     pub fn validate(&self) -> Result<(), super::ValidationError> {
-        if self.flow_id.is_empty()
+        if !(1..=256).contains(&self.flow_id.len())
+            || !self.flow_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
             || !(1..=MAX_SECRET_JSON_INTEGER).contains(&self.version)
             || self.code_hash.len() != 64
             || !self
@@ -111,17 +112,8 @@ const STATEMENT_TAGS: &[&str] = &["ck-secret-flow-statement/v1", "ck-secret-use-
 /// The remaining checks are the identity constraints the store's grant lookup relies on, so
 /// a grant is never created for an identity it could not match later.
 fn flow_identity_encodes_unchanged(flow: &FlowIdentity) -> Result<(), super::ValidationError> {
-    if flow.flow_id.is_empty()
-        || STATEMENT_TAGS.contains(&flow.flow_id.as_str())
-        || !(1..=256).contains(&flow.install_id.len())
-        || !flow.install_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
-        || flow.code_hash.len() != 64
-        || !flow
-            .code_hash
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !(1..=MAX_SECRET_JSON_INTEGER).contains(&flow.version)
-    {
+    flow.validate()?;
+    if STATEMENT_TAGS.contains(&flow.flow_id.as_str()) {
         return Err(super::ValidationError::InvalidParams);
     }
     Ok(())
@@ -327,6 +319,55 @@ impl ApprovalEnvelope {
         let signature = Signature::from_der(signature).map_err(|_| invalid)?;
         key.verify(bytes, &signature).map_err(|_| invalid)?;
         Ok(envelope)
+    }
+}
+
+#[cfg(test)]
+mod flow_identity_tests {
+    use super::*;
+
+    fn identity(flow_id: String) -> FlowIdentity {
+        FlowIdentity {
+            flow_id,
+            version: 1,
+            code_hash: "a".repeat(64),
+            install_id: "install-1".into(),
+        }
+    }
+
+    #[test]
+    fn flow_ids_accept_one_through_256_printable_ascii_bytes() {
+        for id in [
+            "a".into(),
+            "x".repeat(256),
+            (0x20u8..=0x7e).map(char::from).collect(),
+        ] {
+            let flow = identity(id);
+            flow.validate().unwrap();
+            flow_identity_encodes_unchanged(&flow).unwrap();
+        }
+    }
+
+    #[test]
+    fn flow_ids_refuse_empty_and_257_byte_identities() {
+        for id in [String::new(), "x".repeat(257)] {
+            let flow = identity(id);
+            assert!(flow.validate().is_err(), "{:?}", flow.flow_id);
+            assert!(flow_identity_encodes_unchanged(&flow).is_err());
+        }
+    }
+
+    #[test]
+    fn flow_ids_refuse_controls_del_and_non_ascii() {
+        let ids = (0u8..=0x1f)
+            .chain([0x7f])
+            .map(|b| format!("flow{}id", char::from(b)))
+            .chain(["flowé".into(), "flow😀".into()]);
+        for id in ids {
+            let flow = identity(id);
+            assert!(flow.validate().is_err(), "{:?}", flow.flow_id);
+            assert!(flow_identity_encodes_unchanged(&flow).is_err());
+        }
     }
 }
 

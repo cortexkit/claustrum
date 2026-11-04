@@ -1287,6 +1287,73 @@ async fn send_to_a_receiver_with_no_announced_key_commits_nothing() {
     assert!(rig.deliveries().is_empty());
 }
 
+#[tokio::test]
+async fn channel_zero_transfer_refusals_follow_sender_row_policy_on_send_and_resume() {
+    let rig = Rig::new("transfer-control-refusals").await;
+    rig.api_key_on_a(API_ID, b"sk-control-refusals");
+    for code in [
+        "fed_not_exposed",
+        "fed_unknown_module",
+        "fed_bad_call",
+        "fed_payload_too_large",
+        "fed_busy",
+        "fed_partition",
+        "unknown_method",
+    ] {
+        let terminal = matches!(
+            code,
+            "fed_not_exposed" | "fed_unknown_module" | "fed_bad_call" | "fed_payload_too_large"
+        );
+        for resume in [false, true] {
+            let queued = if resume {
+                rig.vaults.callosum.answer(
+                    "claustrum",
+                    OP_TRANSFER_DELIVER,
+                    Reply::Permanent("fed_busy".into()),
+                );
+                let queued = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+                assert!(queued.row_kept);
+                Some(queued.transfer_id)
+            } else {
+                None
+            };
+            rig.vaults.callosum.answer(
+                "claustrum",
+                OP_TRANSFER_DELIVER,
+                Reply::Permanent(code.into()),
+            );
+            let report = match queued {
+                Some(id) => rig.a.transfers.resume(&id).await.unwrap(),
+                None => rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap(),
+            };
+            assert_eq!(
+                report.reply,
+                DeliveryReply::Refused {
+                    code: if terminal {
+                        "federation_setup_invalid"
+                    } else {
+                        "home_unreachable"
+                    }
+                    .into(),
+                    class: if terminal { "permanent" } else { "transient" }.into(),
+                },
+                "{code}, resume={resume}"
+            );
+            assert_eq!(report.row_kept, !terminal, "{code}, resume={resume}");
+            let row = rig
+                .a
+                .store()
+                .outgoing_transfer(&report.transfer_id)
+                .unwrap();
+            assert_eq!(row.is_some(), !terminal, "{code}, resume={resume}");
+            if let Some(row) = row {
+                assert_eq!(row.last_reply_code.as_deref(), Some("home_unreachable"));
+            }
+        }
+    }
+    assert!(rig.b.incoming().is_empty());
+}
+
 /// A failed pairing lookup at delivery is transient: no row on B, and A keeps its row
 /// for a resume that then succeeds.
 #[tokio::test]

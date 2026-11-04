@@ -6204,9 +6204,8 @@ impl EncryptedStore {
             .with_conn(|conn| {
                 let state: Option<String> = conn
                     .query_row(
-                        "SELECT state FROM credentials WHERE credential_id LIKE ?1 \
-                         ORDER BY credential_id LIMIT 1",
-                        [format!("{}%", crate::federation::VAULT_TRANSFER_ID_PREFIX)],
+                        "SELECT state FROM credentials WHERE credential_id = ?1",
+                        [crate::federation::VAULT_TRANSFER_ID],
                         |row| row.get(0),
                     )
                     .optional()?;
@@ -6698,7 +6697,7 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    /// Verify the full audit chain against the master-key-derived audit key.
+    /// Verify the full audit chain against the persisted audit key, sealed under the master key.
     /// Returns the seq of the first broken entry, or `None` if it verifies.
     pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreOpError> {
         let entries = self.read_audit(None)?;
@@ -7132,9 +7131,8 @@ fn rusqlite_err(msg: &str) -> rusqlite::Error {
 fn vault_transfer_key_fence_holds_tx(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
     let active: Option<String> = conn
         .query_row(
-            "SELECT state FROM credentials WHERE credential_id LIKE ?1 \
-             ORDER BY credential_id LIMIT 1",
-            [format!("{}%", crate::federation::VAULT_TRANSFER_ID_PREFIX)],
+            "SELECT state FROM credentials WHERE credential_id = ?1",
+            [crate::federation::VAULT_TRANSFER_ID],
             |row| row.get(0),
         )
         .optional()?;

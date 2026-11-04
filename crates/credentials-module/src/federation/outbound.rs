@@ -327,7 +327,8 @@ impl OutboundClient {
     /// failure, so the caller classifies it. Everything else (no connection, no reply
     /// in time, the connection dying) is [`OutboundError::Unavailable`].
     ///
-    /// A failure withdraws this call's own waiter and drops this call's own binding.
+    /// A failure or cancellation withdraws this call's own waiter and drops this
+    /// call's own binding.
     /// It never tears down a connection another call is using: only the reader task
     /// does that, and only when a frame proves the connection itself is gone.
     pub async fn call(
@@ -337,10 +338,19 @@ impl OutboundClient {
         deadline: Duration,
     ) -> Result<Value, OutboundError> {
         let budget = tokio::time::Instant::now() + deadline;
+        let mut binding = BindingRegistration {
+            client: self,
+            route_key,
+            completed: false,
+        };
         match self.call_inner(route_key, &call, budget).await {
-            Ok(reply) => Ok(reply),
+            Ok(reply) => {
+                binding.completed = true;
+                Ok(reply)
+            }
             Err(failure) => {
                 self.drop_binding(route_key);
+                binding.completed = true;
                 if let Some(dead) = failure.dead.as_ref() {
                     self.retire(dead, budget).await;
                 }
@@ -638,6 +648,22 @@ impl OutboundClient {
             .await
             .map_err(|_| OutboundError::Unavailable(format!("writing the {stage} timed out")))?;
         sent.map_err(|error| OutboundError::Unavailable(format!("writing the {stage}: {error}")))
+    }
+}
+
+// An enclosing timeout can drop a call before its own deadline cleanup runs.
+// Keep binding invalidation synchronous so cancellation still forces a rebind.
+struct BindingRegistration<'a> {
+    client: &'a OutboundClient,
+    route_key: &'a str,
+    completed: bool,
+}
+
+impl Drop for BindingRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.client.drop_binding(self.route_key);
+        }
     }
 }
 

@@ -967,6 +967,192 @@ impl Drop for GrantCliVault {
     }
 }
 
+#[test]
+fn cli_review_minted_bearer_is_stdout_only() {
+    let vault = GrantCliVault::new("mint-streams");
+    vault.bootstrap();
+    assert!(vault
+        .run(&[
+            "put",
+            "--id",
+            "apikey:streams",
+            "--payload-file",
+            &payload_file("fixture")
+        ])
+        .status
+        .success());
+    let minted = vault.run(&["mint-handle", "--id", "apikey:streams"]);
+    assert!(minted.status.success());
+    let stdout = String::from_utf8(minted.stdout).unwrap();
+    let raw = stdout.trim();
+    assert!(raw.starts_with("ckh_"));
+    assert_eq!(stdout, format!("{raw}\n"));
+    assert!(!String::from_utf8_lossy(&minted.stderr).contains(raw));
+}
+
+#[test]
+fn cli_review_payload_filename_is_not_a_replacement_flag() {
+    let vault = GrantCliVault::new("flag-filename");
+    vault.bootstrap();
+    assert!(vault
+        .run(&[
+            "put",
+            "--id",
+            "apikey:filename",
+            "--payload-file",
+            &payload_file("original")
+        ])
+        .status
+        .success());
+    std::fs::write(vault.root.join("--replace"), b"replacement").unwrap();
+    let run = |replace: bool| {
+        let mut command = cli();
+        command
+            .current_dir(&vault.root)
+            .args([
+                "put",
+                "--id",
+                "apikey:filename",
+                "--payload-file",
+                "--replace",
+            ])
+            .arg("--data-dir")
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path);
+        if replace {
+            command.arg("--replace");
+        }
+        command.output().unwrap()
+    };
+    let before = vault.run(&["list", "--json"]).stdout;
+    let refused = run(false);
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(vault.run(&["list", "--json"]).stdout, before);
+    let replaced = run(true);
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    assert!(String::from_utf8_lossy(&replaced.stdout)
+        .contains("replaced apikey:filename (unconditional)"));
+    assert_ne!(vault.run(&["list", "--json"]).stdout, before);
+}
+
+#[test]
+fn cli_review_trailing_value_flags_refuse_before_put() {
+    for flag in [
+        "--expires-ms",
+        "--kind",
+        "--expected-hash",
+        "--client-id",
+        "--provider-id",
+    ] {
+        let vault = GrantCliVault::new("missing-value");
+        vault.bootstrap();
+        let before = vault.run(&["list", "--json"]).stdout;
+        let out = vault.run(&[
+            "put",
+            "--id",
+            "apikey:missing",
+            "--payload-file",
+            &payload_file("fixture"),
+            flag,
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{flag}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("{flag} requires a value")),
+            "{flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(vault.run(&["list", "--json"]).stdout, before, "{flag}");
+    }
+}
+
+fn cli_review_help(verb: &str) -> String {
+    let out = cli().args(["help", verb]).output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn cli_review_bootstrap_runbook_describes_idempotent_success() {
+    let text = include_str!("../../../docs/operator-runbook.md");
+    assert!(!text.contains("a second bootstrap is refused"));
+    assert!(text.contains("already provisioned") && text.contains("exit 0"));
+}
+
+#[test]
+fn cli_review_grants_help_describes_lease_free_fallback() {
+    let text = cli_review_help("grants");
+    assert!(
+        text.contains("lease-free") && text.contains("local metadata"),
+        "{text}"
+    );
+    assert!(!text.contains("offline lease path"));
+}
+
+#[test]
+fn cli_review_transfer_help_describes_offline_recovery() {
+    let text = cli_review_help("transfer");
+    assert!(
+        text.contains("init --replace can recover offline"),
+        "{text}"
+    );
+    assert!(text.contains("existing key must be off active"), "{text}");
+    assert!(text.contains("init --self"), "{text}");
+}
+
+#[test]
+fn cli_review_revoke_help_names_enrolled_principals_and_selectors() {
+    let text = cli_review_help("revoke-grant");
+    assert!(text.contains("<id|reserved:id|enrolled:name>"), "{text}");
+    let out = cli().arg("help").output().unwrap();
+    let top = String::from_utf8(out.stdout).unwrap();
+    let row = top
+        .lines()
+        .find(|line| line.trim_start().starts_with("revoke-grant "))
+        .unwrap();
+    assert!(row.contains("exact/category/audience"), "{row}");
+    assert!(!row.contains("prefix"), "{row}");
+}
+
+#[test]
+fn cli_review_put_help_distinguishes_shell_whitespace() {
+    let text = cli_review_help("put");
+    assert!(!text.contains("same bytes as $(cat file)"));
+    assert!(text.contains("Unlike shell command substitution"), "{text}");
+    assert!(text.contains("spaces and tabs"), "{text}");
+}
+
+#[test]
+fn cli_review_version_is_documented_as_standalone() {
+    for flag in ["--version", "-V"] {
+        let output = cli().arg(flag).output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("ck-auth "));
+        let output = cli().args(["status", flag]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    }
+    let out = cli().arg("help").output().unwrap();
+    let top = String::from_utf8(out.stdout).unwrap();
+    let globals = top
+        .split_once("GLOBAL FLAGS\n")
+        .unwrap()
+        .1
+        .split("\n\n")
+        .next()
+        .unwrap();
+    assert!(!globals.contains("--version"), "{globals}");
+    assert!(top.contains("ck auth --version (or -V)"), "{top}");
+}
+
 fn grant_row_fields<'a>(stdout: &'a str, credential_prefix: &str) -> Vec<&'a str> {
     stdout
         .lines()
@@ -5478,7 +5664,8 @@ fn hash_revoke_cli_stops_a_previously_resolving_handle() {
     let raw = String::from_utf8(minted.stdout).unwrap().trim().to_owned();
     assert!(String::from_utf8_lossy(&minted.stderr)
         .lines()
-        .any(|line| line == format!("revoke with: ck auth revoke-handle --handle {raw}")));
+        .any(|line| line == "revoke with: ck auth revoke-handle --handle <handle>"));
+    assert!(!String::from_utf8_lossy(&minted.stderr).contains(&raw));
     let hash = credentials_core::store::handle_hash(&raw);
     let open = || {
         let key = credentials_core::resolver::resolve(
@@ -5596,13 +5783,14 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .split_once("];")
         .expect("global hoist array end")
         .0;
-    let mut globals: Vec<&str> = hoisted.split('"').filter(|s| s.starts_with("--")).collect();
+    let globals: Vec<&str> = hoisted.split('"').filter(|s| s.starts_with("--")).collect();
     assert_eq!(globals.len(), 3, "global hoist extraction narrowed");
-    globals.push("--version");
     let global_table = top
         .split_once("GLOBAL FLAGS\n")
         .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
         .unwrap_or("");
+    assert!(!global_table.contains("--version"));
+    assert!(top.contains("ck auth --version (or -V)"));
     for flag in globals {
         let count = global_table
             .lines()

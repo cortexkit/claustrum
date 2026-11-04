@@ -344,7 +344,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // Every remaining arg must be an accepted flag for this command (or its value);
     // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
     // before dispatch, so a bad invocation never reaches the keychain or the lease.
-    reject_unknown_args(&command, &args)?;
+    let options = reject_unknown_args(&command, &args)?;
     // A secret verb's flags belong to ONE sub-verb each and a flag's value may be any
     // word, so `secret_cli::guard_args` is the only check that can judge the invocation:
     // it knows the verb being run and lists the flags that verb takes.
@@ -360,7 +360,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
 
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
-        "put" => cmd_put(&global, &args),
+        "put" => cmd_put(&global, &args, options),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
         "sign" => cmd_sign(&global, &args),
         "mint-kem-key" => cmd_mint_kem_key(&global, &args),
@@ -429,18 +429,39 @@ fn hoist_leading_global_flags(args: &mut Vec<String>) {
     args.extend(hoisted);
 }
 
+#[derive(Debug, Default)]
+struct ParsedOptions {
+    values: std::collections::BTreeMap<String, String>,
+    bools: std::collections::BTreeSet<String>,
+}
+
+impl ParsedOptions {
+    fn optional(&self, flag: &str) -> Option<String> {
+        self.values.get(flag).cloned()
+    }
+
+    fn required(&self, flag: &str) -> Result<String, CliError> {
+        self.optional(flag)
+            .ok_or_else(|| CliError::Usage(format!("{flag} is required")))
+    }
+
+    fn has_flag(&self, flag: &str) -> bool {
+        self.bools.contains(flag)
+    }
+}
+
 /// Reject any leftover arg that is not an accepted flag (or a flag's value) for the
 /// command, AFTER the global flags have been pulled. The arg parser consumes the
 /// flags it knows and ignores the rest, so without this a misspelled or stray flag is
 /// silently dropped. For a command that takes no required flag (such as `bootstrap`),
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
-fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
+fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
     // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
     // the generic scan below cannot judge it. `secret_cli` does, against the table for the
     // verb actually named, and that is the only argument check that runs for this verb.
     if command == "secret" {
-        return cli_support::secret_cli::guard_args(args);
+        return cli_support::secret_cli::guard_args(args).map(|()| ParsedOptions::default());
     }
     // The per-command flags that TAKE a value. `--data-dir` / `--key-path` are global
     // and already removed by parse_global before this runs.
@@ -525,6 +546,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "enroll" => &["--keep-grants"],
         _ => &[],
     };
+    let mut options = ParsedOptions::default();
     let mut i = if matches!(command, "set-identity" | "set-category")
         && args.first().is_some_and(|arg| !arg.starts_with("--"))
     {
@@ -587,11 +609,19 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             ));
         }
         if bool_flags.contains(&arg.as_str()) {
+            options.bools.insert(arg.clone());
             i += 1;
             continue;
         }
         if value_flags.contains(&arg.as_str()) {
             // Skip the flag AND its value (the value may look like anything).
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| CliError::Usage(format!("{arg} requires a value")))?;
+            options
+                .values
+                .entry(arg.clone())
+                .or_insert_with(|| value.clone());
             i += 2;
             continue;
         }
@@ -600,7 +630,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             help_verb(command)
         )));
     }
-    Ok(())
+    Ok(options)
 }
 
 /// The short verb table shown for bare `ck auth`, `ck auth help`, and an unknown
@@ -636,7 +666,7 @@ fn usage_short() -> String {
         revoke-handle       revoke one capability handle\n\
         revoke-all-handles  revoke every handle for a credential\n\
         grant               grant a module or consumer an explicit selector\n\
-        revoke-grant        revoke a reserved module's prefix or category selector\n\
+        revoke-grant        revoke an exact/category/audience grant\n\
        invalidate          mark a credential needs-reauth\n\
        reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
@@ -656,7 +686,9 @@ fn usage_short() -> String {
      \x20 --data-dir <dir>   vault location (default: <data_home>/cortexkit/claustrum)\n\
      \x20 --subc <file>      connection file; auto-discovered on a standard install\n\
      \x20 --key-path <file>  operator key file instead of the OS keychain\n\
-     \x20 --version          print the build version and exit\n\
+     \n\
+     STANDALONE\n\
+     \x20 ck auth --version (or -V)  print the build version and exit\n\
      \n\
      NOTES\n\
      On a standard install commands need no flags — the vault location and the\n\
@@ -817,8 +849,8 @@ fn help_verb(verb: &str) -> String {
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
              id, selector kind (exact, category or audience), selector, operation, reach,\n\
              and creation time. Read-only; it uses the authenticated admin.status\n\
-             path, reading the running daemon when available and the offline lease path\n\
-             otherwise. An empty grant table prints `no grants`."
+             path when the daemon is available, otherwise a lease-free, read-only\n\
+             local metadata read. An empty grant table prints `no grants`."
         }
         "categories" => {
             "ck auth categories\n\
@@ -896,10 +928,13 @@ fn help_verb(verb: &str) -> String {
              NOTES\n\
              Moves an api key, DSN, cookie or opaque secret to another member's vault,\n\
              sealed to a key only that vault holds. Rotating logins never move this way.\n\
-             init creates the transfer key and records the self id; callosum must agree\n\
-             that the id is this computer's. send, --resume, accept and init need the\n\
-             running daemon (they make outbound calls) and are refused offline with\n\
-             federation_requires_daemon. A send that cannot be delivered is kept for\n\
+             init --self creates the transfer key and records the self id; callosum must\n\
+             agree that the id is this computer's. send, --resume, accept and init --self\n\
+             need the running daemon (they make outbound calls) and are refused offline\n\
+             with federation_requires_daemon. init --replace can recover offline: the\n\
+             existing key must be off active; missing or active keys are refused. Recovery\n\
+             rejects pending incoming transfers and abandons outgoing transfers.\n\
+             A send that cannot be delivered is kept for\n\
              --resume. Nothing is created on the receiver until its operator accepts."
         }
         "remote" => {
@@ -1044,9 +1079,9 @@ fn help_verb(verb: &str) -> String {
              GitHub App ids must be github_app:<GitHub slug>. The App JWT checks\n\
              the slug with GitHub before storing; an unavailable check refuses.\n\
              \n\
-             A one-line secret file gives the same bytes as $(cat file). A value that must\n\
-             END in whitespace cannot come from a file; use a cookie: id, whose bytes are\n\
-             taken verbatim."
+             Unlike shell command substitution, non-cookie file input also trims trailing\n\
+             spaces and tabs. A value that must END in whitespace cannot come from a file;\n\
+             cookie: ids take file bytes verbatim."
         }
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>\n\
@@ -1198,11 +1233,12 @@ fn help_verb(verb: &str) -> String {
              that name gets it. Revoke the grant if granting ahead was a mistake."
         }
         "revoke-grant" => {
-            "ck auth revoke-grant --principal <id|reserved:id>\n\
+            "ck auth revoke-grant --principal <id|reserved:id|enrolled:name>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
              \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
              \n\
-             \x20 --principal <id|reserved:id>  reserved module principal\n\
+             \x20 --principal <id|reserved:id|enrolled:name>\n\
+             \x20                               module or enrolled consumer principal\n\
              \x20 --selector-kind <kind>        required: exact, category or audience\n\
              \x20 --selector <value>            credential id, category name or audience string\n\
              \x20 --operation <operation>        revoke authority (no `--op` alias)\n\
@@ -2027,14 +2063,16 @@ fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
     pem
 }
 
-fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+fn cmd_put(
+    global: &GlobalArgs,
+    args: &[String],
+    mut options: ParsedOptions,
+) -> Result<(), CliError> {
     let ids = provider_id_flags(args)?;
-    let mut prepared_args = args.to_vec();
-    if !put_prompt::prepare(global, &mut prepared_args)? {
+    if !put_prompt::prepare(global, &mut options)? {
         return Ok(());
     }
-    let args = prepared_args.as_slice();
-    let id = required(args, "--id")?;
+    let id = options.required("--id")?;
     let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
@@ -2044,7 +2082,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // Keep secret bytes out of argv: read a file or use the hidden terminal prompt.
     // Ordinary key files drop their terminal line ending, but a cookie header is sent
     // verbatim upstream, so its file bytes cannot be trimmed or normalized.
-    let payload = match optional(args, "--payload-file") {
+    let payload = match options.optional("--payload-file") {
         Some(path) if matches!(parsed.method, Some(AuthMethod::Cookie)) => {
             std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))?
         }
@@ -2073,7 +2111,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // `--client-id` is what selects the shape, because the adapter cannot mint without
     // it: it is the App JWT's `iss`. Requiring it here means a github_app record cannot
     // be created in a state that can never serve.
-    let client_id = optional(args, "--client-id");
+    let client_id = options.optional("--client-id");
     let is_github_app = id.starts_with("github_app:");
     match (&client_id, is_github_app) {
         (Some(_), false) => {
@@ -2092,14 +2130,14 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     }
 
     let kind = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
-        if optional(args, "--kind").is_some() {
+        if options.optional("--kind").is_some() {
             return Err(CliError::Usage(
                 "cookie:<domain> determines the cookie kind; do not pass --kind".to_string(),
             ));
         }
         CredentialKind::Cookie
     } else {
-        match optional(args, "--kind").as_deref() {
+        match options.optional("--kind").as_deref() {
             None | Some("api_key") => CredentialKind::ApiKey,
             Some("dsn") => CredentialKind::Dsn,
             Some("opaque") => CredentialKind::Opaque,
@@ -2111,14 +2149,15 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
     };
     let expires_at_ms = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
-        if optional(args, "--expires-ms").is_some() {
+        if options.optional("--expires-ms").is_some() {
             return Err(CliError::Usage(
                 "cookie credentials do not carry an expiry; omit --expires-ms".to_string(),
             ));
         }
         None
     } else {
-        optional(args, "--expires-ms")
+        options
+            .optional("--expires-ms")
             .map(|s| s.parse::<i64>())
             .transpose()
             .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?
@@ -2160,8 +2199,8 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // the provider console and the record_version bump invalidates every consumer's
     // cache. The two are mutually exclusive: a CAS is a targeted overwrite, --replace
     // is a deliberate blind one.
-    let replace = has_flag(args, "--replace");
-    match (optional(args, "--expected-hash"), replace) {
+    let replace = options.has_flag("--replace");
+    match (options.optional("--expected-hash"), replace) {
         (Some(_), true) => {
             return Err(CliError::Usage(
                 "pass only one of --expected-hash (CAS) or --replace (unconditional)".to_string(),
@@ -4786,7 +4825,7 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
         .ok_or_else(|| CliError::Io("mint did not return a handle".into()))?;
     // Keep stdout machine-readable for consumers capturing the bearer token.
     println!("{handle}");
-    eprintln!("revoke with: ck auth revoke-handle --handle {handle}");
+    eprintln!("revoke with: ck auth revoke-handle --handle <handle>");
     eprintln!("(minted handle for {id}; store it now — it is not recoverable)");
     warn_about_predecessors(global, &id, handle);
     Ok(())

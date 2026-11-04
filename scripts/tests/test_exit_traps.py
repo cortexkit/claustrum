@@ -37,7 +37,7 @@ def sourced_files(path, text, sources):
     """Resolve repository helpers without executing operator scripts or hooks."""
     for match in SOURCE.finditer(text):
         name = shlex.split(match[1], comments=True)[0]
-        name = re.sub(r'\$\{?script_dir\}?', str(path.parent), name)
+        name = re.sub(r'\$\{?script_dir\}?', path.parent.as_posix(), name)
         candidates = {(ROOT / name).resolve(), (path.parent / name).resolve()}
         for helper in sources:
             # A dirname/BASH_SOURCE expression still names its helper by suffix.
@@ -94,7 +94,7 @@ class ExitTrapContracts(unittest.TestCase):
                      for offset, action in exit_traps(sources[helper])]
             if not traps:
                 continue
-            with self.subTest(script=str(path.relative_to(ROOT))):
+            with self.subTest(script=path.relative_to(ROOT).as_posix()):
                 self.assertRegex(text, r'(?m)^finished=0$', 'initialize the completion flag')
                 self.assertEqual(statements(text)[-1], 'finished=1',
                                  'successful fallthrough must set the completion flag last')
@@ -136,7 +136,7 @@ class ExitTrapContracts(unittest.TestCase):
             script = scripts / 'test-native-store.sh'
             script.write_text(source[:trap.end()] + '\n' + injected
                               + '\necho "injection unexpectedly returned" >&2\nexit 99\n')
-            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+            env = dict(os.environ, PATH=os.fspath(bin_dir) + os.pathsep + os.environ['PATH'],
                        TMPDIR=str(scratch))
             env.pop('finished', None)
             env.pop('EXIT_TRAP_UNSET', None)

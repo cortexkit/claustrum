@@ -1022,10 +1022,12 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             }
         }
     }
-    // A provider-id refusal keeps its labelled rule and value. The bare `code/class` below
-    // would drop them, and the operator then could not tell which id broke which rule. The
-    // full Display is the same string the CLI's offline path prints, so both paths agree.
-    if let StoreOpError::InvalidProviderId { .. } = e {
+    // Keep provider-id details and enrollment grant guidance instead of reducing them
+    // to a bare code/class. Display also gives the offline CLI the same explanation.
+    if matches!(
+        e,
+        StoreOpError::InvalidProviderId { .. } | StoreOpError::EnrollmentNameHasGrants { .. }
+    ) {
         return AdminOutcome::Refused(e.to_string());
     }
     // The secret-home refusals already print the route's `code/class: detail` shape,

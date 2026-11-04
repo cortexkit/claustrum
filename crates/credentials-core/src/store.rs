@@ -1424,6 +1424,8 @@ pub enum StoreOpError {
     },
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
+    /// Approval would hand existing name-bound grants to a new consumer without consent.
+    EnrollmentNameHasGrants { name: String },
     /// Deposit grants are restricted to reserved principals and browser-session categories.
     InvalidDepositGrant,
     /// The existing cookie belongs to another creator, or has no known creator.
@@ -1581,6 +1583,11 @@ impl std::fmt::Display for StoreOpError {
                 write!(f, "invalid_provider_id/permanent: rule={rule} value={value}")
             }
             StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
+            StoreOpError::EnrollmentNameHasGrants { name } => write!(
+                f,
+                "enrollment_name_has_grants/permanent: enrolled:{name} has existing grants; \
+                 revoke them with ck auth revoke-grant, or approve with --keep-grants to explicitly inherit them"
+            ),
             StoreOpError::InvalidDepositGrant => f.write_str("deposit requires a reserved principal and category browser-session selector"),
             StoreOpError::DepositCookieNotPermitted => f.write_str("not_permitted"),
             StoreOpError::AccountIdentityMismatch {
@@ -1655,6 +1662,7 @@ impl StoreOpError {
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
+            StoreOpError::EnrollmentNameHasGrants { .. } => Some("enrollment_name_has_grants"),
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
             StoreOpError::InvalidMemberId => Some("invalid_member_id"),
@@ -2999,7 +3007,7 @@ impl EncryptedStore {
                 )
                 .optional()?;
             let Some((state, expires_at_ms)) = state else {
-                return Ok(None);
+                return Ok(Ok(None));
             };
             if state != "pending" || expires_at_ms <= now {
                 if state == "pending" && expires_at_ms <= now {
@@ -3009,7 +3017,7 @@ impl EncryptedStore {
                     )?;
                     append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
                 }
-                return Ok(None);
+                return Ok(Ok(None));
             }
             let live_name: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM enrolled_consumers \
@@ -3030,10 +3038,9 @@ impl EncryptedStore {
                 |row| row.get(0),
             )?;
             if has_grants && !keep_grants {
-                return Err(rusqlite_err(&format!(
-                    "enrolled:{final_name} has existing grants; revoke them with \
-                     ck auth revoke-grant, or approve with --keep-grants to explicitly inherit them"
-                )));
+                return Ok(Err(StoreOpError::EnrollmentNameHasGrants {
+                    name: final_name.to_string(),
+                }));
             }
             tx.execute(
                 "INSERT INTO enrolled_consumers \
@@ -3058,9 +3065,9 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(Some(enrollment_id.clone()))
+            Ok(Ok(Some(enrollment_id.clone())))
         })
-        .map_err(StoreOpError::from)?
+        .map_err(StoreOpError::from)??
         // Missing and expired requests are gone for approval purposes, not store faults.
         .ok_or(StoreOpError::NotFound)
     }

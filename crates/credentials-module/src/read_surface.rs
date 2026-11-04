@@ -4099,7 +4099,7 @@ mod error_class_tests {
         // store-taxonomy refusals, and docs/wire-contract-v1.md must name each of them
         // in its "Codes from the admin write path" note under the table.
         let rule = credentials_core::provider_ids::ProviderIdRule::Charset;
-        let store_codes: Vec<&str> = [
+        let store_errors = [
             StoreOpError::InvalidCredentialId,
             StoreOpError::InvalidCategoryName,
             StoreOpError::InvalidPlanTier,
@@ -4108,10 +4108,14 @@ mod error_class_tests {
                 value: String::new(),
             },
             StoreOpError::InvalidPrincipal,
-        ]
-        .iter()
-        .filter_map(StoreOpError::wire_code)
-        .collect();
+            StoreOpError::EnrollmentNameHasGrants {
+                name: String::new(),
+            },
+        ];
+        let store_codes: Vec<&str> = store_errors
+            .iter()
+            .filter_map(StoreOpError::wire_code)
+            .collect();
         let elsewhere_note = doc
             .split("**Codes from the admin write path, not the read surface:**")
             .nth(1)
@@ -4119,10 +4123,18 @@ mod error_class_tests {
             .expect("the doc must say which table codes come from the admin write path");
         // And the reverse: every store-taxonomy code reaches consumers through the admin
         // error envelope, so each needs a row in the table too.
-        for code in &store_codes {
-            assert!(
-                table.iter().any(|(c, _)| c == code),
-                "docs/wire-contract-v1.md must list the store-taxonomy code `{code}`"
+        for error in &store_errors {
+            let code = error.wire_code().expect("store-taxonomy code");
+            let rows: Vec<_> = table.iter().filter(|(c, _)| c == code).collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "docs/wire-contract-v1.md must list `{code}` exactly once"
+            );
+            assert_eq!(
+                Some(rows[0].1.as_str()),
+                error.wire_class(),
+                "the doc gives `{code}` a different class than the admin write path"
             );
         }
         for (code, _) in &table {

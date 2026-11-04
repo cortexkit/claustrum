@@ -64,6 +64,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
+| `enrollment_name_has_grants` | permanent | enrollment approval needs explicit consent to inherit existing name-bound grants; revoke them first or pass `--keep-grants` |
 | `invalid_plan_tier` | permanent | a plan tier set with `ck auth set-plan` is outside `^[a-z][a-z0-9_]{0,31}$` |
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
@@ -72,7 +73,8 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
 
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
-`invalid_provider_id`, `invalid_credential_id`, `invalid_principal` and `invalid_plan_tier` are store-taxonomy
+`invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`
+and `enrollment_name_has_grants` are store-taxonomy
 refusals (`StoreOpError::wire_code` in `credentials-core/src/store.rs`). A read never
 produces them. Every other code in the table is a `ReadError` the read surface emits;
 `read_error_wire_codes_are_golden_and_match_the_doc_table` in `read_surface.rs` checks
@@ -310,8 +312,9 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
 admits a pending request without minting a token. Optional `keep_grants` defaults to
 `false`; if the unused final name already has grants (including grants retained by
 older revocations or deliberately preprovisioned), approval refuses through the existing
-admin refusal path unless `keep_grants:true` explicitly authorizes inheritance. The
-grant check and approval are one transaction. `ck auth enroll approve` lists those
+admin refusal path as `enrollment_name_has_grants` / `permanent` unless
+`keep_grants:true` explicitly authorizes inheritance. The grant check and approval
+are one transaction. `ck auth enroll approve` lists those
 grants and explains how to revoke them or consent with `--keep-grants`. The success
 result remains `{"enrollment_id":"<id>","name":"consumer"}`.
 

@@ -5365,6 +5365,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn online_enrollment_approval_with_existing_grants_is_a_permanent_policy_refusal() {
+        use credentials_core::admin_auth::{AdminMacKey, TranscriptParts};
+        use credentials_core::enrollment::{
+            decode_lower_hex_32, enrollment_secret_hash, EnrollmentPoll,
+        };
+
+        let seed = 97;
+        let (surface, admin, store) = scoped_rig(seed);
+        admin.record_bind_at(96, 1, subc_protocol::Principal::Direct, "");
+        let secret = "ac".repeat(32);
+        let request = store
+            .propose_enrollment("consumer", &enrollment_secret_hash(&secret).unwrap())
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "consumer",
+                credentials_core::SelectorKind::Exact,
+                "apikey:one",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let before = store.audit_tip().unwrap();
+        let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+        let mac_key = AdminMacKey::derive(&key);
+        for keep_grants in [false, true] {
+            let challenge = routed_json(&surface, &admin, 96, OP_ADMIN_CHALLENGE, json!({})).await;
+            let nonce =
+                decode_lower_hex_32(challenge["result"]["nonce_hex"].as_str().unwrap()).unwrap();
+            let vault_id =
+                decode_lower_hex_32(challenge["result"]["vault_id_hex"].as_str().unwrap()).unwrap();
+            let op_body =
+                json!({"op":"admin.enroll_approve", "v":2, "request_id":request.request_id,
+                "final_name":"consumer", "keep_grants":keep_grants})
+                .to_string();
+            let tag = mac_key
+                .sign(&TranscriptParts {
+                    vault_id: &vault_id,
+                    key_id: key.key_id(),
+                    nonce: &nonce,
+                    op_body: op_body.as_bytes(),
+                })
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let (frame_type, bytes) = routed_reply(
+                &surface,
+                &admin,
+                96,
+                OP_ADMIN_OP,
+                json!({"op_body":op_body, "tag_hex":tag}),
+            )
+            .await;
+            let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if !keep_grants {
+                assert_eq!(frame_type, FrameType::Error);
+                assert_eq!(reply["code"], "admin_refused");
+                let message = reply["message"].as_str().unwrap();
+                let (code_and_class, guidance) = message.split_once(": ").unwrap();
+                assert_eq!(code_and_class, "enrollment_name_has_grants/permanent");
+                assert!(!message.contains("store_error"), "{message}");
+                assert!(!message.contains("transient"), "{message}");
+                assert!(guidance.contains("ck auth revoke-grant"), "{guidance}");
+                assert!(guidance.contains("--keep-grants"), "{guidance}");
+                assert_eq!(store.audit_tip().unwrap(), before);
+                assert!(matches!(
+                    store.poll_enrollment(&request.request_id, &secret),
+                    Ok(EnrollmentPoll::Pending)
+                ));
+            } else {
+                assert_eq!(frame_type, FrameType::Response);
+                assert_eq!(reply["result"]["name"], "consumer");
+            }
+        }
+        assert_eq!(store.list_read_grants().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn secret_use_dispatch_is_sender_only_and_grammar_uses_error_frames() {
         let (surface, admin, store) = scoped_rig(94);
         let refused = serde_json::to_vec(&uniform_not_found()).unwrap();

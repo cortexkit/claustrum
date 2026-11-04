@@ -167,6 +167,11 @@ fn enrollment_approval_requires_explicit_consent_for_retained_or_preprovisioned_
             "operator",
         )
         .unwrap_err();
+        assert!(
+            matches!(&error, StoreOpError::EnrollmentNameHasGrants { name } if name == "consumer")
+        );
+        assert_eq!(error.wire_code(), Some("enrollment_name_has_grants"));
+        assert_eq!(error.wire_class(), Some("permanent"));
         assert!(error.to_string().contains("--keep-grants"), "{error}");
         assert_eq!(store.audit_tip().unwrap(), before);
         assert_eq!(store.list_read_grants().unwrap(), grants);

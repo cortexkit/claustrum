@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def copy_checkout(source, destination, target):
@@ -95,6 +96,43 @@ def forget_binaries_from_another_copy(checkout, target):
     marker.write_text(str(checkout))
 
 
+COPY_IGNORED = {".git", "target", "node_modules", ".cortexkit", "__pycache__"}
+
+
+def mark_changed_sources(checkout, target):
+    """Give every file whose content changed since the last run a fresh mtime.
+
+    Cargo decides what to rebuild by comparing source modification times with its
+    cached outputs. A build-server snapshot does not carry real mtimes: on Windows
+    every file arrives with the same fixed time, older than the cached test binaries,
+    so an edited source looked unchanged and the gate ran binaries built from older
+    code. Content is the only reliable signal, so the cache keeps a hash per file and
+    any file that differs (or is new) is stamped now, which makes cargo rebuild the
+    crates that use it and nothing else.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    manifest = target / "gate-source-hashes.json"
+    try:
+        previous = json.loads(manifest.read_text())
+    except (FileNotFoundError, ValueError):
+        previous = {}
+    current = {}
+    now = time.time()
+    for root, dirs, files in os.walk(checkout):
+        # Prune the build-cache link and other ignored trees before descending.
+        dirs[:] = [name for name in dirs if name not in COPY_IGNORED]
+        for name in files:
+            path = Path(root) / name
+            relative = path.relative_to(checkout).as_posix()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            current[relative] = digest
+            if previous.get(relative) != digest:
+                os.utime(path, (now, now))
+    staged = manifest.with_suffix(".tmp")
+    staged.write_text(json.dumps(current, sort_keys=True))
+    os.replace(staged, manifest)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("full", "fast", "windows"))
@@ -123,11 +161,13 @@ def main(argv=None):
     else:
         copy_checkout(source, checkout, source / "target")
     forget_binaries_from_another_copy(checkout, source / "target")
+    mark_changed_sources(checkout, source / "target")
     if mode == "full":
         supervisor = scratch / "subconscious"
         # Cached under claustrum's writable target so the supervisor isn't rebuilt
         # from scratch on every gate run.
         copy_checkout(sibling, supervisor, source / "target" / "gate-subconscious")
+        mark_changed_sources(supervisor, source / "target" / "gate-subconscious")
         os.environ["CRED_SUBCONSCIOUS_ROOT"] = str(supervisor)
     elif mode == "windows":
         assert sibling is not None

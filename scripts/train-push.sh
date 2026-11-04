@@ -75,9 +75,11 @@
 #   3  the default branch kept moving through 3 re-queue rounds, or the rebase
 #      conflicted
 set -euo pipefail
-# Bash 3.2 can give EXIT traps status 0 after a nounset error. Require explicit
-# completion in both EXIT handlers: deleting the trigger-probe branch early on
-# and removing the CI/push logs later in the run.
+# Bash 3.2 can give EXIT traps status 0 after a nounset error, so an abort would
+# read as success. This script installs two EXIT handlers at different points: one
+# deletes the throwaway branch it pushes to check that CI triggers on train pushes,
+# and a later one removes its temporary CI and push logs. Both treat an exit 0
+# without `finished=1` (set only at the very end) as a failure.
 finished=0
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

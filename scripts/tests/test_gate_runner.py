@@ -303,6 +303,7 @@ exit "$SCENARIO"
                 with patch.dict(os.environ, env, clear=True), \
                         patch.object(remote, "copy_checkout") as copy, \
                         patch.object(remote, "forget_binaries_from_another_copy"), \
+                        patch.object(remote, "mark_changed_sources"), \
                         patch.object(remote.subprocess, "run", side_effect=worker):
                     self.assertEqual(remote.main([mode, *arguments]), 0)
                 self.assertEqual(copy.call_args_list[0].args[0], ROOT)
@@ -447,6 +448,38 @@ exec "$REAL_PYTHON" "$@"
             # Same copy path as last time: the cached binaries are valid, nothing cleaned.
             remote.forget_binaries_from_another_copy(checkout, target)
             self.assertEqual(calls, [])
+
+    def test_changed_sources_get_a_fresh_mtime_even_when_the_snapshot_time_is_fixed(self):
+        # Build-server snapshots can stamp every file with one old time, so cargo would
+        # reuse binaries built from older sources. Only content may decide.
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        target = self.bin / "target"
+        target.mkdir()
+        checkout = self.bin / "copy"
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "target").mkdir()
+        fixed = 1_000_000_000
+
+        def snapshot(edited):
+            for name, text in (("src/lib.rs", edited), ("README.md", "same"), ("target/out", "cache")):
+                path = checkout / name
+                path.write_text(text)
+                os.utime(path, (fixed, fixed))
+
+        snapshot("first")
+        remote.mark_changed_sources(checkout, target)
+        # The first run knows nothing yet, so every source is stamped fresh.
+        self.assertGreater((checkout / "src/lib.rs").stat().st_mtime, fixed)
+        snapshot("second")
+        remote.mark_changed_sources(checkout, target)
+        self.assertGreater((checkout / "src/lib.rs").stat().st_mtime, fixed)
+        self.assertEqual((checkout / "README.md").stat().st_mtime, fixed)
+        # The build-cache tree is never hashed or touched.
+        self.assertEqual((checkout / "target/out").stat().st_mtime, fixed)
+        self.assertNotIn("target/out", json.loads((target / "gate-source-hashes.json").read_text()))
 
     def test_snapshot_clones_trust_only_each_exact_git_directory(self):
         spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")

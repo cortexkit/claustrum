@@ -7,6 +7,10 @@
 //! `credential.list_scoped`'s derivation, and that no secret ever reaches the
 //! output.
 
+#[path = "support/payload_file.rs"]
+mod payload_file;
+use payload_file::payload_file;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -172,8 +176,8 @@ fn seed_three_credentials(vault: &JsonVault) {
             "put",
             "--id",
             "apikey:deepseek",
-            "--payload",
-            "deepseek-key"
+            "--payload-file",
+            &payload_file("deepseek-key")
         ])
         .status
         .success());
@@ -185,8 +189,8 @@ fn seed_three_credentials(vault: &JsonVault) {
             "opaque:notes",
             "--kind",
             "opaque",
-            "--payload",
-            "operator-notes"
+            "--payload-file",
+            &payload_file("operator-notes")
         ])
         .status
         .success());
@@ -382,11 +386,23 @@ fn list_json_carries_provider_ids_and_plan_tier_when_set() {
     let vault = JsonVault::new("list-json-providers-plan");
     vault.bootstrap();
     assert!(vault
-        .run(&["put", "--id", "apikey:zai", "--payload", "zai-key"])
+        .run(&[
+            "put",
+            "--id",
+            "apikey:zai",
+            "--payload-file",
+            &payload_file("zai-key")
+        ])
         .status
         .success());
     assert!(vault
-        .run(&["put", "--id", "apikey:plain", "--payload", "plain-key"])
+        .run(&[
+            "put",
+            "--id",
+            "apikey:plain",
+            "--payload-file",
+            &payload_file("plain-key")
+        ])
         .status
         .success());
     assert!(vault
@@ -463,7 +479,13 @@ fn list_json_never_prints_secret_material() {
     let marker = "sk-canary-9f3a-json-never-print";
     let payload = format!("prefix-{marker}-suffix");
     assert!(vault
-        .run(&["put", "--id", "apikey:deepseek", "--payload", &payload])
+        .run(&[
+            "put",
+            "--id",
+            "apikey:deepseek",
+            "--payload-file",
+            &payload_file(&payload)
+        ])
         .status
         .success());
     let source = vault.root.join("auth-marker.json");

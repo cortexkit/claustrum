@@ -13,8 +13,8 @@
 //!   cargo run -p credentials-module --example vault_read_probe -- \
 //!     --subc <connection-file> --handle <ckh_...>
 //!
-//! It deliberately does NOT print the credential payload bytes (only its length and
-//! a short fingerprint), so running it against a real credential does not splash the
+//! It deliberately does NOT print the credential payload bytes (only its length),
+//! so running it against a real credential does not splash the
 //! token across a terminal or log.
 
 use std::{path::PathBuf, time::Duration};
@@ -706,7 +706,7 @@ async fn main() {
             if wire {
                 println!("{}", redacted_wire(&parsed));
             }
-            // Print the FINGERPRINT and length, never the payload: this arm is run against
+            // Print only the length, never the payload: this arm is run against
             // production credentials and its output lands in a terminal scrollback.
             let served = parsed.pointer("/result/payload").and_then(Value::as_array);
             match served {
@@ -716,13 +716,9 @@ async fn main() {
                         .filter_map(Value::as_u64)
                         .map(|b| b as u8)
                         .collect();
-                    // fnv1a64, the same dependency-free fingerprint the handle arm uses:
-                    // enough to compare two reads for equality, never enough to recover
-                    // the secret from a terminal scrollback.
                     eprintln!(
-                        "[probe] get_scoped(id={id}) -> {} bytes, fnv1a64 {:016x}, credential_id={}",
-                        raw.len(),
-                        fnv1a64(&raw),
+                        "[probe] get_scoped(id={id}) -> {}, credential_id={}",
+                        payload_summary(&raw),
                         parsed
                             .pointer("/result/credential_id")
                             .and_then(Value::as_str)
@@ -1416,8 +1412,6 @@ fn base64url_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// FNV-1a-64: a stable, dependency-free fingerprint used only to compare two byte
-/// strings for equality without revealing either. NOT a cryptographic hash.
 /// Describe a served payload's SHAPE without ever printing it.
 ///
 /// WHY THIS EXISTS. A consumer asked what `oauth:cursor` carries, because their lane
@@ -1533,17 +1527,11 @@ fn redacted_wire(reply: &Value) -> String {
     serde_json::to_string(&reply).unwrap_or_default()
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+fn payload_summary(bytes: &[u8]) -> String {
+    // Unkeyed fingerprints would let a diagnostic reader check guesses of short secrets.
+    format!("{} byte(s) (content withheld)", bytes.len())
 }
 
-/// Print whether the read succeeded WITHOUT exposing the secret: only the payload
-/// length and a one-way fingerprint are shown.
 /// The served payload bytes of a successful read, or None.
 fn served_payload(frame: &Frame) -> Option<Vec<u8>> {
     if frame.header.ty != FrameType::Response {
@@ -1725,10 +1713,7 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
         FrameType::Response => {
             let value: Value = serde_json::from_slice(&frame.body).unwrap_or(Value::Null);
             // The read surface wraps the result as `{ "result": { "payload": [u8...] } }`.
-            // Show only the payload length and a one-way fingerprint (FNV-1a-64 hex of
-            // the bytes) — never the content. The fingerprint lets an operator compare
-            // the served bytes against an expected token's fingerprint WITHOUT either
-            // side exposing the secret.
+            // Show only the payload length, not its content or a guessable fingerprint.
             let payload = value
                 .get("result")
                 .and_then(|r| r.get("payload"))
@@ -1740,14 +1725,10 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
                         .filter_map(|b| b.as_u64().map(|n| n as u8))
                         .collect();
                     println!("OK credential.get returned a Response.");
-                    println!(
-                        "   payload: {} byte(s), fnv1a64={:016x} (content withheld)",
-                        bytes.len(),
-                        fnv1a64(&bytes)
-                    );
+                    println!("   payload: {}", payload_summary(&bytes));
                     // Opt-in, because a consumer integrating a new lane needs the SHAPE
                     // and nobody running a routine deploy check does. Off by default so
-                    // the common path stays a length and a fingerprint.
+                    // the common path stays a length only.
                     if describe {
                         println!("   shape: {}", describe_shape(&bytes));
                     }
@@ -1843,6 +1824,12 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
 #[cfg(test)]
 mod tests {
     use super::describe_cookie_jwts;
+
+    #[test]
+    fn payload_diagnostics_show_length_only() {
+        assert_eq!(super::payload_summary(b"a"), "1 byte(s) (content withheld)");
+        assert_eq!(super::payload_summary(b"b"), "1 byte(s) (content withheld)");
+    }
 
     /// The payload bytes never reach the output; every other key, and its value, does.
     #[test]

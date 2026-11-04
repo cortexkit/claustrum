@@ -92,9 +92,7 @@ fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
 /// noninteractive command, even when a script happens to inherit a terminal.
 pub(super) fn prepare(global: &GlobalArgs, args: &mut Vec<String>) -> Result<bool, CliError> {
     if !is_terminal()
-        || (optional(args, "--id").is_some()
-            && (optional(args, "--payload").is_some()
-                || optional(args, "--payload-file").is_some()))
+        || (optional(args, "--id").is_some() && optional(args, "--payload-file").is_some())
     {
         return Ok(true);
     }

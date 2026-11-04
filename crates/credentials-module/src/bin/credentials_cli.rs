@@ -21,7 +21,7 @@
 //!
 //! ```text
 //!   bootstrap                                  provision a new master key
-//!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
+//!   put       --id <id> --payload-file <path> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
 //!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
 //!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
 //!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature] [--operator-sign]
@@ -447,7 +447,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     let value_flags: &[&str] = match command {
         "put" => &[
             "--id",
-            "--payload",
             "--payload-file",
             "--kind",
             "--expires-ms",
@@ -581,6 +580,11 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             i += 1;
             continue;
         }
+        if command == "put" && (arg == "--payload" || arg.starts_with("--payload=")) {
+            return Err(CliError::Usage(
+                "--payload is no longer accepted: use --payload-file <path> or omit it for the hidden interactive prompt".into(),
+            ));
+        }
         if bool_flags.contains(&arg.as_str()) {
             i += 1;
             continue;
@@ -617,7 +621,7 @@ fn usage_short() -> String {
        enroll              manage this vault's pending requests and enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-         put                 store an API key, cookie, DSN or opaque secret\n\
+          put                 store a secret from a file or hidden prompt\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
@@ -995,12 +999,11 @@ fn help_verb(verb: &str) -> String {
              Never stores, refreshes, or prints keys, JWTs, or installation tokens."
         }
         "put" => {
-            "ck auth put [--id <id>] [--payload <v> | --payload-file <path>]\n\
+            "ck auth put [--id <id>] [--payload-file <path>]\n\
              \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
              \x20           [--replace | --expected-hash <hex>] [--client-id <id>]\n\
              \n\
              \x20 --id <id>                    vault credential id to create or rotate\n\
-             \x20 --payload <v>                secret bytes from argv, instead of a file\n\
              \x20 --payload-file <path>        keep the secret out of argv; cookie bytes are\n\
              \x20                              preserved exactly; for every other kind strip\n\
              \x20                              TRAILING whitespace (any amount: newlines, CR,\n\
@@ -1541,7 +1544,6 @@ fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
         } else if matches!(
             args[i].as_str(),
             "--id"
-                | "--payload"
                 | "--payload-file"
                 | "--kind"
                 | "--expires-ms"
@@ -2034,49 +2036,22 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "signing keys must be generated with mint-signing-key, not put".to_string(),
         ));
     }
-    // Payload from --payload (exact bytes), --payload-file, or a hidden terminal prompt.
+    // Keep secret bytes out of argv: read a file or use the hidden terminal prompt.
     // Ordinary key files drop their terminal line ending, but a cookie header is sent
     // verbatim upstream, so its file bytes cannot be trimmed or normalized.
-    // --payload-file keeps a real secret OUT of argv (process list / shell history).
-    //
-    // AND THERE IS DELIBERATELY NO ADVISORY WHEN --payload IS USED, which looks like an
-    // omission next to the reachability advisory ~200 lines below. The difference is that
-    // THAT condition is structural -- no handle AND no covering grant is a fact the vault
-    // can read -- while "this value is a secret" is a guess. Every discriminator available
-    // here is a heuristic on the bytes, and both of its failure modes are worse than
-    // silence: a false positive fires on probe deposits (`--payload
-    // 'claustrum-tombstone:v1:probe'` is a real invocation from this week's testing) and
-    // teaches the operator to skip the line, after which the true positives are invisible
-    // too; a false negative is worse still, because a warning that did not fire reads as
-    // clearance.
-    //
-    // So the exposure is real and the vault cannot close it at this seam. It is closed
-    // upstream instead, by whoever ASKS for a key naming a file path rather than
-    // prohibiting a paste -- a prohibition leaves the person holding a secret with no next
-    // step, and under time pressure they paste it anyway. Recorded 2026-09-13 after a peer
-    // routed a key through an ask row for exactly that reason.
-    let payload = match (
-        optional(args, "--payload"),
-        optional(args, "--payload-file"),
-    ) {
-        (Some(_), Some(_)) => {
-            return Err(CliError::Usage(
-                "pass only one of --payload or --payload-file".to_string(),
-            ))
-        }
-        (Some(p), None) => p.into_bytes(),
-        (None, Some(path)) if matches!(parsed.method, Some(AuthMethod::Cookie)) => {
+    let payload = match optional(args, "--payload-file") {
+        Some(path) if matches!(parsed.method, Some(AuthMethod::Cookie)) => {
             std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))?
         }
-        (None, Some(path)) => {
+        Some(path) => {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
             raw.trim_end().as_bytes().to_vec()
         }
-        (None, None) if put_prompt::is_terminal() => put_prompt::payload()?,
-        (None, None) => {
+        None if put_prompt::is_terminal() => put_prompt::payload()?,
+        None => {
             return Err(CliError::Usage(
-                "--payload <value> or --payload-file <path> is required".to_string(),
+                "--payload-file <path> is required without a terminal for the hidden interactive prompt".to_string(),
             ))
         }
     };
@@ -8178,14 +8153,16 @@ mod deposit_cli_tests {
     #[test]
     fn cookie_put_categories_and_list_creator_display_cover_operator_null_and_schema_13() {
         let root = root("cookie-list");
+        let payload = root.join("payload.txt");
+        std::fs::write(&payload, "session=operator").unwrap();
         success(
             &root,
             &[
                 "put",
                 "--id",
                 "cookie:example.com:me",
-                "--payload",
-                "session=operator",
+                "--payload-file",
+                payload.to_str().unwrap(),
             ],
         );
         let cfg = global(&root);
@@ -8401,7 +8378,7 @@ mod provider_cli_tests {
         let args: Vec<String> = [
             "--id",
             "apikey:test",
-            "--payload",
+            "--payload-file",
             "--provider-id",
             "--provider-id",
             "aa",
@@ -8410,7 +8387,7 @@ mod provider_cli_tests {
         .map(str::to_owned)
         .collect();
         assert_eq!(provider_id_flags(&args).unwrap(), vec!["aa"]);
-        let payload_only: Vec<String> = ["--payload", "--provider-id"]
+        let payload_only: Vec<String> = ["--payload-file", "--provider-id"]
             .into_iter()
             .map(str::to_owned)
             .collect();

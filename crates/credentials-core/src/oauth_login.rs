@@ -256,7 +256,13 @@ impl std::fmt::Display for LoginError {
                 write!(f, "authorization state mismatch (forged or stale callback)")
             }
             LoginError::Transport(m) => write!(f, "login transport error: {m}"),
-            LoginError::Status(code, m) => write!(f, "login token exchange failed ({code}): {m}"),
+            LoginError::Status(code, m) => {
+                write!(
+                    f,
+                    "login token exchange failed ({code}): {}",
+                    m.escape_debug()
+                )
+            }
             LoginError::Decode(m) => write!(f, "login response decode error: {m}"),
             LoginError::Device(m) => write!(f, "device login failed: {m}"),
         }
@@ -599,6 +605,15 @@ fn base64url_decode(s: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::refresh_adapters::fixture::FixtureTransport;
+
+    #[test]
+    fn provider_error_controls_are_visible_not_terminal_commands() {
+        let error = LoginError::Status(400, "rejected\x1b[2J\nretry".into());
+        assert_eq!(
+            error.to_string(),
+            "login token exchange failed (400): rejected\\u{1b}[2J\\nretry"
+        );
+    }
 
     // The Anthropic (Claude Pro/Max) constants, pinned against the first-party
     // anthropic-auth plugin, used to exercise the real wire shape.

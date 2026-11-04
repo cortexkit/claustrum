@@ -8,7 +8,12 @@
 mod isolated_cli;
 
 #[cfg(all(windows, feature = "windows-runtime-test-seam"))]
+#[path = "support/payload_file.rs"]
+mod payload_file;
+
+#[cfg(all(windows, feature = "windows-runtime-test-seam"))]
 mod native {
+    use super::payload_file::payload_file;
     use cortexkit_test_support::{ckdev_binary, dev_command};
     use std::{
         io::{BufRead, BufReader, Read, Write},
@@ -118,7 +123,8 @@ mod native {
 
         fn put(&self, id: &str, value: &str) {
             assert_eq!(
-                self.ok(&["put", "--id", id, "--payload", value]).trim(),
+                self.ok(&["put", "--id", id, "--payload-file", &payload_file(value)])
+                    .trim(),
                 format!("created {id}")
             );
         }
@@ -385,8 +391,8 @@ mod native {
             "put",
             "--id",
             "apikey:old-key-must-not-write",
-            "--payload",
-            "must-not-land",
+            "--payload-file",
+            &payload_file("must-not-land"),
         ]);
         assert_eq!(
             refused.status.code(),
@@ -422,7 +428,13 @@ mod native {
         vault.put("apikey:before", "before-secret");
         let before = vault.ok(&["list"]);
         let mut writer = vault.paused(
-            &["put", "--id", "apikey:after", "--payload", "after-secret"],
+            &[
+                "put",
+                "--id",
+                "apikey:after",
+                "--payload-file",
+                &payload_file("after-secret"),
+            ],
             "writer",
         );
         // This is the CLI's actual mode=ro connection, opened while the writer
@@ -470,10 +482,22 @@ mod native {
         vault.bootstrap();
         vault.put("apikey:before", "before-secret");
         let mut first = vault.paused(
-            &["put", "--id", "apikey:winner", "--payload", "winner-secret"],
+            &[
+                "put",
+                "--id",
+                "apikey:winner",
+                "--payload-file",
+                &payload_file("winner-secret"),
+            ],
             "writer",
         );
-        let refused = vault.run(&["put", "--id", "apikey:loser", "--payload", "must-not-land"]);
+        let refused = vault.run(&[
+            "put",
+            "--id",
+            "apikey:loser",
+            "--payload-file",
+            &payload_file("must-not-land"),
+        ]);
         assert_eq!(
             refused.status.code(),
             Some(3),

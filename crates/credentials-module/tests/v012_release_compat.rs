@@ -3,6 +3,10 @@
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 
+#[path = "support/payload_file.rs"]
+mod payload_file;
+use payload_file::payload_file;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -175,7 +179,13 @@ fn v012_release_artifact_reads_what_migration_10_did_not_rename() {
         current_cli(
             &data_dir,
             &key_path,
-            &["put", "--id", "operator:compat", "--payload", "secret"],
+            &[
+                "put",
+                "--id",
+                "operator:compat",
+                "--payload-file",
+                &payload_file("secret"),
+            ],
         ),
     );
     assert_ok(

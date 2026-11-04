@@ -85,6 +85,12 @@ pub fn capture_fragment_callback(bind_addr: &str) -> Option<CallbackListener> {
     capture_with_mode(bind_addr, CaptureMode::Fragment)
 }
 
+pub fn port_in_use_message(redirect_uri: &str) -> String {
+    format!(
+        "callback port is in use or unavailable ({redirect_uri}); retry after freeing the port or choose another device (--approve-on other, paste-only with no local listener)"
+    )
+}
+
 /// Bind an ephemeral numeric loopback port for providers that register a random
 /// callback port. The caller reads [`CallbackListener::local_addr`] before opening
 /// the browser.

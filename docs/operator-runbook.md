@@ -398,6 +398,10 @@ records, while cookie file bytes are kept exactly:
 ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key
 ```
 
+Inline `--payload` input is refused because command-line arguments can expose secrets.
+Use a payload file for scripts, or omit `--payload-file` at a terminal to enter the
+value in the hidden interactive prompt. `put` does not read payloads from stdin.
+
 `put` is create-only. To rotate a static key in place, pass `--replace` (unconditional,
 keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:<label>` id
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the

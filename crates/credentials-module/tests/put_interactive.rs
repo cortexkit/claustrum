@@ -285,7 +285,7 @@ fn nonterminal_missing_flags_keep_the_existing_usage_refusals() {
         (vec!["put"], "--id is required"),
         (
             vec!["put", "--id", "apikey:probe"],
-            "--payload <value> or --payload-file <path> is required",
+            "--payload-file <path> is required without a terminal for the hidden interactive prompt",
         ),
     ] {
         let output = fixture

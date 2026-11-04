@@ -37,7 +37,7 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
                 println!(
                     "rejected  {}  {}  from {}",
                     text(row, "transfer_id"),
-                    text(row, "credential_id"),
+                    text(row, "credential_id").escape_debug(),
                     text(row, "sender")
                 );
             }
@@ -45,7 +45,7 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
                 println!(
                     "abandoned  {}  {}  to {}  (send it again with `ck auth transfer send`)",
                     text(row, "transfer_id"),
-                    text(row, "credential_id"),
+                    text(row, "credential_id").escape_debug(),
                     text(row, "receiver")
                 );
             }
@@ -54,7 +54,7 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
             let transfer_id = text(&reply, "transfer_id");
             println!(
                 "{transfer_id}  {}  to {}  reply {}",
-                text(&reply, "credential_id"),
+                text(&reply, "credential_id").escape_debug(),
                 text(&reply, "receiver"),
                 text(&reply, "reply")
             );
@@ -84,13 +84,7 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
                 println!("no pending transfers");
             }
             for row in pending {
-                println!(
-                    "{}  from {}  {}  {}",
-                    text(row, "transfer_id"),
-                    text(row, "sender"),
-                    text(row, "credential_id"),
-                    text(row, "kind")
-                );
+                println!("{}", pending_transfer_line(row));
             }
         }
         AdminOpBody::TransferAccept { .. } => {
@@ -99,7 +93,7 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
             } else {
                 println!(
                     "accepted {} at version {}",
-                    text(&reply, "credential_id"),
+                    text(&reply, "credential_id").escape_debug(),
                     reply
                         .get("record_version")
                         .and_then(Value::as_u64)
@@ -113,6 +107,16 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         _ => {}
     }
     Ok(())
+}
+
+fn pending_transfer_line(row: &Value) -> String {
+    format!(
+        "{}  from {}  {}  {}",
+        text(row, "transfer_id").escape_debug(),
+        text(row, "sender").escape_debug(),
+        text(row, "credential_id").escape_debug(),
+        text(row, "kind").escape_debug()
+    )
 }
 
 /// The stderr lines that explain a `transfer send` or `send --resume` reply.
@@ -595,6 +599,20 @@ fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_transfer_credential_controls_are_visible() {
+        let row = serde_json::json!({
+            "transfer_id": "0011",
+            "sender": "member",
+            "credential_id": "apikey:example\u{1b}[2J\nforged row",
+            "kind": "api_key",
+        });
+        assert_eq!(
+            pending_transfer_line(&row),
+            "0011  from member  apikey:example\\u{1b}[2J\\nforged row  api_key"
+        );
+    }
 
     const MEMBER: &str = "fed-computer:0123456789abcdef0123456789abcdef";
     const TRANSFER_ID: &str = "00112233445566778899aabbccddeeff";

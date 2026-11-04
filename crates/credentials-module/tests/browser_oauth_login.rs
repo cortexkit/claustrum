@@ -493,6 +493,62 @@ fn clipboard_failure_shows_the_url_and_still_accepts_a_callback() {
 }
 
 #[test]
+fn google_busy_callback_port_refuses_without_authorization_url() {
+    let fixture = Fixture::new();
+    let _occupied = TcpListener::bind(&fixture.callback).unwrap();
+    let output = fixture
+        .command("google", &["--approve-on", "this", "--browser", "show"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("port is in use"), "{stderr}");
+    assert!(
+        stderr.contains("retry") && stderr.contains("--approve-on other"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("/authorize?") && !stderr.contains("/authorize?"),
+        "{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn digitalocean_busy_callback_port_refuses_without_authorization_url() {
+    let fixture = Fixture::new();
+    let _occupied = TcpListener::bind("127.0.0.1:1456").unwrap();
+    let output = fixture
+        .command(
+            "digitalocean",
+            &["--approve-on", "this", "--browser", "show"],
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("port is in use"), "{stderr}");
+    assert!(
+        stderr.contains("retry") && stderr.contains("--approve-on other"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("response_type=token") && !stderr.contains("response_type=token"),
+        "{stdout}\n{stderr}"
+    );
+
+    let mut login = Login::start(fixture.command(
+        "digitalocean",
+        &["--approve-on", "other", "--browser", "show"],
+    ));
+    login.until("paste it here:");
+    login.paste("invalid-fragment");
+    let output = login.finish(false);
+    assert!(output.contains("response_type=token"), "{output}");
+}
+
+#[test]
 fn google_reuses_concurrent_paste_and_other_device_listener_policy() {
     for location in ["this", "other"] {
         let fixture = Fixture::new();

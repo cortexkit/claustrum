@@ -23,6 +23,10 @@
 
 mod common;
 
+#[path = "support/payload_file.rs"]
+mod payload_file;
+use payload_file::payload_file;
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -301,8 +305,8 @@ async fn start_seeded_vault() -> Option<SeededVault> {
             "put",
             "--id",
             "operator:test",
-            "--payload",
-            "the-secret-bytes",
+            "--payload-file",
+            &payload_file("the-secret-bytes"),
             "--data-dir",
             &ctx.data_dir,
             "--key-path",

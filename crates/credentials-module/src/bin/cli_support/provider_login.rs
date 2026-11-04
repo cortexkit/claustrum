@@ -134,6 +134,7 @@ fn run_devin(
     };
     let callback = open_and_capture(
         args,
+        super::browser_login::ApproveOn::This,
         &authorize_url,
         listener,
         "After approving Devin, copy the full callback URL from the browser and paste it here:",
@@ -221,6 +222,7 @@ fn run_snowflake(
     };
     let callback = open_and_capture(
         args,
+        super::browser_login::ApproveOn::This,
         &authorize_url,
         listener,
         "After approving Snowflake, copy the full callback URL from the browser and paste it here:",
@@ -276,16 +278,23 @@ fn run_digitalocean(
         ));
     }
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
+    let approve_on = super::browser_login::approve_on(args).map_err(|e| e.to_string())?;
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = digitalocean::authorize_url(&state);
-    let listener = if super::paste_only(args) {
+    let listener = if approve_on == super::browser_login::ApproveOn::Other
+        || has_flag(args, "--no-listener")
+    {
         None
     } else {
-        login_listener::loopback_bind_addr(digitalocean::REDIRECT_URI)
-            .and_then(|addr| login_listener::capture_fragment_callback(&addr))
+        Some(
+            login_listener::loopback_bind_addr(digitalocean::REDIRECT_URI)
+                .and_then(|addr| login_listener::capture_fragment_callback(&addr))
+                .ok_or_else(|| login_listener::port_in_use_message(digitalocean::REDIRECT_URI))?,
+        )
     };
     let raw = open_and_capture(
         args,
+        approve_on,
         &authorize_url,
         listener,
         "After approving DigitalOcean, copy the full callback URL (including the #fragment) and paste it here:",
@@ -318,6 +327,7 @@ fn run_digitalocean(
 
 fn open_and_capture(
     args: &[String],
+    approve_on: super::browser_login::ApproveOn,
     authorize_url: &str,
     listener: Option<login_listener::CallbackListener>,
     paste_prompt: &str,
@@ -326,12 +336,8 @@ fn open_and_capture(
     println!();
     println!("  {authorize_url}");
     println!();
-    super::browser_login::choose_and_present(
-        args,
-        super::browser_login::ApproveOn::This,
-        authorize_url,
-    )
-    .map_err(|e| e.to_string())?;
+    super::browser_login::choose_and_present(args, approve_on, authorize_url)
+        .map_err(|e| e.to_string())?;
     let captured = match listener {
         Some(listener) => {
             println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");

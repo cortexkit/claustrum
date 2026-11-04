@@ -9383,7 +9383,7 @@ mod tests {
     /// never a credential, and storing it inverts custody: the vault would then serve
     /// the marker that means the vault holds the secret, and the real family would
     /// exist nowhere. When refusal was enforced only by individual importers, a
-    /// generic `put --replace --payload 'claustrum-tombstone:v1:...'` reached the store
+    /// generic `put --replace --payload-file <path>` reached the store
     /// and replaced a working credential with the marker.
     ///
     /// Entrance checks are the wrong shape for this: they enumerate the doors, and the

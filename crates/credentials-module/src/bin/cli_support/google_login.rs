@@ -130,8 +130,13 @@ pub fn cmd_login(
     {
         None
     } else {
-        super::login_listener::loopback_bind_addr(redirect_uri)
-            .and_then(|address| super::login_listener::capture_callback(&address))
+        Some(
+            super::login_listener::loopback_bind_addr(redirect_uri)
+                .and_then(|address| super::login_listener::capture_callback(&address))
+                .ok_or_else(|| {
+                    CliError::Io(super::login_listener::port_in_use_message(redirect_uri))
+                })?,
+        )
     };
 
     println!("Open this URL in a browser signed into the account to custody:");

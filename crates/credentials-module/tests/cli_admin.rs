@@ -6,6 +6,10 @@
 //! credential, mint a handle, list + verify the audit chain. Also proves the
 //! single-writer lease makes admin writes mutually exclusive with a held lease.
 
+#[path = "support/payload_file.rs"]
+mod payload_file;
+use payload_file::payload_file;
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -54,6 +58,31 @@ fn cli() -> Command {
 #[test]
 fn every_cli_command_runs_in_the_isolated_home() {
     isolated_cli::assert_isolated(&cli());
+}
+
+#[test]
+fn put_rejects_inline_payload_without_echoing_it_and_names_safe_inputs() {
+    let vault = GrantCliVault::new("inline-payload-refused");
+    vault.bootstrap();
+    for payload_args in [
+        vec!["--payload", "dummy-inline-secret"],
+        vec!["--payload=dummy-inline-secret"],
+    ] {
+        let mut args = vec!["put", "--id", "apikey:inline"];
+        args.extend(payload_args);
+        let out = vault.run(&args);
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            stderr.contains("--payload-file") && stderr.contains("hidden interactive prompt"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("dummy-inline-secret"), "{stderr}");
+    }
+    let listed = vault.run(&["list"]);
+    assert!(listed.status.success());
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("apikey:inline"));
 }
 
 fn cli_binary() -> Command {
@@ -113,8 +142,8 @@ fn cli_honours_env_key_path_and_the_shared_record_without_overrides() {
             "put",
             "--id",
             "operator:source",
-            "--payload",
-            "test-secret",
+            "--payload-file",
+            &payload_file("test-secret"),
             "--data-dir",
         ])
         .arg(&data_dir)
@@ -205,8 +234,8 @@ fn cli_migrates_a_legacy_file_vault_only_after_successful_load() {
             "put",
             "--id",
             "operator:migrated",
-            "--payload",
-            "test-secret",
+            "--payload-file",
+            &payload_file("test-secret"),
             "--data-dir",
         ])
         .arg(&data_dir)
@@ -220,8 +249,8 @@ fn cli_migrates_a_legacy_file_vault_only_after_successful_load() {
             "put",
             "--id",
             "operator:migrated",
-            "--payload",
-            "test-secret",
+            "--payload-file",
+            &payload_file("test-secret"),
             "--data-dir",
         ])
         .arg(&data_dir)
@@ -505,8 +534,8 @@ fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
         "put",
         "--id",
         "apikey:x",
-        "--payload",
-        "y",
+        "--payload-file",
+        &payload_file("y"),
         "--client-id",
         "z",
     ]);
@@ -618,7 +647,13 @@ fn github_app_deposit_refusals_store_nothing() {
     let vault = GrantCliVault::new("github-app-refusals");
     vault.bootstrap();
     assert!(vault
-        .run(&["put", "--id", "apikey:seed", "--payload", "seed"])
+        .run(&[
+            "put",
+            "--id",
+            "apikey:seed",
+            "--payload-file",
+            &payload_file("seed")
+        ])
         .status
         .success());
     let pem = vault.root.join("app.pem");
@@ -1951,8 +1986,8 @@ fn bootstrap_put_mint_audit_end_to_end() {
     c.arg("put")
         .arg("--id")
         .arg("operator:db")
-        .arg("--payload")
-        .arg("sk-secret");
+        .arg("--payload-file")
+        .arg(payload_file("sk-secret"));
     global(&mut c);
     let out = c.output().expect("run put");
     assert!(
@@ -2148,8 +2183,8 @@ fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
         "put",
         "--id",
         "signing:agent-assertion:unsafe",
-        "--payload",
-        "not-a-key",
+        "--payload-file",
+        &payload_file("not-a-key"),
     ]);
     assert!(
         !bypass.status.success()
@@ -2489,8 +2524,8 @@ fn logout_retires_reversibly_without_degrading_health() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:x")
-        .arg("--payload")
-        .arg("sk-x");
+        .arg("--payload-file")
+        .arg(payload_file("sk-x"));
     global(&mut c);
     assert!(c.output().unwrap().status.success());
     let mut c = cli();
@@ -3160,8 +3195,8 @@ fn events_distinguishes_no_events_from_no_table_and_takes_no_lease() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:e")
-        .arg("--payload")
-        .arg("k");
+        .arg("--payload-file")
+        .arg(payload_file("k"));
     global(&mut c);
     assert!(c.output().unwrap().status.success());
 
@@ -3243,8 +3278,8 @@ fn invalidate_reports_the_handles_it_revoked_and_leaves_the_row_needing_reauth()
     c.arg("put")
         .arg("--id")
         .arg("apikey:inv")
-        .arg("--payload")
-        .arg("k");
+        .arg("--payload-file")
+        .arg(payload_file("k"));
     global(&mut c);
     assert!(c.output().unwrap().status.success());
 
@@ -3337,8 +3372,8 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:vast")
-        .arg("--payload")
-        .arg("old-key");
+        .arg("--payload-file")
+        .arg(payload_file("old-key"));
     global(&mut c);
     assert!(c.output().unwrap().status.success());
     let mut c = cli();
@@ -3365,8 +3400,8 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:vast")
-        .arg("--payload")
-        .arg("new-key");
+        .arg("--payload-file")
+        .arg(payload_file("new-key"));
     global(&mut c);
     assert!(
         !c.output().unwrap().status.success(),
@@ -3378,8 +3413,8 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:vast")
-        .arg("--payload")
-        .arg("new-key")
+        .arg("--payload-file")
+        .arg(payload_file("new-key"))
         .arg("--replace");
     global(&mut c);
     let out = c.output().expect("run put --replace");
@@ -3430,8 +3465,8 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     c.arg("put")
         .arg("--id")
         .arg("apikey:vast")
-        .arg("--payload")
-        .arg("z")
+        .arg("--payload-file")
+        .arg(payload_file("z"))
         .arg("--replace")
         .arg("--expected-hash")
         .arg("00");
@@ -3652,7 +3687,11 @@ fn admin_write_refused_while_lease_held() {
 
     // An admin put must now be refused with exit code 3 (daemon running).
     let mut c = cli();
-    c.arg("put").arg("--id").arg("x").arg("--payload").arg("y");
+    c.arg("put")
+        .arg("--id")
+        .arg("x")
+        .arg("--payload-file")
+        .arg(payload_file("y"));
     global(&mut c);
     let out = c.output().expect("run put while leased");
     assert!(
@@ -3691,7 +3730,13 @@ fn read_only_inventory_verbs_succeed_while_exclusive_lease_is_held() {
     let vault = GrantCliVault::new("read-verbs-leased");
     vault.bootstrap();
 
-    let put = vault.run(&["put", "--id", "apikey:lease-reader", "--payload", "secret"]);
+    let put = vault.run(&[
+        "put",
+        "--id",
+        "apikey:lease-reader",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     assert!(
         put.status.success(),
         "put failed: {}",
@@ -4069,8 +4114,8 @@ fn login_existence_preflight_refuses_before_printing_the_authorize_url() {
     put.arg("put")
         .arg("--id")
         .arg("oauth:anthropic")
-        .arg("--payload")
-        .arg("existing-credential");
+        .arg("--payload-file")
+        .arg(payload_file("existing-credential"));
     global(&mut put);
     let deposited = put.output().expect("deposit existing target");
     assert!(
@@ -4449,11 +4494,15 @@ fn the_rotate_verb_leaves_the_vault_usable_and_can_run_twice() {
     };
 
     assert!(run(&["bootstrap"]).status.success());
-    assert!(
-        run(&["put", "--id", "apikey:one", "--payload", "secret-one"])
-            .status
-            .success()
-    );
+    assert!(run(&[
+        "put",
+        "--id",
+        "apikey:one",
+        "--payload-file",
+        &payload_file("secret-one")
+    ])
+    .status
+    .success());
     let minted = run(&["mint-handle", "--id", "apikey:one"]);
     assert!(minted.status.success());
     let handle = String::from_utf8_lossy(&minted.stdout).trim().to_string();
@@ -4592,8 +4641,8 @@ fn verify_audit_reads_a_leased_vault_and_names_a_broken_chain() {
             "put",
             "--id",
             &format!("apikey:t{i}"),
-            "--payload",
-            "secret"
+            "--payload-file",
+            &payload_file("secret")
         ])
         .status
         .success());
@@ -4681,9 +4730,15 @@ fn audit_reads_a_leased_vault_and_names_the_alarm_reason() {
     };
 
     assert!(run(&["bootstrap"]).status.success());
-    assert!(run(&["put", "--id", "apikey:one", "--payload", "secret"])
-        .status
-        .success());
+    assert!(run(&[
+        "put",
+        "--id",
+        "apikey:one",
+        "--payload-file",
+        &payload_file("secret")
+    ])
+    .status
+    .success());
 
     // Hold the lease exactly as the running daemon does.
     let descriptor = StorageDescriptor {
@@ -4785,7 +4840,13 @@ fn a_lease_refusal_advises_only_a_remedy_that_exists_for_that_verb() {
     // ROUTE PATH EXISTS: the mutation arm must still offer --subc. Without this, a
     // "fix" that told every verb to go offline would pass the assertions above while
     // removing the zero-downtime path that 11 of 13 write verbs depend on.
-    let put = run(&["put", "--id", "apikey:one", "--payload", "secret"]);
+    let put = run(&[
+        "put",
+        "--id",
+        "apikey:one",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     let put_err = String::from_utf8_lossy(&put.stderr);
     assert!(
         !put.status.success(),
@@ -5275,9 +5336,15 @@ fn usable_distinguishes_a_cookie_age_from_an_api_key_age() {
 
     assert!(run(&["bootstrap"]).status.success(), "bootstrap");
     assert!(
-        run(&["put", "--id", "apikey:age-compare", "--payload", "same-age"])
-            .status
-            .success(),
+        run(&[
+            "put",
+            "--id",
+            "apikey:age-compare",
+            "--payload-file",
+            &payload_file("same-age")
+        ])
+        .status
+        .success(),
         "put API key"
     );
     let cookie_file = root.join("cookie.txt");
@@ -5336,7 +5403,13 @@ fn hash_revoke_cli_stops_a_previously_resolving_handle() {
     let vault = GrantCliVault::new("hash-revoke");
     vault.bootstrap();
     assert!(vault
-        .run(&["put", "--id", "apikey:hash", "--payload", "secret"])
+        .run(&[
+            "put",
+            "--id",
+            "apikey:hash",
+            "--payload-file",
+            &payload_file("secret")
+        ])
         .status
         .success());
     let minted = vault.run(&["mint-handle", "--id", "apikey:hash"]);
@@ -5606,7 +5679,13 @@ or clear it.
 fn category_cli_lists_mutates_reclassifies_and_renders_category_grants() {
     let vault = GrantCliVault::new("category-cli");
     vault.bootstrap();
-    let put = vault.run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
+    let put = vault.run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     assert!(
         put.status.success(),
         "put failed: {}",
@@ -5690,7 +5769,7 @@ fn grant_on(
 }
 
 fn put_on(vault: &GrantCliVault, id: &str) {
-    let put = vault.run(&["put", "--id", id, "--payload", "secret"]);
+    let put = vault.run(&["put", "--id", id, "--payload-file", &payload_file("secret")]);
     assert!(
         put.status.success(),
         "put {id} failed: {}",
@@ -6004,7 +6083,13 @@ fn put_without_a_covering_grant_points_at_ck_auth_grant_and_not_at_a_handle() {
     let vault = GrantCliVault::new("put-unreached-note");
     vault.bootstrap();
 
-    let out = vault.run(&["put", "--id", "apikey:unreached", "--payload", "secret"]);
+    let out = vault.run(&[
+        "put",
+        "--id",
+        "apikey:unreached",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "{stderr}");
     let suggested = "`ck auth grant --principal <principal> --selector-kind exact \
@@ -6049,7 +6134,13 @@ fn put_without_a_covering_grant_points_at_ck_auth_grant_and_not_at_a_handle() {
     // Once a grant covers an id, creating it prints no note.
     let (ok, _, stderr) = grant_on(&vault, "consumer", "exact", "apikey:covered", "read");
     assert!(ok, "{stderr}");
-    let out = vault.run(&["put", "--id", "apikey:covered", "--payload", "secret"]);
+    let out = vault.run(&[
+        "put",
+        "--id",
+        "apikey:covered",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "{stderr}");
     assert!(
@@ -6236,7 +6327,13 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     // the assertion above would pass for a note printed unconditionally.
     let migrated = GrantCliVault::new("behind-schema-migrated");
     migrated.bootstrap();
-    let put = migrated.run(&["put", "--id", "apikey:ahead", "--payload", "secret"]);
+    let put = migrated.run(&[
+        "put",
+        "--id",
+        "apikey:ahead",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     assert!(
         put.status.success(),
         "put failed: {}",
@@ -6319,14 +6416,26 @@ fn enroll_list_reads_a_store_without_proposers_and_says_so_on_stderr_only() {
 fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
     let vault = GrantCliVault::new("provider-roundtrip");
     vault.bootstrap();
-    let put = vault.run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
+    let put = vault.run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     assert!(
         put.status.success(),
         "{}",
         String::from_utf8_lossy(&put.stderr)
     );
     assert!(String::from_utf8_lossy(&put.stderr).contains("ck auth set-providers"));
-    let kimi = vault.run(&["put", "--id", "apikey:kimi-code", "--payload", "secret"]);
+    let kimi = vault.run(&[
+        "put",
+        "--id",
+        "apikey:kimi-code",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
     assert!(kimi.status.success());
     assert!(!String::from_utf8_lossy(&kimi.stderr).contains("ck auth set-providers"));
     let set = vault.run(&["set-providers", "--id", "apikey:zai", "--set", "bb", "aa"]);
@@ -6343,8 +6452,8 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
         "put",
         "--id",
         "apikey:zai",
-        "--payload",
-        "rotated",
+        "--payload-file",
+        &payload_file("rotated"),
         "--replace",
         "--provider-id",
         "cc",
@@ -6416,7 +6525,7 @@ fn provider_cli_prechecks_refuse_before_key_resolution_even_with_live_route_requ
                     args.extend(ids.clone());
                 } else {
                     if verb == "put" {
-                        args.extend(["--payload".into(), "secret".into()]);
+                        args.extend(["--payload-file".into(), payload_file("secret")]);
                     } else {
                         args.extend(["--provider".into(), "zai".into()]);
                     }
@@ -6460,8 +6569,8 @@ fn provider_count_failure_keeps_deposit_and_existing_ids_and_retries_add() {
         "put".to_string(),
         "--id".into(),
         "apikey:zai".into(),
-        "--payload".into(),
-        "secret".into(),
+        "--payload-file".into(),
+        payload_file("secret"),
     ];
     for i in 0..32 {
         put.extend(["--provider-id".into(), format!("p{i}")]);
@@ -6482,8 +6591,8 @@ fn provider_count_failure_keeps_deposit_and_existing_ids_and_retries_add() {
         "put",
         "--id",
         "apikey:zai",
-        "--payload",
-        "rotated",
+        "--payload-file",
+        &payload_file("rotated"),
         "--replace",
         "--provider-id",
         "extra",
@@ -6659,8 +6768,8 @@ fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
         "put",
         "--id",
         "apikey:zai",
-        "--payload",
-        "secret",
+        "--payload-file",
+        &payload_file("secret"),
         "--provider-id",
         "aa",
     ]);
@@ -6861,8 +6970,20 @@ fn plan_cli_sets_clears_and_renders_a_conditional_parseable_column() {
         );
         String::from_utf8(out.stdout).unwrap()
     };
-    run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
-    run(&["put", "--id", "apikey:kimi-code", "--payload", "other"]);
+    run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload-file",
+        &payload_file("secret"),
+    ]);
+    run(&[
+        "put",
+        "--id",
+        "apikey:kimi-code",
+        "--payload-file",
+        &payload_file("other"),
+    ]);
     let list = run(&["list"]);
     assert_eq!(
         list.lines()
@@ -6887,8 +7008,8 @@ fn plan_cli_sets_clears_and_renders_a_conditional_parseable_column() {
         "put",
         "--id",
         "apikey:zai",
-        "--payload",
-        "rotated",
+        "--payload-file",
+        &payload_file("rotated"),
         "--replace",
     ]);
     for verb in ["list", "status"] {

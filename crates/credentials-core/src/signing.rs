@@ -29,6 +29,7 @@
 
 use base64::Engine;
 use ring::signature::{Ed25519KeyPair, KeyPair};
+use zeroize::Zeroizing;
 
 /// Why a signing request was refused. Every variant is fail-closed and carries no
 /// key material.
@@ -109,13 +110,15 @@ fn parse_pkcs8_pem(pem: &str) -> Result<Ed25519KeyPair, SignError> {
             }
         )));
     }
-    let body: String = trimmed
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<Vec<_>>()
-        .join("");
-    let der = base64::engine::general_purpose::STANDARD
-        .decode(body.trim())
+    // Reserve before copying private text so growth cannot leave an unscrubbed
+    // allocation behind. Decode into guarded storage even on a base64 error.
+    let mut body = Zeroizing::new(String::with_capacity(trimmed.len()));
+    for line in trimmed.lines().filter(|line| !line.starts_with("-----")) {
+        body.push_str(line);
+    }
+    let mut der = Zeroizing::new(Vec::new());
+    base64::engine::general_purpose::STANDARD
+        .decode_vec(body.trim(), &mut der)
         .map_err(|e| SignError::UnusableKey(format!("PEM body is not valid base64: {e}")))?;
     // BOTH PKCS#8 VERSIONS, and the difference is not academic.
     //
@@ -222,6 +225,30 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ed25519_private_temporaries_have_zeroizing_ownership() {
+        // Inspect ownership rather than reading freed memory, which would be undefined.
+        let source = include_str!("signing.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let source: String = source.split_whitespace().collect();
+        for guarded in [
+            "let mut body = Zeroizing::new(String::with_capacity(trimmed.len()));",
+            "let mut der = Zeroizing::new(Vec::new());",
+            ".decode_vec(body.trim(), &mut der)",
+        ] {
+            assert!(
+                source.contains(&guarded.split_whitespace().collect::<String>()),
+                "missing zeroizing ownership: {guarded}"
+            );
+        }
+        assert!(
+            !source.contains(".decode(body"),
+            "decode errors must also scrub partially decoded bytes"
+        );
+    }
     use ring::rand::SystemRandom;
     use ring::signature::{UnparsedPublicKey, ED25519};
 

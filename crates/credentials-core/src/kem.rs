@@ -8,6 +8,7 @@ use hpke::{
     aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem as _,
     OpModeR, OpModeS, Serializable,
 };
+use zeroize::Zeroizing;
 
 type K = X25519HkdfSha256;
 const PREFIX: [u8; 16] = [
@@ -16,14 +17,18 @@ const PREFIX: [u8; 16] = [
 
 /// Generate a new independent private key, for sealing directly into a vault record.
 pub fn generate_key() -> Result<String, String> {
-    let mut ikm = [0; 32];
-    getrandom::getrandom(&mut ikm).map_err(|_| "recipient randomness unavailable".to_string())?;
-    let (sk, _) = K::derive_keypair(&ikm);
-    let mut der = PREFIX.to_vec();
-    der.extend_from_slice(&sk.to_bytes());
+    let mut ikm = Zeroizing::new([0; 32]);
+    getrandom::getrandom(ikm.as_mut_slice())
+        .map_err(|_| "recipient randomness unavailable".to_string())?;
+    let (sk, _) = K::derive_keypair(ikm.as_slice());
+    let mut der = Zeroizing::new(Vec::with_capacity(PREFIX.len() + 32));
+    der.extend_from_slice(&PREFIX);
+    der.resize(PREFIX.len() + 32, 0);
+    sk.write_exact(&mut der[PREFIX.len()..]);
+    let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der.as_slice()));
     Ok(format!(
         "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
-        base64::engine::general_purpose::STANDARD.encode(der)
+        encoded.as_str()
     ))
 }
 
@@ -41,9 +46,15 @@ pub fn parse_pkcs8_pem(pem: &str) -> Result<<K as hpke::Kem>::PrivateKey, String
             }
         ));
     }
-    let body: String = text.lines().filter(|s| !s.starts_with("-----")).collect();
-    let der = base64::engine::general_purpose::STANDARD
-        .decode(body)
+    // Reserve before copying private text so growth cannot leave an unscrubbed
+    // allocation behind. Decode into guarded storage even on a base64 error.
+    let mut body = Zeroizing::new(String::with_capacity(text.len()));
+    for line in text.lines().filter(|line| !line.starts_with("-----")) {
+        body.push_str(line);
+    }
+    let mut der = Zeroizing::new(Vec::new());
+    base64::engine::general_purpose::STANDARD
+        .decode_vec(body.as_bytes(), &mut der)
         .map_err(|_| "invalid PKCS#8 PEM base64".to_string())?;
     if der.len() != 48 || der[..16] != PREFIX {
         let found = if der.windows(5).any(|s| s == [6, 3, 43, 101, 112]) {
@@ -367,6 +378,36 @@ pub fn pem_from_scalar(scalar: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x25519_private_temporaries_have_zeroizing_ownership() {
+        // Inspect ownership rather than reading freed memory, which would be undefined.
+        let source = include_str!("kem.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let source: String = source.split_whitespace().collect();
+        for guarded in [
+            "let mut ikm = Zeroizing::new([0; 32]);",
+            "let mut der = Zeroizing::new(Vec::with_capacity(PREFIX.len() + 32));",
+            "sk.write_exact(&mut der[PREFIX.len()..]);",
+            "let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der.as_slice()));",
+            "let mut body = Zeroizing::new(String::with_capacity(text.len()));",
+            "let mut der = Zeroizing::new(Vec::new());",
+            ".decode_vec(body.as_bytes(), &mut der)",
+        ] {
+            assert!(source.contains(&guarded.split_whitespace().collect::<String>()), "missing zeroizing ownership: {guarded}");
+        }
+        let generator = source.split("pubfnparse_pkcs8_pem").next().unwrap();
+        assert!(
+            !generator.contains("sk.to_bytes()"),
+            "private serialization must write directly into scrubbed storage"
+        );
+        assert!(
+            !source.contains(".decode(body"),
+            "decode errors must also scrub partially decoded bytes"
+        );
+    }
     use serde_json::Value;
     fn bytes(hex: &str) -> Vec<u8> {
         (0..hex.len())

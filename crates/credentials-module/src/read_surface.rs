@@ -1596,7 +1596,7 @@ impl ReadSurface {
         // Let concurrent test probes reach the gap that a split check/count would expose.
         #[cfg(test)]
         tokio::task::yield_now().await;
-        let credential_id = match self
+        let resolved = match self
             .resolve_key_address(
                 connection_id,
                 principal,
@@ -1607,7 +1607,7 @@ impl ReadSurface {
             )
             .await
         {
-            Ok(resolved) => resolved.credential_id,
+            Ok(resolved) => resolved,
             Err(ReadError::NotFound) => {
                 let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
                 if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
@@ -1619,11 +1619,15 @@ impl ReadSurface {
             Err(error) => return Err(error),
         };
         drop(counters);
+        #[cfg(test)]
+        self.run_incarnation_hook("admitted");
+        let credential_id = resolved.credential_id;
         let record = self
             .engine
             .store()
-            .get(&credential_id)
-            .map_err(|error| map_store_error(&error))?;
+            .get_snapshot(&credential_id, &resolved.incarnation)
+            .map_err(|error| map_store_error(&error))?
+            .record;
         if record.kind != credentials_core::record::CredentialKind::KemKey {
             return Err(ReadError::KindNotOpenable);
         }
@@ -1631,8 +1635,10 @@ impl ReadSurface {
         let parsed = std::str::from_utf8(record.payload.expose())
             .map_err(|_| "invalid UTF-8 container".to_string())
             .and_then(credentials_core::kem::public_half);
-        let (_, key_id) = parsed.map_err(|error| {
-            eprintln!("kem credential {diagnostic_id:?} unusable: {error}");
+        let (_, key_id) = parsed.map_err(|_| {
+            // Parser errors may contain stored payload text, so diagnostics use
+            // only fixed text and the bounded, escaped credential id.
+            eprintln!("kem credential {diagnostic_id:?} unusable: invalid key container");
             ReadError::OpenFailed
         })?;
         let pem =
@@ -1877,8 +1883,14 @@ impl ReadSurface {
 
         let credential_id = resolved.credential_id;
 
-        let record = match self.engine.store().get(&credential_id) {
-            Ok(record) => record,
+        #[cfg(test)]
+        self.run_incarnation_hook("admitted");
+        let record = match self
+            .engine
+            .store()
+            .get_snapshot(&credential_id, &resolved.incarnation)
+        {
+            Ok(snapshot) => snapshot.record,
             Err(StoreOpError::NotFound) if params.credential_id.is_some() => {
                 self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::NotFound);
                 return Err(ReadError::NotFound);

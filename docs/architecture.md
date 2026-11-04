@@ -174,12 +174,17 @@ and changes nothing, and any overwrite of an existing id raises an audit alarm
 
 Each record is sealed individually with XChaCha20-Poly1305 under the 32-byte master key,
 with a fresh 192-bit random nonce per seal. The additional authenticated data binds the
-key id, the credential id and the `record_version`, so a record cannot be moved to
-another id or rolled back to an earlier version of itself
+key id, the credential id and the `record_version`, so moving ciphertext to another
+id or pairing it with a different version fails authentication
 (`envelope::tests::wrong_binding_record_version_fails_decrypt`,
 `envelope::tests::wrong_binding_credential_id_fails_decrypt`). The decoder bounds-checks
 every field and never panics on arbitrary bytes
 (`envelope::tests::decoder_never_panics_on_arbitrary_bytes`, a property test).
+
+The envelope does not independently detect restoring older ciphertext together with
+its matching identity and version, including a whole-store snapshot restore. Peers
+that remember a higher key version can detect key rollback separately; that check is
+not a general record-freshness guarantee.
 
 The cryptographic domain separators are listed in
 [`domain-separators.txt`](domain-separators.txt). They keep the pre-rename

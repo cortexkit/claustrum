@@ -44,6 +44,127 @@ fn assert_not_found(answer: read_surface::GetOutcome) {
 }
 
 #[tokio::test]
+async fn incarnation_open_refuses_recreated_key_outside_authorized_category() {
+    use base64::Engine as _;
+    let (surface, _admin, store) = scoped_rig(188);
+    const ID: &str = "kem:open:lifetime";
+    let original = credentials_core::kem::generate_key().unwrap();
+    let replacement = credentials_core::kem::generate_key().unwrap();
+    let (public, _) = credentials_core::kem::public_half(&replacement).unwrap();
+    store
+        .create(
+            ID,
+            &VaultRecord::new_static(CredentialKind::KemKey, "test", original.into_bytes(), None),
+        )
+        .unwrap();
+    store
+        .set_categories_audited(
+            ID,
+            credentials_core::store::SetCategoryMode::Set,
+            &["key-lifetime".into()],
+            AuditCtx::admin(AuditOp::SetCategory),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "entorhinal",
+            SelectorKind::Category,
+            "key-lifetime",
+            GrantOperation::Open,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let principal = reserved("entorhinal");
+    let (enc, ciphertext) =
+        credentials_core::kem::seal_base(&public, b"replacement plaintext", b"info", b"aad")
+            .unwrap();
+    assert_eq!(
+        credentials_core::kem::open_base(&replacement, &enc, &ciphertext, b"info", b"aad").unwrap(),
+        b"replacement plaintext"
+    );
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let params = read_surface::OpenParams {
+        credential_id: ID.into(),
+        enc_b64: encode(&enc),
+        ciphertext_b64: encode(&ciphertext),
+        info_b64: encode(b"info"),
+        aad_b64: encode(b"aad"),
+        enrollment_token: None,
+    };
+    recreate_on(
+        &surface,
+        &store,
+        "admitted",
+        ID,
+        VaultRecord::new_static(
+            CredentialKind::KemKey,
+            "test",
+            replacement.into_bytes(),
+            None,
+        ),
+    );
+    assert_eq!(
+        surface.open(77, Some(&principal), &params).await.err(),
+        Some(read_surface::ReadError::NotFound)
+    );
+    assert!(store.meta(ID).unwrap().categories.is_empty());
+    assert_eq!(
+        surface.open(77, Some(&principal), &params).await.err(),
+        Some(read_surface::ReadError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn incarnation_public_key_handle_refuses_recreated_key_after_resolution() {
+    let (surface, store, _db, _root) = tmp_surface_with_store(20);
+    const ID: &str = "signing:lifetime:1";
+    store
+        .create(
+            ID,
+            &VaultRecord::new_static(
+                CredentialKind::SigningKey,
+                "test",
+                test_ed25519_pem().into_bytes(),
+                None,
+            ),
+        )
+        .unwrap();
+    let params = read_surface::PublicKeyParams {
+        handle: Some(handle_for(&store, ID)),
+        credential_id: None,
+        enrollment_token: None,
+    };
+    let original = surface.public_key(77, None, &params).await.unwrap();
+    let pem = test_ed25519_pem();
+    let replacement = credentials_core::signing::public_key_ed25519(&pem).unwrap();
+    assert_ne!(original.key_id, replacement.key_id);
+    recreate_on(
+        &surface,
+        &store,
+        "admitted",
+        ID,
+        VaultRecord::new_static(CredentialKind::SigningKey, "test", pem.into_bytes(), None),
+    );
+    assert_eq!(
+        surface.public_key(77, None, &params).await.err(),
+        Some(read_surface::ReadError::NotFound)
+    );
+    assert_eq!(
+        surface.public_key(77, None, &params).await.err(),
+        Some(read_surface::ReadError::NotFound)
+    );
+    assert_eq!(
+        credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(store.get(ID).unwrap().payload.expose()).unwrap()
+        )
+        .unwrap()
+        .key_id,
+        replacement.key_id
+    );
+}
+
+#[tokio::test]
 async fn incarnation_handle_get_refuses_recreated_id_after_resolution() {
     let (surface, store, _db, _root) = tmp_surface_with_store(20);
     const ID: &str = "apikey:openrouter";

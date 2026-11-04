@@ -752,9 +752,20 @@ needs. In `enroll list`, `awaiting-poll` means admitted but never collected: a s
 handover, not a live consumer.
 
 `revoke` stops the token from resolving immediately; a revoked enrollment answers like an
-unknown token. It keeps the consumer's grants, which record what reach existed and block
-re-enrolling the name, so a later consumer cannot inherit that reach. Revoke the grants
-before re-enrolling a name. `reissue` writes a new token; the previous one stops working the
+unknown token. In the same transaction it removes every grant on `enrolled:<name>` and
+appends one `grant_revoke` audit row per removed grant, preserving the history without
+letting a later consumer inherit the reach. The CLI prints each removed grant.
+
+An unused name may still have grants from an older revocation or from preprovisioning.
+`enroll approve` lists those grants and refuses unless you either remove them with
+`ck auth revoke-grant` or pass `--keep-grants` to explicitly give them to the new consumer:
+
+```sh
+ck auth enroll approve --request-id <id> [--name <name>] --keep-grants
+```
+
+Token rotation (`auth.enroll_rotate`) keeps the same consumer and preserves its grants.
+`reissue` also keeps grants and writes a new token; the previous one stops working the
 moment the new one is minted. The consumer-side ceremony is in
 [the wire contract](wire-contract-v1.md#21-enrollment-for-a-consumer-with-no-supervised-identity).
 

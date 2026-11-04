@@ -522,6 +522,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
+        "enroll" => &["--keep-grants"],
         _ => &[],
     };
     let mut i = if matches!(command, "set-identity" | "set-category")
@@ -850,13 +851,14 @@ fn help_verb(verb: &str) -> String {
         }
         "enroll" => {
             "ck auth enroll list\n\
-             \x20             approve --request-id <id> [--name <name>]\n\
+             \x20             approve --request-id <id> [--name <name>] [--keep-grants]\n\
              \x20             deny --request-id <id>\n\
              \x20             revoke --name <name>\n\
              \x20             reissue --name <name>\n\
              \n\
              \x20 --request-id <id>             pending request, from `enroll list`\n\
              \x20 --name <name>                 consumer name to admit, revoke or reissue\n\
+             \x20 --keep-grants                 explicitly inherit existing name grants\n\
              \n\
              NOTES\n\
              The operator half of consumer enrollment. A consumer proposes a name over the\n\
@@ -867,8 +869,10 @@ fn help_verb(verb: &str) -> String {
              proposed spelling, which is a stranger's claim rather than a fact.\n\
              Requests are short-lived and stay on the vault on the computer\n\
              where the consumer ran setup. Approve there; `enroll list` shows pending ones.\n\
-             revoke keeps the consumer's grants: they record what reach existed and they\n\
-             block re-enrolling the name, so a later consumer cannot inherit that reach.\n\
+             revoke removes all the consumer's grants and lists them, auditing each one.\n\
+             approve lists existing grants on an unused name and refuses unless you revoke\n\
+             them first or pass --keep-grants to explicitly give them to the new consumer.\n\
+             Token rotation keeps the same consumer and preserves its grants.\n\
              reissue prints the new token on stdout ALONE so it can be piped into a 0600\n\
              file; the previous token stops working the moment it is minted.\n\
              list is read-only and takes no lease. awaiting-poll means admitted but never\n\
@@ -5043,8 +5047,8 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Ok(rows) if !live_enrollment_named(&rows, &principal_id) => {
                 eprintln!(
                     "warning: no live enrollment holds the name '{principal_id}', so nothing \
-                     can use this grant now.\n  Whoever is later approved under exactly this \
-                     name gets it."
+                     can use this grant now.\n  Approval under exactly this name requires \
+                     --keep-grants to explicitly inherit it."
                 );
                 eprintln!(
                     "  If this was a mistake: ck auth revoke-grant --principal \
@@ -5592,6 +5596,11 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         })?
         .clone();
     let rest = &args[1..];
+    if sub != "approve" && has_flag(rest, "--keep-grants") {
+        return Err(CliError::Usage(
+            "--keep-grants is only valid for enroll approve".into(),
+        ));
+    }
     match sub.as_str() {
         "list" => cmd_enroll_list(global),
         "approve" => {
@@ -5600,12 +5609,41 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // The name defaults to what was proposed, and `--name` is how an operator
             // corrects it. A name a stranger chose is a claim, not a fact.
             let final_name = optional(rest, "--name").unwrap_or(proposed_name);
+            let keep_grants = has_flag(rest, "--keep-grants");
+            let rows = credentials_core::store::list_enrollments_read_only(&store_path(global))
+                .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+            if !live_enrollment_named(&rows, &final_name) {
+                let grants =
+                    credentials_core::store::list_read_grants_read_only(&store_path(global))
+                        .map_err(|error| CliError::Usage(format!("read grants: {error}")))?;
+                let retained: Vec<_> = grants
+                    .iter()
+                    .filter(|grant| {
+                        grant.principal_kind == "enrolled" && grant.principal_id == final_name
+                    })
+                    .collect();
+                for grant in &retained {
+                    eprintln!(
+                        "existing grant enrolled:{final_name} {} {}:{}",
+                        grant.operation.as_str(),
+                        grant.selector_kind.as_str(),
+                        grant.selector
+                    );
+                }
+                if !retained.is_empty() && !keep_grants {
+                    return Err(CliError::Usage(format!(
+                        "enrolled:{final_name} has existing grants; revoke them with \
+                         ck auth revoke-grant, or approve with --keep-grants to explicitly inherit them"
+                    )));
+                }
+            }
             commit_admin(
                 global,
                 AdminOpBody::EnrollApprove {
                     v: ADMIN_OP_SCHEMA_V2,
                     request_id: request_id.clone(),
                     final_name: final_name.clone(),
+                    keep_grants,
                 },
             )?;
             println!("approved {request_id} as enrolled:{final_name}");
@@ -5630,7 +5668,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         "revoke" => {
             let name = required(rest, "--name")?;
             require_live_enrollment(global, &name)?;
-            commit_admin(
+            let reply = commit_admin(
                 global,
                 AdminOpBody::EnrollRevoke {
                     v: ADMIN_OP_SCHEMA_V2,
@@ -5638,10 +5676,19 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 },
             )?;
             println!("revoked enrolled:{name}");
-            eprintln!(
-                "(its grants are kept and still name this principal; revoke them too \
-                 before re-enrolling the name, or a different consumer inherits its reach)"
-            );
+            let grants = parse_grants(&serde_json::json!({
+                "read_grants": reply.get("removed_grants")
+            }))?;
+            for grant in grants {
+                println!(
+                    "removed grant {}:{} {} {}:{}",
+                    grant.principal_kind,
+                    grant.principal_id,
+                    grant.operation,
+                    grant.selector_kind,
+                    grant.credential_prefix
+                );
+            }
             Ok(())
         }
         "reissue" => {

@@ -2972,6 +2972,18 @@ impl EncryptedStore {
         final_name: &str,
         actor: &str,
     ) -> Result<String, StoreOpError> {
+        self.approve_enrollment_with_grants(request_id, final_name, false, actor)
+    }
+
+    /// Existing name-bound grants require explicit consent before a new consumer can
+    /// inherit them. Check inside the approval transaction so grant creation cannot race it.
+    pub fn approve_enrollment_with_grants(
+        &self,
+        request_id: &str,
+        final_name: &str,
+        keep_grants: bool,
+        actor: &str,
+    ) -> Result<String, StoreOpError> {
         if !valid_enrollment_name(final_name) {
             return Err(StoreOpError::InvalidPrincipal);
         }
@@ -3010,6 +3022,18 @@ impl EncryptedStore {
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
                     Some("enrollment name already in use".into()),
                 ));
+            }
+            let has_grants: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM read_grants \
+                 WHERE principal_kind = 'enrolled' AND principal_id = ?1)",
+                [final_name],
+                |row| row.get(0),
+            )?;
+            if has_grants && !keep_grants {
+                return Err(rusqlite_err(&format!(
+                    "enrolled:{final_name} has existing grants; revoke them with \
+                     ck auth revoke-grant, or approve with --keep-grants to explicitly inherit them"
+                )));
             }
             tx.execute(
                 "INSERT INTO enrolled_consumers \
@@ -3135,8 +3159,13 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    /// Revoke the live incarnation for a name while retaining its grants.
-    pub fn revoke_enrollment(&self, name: &str, actor: &str) -> Result<(), StoreOpError> {
+    /// Revoke the live incarnation and all of its name-bound grants atomically, so a
+    /// different consumer later admitted under the name cannot inherit its reach.
+    pub fn revoke_enrollment(
+        &self,
+        name: &str,
+        actor: &str,
+    ) -> Result<Vec<ReadGrant>, StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -3151,6 +3180,37 @@ impl EncryptedStore {
             let Some(enrollment_id) = enrollment_id else {
                 return Ok(None);
             };
+            let removed_grants = read_grants_from_conn(
+                tx,
+                Some("enrolled"),
+                Some(name),
+                newest_migration_version(),
+            )?;
+            tx.execute(
+                "DELETE FROM read_grants WHERE principal_kind = 'enrolled' AND principal_id = ?1",
+                [name],
+            )?;
+            for grant in &removed_grants {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::GrantRevoke,
+                        credential_id: Some(format!(
+                            "grant:{}:enrolled:{name}:{}|{}",
+                            grant.operation.as_str(),
+                            grant.selector_kind.as_str(),
+                            grant.selector,
+                        )),
+                        payload_hash: None,
+                        actor: actor.to_string(),
+                        alarm: None,
+                    },
+                )?;
+            }
+            if !removed_grants.is_empty() {
+                bump_grants_generation_tx(tx)?;
+            }
             tx.execute(
                 "UPDATE enrolled_consumers SET revoked_at_ms = ?1 WHERE enrollment_id = ?2",
                 rusqlite::params![now, enrollment_id],
@@ -3166,7 +3226,7 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(Some(()))
+            Ok(Some(removed_grants))
         })
         .map_err(StoreOpError::from)?
         .ok_or(StoreOpError::NotFound)
@@ -17170,6 +17230,10 @@ mod migration_10_tests {
 #[cfg(test)]
 #[path = "deposit_cookie_tests.rs"]
 mod deposit_cookie_tests;
+
+#[cfg(test)]
+#[path = "enrollment_grant_tests.rs"]
+mod enrollment_grant_tests;
 
 #[cfg(test)]
 #[path = "provider_ids_store_tests.rs"]

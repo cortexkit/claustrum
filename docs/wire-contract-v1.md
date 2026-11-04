@@ -305,6 +305,29 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
    token. Only `pending` means keep polling; every other outcome is terminal.
 4. **Persist at `0600`** with a parent directory that is not group- or world-writable.
 
+**Operator approval and revocation.** The master-key-authenticated `admin.op` body
+`{"op":"admin.enroll_approve","v":2,"request_id":"<id>","final_name":"consumer"}`
+admits a pending request without minting a token. Optional `keep_grants` defaults to
+`false`; if the unused final name already has grants (including grants retained by
+older revocations or deliberately preprovisioned), approval refuses through the existing
+admin refusal path unless `keep_grants:true` explicitly authorizes inheritance. The
+grant check and approval are one transaction. `ck auth enroll approve` lists those
+grants and explains how to revoke them or consent with `--keep-grants`. The success
+result remains `{"enrollment_id":"<id>","name":"consumer"}`.
+
+`{"op":"admin.enroll_revoke","v":2,"name":"consumer"}` revokes the live enrollment
+and every grant on `enrolled:consumer` in one transaction. Each removed grant gets a
+normal `grant_revoke` audit row. Its success result keeps `revoked:true` and adds
+`removed_grants`, an array ordered by selector kind, selector, then operation. Each row
+uses the existing grant inventory fields: `principal_kind`, `principal_id`,
+`selector_kind`, `credential_prefix` (the selector text), `operation`, and
+`created_at_ms`. The array is empty when no grants were removed. The CLI prints the
+removed grants. Consumer token rotation (`auth.enroll_rotate`) and operator reissue
+preserve grants because they keep the same enrollment. Golden admin request and reply
+examples are pinned by
+`enrollment_regression_admin_wire_examples_pin_consent_and_removed_grants` in the
+enrollment wire fixture below. No consumer request, reply, or refusal shape changes.
+
 **Refusals.** Every enrollment op refuses in the same shape as a read-surface
 refusal: a `Response` frame whose body is
 

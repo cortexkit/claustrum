@@ -5920,7 +5920,9 @@ fn enrollment_regression_grant_warns_for_an_unenrolled_name_and_can_be_revoked()
         "{stderr}"
     );
     assert!(
-        stderr.contains("Whoever is later approved under exactly this name gets it"),
+        stderr.contains(
+            "Approval under exactly this name requires --keep-grants to explicitly inherit it"
+        ),
         "{stderr}"
     );
     assert!(
@@ -6002,7 +6004,11 @@ fn enrollment_regression_grant_does_not_warn_for_a_live_name_but_warns_after_rev
         .unwrap();
     let (ok, stdout, stderr) = grant_on(&vault, "enrolled:consumer", "exact", "apikey:zai", "read");
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("already granted (no change)"), "{stdout}");
+    assert!(
+        stdout.contains("granted enrolled:consumer read exact:apikey:zai"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("already granted"), "{stdout}");
     assert!(
         stderr.contains("no live enrollment holds the name 'consumer'"),
         "{stderr}"
@@ -6017,6 +6023,144 @@ fn enrollment_regression_grant_does_not_warn_for_a_reserved_principal() {
     let (ok, _, stderr) = grant_on(&vault, "reserved:consumer", "exact", "apikey:zai", "read");
     assert!(ok, "{stderr}");
     assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+#[test]
+fn enrollment_regression_retained_grants_require_flag_and_revoke_lists_removed_grants() {
+    let vault = GrantCliVault::new("enrollment-retained-grants-cli");
+    vault.bootstrap();
+    let request = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let secret = "ac".repeat(32);
+        store
+            .propose_enrollment(
+                "proposed-name",
+                &credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap(),
+            )
+            .unwrap()
+    };
+    for (selector_kind, selector, operation) in [
+        ("category", "llm-provider", "list"),
+        ("exact", "apikey:zai", "read"),
+    ] {
+        let (ok, _, stderr) = grant_on(
+            &vault,
+            "enrolled:consumer",
+            selector_kind,
+            selector,
+            operation,
+        );
+        assert!(ok, "{stderr}");
+    }
+    let approve = [
+        "enroll",
+        "approve",
+        "--request-id",
+        &request.request_id,
+        "--name",
+        "consumer",
+    ];
+    {
+        // The retained-grant refusal must happen even when another writer holds the lease.
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let audit = store.audit_tip().unwrap();
+        let refused = vault.run(&approve);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "approval must require consent");
+        assert!(refused.stdout.is_empty());
+        assert!(
+            stderr.contains("existing grant enrolled:consumer list category:llm-provider"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("existing grant enrolled:consumer read exact:apikey:zai"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("revoke-grant"), "{stderr}");
+        assert!(stderr.contains("--keep-grants"), "{stderr}");
+        assert_eq!(store.audit_tip().unwrap(), audit);
+    }
+    let mut explicit = approve.to_vec();
+    explicit.push("--keep-grants");
+    let approved = vault.run(&explicit);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    assert!(String::from_utf8_lossy(&approved.stdout).contains("as enrolled:consumer"));
+    let revoked = vault.run(&["enroll", "revoke", "--name", "consumer"]);
+    let stdout = String::from_utf8_lossy(&revoked.stdout);
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert_eq!(stdout, "revoked enrolled:consumer\nremoved grant enrolled:consumer list category:llm-provider\nremoved grant enrolled:consumer read exact:apikey:zai\n");
+    assert!(open_leased_store(&vault.data_dir, &vault.key_path)
+        .list_read_grants()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn enrollment_regression_admin_wire_examples_pin_consent_and_removed_grants() {
+    use credentials_core::admin_ops::{apply, AdminOpBody};
+    use credentials_core::audit::AuditCtx;
+    use credentials_core::{AuditOp, GrantOperation, SelectorKind};
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/enrollment_wire_contract.json")).unwrap();
+    let operations = fixture["operations"].as_array().unwrap();
+    let example = |name: &str| operations.iter().find(|row| row["op"] == name).unwrap();
+    let vault = GrantCliVault::new("enrollment-admin-wire");
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let secret = "ad".repeat(32);
+    let request = store
+        .propose_enrollment(
+            "consumer",
+            &credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap(),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "enrolled",
+            "consumer",
+            SelectorKind::Exact,
+            "apikey:zai",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let approve = example("admin.enroll_approve");
+    for key in ["request", "keep_grants_request"] {
+        let bytes = approve[key].as_str().unwrap();
+        let op: AdminOpBody = serde_json::from_str(bytes).unwrap();
+        assert_eq!(String::from_utf8(op.to_bytes().unwrap()).unwrap(), bytes);
+        let mut body: serde_json::Value = serde_json::from_str(bytes).unwrap();
+        body["request_id"] = request.request_id.clone().into();
+        let result = apply(&store, serde_json::from_value(body).unwrap(), "operator");
+        if key == "request" {
+            assert!(result.unwrap_err().to_string().contains("--keep-grants"));
+        } else {
+            let mut reply = result.unwrap();
+            reply["enrollment_id"] = "enrollment-id".into();
+            assert_eq!(
+                serde_json::to_string(&serde_json::json!({"result": reply})).unwrap(),
+                approve["success"][0]
+            );
+        }
+    }
+    let revoke = example("admin.enroll_revoke");
+    let bytes = revoke["request"].as_str().unwrap();
+    let op: AdminOpBody = serde_json::from_str(bytes).unwrap();
+    assert_eq!(String::from_utf8(op.to_bytes().unwrap()).unwrap(), bytes);
+    let mut reply = apply(&store, op, "operator").unwrap();
+    reply["removed_grants"][0]["created_at_ms"] = 1_800_000_000_000_i64.into();
+    assert_eq!(
+        serde_json::to_string(&serde_json::json!({"result": reply})).unwrap(),
+        revoke["success"][0]
+    );
 }
 
 // `ck auth grant` USED TO PRINT ONLY `granted ...`, so a grant that reached nothing read

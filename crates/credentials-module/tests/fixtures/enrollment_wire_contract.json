@@ -1,6 +1,21 @@
 {
   "operations": [
     {
+      "op": "admin.enroll_approve",
+      "request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\"}",
+      "keep_grants_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"keep_grants\":true}",
+      "success": [
+        "{\"result\":{\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}"
+      ]
+    },
+    {
+      "op": "admin.enroll_revoke",
+      "request": "{\"op\":\"admin.enroll_revoke\",\"v\":2,\"name\":\"consumer\"}",
+      "success": [
+        "{\"result\":{\"removed_grants\":[{\"created_at_ms\":1800000000000,\"credential_prefix\":\"apikey:zai\",\"operation\":\"read\",\"principal_id\":\"consumer\",\"principal_kind\":\"enrolled\",\"selector_kind\":\"exact\"}],\"revoked\":true}}"
+      ]
+    },
+    {
       "op": "credential.account_token",
       "request": "{\"audience\":\"cortexkit-runners\"}",
       "success": [

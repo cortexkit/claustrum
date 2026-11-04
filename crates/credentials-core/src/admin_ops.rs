@@ -159,17 +159,16 @@ pub enum AdminOpBody {
         /// The name to admit. Usually the proposed one; an operator may correct it,
         /// because a name a stranger chose is a claim rather than a fact.
         final_name: String,
+        /// Explicitly allow the new consumer to inherit existing name-bound grants.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_grants: bool,
     },
     /// Deny a pending enrollment request.
     #[serde(rename = "admin.enroll_deny")]
     EnrollDeny { v: u32, request_id: String },
-    /// Revoke a live enrollment, keeping its grant rows.
-    ///
-    /// The grants stay DELIBERATELY. They record what reach existed, and they block
-    /// re-enrolment of the name until an operator revokes them too -- otherwise a
-    /// different consumer could enrol under a freed name and silently inherit the reach
-    /// of the one that was revoked, which is the failure that makes revocation look
-    /// complete while leaving a loaded slot behind.
+    /// Revoke a live enrollment and its grants in one transaction. Each removed grant
+    /// gets the same audit row as an explicit revoke-grant, preserving its history
+    /// without leaving reach for a different consumer later admitted under the name.
     #[serde(rename = "admin.enroll_revoke")]
     EnrollRevoke { v: u32, name: String },
     /// Mint a fresh token for a live enrollment, invalidating the previous one.
@@ -509,11 +508,13 @@ impl std::fmt::Debug for AdminOpBody {
                 v,
                 request_id,
                 final_name,
+                keep_grants,
             } => f
                 .debug_struct("EnrollApprove")
                 .field("v", v)
                 .field("request_id", request_id)
                 .field("final_name", final_name)
+                .field("keep_grants", keep_grants)
                 .finish(),
             AdminOpBody::EnrollDeny { v, request_id } => f
                 .debug_struct("EnrollDeny")
@@ -1235,9 +1236,15 @@ pub fn apply(
         AdminOpBody::EnrollApprove {
             request_id,
             final_name,
+            keep_grants,
             ..
         } => {
-            let enrollment_id = store.approve_enrollment(&request_id, &final_name, actor)?;
+            let enrollment_id = store.approve_enrollment_with_grants(
+                &request_id,
+                &final_name,
+                keep_grants,
+                actor,
+            )?;
             // The token is deliberately absent: approval admits a NAME, and only the
             // consumer's own poll -- authenticated by the request secret it minted --
             // turns that into bearer material.
@@ -1251,8 +1258,21 @@ pub fn apply(
             Ok(serde_json::json!({ "denied": true }))
         }
         AdminOpBody::EnrollRevoke { name, .. } => {
-            store.revoke_enrollment(&name, actor)?;
-            Ok(serde_json::json!({ "revoked": true }))
+            let removed_grants: Vec<serde_json::Value> = store
+                .revoke_enrollment(&name, actor)?
+                .iter()
+                .map(|grant| {
+                    serde_json::json!({
+                        "principal_kind": grant.principal_kind,
+                        "principal_id": grant.principal_id,
+                        "selector_kind": grant.selector_kind.as_str(),
+                        "credential_prefix": grant.selector,
+                        "operation": grant.operation.as_str(),
+                        "created_at_ms": grant.created_at_ms,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "revoked": true, "removed_grants": removed_grants }))
         }
         AdminOpBody::EnrollReissue { name, .. } => {
             let rotation = store.reissue_enrollment(&name, actor)?;

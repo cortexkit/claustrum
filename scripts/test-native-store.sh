@@ -30,7 +30,9 @@ cleanup() {
       kill "$pid" 2>/dev/null && pids+=("$pid")
     fi
   done
-  for pid in "${pids[@]}"; do
+  # The `+` form expands to nothing for an empty array; a bare "${pids[@]}" is an
+  # unbound-variable error under `set -u` in bash 3.2, which macOS ships.
+  for pid in ${pids[@]+"${pids[@]}"}; do
     for _ in $(seq 50); do running "$pid" || break; sleep 0.1; done
     if running "$pid"; then
       kill -KILL "$pid" 2>/dev/null || true

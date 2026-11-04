@@ -78,6 +78,75 @@ async fn cancelled_pairing_lookup_withdraws_its_waiter_on_the_shared_link() {
 }
 
 #[tokio::test]
+async fn an_enclosing_deadline_drops_only_the_cancelled_calls_binding() {
+    let root = crate::support::temp_root("outbound-enclosing-deadline");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Ok(json!({ "payload": "tok" })),
+    );
+    for key in [&home, "healthy-route"] {
+        wait_for_signal(call(
+            &vaults.b.outbound,
+            key,
+            consumer_get(),
+            Duration::from_secs(30),
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(vaults.callosum.opens("claustrum").len(), 2);
+
+    let held = Held::new();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Hold(held.clone()),
+    );
+    tokio::time::pause();
+    let client = vaults.b.outbound.clone();
+    let target = home.clone();
+    let mut request = tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            call(&client, &target, consumer_get(), Duration::from_secs(30)),
+        )
+        .await
+    });
+    held.arrived_before(&mut request).await;
+    assert!(
+        resolved_after_advance(request, Duration::from_millis(1_001))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        vaults.b.outbound.pending_waiter_count_for_test().await,
+        Some(0)
+    );
+
+    vaults.callosum.forget_answers();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Ok(json!({ "payload": "reconnected" })),
+    );
+    for (key, opens) in [("healthy-route", 2), (home.as_str(), 3)] {
+        let reply = wait_for_signal(call(
+            &vaults.b.outbound,
+            key,
+            consumer_get(),
+            Duration::from_secs(30),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(reply["payload"], "reconnected");
+        assert_eq!(vaults.callosum.opens("claustrum").len(), opens);
+    }
+}
+
+#[tokio::test]
 async fn a_channel_zero_open_refusal_keeps_its_code_without_spending_the_deadline() {
     let root = crate::support::temp_root("outbound-open-refusal");
     let vaults = TwoVaults::new(&root).await;

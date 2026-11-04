@@ -5,9 +5,10 @@
 //! previous entry's mac plus this entry's fields, so the log is a hash chain: any
 //! edit to a past entry invalidates every later mac.
 //!
-//! The chain is HMAC-keyed (not a plain hash) with a key DERIVED from the master
-//! key, so the audit log cannot be forged or silently repaired without the master
-//! key. A key-less attacker who rewrites the whole `audit_log` table could
+//! The chain is HMAC-keyed (not a plain hash) with an independently generated random
+//! key, persisted in `vault_secrets` sealed under the master key. Master-key rotation
+//! rewraps that same audit key, preserving verification of the existing chain.
+//! A key-less attacker who rewrites the whole `audit_log` table could
 //! recompute a plain SHA-256 chain and erase their tracks; they cannot recompute
 //! the HMACs without the audit key, so the forensic record's tamper-evidence rests
 //! on the SAME trust boundary as the record encryption. (An attacker who HAS the

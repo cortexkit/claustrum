@@ -889,6 +889,8 @@ pub struct HomeVault {
     #[cfg(any(test, feature = "test-support"))]
     issue_audit_gate: Option<IssueAuditGate>,
     #[cfg(any(test, feature = "test-support"))]
+    authorization_gate: Option<IssueAuditGate>,
+    #[cfg(any(test, feature = "test-support"))]
     callosum_stub: Option<CallosumStub>,
 }
 
@@ -911,6 +913,8 @@ impl HomeVault {
             op_deadline: HOME_OP_DEADLINE,
             #[cfg(any(test, feature = "test-support"))]
             issue_audit_gate: None,
+            #[cfg(any(test, feature = "test-support"))]
+            authorization_gate: None,
             #[cfg(any(test, feature = "test-support"))]
             callosum_stub: None,
         }
@@ -936,6 +940,14 @@ impl HomeVault {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_issue_audit_gate(mut self, gate: IssueAuditGate) -> Self {
         self.issue_audit_gate = Some(gate);
+        self
+    }
+
+    /// Pause after member-grant admission, before any credential read or mutation.
+    /// Tests use this seam to replace a row after its authorization has completed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_authorization_gate(mut self, gate: IssueAuditGate) -> Self {
+        self.authorization_gate = Some(gate);
         self
     }
 
@@ -1057,9 +1069,13 @@ impl HomeVault {
             return Err(Refusal::NotFound);
         }
         // 7. A current-pairing `remote_read` grant covering the id.
-        self.require_grant(member, &pairing_id, &aad.credential_id)?;
+        let incarnation = self.require_grant(member, &pairing_id, &aad.credential_id)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(gate) = self.authorization_gate.as_ref() {
+            gate().await;
+        }
         // 8. Eligibility: local, refreshable, outside the transfer-key fence.
-        self.require_eligible(member, &aad.credential_id)?;
+        self.require_eligible(member, &aad.credential_id, &incarnation)?;
         // 9. An announced key for the requester, matching the aad's key id.
         let peer = self.peer_key(member, budget).await?;
         if peer.key_id != aad.recipient_key_id {
@@ -1067,7 +1083,7 @@ impl HomeVault {
         }
         // 10. The local get path, with refresh, then the projection.
         let served = self
-            .read_with_refresh(&aad.credential_id, request.min_ttl_ms, budget)
+            .read_with_refresh(&aad.credential_id, &incarnation, request.min_ttl_ms, budget)
             .await?;
         if served.refreshed_for_min_ttl
             && request
@@ -1135,8 +1151,12 @@ impl HomeVault {
         if report.credential_id.is_empty() {
             return Err(Refusal::InvalidParams("credential_id is empty".into()));
         }
-        self.require_grant(member, &pairing_id, &report.credential_id)?;
-        self.require_eligible(member, &report.credential_id)?;
+        let incarnation = self.require_grant(member, &pairing_id, &report.credential_id)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(gate) = self.authorization_gate.as_ref() {
+            gate().await;
+        }
+        self.require_eligible(member, &report.credential_id, &incarnation)?;
         if !matches!(report.provider_status, 401 | 403) {
             return Err(Refusal::StatusNotCredentialDeath);
         }
@@ -1152,9 +1172,10 @@ impl HomeVault {
         };
         self.engine
             .store()
-            .mark_stale_if_version_reported(
+            .mark_stale_in_incarnation(
                 &report.credential_id,
                 report.record_version,
+                &incarnation,
                 AuditCtx {
                     op: AuditOp::ReportAuthFailure,
                     actor: member,
@@ -1473,8 +1494,12 @@ impl HomeVault {
         member: &str,
         pairing_id: &str,
         credential_id: &str,
-    ) -> Result<(), Refusal> {
+    ) -> Result<String, Refusal> {
         let store = self.engine.store();
+        // Capture the row lifetime before grant/category evaluation so a later
+        // remove-and-recreate cannot redirect the authority granted by this check.
+        // Defer errors until after authorization to keep unknown ids undisclosed.
+        let incarnation = store.credential_incarnation(credential_id);
         // A store fault is transient here, not the authoritative `not_found` a
         // requester would latch as a dead grant.
         let grants = store.list_member_grants().map_err(|_| STORE_ERROR)?;
@@ -1501,7 +1526,7 @@ impl HomeVault {
             });
         }
         if covered {
-            Ok(())
+            incarnation.map_err(|error| map_store_error(&error))
         } else {
             self.note_refusal(credential_id, member, "no_grant");
             Err(Refusal::NotFound)
@@ -1512,13 +1537,18 @@ impl HomeVault {
     /// transfer-key fence. A remote id has no local row, so it reads as not found. A
     /// record whose state refuses a read (`needs_reauth`, quarantined) answers its own
     /// error, as a local read does for a caller already authorized by its grant.
-    fn require_eligible(&self, member: &str, credential_id: &str) -> Result<(), Refusal> {
+    fn require_eligible(
+        &self,
+        member: &str,
+        credential_id: &str,
+        incarnation: &str,
+    ) -> Result<(), Refusal> {
         if is_vault_transfer_id(credential_id) {
             self.note_refusal(credential_id, member, "transfer_key");
             return Err(Refusal::NotFound);
         }
-        match self.engine.store().get(credential_id) {
-            Ok(record) if record.is_refreshable() => Ok(()),
+        match self.engine.store().get_snapshot(credential_id, incarnation) {
+            Ok(snapshot) if snapshot.record.is_refreshable() => Ok(()),
             Ok(_) => {
                 self.note_refusal(credential_id, member, "ineligible");
                 Err(Refusal::NotFound)
@@ -1538,15 +1568,18 @@ impl HomeVault {
     async fn read_with_refresh(
         &self,
         credential_id: &str,
+        incarnation: &str,
         min_ttl_ms: Option<i64>,
         budget: tokio::time::Instant,
     ) -> Result<GetWithRefreshStatus, Refusal> {
         let engine = Arc::clone(&self.engine);
         let id = credential_id.to_string();
-        let read =
-            tokio::spawn(
-                async move { engine.get_with_refresh_status(&id, min_ttl_ms, false).await },
-            );
+        let incarnation = incarnation.to_string();
+        let read = tokio::spawn(async move {
+            engine
+                .get_in_incarnation(&id, &incarnation, min_ttl_ms, false)
+                .await
+        });
         match tokio::time::timeout_at(budget, read).await {
             Err(_) => Err(Refusal::HomeUnavailable),
             Ok(Err(_)) => Err(STORE_ERROR),

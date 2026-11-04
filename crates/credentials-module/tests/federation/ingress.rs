@@ -1001,7 +1001,7 @@ async fn repeated_fetches_at_one_version_write_one_remote_issue_row_also_after_a
     assert!(restarted.store.verify_audit_chain().is_ok());
 }
 
-/// A gate that pauses the N-th fetch (1-based) at the audit point until released.
+/// A gate that pauses its N-th invocation (1-based) until explicitly released.
 fn pause_fetch(
     nth: usize,
 ) -> (
@@ -1027,6 +1027,130 @@ fn pause_fetch(
         })
     });
     (gate, reached_rx)
+}
+
+#[tokio::test]
+async fn member_authorization_does_not_follow_a_recreated_credential_into_a_read_or_report() {
+    for category_grant in [false, true] {
+        for report in [false, true] {
+            let (gate, mut reached) = pause_fetch(1);
+            let mut rig = Rig::new("ingress-authorized-incarnation").await;
+            rig.home = rig.home.with_authorization_gate(gate);
+            rig.add_login(TOKEN_ID, "llm-provider");
+            if category_grant {
+                rig.grant(
+                    MemberGrantSelector::Category("llm-provider".into()),
+                    PAIRING,
+                );
+            } else {
+                rig.grant_exact(TOKEN_ID);
+            }
+            let params = |rig: &Rig, id: &str| {
+                if report {
+                    json!({"credential_id": id, "record_version": 1, "provider_status": 401})
+                } else {
+                    json!({"aad": rig.aad(id)})
+                }
+            };
+            let method = if report {
+                OP_REPORT_AUTH_FAILURE
+            } else {
+                OP_REMOTE_TOKEN
+            };
+            let unknown = reply(
+                rig.call(method, params(&rig, "oauth:anthropic:absent"))
+                    .await,
+            );
+            assert_eq!(error_code(&unknown), "not_found");
+            let original = rig.store().credential_incarnation(TOKEN_ID).unwrap();
+            let request_params = params(&rig, TOKEN_ID);
+            let rig = Arc::new(rig);
+            tokio::time::pause();
+            let request = {
+                let rig = Arc::clone(&rig);
+                tokio::spawn(async move { reply(rig.call(method, request_params).await) })
+            };
+            let resume = wait_for_signal(reached.recv())
+                .await
+                .expect("member grant admitted");
+            rig.store()
+                .remove_audited(TOKEN_ID, AuditCtx::admin(AuditOp::Remove))
+                .unwrap();
+            rig.store()
+                .create(
+                    TOKEN_ID,
+                    &oauth_record("anthropic", "access-new", "refresh-new", None),
+                )
+                .unwrap();
+            rig.set_category(TOKEN_ID, "ungranted");
+            assert_ne!(
+                rig.store().credential_incarnation(TOKEN_ID).unwrap(),
+                original
+            );
+            resume.send(()).unwrap();
+            let answer = wait_for_signal(request).await.unwrap();
+            assert_eq!(
+                serde_json::to_vec(&answer).unwrap(),
+                serde_json::to_vec(&unknown).unwrap(),
+                "category_grant={category_grant}, report={report}: {answer}"
+            );
+            assert_eq!(stale_and_version(&rig, TOKEN_ID), (0, 1));
+            assert!(rig.audit_ops("remote_issue").is_empty());
+            assert!(rig.audit_ops("report_auth_failure").is_empty());
+            tokio::time::resume();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_peer_key_lookup_cannot_move_an_authorized_read_to_a_recreated_row() {
+    let rig = Arc::new(Rig::new("ingress-peer-incarnation").await);
+    rig.add_login(TOKEN_ID, "llm-provider");
+    rig.grant(
+        MemberGrantSelector::Category("llm-provider".into()),
+        PAIRING,
+    );
+    let unknown = rig.fetch("oauth:anthropic:absent").await;
+    let (public, _) = credentials_core::kem::public_half(&rig.requester_pem).unwrap();
+    let fingerprint = rig
+        .requester()
+        .strip_prefix("fed-computer:")
+        .unwrap()
+        .to_string();
+    let held = Held::new();
+    rig.vaults.callosum.answer(
+        "claustrum",
+        "callosum.peer_keys_read",
+        Reply::Hold(held.clone()),
+    );
+    tokio::time::pause();
+    let mut request = {
+        let rig = Arc::clone(&rig);
+        tokio::spawn(async move { rig.fetch(TOKEN_ID).await })
+    };
+    held.arrived_before(&mut request).await;
+    rig.store()
+        .remove_audited(TOKEN_ID, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    rig.store()
+        .create(
+            TOKEN_ID,
+            &oauth_record("anthropic", "access-new", "refresh-new", None),
+        )
+        .unwrap();
+    rig.set_category(TOKEN_ID, "ungranted");
+    held.release(Reply::Ok(
+        json!({"peers":[{"fingerprint":fingerprint,"key_record":{"keys":{
+            "vault_transfer_x25519":{"pub":hex(&public),"version":"1"}
+        }}}]}),
+    ));
+    let answer = wait_for_signal(request).await.unwrap();
+    assert_eq!(
+        serde_json::to_vec(&answer).unwrap(),
+        serde_json::to_vec(&unknown).unwrap(),
+        "{answer}"
+    );
+    assert!(rig.audit_ops("remote_issue").is_empty());
 }
 
 #[tokio::test]

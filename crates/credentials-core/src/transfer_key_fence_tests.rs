@@ -305,6 +305,58 @@ fn put_handle_hash_refuses_to_mint_a_transfer_key_handle() {
 
 // ---- the admin-op fence, one test per op --------------------------------
 
+fn add_inactive_case_variant(store: &EncryptedStore) {
+    let lookalike = "KEM:VAULT-TRANSFER:0";
+    store.create(lookalike, &static_record()).unwrap();
+    apply(
+        store,
+        AdminOpBody::Invalidate {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: lookalike.into(),
+        },
+        ACTOR,
+    )
+    .unwrap();
+    assert_eq!(
+        version_and_state(store, lookalike).1,
+        RecordState::NeedsReauth
+    );
+}
+
+#[test]
+fn active_transfer_key_state_is_not_shadowed_by_an_inactive_case_variant() {
+    let (_root, store) = rig_with_transfer_key("transfer-case-state", 240);
+    add_inactive_case_variant(&store);
+    assert_eq!(
+        store.vault_transfer_key_state().unwrap(),
+        Some(RecordState::Active)
+    );
+}
+
+#[test]
+fn an_inactive_case_variant_cannot_disable_active_transfer_key_mutation_fences() {
+    let (_root, store) = rig_with_transfer_key("transfer-case-mutations", 241);
+    add_inactive_case_variant(&store);
+    for op in [
+        AdminOpBody::Invalidate {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: VAULT_TRANSFER_ID.into(),
+        },
+        store_body(
+            VAULT_TRANSFER_ID,
+            transfer_record(),
+            AdminAuditOp::Overwrite,
+            StoreMode::ReplaceUnconditional,
+        ),
+        AdminOpBody::Remove {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: VAULT_TRANSFER_ID.into(),
+        },
+    ] {
+        assert_protected(&store, op);
+    }
+}
+
 #[test]
 fn put_replace_is_refused_on_the_active_transfer_key() {
     let (_root, store) = rig_with_transfer_key("transfer-put", 230);

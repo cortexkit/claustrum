@@ -1399,6 +1399,10 @@ order. No grant, stale pairing, unknown/ungranted id, ineligible record and proj
 refusal are indistinguishable `not_found`. An authorized `needs_reauth` record keeps
 answering `needs_reauth` on subsequent reads, rather than degrading to `not_found`.
 
+Grant admission pins the local row lifetime for eligibility, refresh reads and forwarded
+stale-report updates. Removing and re-creating the id before one of those steps answers the
+same `not_found` as an unknown credential; the admitted call cannot follow the replacement.
+
 After the normal local get/refresh the home requires a nonempty `oauth.access_token`
 equal to `payload` and unequal to every nonempty refresh component (including packed-token
 segments, client secret and Meta session identity/refresh tokens). It then audits issuance
@@ -1718,6 +1722,10 @@ envelopes; active replacement is protected. Abandoned resume sends nothing: use 
 The effect suffix takes precedence. The 90 s callosum reconnect grace does not extend the
 vault's shorter deadlines. Token queries and version-gated reports are safe under uncertain
 outcomes; transfers rely on durable dedup.
+
+The permanent-code mapping also applies to channel-zero Error frames, whether refusing
+`route.open` or a correlated delivery request. A transfer send or resume deletes its outgoing
+row on that `federation_setup_invalid` result, just as for a routed permanent refusal.
 
 `invalid_params` is a protocol Error-frame code with no credential class, including for
 malformed federation params/member/aad and forbidden bearers. Master-key admin helpers

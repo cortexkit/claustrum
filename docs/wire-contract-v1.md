@@ -695,7 +695,8 @@ the error code's class determines retry policy. Scoped refusals remain uniform.
 
 `credential_id` is absent for overall readiness and unresolved addresses; verify a held
 binding with it, but never route on it—account routing remains `account_id` +
-`record_version`.
+the refresh adapter, never `record_version`. Use `record_version` to invalidate
+cached material, not to identify an account pool.
 
 **An unresolved handle is an answer, not an error.** A handle that is unknown or revoked
 returns a normal result, `{"ready":false,"last_error_code":"not_found","lease_held":…}`,

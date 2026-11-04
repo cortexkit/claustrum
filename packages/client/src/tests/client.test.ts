@@ -499,12 +499,8 @@ describe('ClaustrumClient', () => {
   })
 
   test('treats an envelope that omits code as malformed and falls back to transient', async () => {
-    // P2: the wire contract in read_surface.rs says BOTH `class` and `code` are always
-    // present. A frame missing `code` is therefore malformed; treating its `class`
-    // as authoritative lets a malicious or broken peer drive a "gone" action (the
-    // mapping of `permanent`) by sending a half-formed error. The cut-line rule
-    // (Anthropic: unknown or absent class → transient) is the safer fallback: a
-    // malformed envelope is treated as transient and retried.
+    // Both class and code are required. A known class in a half-formed envelope
+    // must not drive a definitive action such as `gone`.
     const client = await ClaustrumClient.connect({
       connector: async () =>
         new FakeDaemon([
@@ -520,7 +516,7 @@ describe('ClaustrumClient', () => {
     client.close()
   })
 
-  test('bounds an UNKNOWN error class to transient and logs only the class name', async () => {
+  test('keeps an unknown error class degraded and logs only the class name', async () => {
     const logs: string[] = []
     const client = await ClaustrumClient.connect({
       logger: (errorClass) => logs.push(errorClass),
@@ -532,8 +528,9 @@ describe('ClaustrumClient', () => {
 
     expect(await rejectionOf(client.getCredential('private-handle'))).toMatchObject({
       code: 'future_code',
-      class: 'transient',
-      action: 'retry',
+      class: 'unknown',
+      action: 'degraded',
+      rawClass: 'future_class',
     })
     expect(logs).toEqual(['future_class'])
     client.close()

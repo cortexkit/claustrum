@@ -21,8 +21,12 @@ credential caching, refresh, account scheduling, and retry policy.
   and `stalePending` absent. Since 0.5.0 `CredentialStatus.recordVersion` is optional for
   that reason; handle `undefined` rather than defaulting it to a number, which would read
   as a version older than every real one.
-• Unknown server error classes are bounded to `transient`; callers must retry them
-  rather than treating a forward-compatible class as permanent.
+• Unknown server error classes return `class: 'unknown'` and `action: 'degraded'`,
+  retaining the original string in `rawClass` (`undefined` for a non-string class).
+  Render a generic degraded state; do not infer a retry or another known remedy.
+• Account pools use the refresh adapter from `list_scoped` plus opaque `accountId`.
+  Use `recordVersion` to invalidate cached material, never as part of a pool key:
+  a token refresh must not split one account into a new pool.
 • **Changed in 0.13.0:** a transport `Error` frame whose answer no retry or reconnect
   can change is reported as `permanent` with action `gone`, and the client no longer
   reconnects for it: `unknown_method`, `invalid_params`, `invalid_request`,

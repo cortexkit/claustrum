@@ -817,6 +817,9 @@ impl RemoteReader {
         record: &RemoteRecord,
         min_ttl_ms: Option<i64>,
     ) -> RemoteAnswer {
+        if let Err(refusal) = self.check_incarnation(record) {
+            return RemoteAnswer::Refused(refusal);
+        }
         let budget = tokio::time::Instant::now() + self.deadline;
         let min_ttl = min_ttl_ms.unwrap_or(0).max(0);
         let demand = home_demand(min_ttl_ms);
@@ -873,6 +876,11 @@ impl RemoteReader {
             return RemoteAnswer::Refused(Failure::home_unreachable().refusal);
         };
 
+        // A removed mapping can leave an old flight and its waiters in memory. The
+        // durable incarnation, not successful cache application, decides delivery.
+        if let Err(refusal) = self.check_incarnation(record) {
+            return RemoteAnswer::Refused(refusal);
+        }
         let ids = self.lock();
         let Some(state) = ids
             .get(&record.credential_id)
@@ -900,6 +908,14 @@ impl RemoteReader {
                 }
             }
             Fetched::Failed(failure) => RemoteAnswer::Refused(failure.refusal.clone()),
+        }
+    }
+
+    fn check_incarnation(&self, record: &RemoteRecord) -> Result<(), RemoteRefusal> {
+        match self.remote_record(&record.credential_id) {
+            Ok(Some(current)) if current.incarnation == record.incarnation => Ok(()),
+            Ok(_) => Err(RemoteRefusal::new("not_found", "permanent")),
+            Err(_) => Err(Failure::store_error().refusal),
         }
     }
 

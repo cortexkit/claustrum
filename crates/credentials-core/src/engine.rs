@@ -143,6 +143,8 @@ pub enum EngineError {
 /// move the version without this read proving why the replacement exists.
 #[derive(Debug)]
 pub struct GetWithRefreshStatus {
+    /// Internal lifetime of the row read; never projected onto consumer replies.
+    pub incarnation: String,
     pub record: VaultRecord,
     pub refreshed_for_min_ttl: bool,
     /// On the engine clock, when a refresh this read wanted becomes allowed: set only
@@ -202,6 +204,8 @@ pub struct RefreshEngine {
     // block-before-commit path at all.
     #[cfg(feature = "kill9-test-seam")]
     pre_commit: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RefreshEngine {
@@ -224,6 +228,8 @@ impl RefreshEngine {
             inflight: Mutex::new(HashMap::new()),
             #[cfg(feature = "kill9-test-seam")]
             pre_commit: Mutex::new(None),
+            #[cfg(test)]
+            after_snapshot: Mutex::new(None),
         }
     }
 
@@ -232,6 +238,11 @@ impl RefreshEngine {
     #[cfg(feature = "kill9-test-seam")]
     pub fn set_pre_commit_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
         *self.pre_commit.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_snapshot_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.after_snapshot.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Override the expiry skew (mostly for tests).
@@ -283,18 +294,53 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        let initial = self
-            .store
-            .get_with_stale_pending_and_digest(credential_id)?;
+        self.get_for_incarnation(credential_id, None, min_ttl_ms, force_refresh)
+            .await
+    }
+
+    /// Serve only the row lifetime admitted by handle resolution or authorization.
+    pub async fn get_in_incarnation(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+        min_ttl_ms: Option<i64>,
+        force_refresh: bool,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
+        self.get_for_incarnation(credential_id, Some(incarnation), min_ttl_ms, force_refresh)
+            .await
+    }
+
+    async fn get_for_incarnation(
+        &self,
+        credential_id: &str,
+        expected_incarnation: Option<&str>,
+        min_ttl_ms: Option<i64>,
+        force_refresh: bool,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
+        let initial = match expected_incarnation {
+            Some(incarnation) => self.store.get_snapshot(credential_id, incarnation)?,
+            None => self
+                .store
+                .get_with_stale_pending_and_digest(credential_id)?,
+        };
+        let incarnation = initial.incarnation.clone();
+        #[cfg(test)]
+        {
+            let hook = self.after_snapshot.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let stale_pending = initial.mark.pending;
         let initial_version = initial.record.record_version;
         if stale_pending && !initial.record.is_refreshable() {
             // A stale marker means a consumer already refused this exact token. A
             // non-refreshable record cannot replace it, so defer to the existing
             // version-fenced terminal transition rather than serving it again.
-            self.store.invalidate_if_version_reported(
+            self.store.invalidate_in_incarnation(
                 credential_id,
                 initial.record.record_version,
+                &incarnation,
                 AuditCtx::vault(AuditOp::Invalidate),
                 Some(AuthObservation {
                     kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
@@ -306,10 +352,9 @@ impl RefreshEngine {
             )?;
             // If a concurrent write moved the version, return the replacement rather
             // than incorrectly refusing the record this get did not inspect.
-            let replacement = self
-                .store
-                .get_with_stale_pending_and_digest(credential_id)?;
+            let replacement = self.store.get_snapshot(credential_id, &incarnation)?;
             return Ok(GetWithRefreshStatus {
+                incarnation,
                 record: replacement.record,
                 refreshed_for_min_ttl: false,
                 refresh_deferred_until_ms: None,
@@ -324,6 +369,7 @@ impl RefreshEngine {
             force_refresh || stale_pending || self.is_stale(&served.record, min_ttl_ms);
         if !wants_refresh || !served.record.is_refreshable() {
             return Ok(GetWithRefreshStatus {
+                incarnation,
                 record: served.record,
                 refreshed_for_min_ttl: false,
                 refresh_deferred_until_ms: None,
@@ -349,6 +395,7 @@ impl RefreshEngine {
             // duration cannot drift from this read's own decision by clock skew.
             let deferred_until_ms = record_written_at_ms + REPORT_REFRESH_COOLDOWN_MS;
             return Ok(GetWithRefreshStatus {
+                incarnation,
                 record: served.record,
                 refreshed_for_min_ttl: false,
                 refresh_deferred_until_ms: Some(deferred_until_ms),
@@ -365,11 +412,10 @@ impl RefreshEngine {
         // without a second one (this is what makes N concurrent gets ⇒ 1 call, and
         // it is correct even under force_refresh). It also means this request has no
         // exchange proof of its own for a later TTL refusal.
-        let current = self
-            .store
-            .get_with_stale_pending_and_digest(credential_id)?;
+        let current = self.store.get_snapshot(credential_id, &incarnation)?;
         if current.record.record_version != initial_version {
             return Ok(GetWithRefreshStatus {
+                incarnation,
                 record: current.record,
                 refreshed_for_min_ttl: false,
                 refresh_deferred_until_ms: None,
@@ -377,10 +423,9 @@ impl RefreshEngine {
             });
         }
         self.do_refresh(credential_id, &current.record).await?;
-        let refreshed = self
-            .store
-            .get_with_stale_pending_and_digest(credential_id)?;
+        let refreshed = self.store.get_snapshot(credential_id, &incarnation)?;
         Ok(GetWithRefreshStatus {
+            incarnation,
             record: refreshed.record,
             refreshed_for_min_ttl: refresh_requested_by_min_ttl,
             refresh_deferred_until_ms: None,

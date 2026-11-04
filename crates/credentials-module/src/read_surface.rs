@@ -946,6 +946,9 @@ pub struct StatusResult {
 const OPEN_REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 const OPEN_REFUSAL_THRESHOLD: usize = 16;
 
+#[cfg(test)]
+type IncarnationHooks = HashMap<&'static str, Box<dyn FnOnce() + Send>>;
+
 /// The read surface: the engine (for refresh-on-read), the per-connection limiter,
 /// and the actor used in audit entries this surface writes (refresh commits and
 /// report_auth_failure go in the same chain as admin writes).
@@ -995,6 +998,8 @@ pub struct ReadSurface {
     // Fixes the ephemeral key so the pinned wire sample is reproducible byte for byte.
     #[cfg(test)]
     seal_ephemeral_ikm_for_test: std::sync::Mutex<Option<[u8; 32]>>,
+    #[cfg(test)]
+    incarnation_hooks: std::sync::Mutex<IncarnationHooks>,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -1292,6 +1297,7 @@ enum KeyAddress<'a> {
 
 struct ResolvedKeyAddress {
     credential_id: String,
+    incarnation: String,
     principal: Option<(&'static str, String)>,
 }
 
@@ -1314,6 +1320,30 @@ impl<'a> From<PublicKeyAuthorization<'a>> for KeyAddress<'a> {
 }
 
 impl ReadSurface {
+    #[cfg(test)]
+    pub(crate) fn set_incarnation_hook(
+        &self,
+        point: &'static str,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        self.incarnation_hooks
+            .lock()
+            .expect("incarnation hooks")
+            .insert(point, Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_incarnation_hook(&self, point: &'static str) {
+        let hook = self
+            .incarnation_hooks
+            .lock()
+            .expect("incarnation hooks")
+            .remove(point);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     pub fn new(engine: Arc<RefreshEngine>, limiter: FetchLimiter) -> Self {
         // Compute the initial snapshot once at construction (boot time, off any
         // probe path) so the very first health.check has real data, not a
@@ -1347,6 +1377,8 @@ impl ReadSurface {
             seal_before_audit_hook: std::sync::Mutex::new(None),
             #[cfg(test)]
             seal_ephemeral_ikm_for_test: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            incarnation_hooks: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1433,7 +1465,11 @@ impl ReadSurface {
 
         let credential_id = resolved.credential_id;
 
-        let record = match self.engine.store().get(&credential_id) {
+        let snapshot = match self
+            .engine
+            .store()
+            .get_snapshot(&credential_id, &resolved.incarnation)
+        {
             Ok(r) => r,
             Err(StoreOpError::NotFound) if params.credential_id.is_some() => {
                 self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::NotFound);
@@ -1441,6 +1477,7 @@ impl ReadSurface {
             }
             Err(e) => return Err(map_store_error(&e)),
         };
+        let record = snapshot.record;
 
         // The fence is checked before the payload is decoded, so a non-signing
         // credential refuses identically whatever bytes were presented.
@@ -1465,6 +1502,8 @@ impl ReadSurface {
             }
         };
         if record.audit_each_signature {
+            #[cfg(test)]
+            self.run_incarnation_hook("sign_audit");
             // Keep the identity that authorized a scoped request, not its ambient
             // transport principal. Anonymous handle holders retain channel attribution.
             let actor = resolved
@@ -1482,7 +1521,7 @@ impl ReadSurface {
                 }
                 self.engine.store().append_signature_audit(
                     &credential_id,
-                    record.record_version,
+                    (record.record_version, &snapshot.incarnation),
                     &payload,
                     &actor,
                 )
@@ -1490,7 +1529,10 @@ impl ReadSurface {
             // A signature without its required history defeats compromise forensics.
             // All fallible key/payload validation happened before this write. The
             // store checks its writer fence and the key version in the append transaction.
-            write_audit().map_err(|_| ReadError::StoreError)?;
+            write_audit().map_err(|e| match e {
+                StoreOpError::NotFound => ReadError::NotFound,
+                _ => ReadError::StoreError,
+            })?;
         }
         let sig = prepared.sign();
         Ok(SignResult {
@@ -1627,7 +1669,8 @@ impl ReadSurface {
     /// AUDITED ON EVERY CALL, before the ciphertext is returned, because whoever opens
     /// the message attributes it to this key. If the row cannot be written, or the key
     /// record changed between the read and the audit, the ciphertext is dropped and the
-    /// call answers `store_error`.
+    /// call answers `store_error`. Removal, including recreation under the same id,
+    /// instead refuses as an unknown key.
     pub async fn seal(
         &self,
         connection_id: u64,
@@ -1682,6 +1725,10 @@ impl ReadSurface {
             entry.1 += 1;
             ReadError::NotFound
         };
+        let incarnation = self
+            .engine
+            .store()
+            .credential_incarnation(&params.credential_id);
         let resolved_principal = match self.authorize_scoped_as(
             principal,
             params.enrollment_token.as_deref(),
@@ -1692,7 +1739,11 @@ impl ReadSurface {
             Err(_) => return Err(refuse(&mut counters)),
         };
         let credential_id = params.credential_id.as_str();
-        let record = match self.engine.store().get(credential_id) {
+        let snapshot = match incarnation.and_then(|incarnation| {
+            self.engine
+                .store()
+                .get_snapshot(credential_id, &incarnation)
+        }) {
             Ok(record) => record,
             Err(error) => {
                 let refusal = match error {
@@ -1703,6 +1754,7 @@ impl ReadSurface {
                 return Err(refuse(&mut counters));
             }
         };
+        let record = snapshot.record;
         // Only a vault-held KEM key can seal. A seal grant on any other kind answers
         // exactly like no grant at all.
         if record.kind != credentials_core::record::CredentialKind::KemKey {
@@ -1759,14 +1811,17 @@ impl ReadSurface {
             }
             self.engine.store().append_seal_audit(
                 credential_id,
-                record.record_version,
+                (record.record_version, &snapshot.incarnation),
                 plaintext.expose(),
                 &actor,
             )
         };
         // No row, no ciphertext. The append re-checks the writer fence and that the key
         // generation sealed with is still the stored one, in the same transaction.
-        write_audit().map_err(|_| ReadError::StoreError)?;
+        write_audit().map_err(|e| match e {
+            StoreOpError::NotFound => ReadError::NotFound,
+            _ => ReadError::StoreError,
+        })?;
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         Ok(SealResult {
             enc_b64: encode(&enc),
@@ -1884,21 +1939,32 @@ impl ReadSurface {
         // credentials. A resolved-only check would miss enumeration entirely.
         self.check_limiter(connection_id, &params.handle).await;
 
-        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
+        let (credential_id, incarnation) = match self
+            .engine
+            .store()
+            .resolve_handle_with_incarnation(&params.handle)
+        {
             // A handle to the transfer key minted before the fence existed is refused
             // exactly as an unknown handle.
-            Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+            Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
                 return err(ReadError::NotFound)
             }
-            Ok(id) => id,
+            Ok(resolved) => resolved,
             // Unknown or revoked handle → uniform not_found.
             Err(StoreOpError::NotFound) => return err(ReadError::NotFound),
             Err(e) => return err(map_store_error(&e)),
         };
+        #[cfg(test)]
+        self.run_incarnation_hook("admitted");
 
         match self
             .engine
-            .get_with_refresh_status(&credential_id, params.min_ttl_ms, params.force_refresh)
+            .get_in_incarnation(
+                &credential_id,
+                &incarnation,
+                params.min_ttl_ms,
+                params.force_refresh,
+            )
             .await
         {
             Ok(refreshed) => {
@@ -1920,14 +1986,16 @@ impl ReadSurface {
                     return err(ReadError::KindNotGettable);
                 }
                 if record.payload.expose().is_empty() {
+                    #[cfg(test)]
+                    self.run_incarnation_hook("quarantine");
                     // A successful zero-byte credential is a corrupt producer state, not
                     // an authentication token. Quarantine only the version we inspected:
                     // a concurrent refresh/login may already have repaired the record.
-                    match self
-                        .engine
-                        .store()
-                        .quarantine_if_version(&credential_id, record.record_version)
-                    {
+                    match self.engine.store().quarantine_in_incarnation(
+                        &credential_id,
+                        record.record_version,
+                        &refreshed.incarnation,
+                    ) {
                         Ok(true) => return err(ReadError::Corrupt),
                         // The record changed under us. Do not poison the fresh version or
                         // misclassify it as corrupt; a retry will read the replacement.
@@ -2188,12 +2256,13 @@ impl ReadSurface {
         match address {
             KeyAddress::Handle(handle) => {
                 self.check_limiter(connection_id, handle).await;
-                match self.engine.store().resolve_handle(handle) {
-                    Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                match self.engine.store().resolve_handle_with_incarnation(handle) {
+                    Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
                         Err(ReadError::NotFound)
                     }
-                    Ok(id) => Ok(ResolvedKeyAddress {
+                    Ok((id, incarnation)) => Ok(ResolvedKeyAddress {
                         credential_id: id,
+                        incarnation,
                         principal: None,
                     }),
                     Err(StoreOpError::NotFound) => Err(ReadError::NotFound),
@@ -2201,6 +2270,7 @@ impl ReadSurface {
                 }
             }
             KeyAddress::Scoped(credential_id) => {
+                let incarnation = self.engine.store().credential_incarnation(credential_id);
                 let resolved_principal = self.authorize_scoped_for(
                     principal,
                     enrollment_token,
@@ -2210,6 +2280,7 @@ impl ReadSurface {
                 )?;
                 Ok(ResolvedKeyAddress {
                     credential_id: credential_id.to_string(),
+                    incarnation: incarnation.map_err(|e| map_store_error(&e))?,
                     principal: Some(resolved_principal),
                 })
             }
@@ -2693,6 +2764,11 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &GetScopedParams,
     ) -> GetOutcome {
+        let incarnation = self
+            .engine
+            .store()
+            .credential_incarnation(&params.credential_id);
+        let remote_record = self.remote.remote_record(&params.credential_id);
         if let Err(code) = self.authorize_scoped_as(
             principal,
             params.enrollment_token.as_deref(),
@@ -2703,7 +2779,7 @@ impl ReadSurface {
         }
         // A remote id is served by its home vault, never from the local store. The
         // grant check above already covered it, through this vault's own categories.
-        match self.remote.remote_record(&params.credential_id) {
+        match remote_record {
             Ok(Some(record)) => {
                 let answer = self.remote.get(&record, params.min_ttl_ms).await;
                 return remote_get_outcome(&params.credential_id, answer);
@@ -2712,13 +2788,25 @@ impl ReadSurface {
             Err(error) => return err(map_store_error(&error)),
         }
 
+        let incarnation = match incarnation {
+            Ok(incarnation) => incarnation,
+            Err(e) => return err(map_store_error(&e)),
+        };
+        #[cfg(test)]
+        self.run_incarnation_hook("admitted");
+
         match self
             .engine
             // `force_refresh` stays hardcoded off: no scoped caller can ask for it, and
             // it is a lever that spends an upstream mint on demand. It is a deliberate
             // omission rather than an oversight -- the same consumer that needs
             // `min_ttl_ms` confirmed its own trait cannot express force_refresh at all.
-            .get_with_refresh_status(&params.credential_id, params.min_ttl_ms, false)
+            .get_in_incarnation(
+                &params.credential_id,
+                &incarnation,
+                params.min_ttl_ms,
+                false,
+            )
             .await
         {
             Ok(refreshed) => {
@@ -2740,11 +2828,13 @@ impl ReadSurface {
                     return err(ReadError::KindNotGettable);
                 }
                 if record.payload.expose().is_empty() {
-                    match self
-                        .engine
-                        .store()
-                        .quarantine_if_version(&params.credential_id, record.record_version)
-                    {
+                    #[cfg(test)]
+                    self.run_incarnation_hook("quarantine");
+                    match self.engine.store().quarantine_in_incarnation(
+                        &params.credential_id,
+                        record.record_version,
+                        &refreshed.incarnation,
+                    ) {
                         Ok(true) => return err(ReadError::Corrupt),
                         Ok(false) => return err(ReadError::RefreshFailed),
                         Err(e) => return err(map_store_error(&e)),
@@ -2827,22 +2917,23 @@ impl ReadSurface {
         // decides the audit actor: a handle holder is anonymous and the channel number is
         // all there is, while a scoped caller has a principal that is KNOWN HERE and must
         // not be discarded.
-        let (credential_id, scoped) = match (&params.handle, &params.credential_id) {
+        let (credential_id, incarnation, scoped) = match (&params.handle, &params.credential_id) {
             (Some(handle), None) => {
                 // Rate-limit on the presented handle (before resolution), like get — a
                 // flood of report_auth_failure (malicious invalidation DoS) is itself an
                 // anomaly.
                 self.check_limiter(connection_id, handle).await;
-                match self.engine.store().resolve_handle(handle) {
-                    Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                match self.engine.store().resolve_handle_with_incarnation(handle) {
+                    Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
                         return Err(ReadError::NotFound)
                     }
-                    Ok(id) => (id, false),
+                    Ok((id, incarnation)) => (id, incarnation, false),
                     Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
                     Err(e) => return Err(map_store_error(&e)),
                 }
             }
             (None, Some(credential_id)) => {
+                let incarnation = self.engine.store().credential_incarnation(credential_id);
                 // An unknown id and an ungranted id must be INDISTINGUISHABLE here, for
                 // the same reason they are on `get_scoped` and `status`: telling them
                 // apart turns this into an inventory oracle. `authorize_scoped` records
@@ -2853,13 +2944,19 @@ impl ReadSurface {
                     credential_id,
                     GrantOperation::Read,
                 )?;
-                (credential_id.clone(), true)
+                (
+                    credential_id.clone(),
+                    incarnation.map_err(|e| map_store_error(&e))?,
+                    true,
+                )
             }
             // Both or neither is a malformed request, not an addressing question. It
             // answers as `NotFound` rather than a distinct code so that a caller cannot
             // use the difference to probe which of two ids exists by pairing them.
             (Some(_), Some(_)) | (None, None) => return Err(ReadError::NotFound),
         };
+        #[cfg(test)]
+        self.run_incarnation_hook("admitted");
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
         // provider hiccup, not a dead credential.
@@ -3013,9 +3110,10 @@ impl ReadSurface {
             if refreshable {
                 self.engine
                     .store()
-                    .mark_stale_if_version_reported(
+                    .mark_stale_in_incarnation(
                         &credential_id,
                         params.record_version,
+                        &incarnation,
                         audit,
                         observation,
                     )
@@ -3023,9 +3121,10 @@ impl ReadSurface {
             } else {
                 self.engine
                     .store()
-                    .invalidate_if_version_reported(
+                    .invalidate_in_incarnation(
                         &credential_id,
                         params.record_version,
+                        &incarnation,
                         audit,
                         Some(observation),
                     )

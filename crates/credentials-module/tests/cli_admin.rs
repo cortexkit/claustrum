@@ -53,6 +53,29 @@ fn cli() -> Command {
     command
 }
 
+fn local_incarnation(data_dir: &std::path::Path, id: &str) -> String {
+    let sqlite = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    })
+    .unwrap();
+    let incarnation: String = sqlite
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT incarnation FROM credentials WHERE credential_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(incarnation.len(), 32);
+    incarnation
+}
+
 /// Dropping the isolation from `cli()` would let a test that omits `--data-dir` open the
 /// developer's real vault and read its master key.
 #[test]
@@ -3033,6 +3056,7 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
         r#"{"refresh":"refresh-rotated","access":"opaque-rotated","expires":4102444800000}"#,
     )
     .expect("rotate source");
+    let incarnation = local_incarnation(&data_dir, "oauth:anthropic");
     let replacement = run(&[
         "import",
         "--source",
@@ -3051,6 +3075,7 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
     let sticky = open_record()
         .get("oauth:anthropic")
         .expect("sticky identity");
+    assert_eq!(local_incarnation(&data_dir, "oauth:anthropic"), incarnation);
     assert_eq!(sticky.identity.account_id.as_deref(), Some("acct-set"));
     assert_eq!(
         sticky.oauth.as_ref().expect("OAuth").refresh_token.expose(),
@@ -3411,6 +3436,7 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     );
 
     // put --replace rotates it: new payload, version bumps to v2, id stays active.
+    let incarnation = local_incarnation(&data_dir, "apikey:vast");
     let mut c = cli();
     c.arg("put")
         .arg("--id")
@@ -3425,6 +3451,7 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
         "put --replace: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(local_incarnation(&data_dir, "apikey:vast"), incarnation);
 
     let mut c = cli();
     c.arg("list");
@@ -8319,10 +8346,15 @@ fn login_replace_keeps_existing_provider_ids() {
         String::from_utf8_lossy(&set.stderr)
     );
     assert_eq!(list_providers(&vault, "oauth:anthropic"), "aa");
+    let incarnation = local_incarnation(&vault.data_dir, "oauth:anthropic");
     let (ok, output) =
         drive_anthropic_oauth_login(&vault.data_dir, &vault.key_path, &["--replace"]);
     assert!(ok, "anthropic --replace failed: {output}");
     assert!(output.contains("replaced oauth:anthropic"), "{output}");
+    assert_eq!(
+        local_incarnation(&vault.data_dir, "oauth:anthropic"),
+        incarnation
+    );
     assert_eq!(
         list_providers(&vault, "oauth:anthropic"),
         "aa",

@@ -1255,7 +1255,10 @@ async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
     let home_c = "fed-computer:cccccccccccccccccccccccccccccccc";
     let readded = rig.add_remote(TOKEN_ID, home_c);
     held.release();
-    let _ = pending.await.unwrap();
+    let RemoteAnswer::Refused(refusal) = pending.await.unwrap() else {
+        panic!("a reply for the removed mapping reached its waiter");
+    };
+    assert_eq!(code(&refusal), ("not_found", "permanent", None));
 
     let now = rig.record(TOKEN_ID);
     assert_eq!(
@@ -1276,6 +1279,50 @@ async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
         authoritative(&readded),
         "no announced key for the home is outcome only"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delayed_reply_after_mapping_removal_refuses_its_waiter() {
+    let rig = Rig::new("remote-remove-waiter").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let held = rig.hold(Step::Forward);
+    let old = rig.record(TOKEN_ID);
+    let pending = {
+        let reader = Arc::clone(&rig.reader);
+        tokio::spawn(async move { wait_for_signal(reader.get(&old, None)).await })
+    };
+    held.arrived().await;
+    rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
+    held.release();
+    let RemoteAnswer::Refused(refusal) = pending.await.unwrap() else {
+        panic!("a reply for the removed mapping reached its waiter");
+    };
+    assert_eq!(code(&refusal), ("not_found", "permanent", None));
+    assert!(rig.reader.remote_record(TOKEN_ID).unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cached_reply_for_a_removed_mapping_refuses_a_stale_snapshot() {
+    let rig = Rig::new("remote-remove-cache").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let old = rig.record(TOKEN_ID);
+    assert!(matches!(
+        wait_for_signal(rig.reader.get(&old, None)).await,
+        RemoteAnswer::Served(_)
+    ));
+    rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
+    let fetches = rig.fetches();
+    let RemoteAnswer::Refused(refusal) = rig.reader.get(&old, None).await else {
+        panic!("a cached token for a removed mapping reached its caller");
+    };
+    assert_eq!(code(&refusal), ("not_found", "permanent", None));
+    assert_eq!(rig.fetches(), fetches);
 }
 
 // ---------------------------------------------------------------------------------

@@ -2593,6 +2593,9 @@ pub mod probe {
 
 #[cfg(test)]
 mod tests {
+    mod incarnation_tests {
+        include!("incarnation_tests.rs");
+    }
     mod usage_report_tests {
         include!("usage_report_tests.rs");
     }
@@ -13522,6 +13525,7 @@ mod tests {
     #[test]
     fn seal_audit_append_refuses_a_replaced_generation_without_a_row() {
         let (_surface, _admin, store, _, _, _) = seal_rig();
+        let incarnation = store.credential_incarnation("kem:push").unwrap();
         let original = store.get("kem:push").unwrap();
         store
             .overwrite_unconditional_audited(
@@ -13537,13 +13541,23 @@ mod tests {
             .unwrap();
         let before = store.read_audit(None).unwrap();
         assert!(matches!(
-            store.append_seal_audit("kem:push", original.record_version, b"push", "reserved:p"),
+            store.append_seal_audit(
+                "kem:push",
+                (original.record_version, &incarnation),
+                b"push",
+                "reserved:p"
+            ),
             Err(credentials_core::store::StoreOpError::CasMismatch)
         ));
         assert_eq!(store.read_audit(None).unwrap(), before);
         let current = store.get("kem:push").unwrap();
         let row = store
-            .append_seal_audit("kem:push", current.record_version, b"push", "reserved:p")
+            .append_seal_audit(
+                "kem:push",
+                (current.record_version, &incarnation),
+                b"push",
+                "reserved:p",
+            )
             .unwrap();
         assert_eq!(row.op, "seal");
         assert_eq!(store.read_audit(None).unwrap().len(), before.len() + 1);
@@ -14151,6 +14165,7 @@ mod tests {
     #[test]
     fn signature_audit_refuses_a_replaced_generation_without_a_row() {
         let (_surface, _admin, store) = signature_audit_rig(true);
+        let incarnation = store.credential_incarnation("signing:publish:1").unwrap();
         let original = store.get("signing:publish:1").unwrap();
         let mut replacement = original.clone();
         replacement.payload = test_ed25519_pem().into_bytes().into();
@@ -14165,7 +14180,7 @@ mod tests {
         assert!(matches!(
             store.append_signature_audit(
                 "signing:publish:1",
-                original.record_version,
+                (original.record_version, &incarnation),
                 b"payload",
                 "reserved:entorhinal"
             ),
@@ -14176,7 +14191,7 @@ mod tests {
         store
             .append_signature_audit(
                 "signing:publish:1",
-                current.record_version,
+                (current.record_version, &incarnation),
                 b"payload",
                 "reserved:entorhinal",
             )

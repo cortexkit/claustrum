@@ -1188,11 +1188,12 @@ pub fn apply(
             id, payload_b64, ..
         } => {
             let refusal = || StoreOpError::Encode("key is not marked for operator signing".into());
-            let record = match store.get(&id) {
+            let snapshot = match store.get_with_stale_pending_and_digest(&id) {
                 Ok(record) => record,
                 Err(StoreOpError::NotFound) => return Err(refusal()),
                 Err(e) => return Err(e),
             };
+            let record = snapshot.record;
             if record.kind != CredentialKind::SigningKey || !record.operator_sign {
                 return Err(refusal());
             }
@@ -1213,7 +1214,12 @@ pub fn apply(
             let public = crate::signing::public_key_ed25519(pem).map_err(|_| corrupt())?;
             // Operator permission always requires durable history, even if a record
             // was stored without the separate bus-signature audit opt-in.
-            store.append_signature_audit(&id, record.record_version, &payload, actor)?;
+            store.append_signature_audit(
+                &id,
+                (record.record_version, &snapshot.incarnation),
+                &payload,
+                actor,
+            )?;
             let signature = prepared.sign();
             let signature_bytes = base64::engine::general_purpose::STANDARD
                 .decode(&signature.signature_b64)

@@ -48,6 +48,8 @@ fn deposit_cookie_create_replace_preserves_creator_categories_birth_and_identity
         DepositCookieOutcome::Created { record_version: 1 }
     );
     let meta = store.meta(ID).unwrap();
+    let incarnation = store.credential_incarnation(ID).unwrap();
+    assert_eq!(incarnation.len(), 32);
     assert_eq!(meta.created_by.as_deref(), Some(CALLER));
     assert_eq!(meta.categories, ["browser-session"]);
     let birth: (i64, i64) = store
@@ -70,6 +72,7 @@ fn deposit_cookie_create_replace_preserves_creator_categories_birth_and_identity
         DepositCookieOutcome::Replaced { record_version: 2 }
     );
     assert_eq!(store.get(ID).unwrap().identity, record.identity);
+    assert_eq!(store.credential_incarnation(ID).unwrap(), incarnation);
     assert_eq!(store.meta(ID).unwrap().created_by, meta.created_by);
     assert_eq!(store.meta(ID).unwrap().categories, meta.categories);
     let after_birth: i64 = store
@@ -120,6 +123,7 @@ fn deposit_cookie_create_replace_preserves_creator_categories_birth_and_identity
         deposit(&store).unwrap(),
         DepositCookieOutcome::Replaced { record_version: 5 }
     );
+    assert_eq!(store.credential_incarnation(ID).unwrap(), incarnation);
 }
 
 #[test]

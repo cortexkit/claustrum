@@ -2152,3 +2152,39 @@ fn transfer_key_recovery_rejects_pending_and_abandons_outgoing_in_one_transactio
     assert_eq!(actors, vec![HOME, OTHER, OTHER]);
     assert!(store.verify_audit_chain().is_ok());
 }
+
+#[test]
+fn incarnation_transfer_acceptance_creates_then_preserves_row_identity() {
+    let (_root, store) = rig("federation-incarnation", 231);
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID, 5))
+        .unwrap();
+    store
+        .accept_incoming_transfer_audited(&acceptance(TRANSFER_ID, 5, vec![]))
+        .unwrap();
+    let incarnation = store.credential_incarnation("apikey:openai").unwrap();
+    assert_eq!(incarnation.len(), 32);
+    let mut replacement = acceptance(&transfer_id(2), 6, vec![]);
+    replacement.replace = true;
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, &replacement.transfer_id, 6))
+        .unwrap();
+    store
+        .accept_incoming_transfer_audited(&replacement)
+        .unwrap();
+    assert_eq!(
+        store.credential_incarnation("apikey:openai").unwrap(),
+        incarnation
+    );
+    let empty: i64 = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM credentials WHERE incarnation IS NULL OR incarnation = ''",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(empty, 0);
+}

@@ -28,7 +28,7 @@ fn insert_secret(store: &EncryptedStore, name: &str, incarnation: &str) {
 #[test]
 fn secret_migrations_create_exactly_eight_secret_tables() {
     let (_root, store) = rig("secret-schema", 50);
-    assert_eq!(newest_migration_version(), 32);
+    assert_eq!(newest_migration_version(), 33);
     let tables = store.store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'agent_secrets' OR name LIKE 'secret_%') ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -173,8 +173,14 @@ fn deposit_bootstrap_is_idempotent_and_payload_hash_is_framed_key_id() {
     let (_root, store) = rig("secret-bootstrap", 54);
     store.ensure_secret_deposit_key().unwrap();
     let key = store.secret_deposit_public_key().unwrap();
+    let incarnation = store.credential_incarnation(DEPOSIT_KEY_ID).unwrap();
+    assert_eq!(incarnation.len(), 32);
     store.ensure_secret_deposit_key().unwrap();
     assert_eq!(store.secret_deposit_public_key().unwrap(), key);
+    assert_eq!(
+        store.credential_incarnation(DEPOSIT_KEY_ID).unwrap(),
+        incarnation
+    );
     assert_eq!(key.key_id, sha256_hex_of_bytes(&key.public_key)[..16]);
     let audit = store.read_audit(None).unwrap();
     assert_eq!(audit.len(), 1);

@@ -530,6 +530,8 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     let (root, d) = tmp_descriptor();
     let store = open_store(&d, 1);
     store.create("id", &stale_oauth_record()).unwrap();
+    let incarnation = store.credential_incarnation("id").unwrap();
+    assert_eq!(incarnation.len(), 32);
     let (eng, calls) = engine(store, StubAdapter::new("stub"));
 
     let got = eng.get("id", None, false).await.expect("get");
@@ -543,6 +545,10 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one upstream call");
     // The intent is cleared post-commit.
     assert!(eng.store().read_intent("id").unwrap().is_none());
+    assert_eq!(
+        eng.store().credential_incarnation("id").unwrap(),
+        incarnation
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1818,4 +1824,62 @@ async fn chatgpt_refresh_detects_each_new_token_in_the_token_commit() {
         assert_eq!(record.detected_plan.as_ref().unwrap().tier.as_deref(), tier);
     }
     assert_eq!(http.requests().len(), 4, "no profile calls for ChatGPT");
+}
+
+#[tokio::test]
+async fn incarnation_refresh_reread_refuses_a_recreated_id() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = Arc::new(open_store(&descriptor, 42));
+    let record = stale_oauth_record();
+    store.create("oauth:stub", &record).unwrap();
+    // A version change alone must not make this read accept a recreated row as
+    // another refresh's successful result.
+    store
+        .overwrite_unconditional_audited("oauth:stub", &record, AuditCtx::admin(AuditOp::Overwrite))
+        .unwrap();
+    let adapter = Arc::new(StubAdapter::new("stub"));
+    let engine = RefreshEngine::new(Arc::clone(&store), vec![adapter.clone()], Arc::new(NoHttp));
+    let writer = Arc::clone(&store);
+    engine.set_after_snapshot_hook(move || {
+        writer
+            .remove_audited("oauth:stub", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        writer.create("oauth:stub", &record).unwrap();
+    });
+    assert!(matches!(
+        engine.get("oauth:stub", None, false).await,
+        Err(EngineError::Store(StoreOpError::NotFound))
+    ));
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.get("oauth:stub").unwrap().record_version, 1);
+}
+
+#[tokio::test]
+async fn incarnation_stale_static_read_does_not_latch_a_recreated_id() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = Arc::new(open_store(&descriptor, 42));
+    let record = VaultRecord::new_static(
+        crate::record::CredentialKind::ApiKey,
+        "operator",
+        b"dummy".to_vec(),
+        None,
+    );
+    store.create("apikey:stub", &record).unwrap();
+    report_stale(&store, "apikey:stub", 1);
+    let engine = RefreshEngine::new(Arc::clone(&store), Vec::new(), Arc::new(NoHttp));
+    let writer = Arc::clone(&store);
+    engine.set_after_snapshot_hook(move || {
+        writer
+            .remove_audited("apikey:stub", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        writer.create("apikey:stub", &record).unwrap();
+    });
+    assert!(matches!(
+        engine.get("apikey:stub", None, false).await,
+        Err(EngineError::Store(StoreOpError::NotFound))
+    ));
+    assert_eq!(
+        store.meta("apikey:stub").unwrap().state,
+        crate::store::RecordState::Active
+    );
 }

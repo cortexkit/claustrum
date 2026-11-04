@@ -972,6 +972,18 @@ const MIGRATIONS: &[Migration] = &[
                      END; \
                      CREATE TRIGGER held_detected_plans_insert AFTER INSERT ON credentials BEGIN \
                          DELETE FROM held_detected_plans WHERE credential_id = NEW.credential_id; \
+                      END;",
+    },
+    // Versions restart after removal, and creation timestamps can share a millisecond.
+    // A separate identity binds pending reads and writes to one row's lifetime.
+    Migration {
+        version: 33,
+        statements: "ALTER TABLE credentials ADD COLUMN incarnation TEXT NOT NULL DEFAULT ''; \
+                     UPDATE credentials SET incarnation = lower(hex(randomblob(16))); \
+                     CREATE TRIGGER credentials_incarnation_insert AFTER INSERT ON credentials \
+                     WHEN NEW.incarnation = '' BEGIN \
+                         UPDATE credentials SET incarnation = lower(hex(randomblob(16))) \
+                         WHERE credential_id = NEW.credential_id; \
                      END;",
     },
 ];
@@ -1052,8 +1064,10 @@ pub(crate) struct StaleMark {
 /// One decrypted read of a credential row: the record, the stale mark observed beside
 /// it, and the digest of the exact encrypted bytes it was decrypted from.
 #[derive(Debug)]
-pub(crate) struct StoredRead {
-    pub(crate) record: VaultRecord,
+pub struct StoredRead {
+    pub record: VaultRecord,
+    /// Internal row identity, stable across refresh and replacement but not removal.
+    pub incarnation: String,
     pub(crate) mark: StaleMark,
     /// Lowercase-hex SHA-256 of the stored envelope bytes this read decrypted.
     pub(crate) stored_digest_hex: String,
@@ -1067,6 +1081,18 @@ pub(crate) fn sha256_hex_of_bytes(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn credential_incarnation_matches(
+    conn: &rusqlite::Connection,
+    credential_id: &str,
+    incarnation: &str,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1 AND incarnation = ?2)",
+        rusqlite::params![credential_id, incarnation],
+        |row| row.get(0),
+    )
 }
 
 /// The non-secret metadata of a stored record, readable WITHOUT decrypting (the
@@ -4759,6 +4785,16 @@ impl EncryptedStore {
         Ok((read.record, read.mark))
     }
 
+    /// Read only the row lifetime admitted earlier. A removed-and-recreated id is
+    /// indistinguishable from an unknown id, even if its version number is reused.
+    pub fn get_snapshot(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+    ) -> Result<StoredRead, StoreOpError> {
+        self.read_snapshot(credential_id, Some(incarnation))
+    }
+
     /// The same read as [`Self::get_with_stale_pending`], plus the SHA-256 of the exact
     /// encrypted bytes it decrypted.
     ///
@@ -4772,11 +4808,19 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<StoredRead, StoreOpError> {
+        self.read_snapshot(credential_id, None)
+    }
+
+    fn read_snapshot(
+        &self,
+        credential_id: &str,
+        expected_incarnation: Option<&str>,
+    ) -> Result<StoredRead, StoreOpError> {
         let row = self
             .store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT record_version, state, stale_pending, envelope, updated_at_ms \
+                    "SELECT record_version, state, stale_pending, envelope, updated_at_ms, incarnation \
                      FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |r| {
@@ -4785,7 +4829,8 @@ impl EncryptedStore {
                         let stale_pending: i64 = r.get(2)?;
                         let blob: Vec<u8> = r.get(3)?;
                         let updated_at_ms: i64 = r.get(4)?;
-                        Ok((version, state, stale_pending, blob, updated_at_ms))
+                        let incarnation: String = r.get(5)?;
+                        Ok((version, state, stale_pending, blob, updated_at_ms, incarnation))
                     },
                 )
                 .map(Some)
@@ -4796,12 +4841,21 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?;
 
-        let (version, state, stale_pending, blob, updated_at_ms) =
+        let (version, state, stale_pending, blob, updated_at_ms, incarnation) =
             row.ok_or(StoreOpError::NotFound)?;
-        let (record, pending) =
-            self.decode_record_row(credential_id, version, &state, stale_pending, &blob)?;
+        if expected_incarnation.is_some_and(|expected| expected != incarnation) {
+            return Err(StoreOpError::NotFound);
+        }
+        let (record, pending) = self.decode_record_row(
+            credential_id,
+            (version, &incarnation),
+            &state,
+            stale_pending,
+            &blob,
+        )?;
         Ok(StoredRead {
             record,
+            incarnation,
             mark: StaleMark {
                 pending,
                 record_written_at_ms: updated_at_ms,
@@ -4813,11 +4867,12 @@ impl EncryptedStore {
     fn decode_record_row(
         &self,
         credential_id: &str,
-        version: i64,
+        identity: (i64, &str),
         state: &str,
         stale_pending: i64,
         blob: &[u8],
     ) -> Result<(VaultRecord, bool), StoreOpError> {
+        let (version, incarnation) = identity;
         match RecordState::from_str(state) {
             RecordState::Corrupt => return Err(StoreOpError::Quarantined),
             RecordState::NeedsReauth | RecordState::Retired => {
@@ -4836,14 +4891,24 @@ impl EncryptedStore {
                 // Per-record quarantine: a single undecryptable row is isolated so
                 // the rest of the vault keeps serving. Best-effort state flip — a
                 // failure to mark must not itself panic the read path.
-                let _ = self.quarantine_if_version(credential_id, version as u64);
+                if matches!(
+                    self.quarantine_in_incarnation(credential_id, version as u64, incarnation),
+                    Err(StoreOpError::NotFound)
+                ) {
+                    return Err(StoreOpError::NotFound);
+                }
                 return Err(StoreOpError::Decrypt(e));
             }
         };
         match VaultRecord::decode(&plaintext) {
             Ok(record) => Ok((record, stale_pending != 0)),
             Err(e) => {
-                let _ = self.quarantine_if_version(credential_id, version as u64);
+                if matches!(
+                    self.quarantine_in_incarnation(credential_id, version as u64, incarnation),
+                    Err(StoreOpError::NotFound)
+                ) {
+                    return Err(StoreOpError::NotFound);
+                }
                 Err(StoreOpError::Corrupt(e.to_string()))
             }
         }
@@ -4906,9 +4971,31 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
         observation: Option<AuthObservation<'_>>,
     ) -> Result<bool, StoreOpError> {
+        let incarnation = self.credential_incarnation(credential_id)?;
+        self.invalidate_in_incarnation(
+            credential_id,
+            expected_version,
+            &incarnation,
+            ctx,
+            observation,
+        )
+    }
+
+    /// Apply feedback only to the row lifetime that admitted the request.
+    pub fn invalidate_in_incarnation(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        incarnation: &str,
+        ctx: AuditCtx<'_>,
+        observation: Option<AuthObservation<'_>>,
+    ) -> Result<bool, StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
+            if !credential_incarnation_matches(tx, credential_id, incarnation)? {
+                return Ok(None);
+            }
             // `state = active` makes this a STATE TRANSITION rather than a
             // repeatable write, and that is what bounds the audit chain here.
             //
@@ -4954,9 +5041,9 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(n)
+            Ok(Some(n))
         })?;
-        Ok(changed > 0)
+        Ok(changed.ok_or(StoreOpError::NotFound)? > 0)
     }
 
     /// Mark only the current token stale after a consumer reports it refused.
@@ -4972,8 +5059,30 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
         observation: AuthObservation<'_>,
     ) -> Result<bool, StoreOpError> {
+        let incarnation = self.credential_incarnation(credential_id)?;
+        self.mark_stale_in_incarnation(
+            credential_id,
+            expected_version,
+            &incarnation,
+            ctx,
+            observation,
+        )
+    }
+
+    /// Mark stale only within the row lifetime that admitted the request.
+    pub fn mark_stale_in_incarnation(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        incarnation: &str,
+        ctx: AuditCtx<'_>,
+        observation: AuthObservation<'_>,
+    ) -> Result<bool, StoreOpError> {
         let audit_key = self.audit_key.clone();
         let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
+            if !credential_incarnation_matches(tx, credential_id, incarnation)? {
+                return Ok(None);
+            }
             // A repeated report for the same version has already instructed the
             // next read to refresh. Treat it as no new state transition so the
             // append-only audit chain remains bounded; auth_events still records it.
@@ -5002,9 +5111,9 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(n)
+            Ok(Some(n))
         })?;
-        Ok(changed > 0)
+        Ok(changed.ok_or(StoreOpError::NotFound)? > 0)
     }
 
     /// Record an authentication observation WITHOUT changing the credential.
@@ -5527,15 +5636,30 @@ impl EncryptedStore {
         credential_id: &str,
         expected_version: u64,
     ) -> Result<bool, StoreOpError> {
+        let incarnation = self.credential_incarnation(credential_id)?;
+        self.quarantine_in_incarnation(credential_id, expected_version, &incarnation)
+    }
+
+    /// Quarantine a snapshot without poisoning a removed-and-recreated credential.
+    pub fn quarantine_in_incarnation(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        incarnation: &str,
+    ) -> Result<bool, StoreOpError> {
         let now = now_ms();
         let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
+            if !credential_incarnation_matches(tx, credential_id, incarnation)? {
+                return Ok(None);
+            }
             tx.execute(
                 "UPDATE credentials SET state = 'corrupt', updated_at_ms = ?1
                  WHERE credential_id = ?2 AND record_version = ?3",
                 rusqlite::params![now, credential_id, expected_version],
             )
+            .map(Some)
         })?;
-        Ok(changed == 1)
+        Ok(changed.ok_or(StoreOpError::NotFound)? == 1)
     }
 
     /// Mark a record `needs_reauth` but RETAIN its refresh intent. Used by
@@ -6118,14 +6242,25 @@ impl EncryptedStore {
     /// when the handle is unknown or revoked (the read surface maps that to a
     /// uniform not-found so a probe cannot tell "wrong handle" from "revoked").
     pub fn resolve_handle(&self, raw_handle: &str) -> Result<String, StoreOpError> {
+        self.resolve_handle_with_incarnation(raw_handle)
+            .map(|(id, _)| id)
+    }
+
+    /// Resolve authority and row identity in one read, before a lifecycle change can
+    /// destroy the handle and reuse its credential id.
+    pub fn resolve_handle_with_incarnation(
+        &self,
+        raw_handle: &str,
+    ) -> Result<(String, String), StoreOpError> {
         let h = handle_hash(raw_handle);
         self.store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT credential_id FROM handles \
+                    "SELECT h.credential_id, c.incarnation FROM handles h \
+                     JOIN credentials c ON c.credential_id = h.credential_id \
                      WHERE handle_hash = ?1 AND revoked = 0",
                     rusqlite::params![h],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                 )
                 .map(Some)
                 .or_else(|e| match e {
@@ -6134,7 +6269,22 @@ impl EncryptedStore {
                 })
             })
             .map_err(StoreOpError::from)?
-            .filter(|id| !crate::agent_secret::is_deposit_key(id))
+            .filter(|(id, _)| !crate::agent_secret::is_deposit_key(id))
+            .ok_or(StoreOpError::NotFound)
+    }
+
+    /// Internal identity of a local row, not a credential address or wire value.
+    pub fn credential_incarnation(&self, credential_id: &str) -> Result<String, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT incarnation FROM credentials WHERE credential_id = ?1",
+                    [credential_id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .map_err(StoreOpError::from)?
             .ok_or(StoreOpError::NotFound)
     }
 
@@ -6340,21 +6490,22 @@ impl EncryptedStore {
     }
 
     /// Record a signature only while the decoded key's generation is still current.
-    /// Checking the version in the append transaction prevents a concurrent key
-    /// replacement from placing an old-key signature after the new key's audit row.
-    /// Signed bytes are published with the signature, so their plain SHA-256 lets
-    /// readers compare the published payload with its audit row without a vault key.
+    /// `identity` is the version and incarnation read with the key. Checking both in
+    /// the append transaction prevents replacement or removal/recreation from placing
+    /// an old-key signature after the new key's audit row. Signed bytes are published
+    /// with the signature, so their plain SHA-256 lets readers compare the published
+    /// payload with its audit row without a vault key.
     pub fn append_signature_audit(
         &self,
         credential_id: &str,
-        record_version: u64,
+        identity: (u64, &str),
         signed_payload: &[u8],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         self.append_key_use_audit(
             AuditOp::Sign,
             credential_id,
-            record_version,
+            identity,
             &payload_hash(signed_payload),
             actor,
         )
@@ -6367,14 +6518,14 @@ impl EncryptedStore {
     pub fn append_seal_audit(
         &self,
         credential_id: &str,
-        record_version: u64,
+        identity: (u64, &str),
         sealed_plaintext: &[u8],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         self.append_key_use_audit(
             AuditOp::Seal,
             credential_id,
-            record_version,
+            identity,
             &audit::payload_fingerprint(&self.audit_key, sealed_plaintext),
             actor,
         )
@@ -6384,21 +6535,26 @@ impl EncryptedStore {
         &self,
         op: AuditOp,
         credential_id: &str,
-        record_version: u64,
+        identity: (u64, &str),
         payload_hash: &[u8; 32],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
-            let current: Option<i64> = tx
+            let current: Option<(i64, String)> = tx
                 .query_row(
-                    "SELECT record_version FROM credentials WHERE credential_id = ?1",
+                    "SELECT record_version, incarnation FROM credentials WHERE credential_id = ?1",
                     [credential_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if current != Some(record_version as i64) {
-                return Ok(None);
+            match current {
+                Some((version, incarnation)) if incarnation == identity.1 => {
+                    if version != identity.0 as i64 {
+                        return Ok(Err(StoreOpError::CasMismatch));
+                    }
+                }
+                _ => return Ok(Err(StoreOpError::NotFound)),
             }
             append_audit_tx(
                 tx,
@@ -6411,10 +6567,9 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )
-            .map(Some)
+            .map(Ok)
         })
         .map_err(StoreOpError::from)?
-        .ok_or(StoreOpError::CasMismatch)
     }
 
     /// Read the current audit-chain tip without scanning the chain.
@@ -9151,10 +9306,13 @@ mod tests {
         let record =
             VaultRecord::new_static(CredentialKind::Opaque, "operator", payload.to_vec(), None);
         store.create(id, &record).unwrap();
+        let incarnation = store.credential_incarnation(id).unwrap();
         let sign = store
-            .append_signature_audit(id, 1, payload, "operator")
+            .append_signature_audit(id, (1, &incarnation), payload, "operator")
             .unwrap();
-        let seal = store.append_seal_audit(id, 1, payload, "operator").unwrap();
+        let seal = store
+            .append_seal_audit(id, (1, &incarnation), payload, "operator")
+            .unwrap();
         let plain = hex32(&payload_hash(payload));
         let keyed = hex32(&audit::payload_fingerprint(&store.audit_key, payload));
         assert_eq!(sign.payload_hash.as_deref(), Some(plain.as_str()));
@@ -9192,6 +9350,7 @@ mod tests {
             VaultRecord::new_static(CredentialKind::Opaque, "operator", payload.to_vec(), None);
         let id = "opaque:keyed-audit";
         store.create(id, &record).unwrap();
+        let incarnation = store.credential_incarnation(id).unwrap();
         store
             .overwrite_cas(id, &record, &payload_hash(payload))
             .unwrap();
@@ -9207,9 +9366,11 @@ mod tests {
             )
             .unwrap();
         store
-            .append_signature_audit(id, 5, payload, "operator")
+            .append_signature_audit(id, (5, &incarnation), payload, "operator")
             .unwrap();
-        store.append_seal_audit(id, 5, payload, "operator").unwrap();
+        store
+            .append_seal_audit(id, (5, &incarnation), payload, "operator")
+            .unwrap();
         let rows = store.read_audit(None).unwrap();
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0], legacy);
@@ -9236,7 +9397,9 @@ mod tests {
         store
             .rotate_master_key(MasterKey::from_bytes([0x6c; MASTER_KEY_LEN]))
             .unwrap();
-        store.append_seal_audit(id, 5, payload, "operator").unwrap();
+        store
+            .append_seal_audit(id, (5, &incarnation), payload, "operator")
+            .unwrap();
         assert_eq!(store.read_audit(None).unwrap()[0], legacy);
         assert_eq!(
             store.read_audit(Some(1)).unwrap()[0]
@@ -9721,7 +9884,7 @@ mod tests {
             .unwrap());
         let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([205; 32])).unwrap();
         store.create("oauth:anthropic", &oauth_record()).unwrap();
-        let record = store.get("oauth:anthropic").unwrap();
+        let record = oauth_record();
         let audit_before = store.read_audit(None).unwrap();
         EncryptedStore::migrate(&store.store).unwrap();
         EncryptedStore::migrate(&store.store).unwrap();
@@ -9759,13 +9922,77 @@ mod tests {
             ]
         );
         let recorded = store.with_raw_conn(read_schema_version).unwrap();
-        assert_eq!(recorded, 32);
+        assert_eq!(recorded, newest_migration_version());
         let error = refuse_store_ahead_of_binary(recorded, 31)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("32") && error.contains("31"), "{error}");
+        assert!(
+            error.contains(&recorded.to_string()) && error.contains("31"),
+            "{error}"
+        );
         hold_test_plan(&store, &record);
         assert_eq!(held_plan_rows(&store), 1);
+    }
+
+    #[test]
+    fn incarnation_migration_backfills_distinct_non_null_row_identities() {
+        let root = TestTempDir::new("ck-incarnation-migration");
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        migrate_through_for_test(&sqlite, 32).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([205; 32])).unwrap();
+        for id in ["oauth:anthropic", "oauth:openai"] {
+            store.create(id, &oauth_record()).unwrap();
+        }
+        let before = store.read_audit(None).unwrap();
+        EncryptedStore::migrate(&store.store).unwrap();
+        let a = store.credential_incarnation("oauth:anthropic").unwrap();
+        let b = store.credential_incarnation("oauth:openai").unwrap();
+        assert_eq!(a.len(), 32);
+        assert_eq!(b.len(), 32);
+        assert_ne!(a, b);
+        assert!(a
+            .bytes()
+            .chain(b.bytes())
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        let not_null: bool = store.with_raw_conn(|conn| conn.query_row(
+            "SELECT [notnull] FROM pragma_table_info('credentials') WHERE name = 'incarnation'", [], |row| row.get(0)
+        )).unwrap();
+        assert!(not_null);
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        EncryptedStore::migrate(&store.store).unwrap();
+        assert_eq!(store.credential_incarnation("oauth:anthropic").unwrap(), a);
+        assert_eq!(store.get("oauth:anthropic").unwrap(), oauth_record());
+    }
+
+    #[test]
+    fn incarnation_insert_generates_identity_even_with_equal_creation_timestamps() {
+        let (_root, store) = tmp_store(151);
+        store.create("id", &oauth_record()).unwrap();
+        // Model two deposits dated in the same millisecond without racing a clock.
+        store
+            .with_raw_conn(|conn| conn.execute("UPDATE credentials SET created_at_ms = 1", []))
+            .unwrap();
+        let a = store.credential_incarnation("id").unwrap();
+        store
+            .remove_audited("id", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        store.create("id", &oauth_record()).unwrap();
+        let b = store.credential_incarnation("id").unwrap();
+        store
+            .with_raw_conn(|conn| conn.execute("UPDATE credentials SET created_at_ms = 1", []))
+            .unwrap();
+        assert_eq!(a.len(), 32);
+        assert_eq!(b.len(), 32);
+        assert_ne!(a, b);
+        assert_eq!(store.credential_incarnation("id").unwrap(), b);
     }
 
     #[test]
@@ -11113,6 +11340,7 @@ mod tests {
     fn stale_failed_reads_do_not_quarantine_replacement_material() {
         let (_root, store) = tmp_store(151);
         store.create("id", &oauth_record()).unwrap();
+        let incarnation = store.credential_incarnation("id").unwrap();
         let invalid_plaintext = envelope::seal(
             &store.key,
             b"not a record",
@@ -11125,14 +11353,30 @@ mod tests {
             .overwrite_unconditional_audited("id", &oauth_record(), AuditCtx::admin(AuditOp::Put))
             .unwrap();
         assert!(matches!(
-            store.decode_record_row("id", 1, "active", 0, &[0, 1]),
+            store.decode_record_row("id", (1, &incarnation), "active", 0, &[0, 1]),
             Err(StoreOpError::Decrypt(_))
         ));
         assert_eq!(store.meta("id").unwrap().state, RecordState::Active);
         let blob = invalid_plaintext.unwrap();
         assert!(matches!(
-            store.decode_record_row("id", 1, "active", 0, &blob),
+            store.decode_record_row("id", (1, &incarnation), "active", 0, &blob),
             Err(StoreOpError::Corrupt(_))
+        ));
+        assert_eq!(store.meta("id").unwrap().state, RecordState::Active);
+    }
+
+    #[test]
+    fn incarnation_failed_read_cannot_quarantine_a_recreated_version_one() {
+        let (_root, store) = tmp_store(151);
+        store.create("id", &oauth_record()).unwrap();
+        let incarnation = store.credential_incarnation("id").unwrap();
+        store
+            .remove_audited("id", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        store.create("id", &oauth_record()).unwrap();
+        assert!(matches!(
+            store.decode_record_row("id", (1, &incarnation), "active", 0, &[0, 1]),
+            Err(StoreOpError::NotFound)
         ));
         assert_eq!(store.meta("id").unwrap().state, RecordState::Active);
     }
@@ -12904,7 +13148,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            32,
+            33,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

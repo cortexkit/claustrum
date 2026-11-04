@@ -6309,8 +6309,27 @@ impl EncryptedStore {
     /// when the handle is unknown or revoked (the read surface maps that to a
     /// uniform not-found so a probe cannot tell "wrong handle" from "revoked").
     pub fn resolve_handle(&self, raw_handle: &str) -> Result<String, StoreOpError> {
-        self.resolve_handle_with_incarnation(raw_handle)
-            .map(|(id, _)| id)
+        // Reads only the handles table. Callers that need the id alone, such as status,
+        // must still name the credential when its row cannot be read; reads that act on
+        // the row use `resolve_handle_with_incarnation`, which also pins the row identity.
+        let h = handle_hash(raw_handle);
+        self.store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT credential_id FROM handles \
+                     WHERE handle_hash = ?1 AND revoked = 0",
+                    rusqlite::params![h],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+            })
+            .map_err(StoreOpError::from)?
+            .filter(|id| !crate::agent_secret::is_deposit_key(id))
+            .ok_or(StoreOpError::NotFound)
     }
 
     /// Resolve authority and row identity in one read, before a lifecycle change can

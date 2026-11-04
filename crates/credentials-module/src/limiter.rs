@@ -13,7 +13,7 @@
 //! alarm that persists across connections, so a reconnect-churning sweep is still
 //! recorded for cross-connection analysis.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// The maximum number of handles a single `get_many` call may carry. A call over
@@ -65,8 +65,8 @@ impl Default for Caps {
 struct ConnState {
     /// Distinct credential ids fetched in the current window.
     distinct: HashMap<String, Instant>,
-    /// Fetch timestamps in the current window (for the rate check).
-    fetches: Vec<Instant>,
+    /// Newest fetch timestamps, capped at one more than the rate ceiling.
+    fetches: VecDeque<Instant>,
     /// Whether this connection has already been flagged (so we alarm once).
     flagged: bool,
 }
@@ -75,7 +75,7 @@ impl ConnState {
     fn new() -> Self {
         ConnState {
             distinct: HashMap::new(),
-            fetches: Vec::new(),
+            fetches: VecDeque::new(),
             flagged: false,
         }
     }
@@ -84,7 +84,9 @@ impl ConnState {
     fn prune(&mut self, now: Instant, window: Duration) {
         let cutoff = now.checked_sub(window);
         if let Some(cutoff) = cutoff {
-            self.fetches.retain(|t| *t >= cutoff);
+            while self.fetches.front().is_some_and(|t| *t < cutoff) {
+                self.fetches.pop_front();
+            }
             self.distinct.retain(|_, last_fetch| *last_fetch >= cutoff);
         }
         // The distinct set is window-scoped too: when no fetches remain in the
@@ -120,7 +122,12 @@ impl FetchLimiter {
             .entry(connection_id)
             .or_insert_with(ConnState::new);
         state.prune(now, caps.window);
-        state.fetches.push(now);
+        // Only the newest ceiling + 1 timestamps can affect the rate decision:
+        // any discarded timestamp expires before all of those newer fetches.
+        if state.fetches.len() == caps.rate_ceiling.saturating_add(1) {
+            state.fetches.pop_front();
+        }
+        state.fetches.push_back(now);
         // Cap the retained distinct-probe set: once it has already crossed the ceiling
         // (i.e. this connection is anomalous), the EXACT set of probed keys past that
         // point is irrelevant — we only need to know the ceiling was exceeded. Not
@@ -234,6 +241,44 @@ mod tests {
         }
         // The 6th fetch in the window crosses the rate ceiling (5).
         assert_eq!(l.admit(1, "a", now), Admission::Anomaly { first: true });
+    }
+
+    #[test]
+    fn burst_history_is_bounded_without_changing_rate_boundary() {
+        let mut limiter = FetchLimiter::new(Caps::default());
+        let start = Instant::now();
+        for _ in 0..64 {
+            assert_eq!(limiter.admit(1, "missing", start), Admission::Ok);
+        }
+        assert_eq!(
+            limiter.admit(1, "missing", start),
+            Admission::Anomaly { first: true }
+        );
+        let later = start + Duration::from_secs(1);
+        for _ in 0..256 {
+            assert_eq!(
+                limiter.admit(1, "missing", later),
+                Admission::Anomaly { first: false }
+            );
+            assert!(limiter.conns[&1].fetches.len() <= 65);
+        }
+        // The cutoff is inclusive, including after old burst entries were evicted.
+        assert_eq!(
+            limiter.admit(1, "missing", later + Duration::from_secs(60)),
+            Admission::Anomaly { first: false }
+        );
+        let expired = later + Duration::from_secs(60) + Duration::from_nanos(1);
+        for _ in 0..63 {
+            assert_eq!(limiter.admit(1, "missing", expired), Admission::Ok);
+        }
+        assert_eq!(
+            limiter.admit(1, "missing", expired),
+            Admission::Anomaly { first: false }
+        );
+        assert_eq!(
+            limiter.admit(1, "missing", expired + Duration::from_secs(61)),
+            Admission::Ok
+        );
     }
 
     #[test]

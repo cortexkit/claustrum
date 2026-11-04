@@ -1,5 +1,5 @@
-//! Held scoped-inventory subscriptions. The registry owns cancellation, not tasks,
-//! so route teardown frees capacity even while a SQLite recomputation is in flight.
+//! Held scoped-inventory subscriptions. Route teardown cancels publication promptly;
+//! a separate snapshot budget stays occupied until blocking computations finish.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -8,7 +8,7 @@ use std::time::Duration;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::json;
 use subc_protocol::{Flags, Frame, FrameType, Principal, Priority};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 use crate::read_surface::{ErrorBody, ListScopedParams, ReadError, ReadSurface};
 use crate::{send, wrap_result, ModuleError};
@@ -38,6 +38,7 @@ struct Registry {
 
 pub(crate) struct WatchHub {
     entries: Arc<Mutex<Registry>>,
+    snapshots: Arc<Semaphore>,
 }
 
 impl Default for WatchHub {
@@ -45,6 +46,7 @@ impl Default for WatchHub {
         process_epoch();
         Self {
             entries: Arc::default(),
+            snapshots: Arc::new(Semaphore::new(MAX_WATCHES)),
         }
     }
 }
@@ -156,6 +158,7 @@ impl WatchHub {
         // either be included in it or wake the next recomputation.
         let writes = surface.subscribe_writes();
         let entries = Arc::clone(&self.entries);
+        let snapshots = Arc::clone(&self.snapshots);
         tokio::spawn(async move {
             let mut subscription = Subscription {
                 surface,
@@ -165,6 +168,7 @@ impl WatchHub {
                 params: Arc::new(params),
                 stopped,
                 writes,
+                snapshots,
             };
             let _ = subscription.run().await;
             let mut entries = entries.lock().expect("watches");
@@ -232,6 +236,25 @@ struct Subscription {
     params: Arc<ListScopedParams>,
     stopped: watch::Receiver<Stop>,
     writes: watch::Receiver<()>,
+    snapshots: Arc<Semaphore>,
+}
+
+async fn snapshot<T: Send + 'static>(
+    slots: Arc<Semaphore>,
+    compute: impl FnOnce() -> Result<T, ReadError> + Send + 'static,
+) -> Result<T, ReadError> {
+    let permit = slots
+        .acquire_owned()
+        .await
+        .expect("snapshot budget is open");
+    tokio::task::spawn_blocking(move || {
+        // Dropping the awaiting subscription cannot stop a submitted blocking job.
+        // The job therefore owns its slot, including while queued for a worker.
+        let _permit = permit;
+        compute()
+    })
+    .await
+    .unwrap_or(Err(ReadError::StoreError))
 }
 
 impl Subscription {
@@ -247,12 +270,12 @@ impl Subscription {
             let header = self.header;
             let principal = self.principal.clone();
             let params = Arc::clone(&self.params);
+            let snapshots = Arc::clone(&self.snapshots);
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
                 result = async {
-                    let snapshot = tokio::task::spawn_blocking(move || surface.watch_scoped(principal.as_ref(), &params))
-                        .await.unwrap_or(Err(ReadError::StoreError));
+                    let snapshot = snapshot(snapshots, move || surface.watch_scoped(principal.as_ref(), &params)).await;
                     match snapshot {
                         Ok(values) => {
                             if last.as_ref() != Some(&values) {
@@ -291,5 +314,70 @@ impl Subscription {
             emit(&self.writer, self.header, FrameType::StreamEnd, Vec::new()).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Condvar;
+    use std::task::Poll;
+
+    struct ReleaseOnDrop(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let (lock, changed) = &*self.0;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_snapshots_keep_the_budget_until_blocking_jobs_finish() {
+        let hub = WatchHub::default();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = ReleaseOnDrop(Arc::clone(&gate));
+        let admitted = Arc::new(AtomicUsize::new(0));
+        for _ in 0..MAX_WATCHES {
+            let (started, arrived) = oneshot::channel();
+            let gate = Arc::clone(&gate);
+            let admitted = Arc::clone(&admitted);
+            let mut pending = Box::pin(snapshot(Arc::clone(&hub.snapshots), move || {
+                admitted.fetch_add(1, Ordering::SeqCst);
+                started.send(()).unwrap();
+                let (lock, changed) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Ok(())
+            }));
+            tokio::select! {
+                result = arrived => result.unwrap(),
+                _ = &mut pending => panic!("snapshot finished before release"),
+            }
+            // This is the same future drop as the subscription's cancellation arm.
+            drop(pending);
+        }
+        assert_eq!(admitted.load(Ordering::SeqCst), 64);
+        assert_eq!(hub.snapshots.available_permits(), 0);
+        let count = Arc::clone(&admitted);
+        let mut next = Box::pin(snapshot(Arc::clone(&hub.snapshots), move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(admitted.load(Ordering::SeqCst), 64);
+        drop(release);
+        next.await.unwrap();
+        let _all = hub.snapshots.acquire_many(64).await.unwrap();
+        assert_eq!(admitted.load(Ordering::SeqCst), 65);
     }
 }

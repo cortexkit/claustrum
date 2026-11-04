@@ -41,6 +41,43 @@ async fn call(
 }
 
 #[tokio::test]
+async fn cancelled_pairing_lookup_withdraws_its_waiter_on_the_shared_link() {
+    let root = crate::support::temp_root("outbound-cancelled-pairing");
+    let vaults = TwoVaults::new(&root).await;
+    tokio::time::pause();
+    for _ in 0..2 {
+        let held = Held::new();
+        vaults.callosum.answer(
+            "claustrum",
+            "callosum.paired_devices_read",
+            Reply::Hold(held.clone()),
+        );
+        let client = vaults.b.outbound.clone();
+        let mut lookup = tokio::spawn(async move {
+            fed::callosum_lookup(
+                Some(&client),
+                "callosum.paired_devices_read",
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+        });
+        held.arrived_before(&mut lookup).await;
+        assert_eq!(
+            vaults.b.outbound.pending_waiter_count_for_test().await,
+            Some(1)
+        );
+        // Aborting the lookup must release its waiter before a late reply or
+        // route close, rather than depending on either event to clean up.
+        lookup.abort();
+        assert!(wait_for_signal(lookup).await.unwrap_err().is_cancelled());
+        assert_eq!(
+            vaults.b.outbound.pending_waiter_count_for_test().await,
+            Some(0)
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_channel_zero_open_refusal_keeps_its_code_without_spending_the_deadline() {
     let root = crate::support::temp_root("outbound-open-refusal");
     let vaults = TwoVaults::new(&root).await;

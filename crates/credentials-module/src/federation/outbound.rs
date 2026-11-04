@@ -308,6 +308,18 @@ impl OutboundClient {
             .clear();
     }
 
+    /// Inspect pending replies on the live link without changing its lifecycle.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pending_waiter_count_for_test(&self) -> Option<usize> {
+        let connection = self.inner.connection.lock().await;
+        connection.as_ref().map(|link| {
+            link.waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        })
+    }
+
     /// Run one call, bounded by `deadline`.
     ///
     /// Returns the reply frame's body on `Response` and `Err` with the daemon's reason
@@ -533,8 +545,8 @@ impl OutboundClient {
     /// Send one frame and wait for the reply matched by `key`, all inside `budget`.
     ///
     /// The waiter is registered before the write, so a reply that arrives immediately
-    /// cannot be missed. Either way, this call removes its own waiter before returning,
-    /// and a deadline withdraws it, so no later reply can be delivered to it.
+    /// cannot be missed. A drop guard withdraws the waiter on return or cancellation,
+    /// including when an enclosing operation has an earlier deadline.
     ///
     /// `route` is the binding a route request travels on, and `None` for a channel-0
     /// control request.
@@ -552,13 +564,13 @@ impl OutboundClient {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, sender);
+        let _registration = WaiterRegistration { link, key };
         // The reader marks a link closed (or counts a route closure) before it fails
         // the waiters already registered. Checking after registering therefore leaves
         // no gap: either the reader's sweep finds this waiter, or this check sees the
         // mark. Without it a call that raced the reader's exit would write into a
         // socket nobody reads and wait out its whole deadline.
         if link.is_closed() {
-            withdraw(link, key);
             return Err(LinkFailure {
                 error: OutboundError::Unavailable(format!(
                     "the connection closed before the {stage} was sent"
@@ -567,7 +579,6 @@ impl OutboundClient {
             });
         }
         if route.is_some_and(|binding| !link.holds(binding)) {
-            withdraw(link, key);
             return Err(failure(OutboundError::Unavailable(format!(
                 "the route closed before the {stage} was sent"
             ))));
@@ -576,16 +587,7 @@ impl OutboundClient {
             .write(link, &frame, budget, stage)
             .await
             .map_err(failure);
-        // The waiter is withdrawn on every path below: after a successful write a dead
-        // connection's reader has already failed it, and after a failed write nothing
-        // will ever reply to it.
-        match written {
-            Ok(()) => {}
-            Err(error) => {
-                withdraw(link, key);
-                return Err(error);
-            }
-        }
+        written?;
         match tokio::time::timeout_at(budget, reply).await {
             Ok(Ok(Ok(frame))) => Ok(frame),
             // The reader failed this call. If it closed the whole connection, the call
@@ -604,7 +606,6 @@ impl OutboundClient {
                 // either ours or dropped, never delivered to a call that has returned.
                 // A deadline is this call's failure alone: the connection and every
                 // other call on it are untouched.
-                withdraw(link, key);
                 Err(failure(OutboundError::Unavailable(format!(
                     "the {stage} reply timed out"
                 ))))
@@ -637,6 +638,17 @@ impl OutboundClient {
             .await
             .map_err(|_| OutboundError::Unavailable(format!("writing the {stage} timed out")))?;
         sent.map_err(|error| OutboundError::Unavailable(format!("writing the {stage}: {error}")))
+    }
+}
+
+struct WaiterRegistration<'a> {
+    link: &'a Link,
+    key: WaiterKey,
+}
+
+impl Drop for WaiterRegistration<'_> {
+    fn drop(&mut self) {
+        withdraw(self.link, self.key);
     }
 }
 

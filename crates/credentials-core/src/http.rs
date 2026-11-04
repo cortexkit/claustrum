@@ -9,6 +9,11 @@ use async_trait::async_trait;
 
 use crate::refresh_adapters::{HttpResponse, HttpTransport, RefreshError};
 
+// Token/profile replies are small JSON objects; GitHub installation discovery is
+// the larger, list-shaped reply. One MiB leaves headroom for token strings and
+// installation metadata, not downloads, and also bounds error and chunked bodies.
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+
 /// A reqwest-backed [`HttpTransport`]. Holds one shared client (connection pooling).
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -72,13 +77,7 @@ impl HttpTransport for ReqwestTransport {
             .send()
             .await
             .map_err(|e| RefreshError::Transport(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?
-            .to_vec();
-        Ok(HttpResponse { status, body })
+        read_response(resp).await
     }
 
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
@@ -90,14 +89,26 @@ impl HttpTransport for ReqwestTransport {
             .send()
             .await
             .map_err(|e| RefreshError::Transport(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?
-            .to_vec();
-        Ok(HttpResponse { status, body })
+        read_response(resp).await
     }
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<HttpResponse, RefreshError> {
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| RefreshError::Transport(e.to_string()))?
+    {
+        if chunk.len() > MAX_RESPONSE_BODY_BYTES - body.len() {
+            return Err(RefreshError::Transport(
+                "provider response body exceeds one MiB".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(HttpResponse { status, body })
 }
 
 #[cfg(test)]
@@ -200,5 +211,87 @@ mod redirect_rules {
             !forwarded,
             "a token body must never reach a redirect target"
         );
+    }
+}
+
+#[cfg(test)]
+mod response_limits {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn response_body_accepts_one_mib_and_refuses_one_byte_more() {
+        assert_eq!(MAX_RESPONSE_BODY_BYTES, 1_048_576);
+        let transport = ReqwestTransport::new().unwrap();
+        for post in [false, true] {
+            for chunked in [false, true] {
+                for status in [200, 503] {
+                    for size in [1_048_576, 1_048_577] {
+                        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let server = tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let mut request = Vec::new();
+                            let mut byte = [0];
+                            while !request.ends_with(b"\r\n\r\n") {
+                                socket.read_exact(&mut byte).await.unwrap();
+                                request.push(byte[0]);
+                            }
+                            let framing = if chunked {
+                                "Transfer-Encoding: chunked".to_owned()
+                            } else {
+                                format!("Content-Length: {size}")
+                            };
+                            let head = format!(
+                                "HTTP/1.1 {status} Test\r\n{framing}\r\nConnection: close\r\n\r\n"
+                            );
+                            socket.write_all(head.as_bytes()).await.unwrap();
+                            // Separate chunks make the cumulative limit matter, not
+                            // just the length of any one chunk or a declared length.
+                            let bytes = [b'x'; 8192];
+                            let mut remaining = size;
+                            while remaining > 0 {
+                                let len = remaining.min(bytes.len());
+                                if chunked
+                                    && socket
+                                        .write_all(format!("{len:x}\r\n").as_bytes())
+                                        .await
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                                if socket.write_all(&bytes[..len]).await.is_err() {
+                                    return;
+                                }
+                                if chunked && socket.write_all(b"\r\n").await.is_err() {
+                                    return;
+                                }
+                                remaining -= len;
+                            }
+                            if chunked {
+                                let _ = socket.write_all(b"0\r\n\r\n").await;
+                            }
+                        });
+                        let url = format!("http://{address}/provider");
+                        let response = if post {
+                            transport
+                                .post(&url, &[], "application/json", Vec::new())
+                                .await
+                        } else {
+                            transport.get(&url, &[]).await
+                        };
+                        server.await.unwrap();
+                        if size == 1_048_576 {
+                            let response = response.unwrap();
+                            assert_eq!(response.status, status);
+                            assert_eq!(response.body, vec![b'x'; size]);
+                        } else {
+                            assert!(matches!(response, Err(RefreshError::Transport(ref why)) if why == "provider response body exceeds one MiB"), "oversized reply must be retryable for post={post}, chunked={chunked}, status={status}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

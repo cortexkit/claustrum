@@ -5,6 +5,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -93,11 +94,16 @@ class ReleaseFastPath(unittest.TestCase):
         shutil.copy2(ROOT / 'scripts/release-build.sh', self.root / 'scripts/release-build.sh')
         shutil.copy2(ROOT / 'scripts/lib/ckdev-binary.sh', self.root / 'scripts/lib/ckdev-binary.sh')
         (self.root / 'scripts/fast-check.sh').write_text('echo fast-check >> "$HOME/calls"\nexit "${CHECK_RC:-0}"\n')
-        # The builder counts debug-only source seams. Five inert lines let the real
-        # count check run in this fixture instead of stubbing that refusal away.
+        # The builder counts debug-only source seams against its pinned number. Writing
+        # exactly that many inert lines lets the real count check run in this fixture
+        # instead of stubbing the refusal away. One plain line plus combined forms covers
+        # both spellings the scan must match.
+        pinned = re.search(r'^KNOWN_DEBUG_SEAMS=(\d+)$',
+                           (ROOT / 'scripts/release-build.sh').read_text(), re.M)
         source = self.root / 'crates/example/src/seams.rs'
         source.parent.mkdir(parents=True)
-        source.write_text('cfg(debug_assertions)\n')
+        source.write_text('cfg(debug_assertions)\n'
+                          + 'cfg(all(debug_assertions, feature = "x"))\n' * (int(pinned.group(1)) - 1))
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         self.env = dict(os.environ, HOME=os.fspath(self.root), PROBE='none: hermetic policy test',

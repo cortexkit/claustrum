@@ -491,9 +491,28 @@ fn bootstrap_is_idempotent_but_a_real_key_store_failure_is_not() {
     );
 }
 
+/// The GitHub App arms reach a stand-in GitHub API through `CK_AUTH_TEST_LOGIN_WIRE`,
+/// which only debug `test-support` builds read. A staged release `ck-auth` compiles that
+/// redirect out and would call the real GitHub API, so these arms verify the source and
+/// skip, saying why, when `CRED_CLI_BIN` points at a staged artifact.
+#[cfg(all(debug_assertions, feature = "test-support"))]
+fn skips_staged_github_api(name: &str) -> bool {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!(
+            "SKIPPING {name}: {CLI_BIN_ENV} is set, and this arm needs the debug-only \
+             GitHub API redirect that release builds omit"
+        );
+        return true;
+    }
+    false
+}
+
 #[cfg(all(debug_assertions, feature = "test-support"))]
 #[test]
 fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
+    if skips_staged_github_api("a_github_app_deposit_lands_oauth_shaped_rather_than_static") {
+        return;
+    }
     let rig = tmp_root("github-app-put");
     std::fs::create_dir_all(&rig).unwrap();
     let key = rig.join("master.key");
@@ -667,6 +686,9 @@ impl GithubAppServer {
 #[cfg(all(debug_assertions, feature = "test-support"))]
 #[test]
 fn github_app_deposit_refusals_store_nothing() {
+    if skips_staged_github_api("github_app_deposit_refusals_store_nothing") {
+        return;
+    }
     let vault = GrantCliVault::new("github-app-refusals");
     vault.bootstrap();
     assert!(vault
@@ -736,6 +758,11 @@ fn github_app_deposit_refusals_store_nothing() {
 #[cfg(all(debug_assertions, feature = "test-support"))]
 #[test]
 fn verify_github_apps_reports_mismatch_without_writing_under_writer_lease() {
+    if skips_staged_github_api(
+        "verify_github_apps_reports_mismatch_without_writing_under_writer_lease",
+    ) {
+        return;
+    }
     let vault = GrantCliVault::new("github-app-verify");
     vault.bootstrap();
     let store = open_leased_store(&vault.data_dir, &vault.key_path);
@@ -787,6 +814,11 @@ fn verify_github_apps_reports_mismatch_without_writing_under_writer_lease() {
 #[cfg(all(debug_assertions, feature = "test-support"))]
 #[test]
 fn verify_github_apps_reports_installation_failures_and_exits_zero_only_for_ok() {
+    if skips_staged_github_api(
+        "verify_github_apps_reports_installation_failures_and_exits_zero_only_for_ok",
+    ) {
+        return;
+    }
     let vault = GrantCliVault::new("github-app-verify-statuses");
     vault.bootstrap();
     let store = open_leased_store(&vault.data_dir, &vault.key_path);

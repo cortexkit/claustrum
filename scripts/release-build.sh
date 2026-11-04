@@ -345,27 +345,34 @@ fi
 # verifying a release artifact: the seam is compiled out, so the arm either fails
 # against the staged binary or -- worse -- passes without exercising what it names.
 # Those arms are enumerable in advance by grepping for the cfg, which is what this
-# does. ONE seam is known and its arm skips under
-# CRED_CLI_BIN and PRINTS why:
+# does. The scan matches debug_assertions anywhere inside a cfg(...), so combined
+# forms such as cfg(all(debug_assertions, feature = "test-support")) count too. The
+# known seams, and what their test arms do against a staged artifact:
 #
-#   1  api_key_login.rs        the validation bypass
+#   1  api_key_login.rs        validation bypass; its arm skips under CRED_CLI_BIN
+#   2  browser_login.rs        fake OAuth endpoints; login arms skip under CRED_CLI_BIN
+#   3  github_apps.rs          GitHub API redirect; its arms skip under CRED_CLI_BIN
+#   1  google_login.rs         fake Google endpoints; covered by the login-arm skips
+#   1  credentials_cli.rs      the login wire hook; covered by the login-arm skips
+#   4  Windows-only seams      store.rs, test_support.rs and two in credentials_cli.rs;
+#                              never compiled into this macOS build
 #
 # A NEW seam silently NARROWS artifact verification while every line above still prints
 # green, so the count is pinned. Raising it means deciding what the matching test arm
 # does under an override -- skip with a printed reason, or be rewritten not to need the
 # seam -- rather than discovering the narrowing at some later deploy.
-KNOWN_DEBUG_SEAMS=1
-seams="$(grep -rc 'cfg(debug_assertions)' crates/*/src --include='*.rs' 2>/dev/null \
+KNOWN_DEBUG_SEAMS=12
+seams="$(grep -rcE 'cfg\(.*debug_assertions' crates/*/src --include='*.rs' 2>/dev/null \
   | awk -F: '{n += $2} END {print n + 0}')"
 if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then
   echo "REFUSING: found ${seams} cfg(debug_assertions) seams, expected ${KNOWN_DEBUG_SEAMS}." >&2
   echo "  Each one is a place artifact verification cannot reach. Decide what the" >&2
   echo "  matching test arm does under CRED_CLI_BIN / CRED_DAEMON_BIN, then update" >&2
   echo "  KNOWN_DEBUG_SEAMS in this script." >&2
-  grep -rn 'cfg(debug_assertions)' crates/*/src --include='*.rs' >&2
+  grep -rnE 'cfg\(.*debug_assertions' crates/*/src --include='*.rs' >&2
   exit 1
 fi
-echo "  debug seams: ${seams} (known, and its test arm skips with a printed reason)"
+echo "  debug seams: ${seams} (known; each test arm that needs one skips with a printed reason)"
 
 if [ "$FAST" = 0 ]; then
   echo "  the STAGED artifacts passed, not merely the source they were built from"

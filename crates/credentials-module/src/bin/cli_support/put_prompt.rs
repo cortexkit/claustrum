@@ -8,8 +8,8 @@ use credentials_core::store::validate_deposit_credential_id;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 
 use super::{
-    api_key_login, has_flag, login_id_is_valid, optional, parse_inventory, request_admin_status,
-    CliError, GlobalArgs,
+    api_key_login, login_id_is_valid, parse_inventory, request_admin_status, CliError, GlobalArgs,
+    ParsedOptions,
 };
 
 const KINDS: [&str; 4] = ["API key", "Cookie", "DSN", "Opaque secret"];
@@ -90,17 +90,17 @@ fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
 
 /// Resolve only missing metadata. Explicit id and payload sources preserve the
 /// noninteractive command, even when a script happens to inherit a terminal.
-pub(super) fn prepare(global: &GlobalArgs, args: &mut Vec<String>) -> Result<bool, CliError> {
+pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Result<bool, CliError> {
     if !is_terminal()
-        || (optional(args, "--id").is_some() && optional(args, "--payload-file").is_some())
+        || (options.optional("--id").is_some() && options.optional("--payload-file").is_some())
     {
         return Ok(true);
     }
     let theme = ColorfulTheme::default();
-    let id = match optional(args, "--id") {
+    let id = match options.optional("--id") {
         Some(id) => id,
         None => {
-            let kind = match optional(args, "--kind").as_deref() {
+            let kind = match options.optional("--kind").as_deref() {
                 Some("api_key") => 0,
                 Some("dsn") => 2,
                 Some("opaque") => 3,
@@ -134,18 +134,18 @@ pub(super) fn prepare(global: &GlobalArgs, args: &mut Vec<String>) -> Result<boo
                     }
                 }
             }
-            args.extend(["--id".into(), id.clone()]);
-            if optional(args, "--kind").is_none() && kind != 1 {
-                args.extend([
+            options.values.insert("--id".into(), id.clone());
+            if options.optional("--kind").is_none() && kind != 1 {
+                options.values.insert(
                     "--kind".into(),
                     ["api_key", "", "dsn", "opaque"][kind].into(),
-                ]);
+                );
             }
             id
         }
     };
 
-    if !has_flag(args, "--replace") && optional(args, "--expected-hash").is_none() {
+    if !options.has_flag("--replace") && options.optional("--expected-hash").is_none() {
         let inventory = parse_inventory(&request_admin_status(global)?)?;
         if inventory.iter().any(|row| row.2 == id) {
             eprintln!("{id} already holds a credential.");
@@ -157,7 +157,7 @@ pub(super) fn prepare(global: &GlobalArgs, args: &mut Vec<String>) -> Result<boo
             {
                 return Ok(false);
             }
-            args.push("--replace".into());
+            options.bools.insert("--replace".into());
         }
     }
     Ok(true)

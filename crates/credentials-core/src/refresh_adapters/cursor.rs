@@ -106,16 +106,14 @@ pub trait CursorPollTransport: Send + Sync {
 
 /// A production GET transport for Cursor's poll endpoint.
 pub struct ReqwestCursorPollTransport {
-    client: reqwest::Client,
+    transport: crate::http::ReqwestTransport,
 }
 
 impl ReqwestCursorPollTransport {
     pub fn new() -> Result<Self, CursorPollError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
+        let transport = crate::http::ReqwestTransport::new()
             .map_err(|e| CursorPollError::Transport(e.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { transport })
     }
 }
 
@@ -123,18 +121,14 @@ impl ReqwestCursorPollTransport {
 impl CursorPollTransport for ReqwestCursorPollTransport {
     async fn get(&self, url: &str) -> Result<CursorPollResponse, CursorPollError> {
         let response = self
-            .client
-            .get(url)
-            .send()
+            .transport
+            .get(url, &[])
             .await
             .map_err(|e| CursorPollError::Transport(e.to_string()))?;
-        let status = response.status().as_u16();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| CursorPollError::Transport(e.to_string()))?
-            .to_vec();
-        Ok(CursorPollResponse { status, body })
+        Ok(CursorPollResponse {
+            status: response.status,
+            body: response.body,
+        })
     }
 }
 
@@ -363,6 +357,87 @@ mod tests {
             client_secret: None,
             scopes: vec![],
         }
+    }
+
+    async fn poll_response_limit(chunked: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let transport = ReqwestCursorPollTransport::new().unwrap();
+        for status in [200, 503] {
+            for size in [1_048_576, 1_048_577] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        socket.read_exact(&mut byte).await.unwrap();
+                        request.push(byte[0]);
+                    }
+                    let framing = if chunked {
+                        "Transfer-Encoding: chunked".to_owned()
+                    } else {
+                        format!("Content-Length: {size}")
+                    };
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 {status} Test\r\n{framing}\r\nConnection: close\r\n\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    let bytes = [b'x'; 8192];
+                    let mut remaining = size;
+                    while remaining > 0 {
+                        let len = remaining.min(bytes.len());
+                        if chunked
+                            && socket
+                                .write_all(format!("{len:x}\r\n").as_bytes())
+                                .await
+                                .is_err()
+                        {
+                            return;
+                        }
+                        if socket.write_all(&bytes[..len]).await.is_err() {
+                            return;
+                        }
+                        if chunked && socket.write_all(b"\r\n").await.is_err() {
+                            return;
+                        }
+                        remaining -= len;
+                    }
+                    if chunked {
+                        let _ = socket.write_all(b"0\r\n\r\n").await;
+                    }
+                });
+                let response = transport.get(&format!("http://{address}/poll")).await;
+                server.await.unwrap();
+                if size == 1_048_576 {
+                    let response = response.unwrap();
+                    assert_eq!(response.status, status);
+                    assert_eq!(response.body, vec![b'x'; size]);
+                } else {
+                    assert!(
+                        matches!(response, Err(CursorPollError::Transport(ref why)) if why.contains("provider response body exceeds one MiB")),
+                        "oversized poll reply accepted: chunked={chunked}, status={status}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_poll_fixed_length_response_limit() {
+        poll_response_limit(false).await;
+    }
+
+    #[tokio::test]
+    async fn cursor_poll_chunked_response_limit() {
+        poll_response_limit(true).await;
     }
 
     #[test]

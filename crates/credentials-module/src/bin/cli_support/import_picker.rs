@@ -212,6 +212,7 @@ impl CommitSeam for RealCommit<'_> {
 enum ScriptCommit {
     Stored { stored: bool },
     Refused { refused: bool },
+    Indeterminate { indeterminate: bool },
 }
 
 #[cfg(feature = "import-prompt-seam")]
@@ -254,6 +255,14 @@ impl CommitSeam for InjectedCommit<'_> {
             ScriptCommit::Stored { stored: true } => self.real.commit(final_id, record, action),
             ScriptCommit::Refused { refused: true } => {
                 Err(CliError::RouteRefused("injected refusal".to_string()))
+            }
+            ScriptCommit::Indeterminate {
+                indeterminate: true,
+            } => {
+                self.real.commit(final_id, record, action)?;
+                Err(CliError::RouteIndeterminate(
+                    "op was sent but no response arrived (injected lost reply); it may have committed — verify with `list`/`verify-audit` before retrying".to_string(),
+                ))
             }
             _ => Err(CliError::Usage(
                 "import commit script outcome must be true".to_string(),
@@ -529,9 +538,14 @@ where
                     println!("{final_id}: replaced v{}", record_version + 1);
                 }
             },
-            Err(_) => {
+            Err(error @ CliError::RouteIndeterminate(_)) => {
+                println!("{final_id}: outcome unknown; batch stopped");
+                return Err(error);
+            }
+            Err(error) => {
                 refused = true;
                 println!("{final_id}: refused");
+                eprintln!("{final_id}: {error}");
             }
         }
     }

@@ -231,6 +231,52 @@ fn invalid_id_edits_share_one_bounded_attempt_counter() {
 }
 
 #[test]
+fn cli_review_indeterminate_import_stops_after_possibly_committed_row() {
+    let fixture = Fixture::new("indeterminate");
+    fixture.bootstrap();
+    let prompts = fixture.write_script(
+        "prompts.json",
+        r#"[
+          {"pick":["oauth:anthropic","apikey:openrouter"]},
+          {"id":"oauth:anthropic"},
+          {"id":"apikey:openrouter"},
+          {"confirm":true}
+        ]"#,
+    );
+    let commits = fixture.write_script(
+        "commits.json",
+        r#"[{"indeterminate":true},{"stored":true}]"#,
+    );
+    let mut command = fixture.command(env!("CARGO_BIN_EXE_ck-auth"));
+    command.arg("import");
+    fixture.global(&mut command);
+    let output = command
+        .env(PROMPT_ENV, prompts)
+        .env(COMMIT_ENV, commits)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = combined(&output);
+    assert_eq!(output.status.code(), Some(5), "{text}");
+    assert!(text.contains("oauth:anthropic: outcome unknown"), "{text}");
+    assert!(!text.contains("oauth:anthropic: refused"), "{text}");
+    assert!(
+        text.contains("verify with `list`/`verify-audit` before retrying"),
+        "{text}"
+    );
+    assert!(!text.contains("anthropic-access-fixture"), "{text}");
+    assert!(!text.contains("openrouter-key-fixture"), "{text}");
+    let mut list = fixture.command(env!("CARGO_BIN_EXE_ck-auth"));
+    list.arg("list");
+    fixture.global(&mut list);
+    let listed = list.output().unwrap();
+    assert!(listed.status.success(), "{}", combined(&listed));
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    assert!(listing.contains("oauth:anthropic"), "{listing}");
+    assert!(!listing.contains("apikey:openrouter"), "{listing}");
+}
+
+#[test]
 fn declared_commit_seam_continues_after_a_refused_row_without_leaking_material() {
     let fixture = Fixture::new("commit-seam");
     fixture.bootstrap();

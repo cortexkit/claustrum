@@ -13841,7 +13841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_record_vector_route_signs_exact_bytes_and_audits_their_fingerprint() {
+    async fn catalog_record_vector_route_signs_exact_bytes_and_audits_their_hash() {
         use base64::Engine as _;
         let vectors = catalog_vectors::fixture();
         let pem = catalog_vectors::trusted_key_pem(&vectors);
@@ -13889,7 +13889,7 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        assert_ne!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
+        assert_eq!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
         assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
         assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
         assert_eq!(row.op, "sign");
@@ -14004,7 +14004,7 @@ mod tests {
                     .collect();
                 assert_eq!(row.op, "sign");
                 assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
-                assert_ne!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
+                assert_eq!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
                 assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
                 assert_eq!(
                     row.actor,

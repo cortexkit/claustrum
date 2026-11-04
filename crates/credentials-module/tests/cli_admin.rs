@@ -2443,6 +2443,8 @@ fn operator_sign_cli_help_and_flags_are_discoverable() {
         assert!(page.starts_with("ck auth sign --id <id> --payload-file <path>\n"));
         assert!(page.contains("- reads stdin"));
         assert!(page.contains("signature_hex"));
+        assert!(page.contains("plain SHA-256"));
+        assert!(page.contains("Signed bytes are published with the signature"));
     }
     let output = cli().args(["help", "mint-signing-key"]).output().unwrap();
     let page = String::from_utf8(output.stdout).unwrap();

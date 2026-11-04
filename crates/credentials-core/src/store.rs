@@ -6342,6 +6342,8 @@ impl EncryptedStore {
     /// Record a signature only while the decoded key's generation is still current.
     /// Checking the version in the append transaction prevents a concurrent key
     /// replacement from placing an old-key signature after the new key's audit row.
+    /// Signed bytes are published with the signature, so their plain SHA-256 lets
+    /// readers compare the published payload with its audit row without a vault key.
     pub fn append_signature_audit(
         &self,
         credential_id: &str,
@@ -6353,7 +6355,7 @@ impl EncryptedStore {
             AuditOp::Sign,
             credential_id,
             record_version,
-            signed_payload,
+            &payload_hash(signed_payload),
             actor,
         )
     }
@@ -6373,7 +6375,7 @@ impl EncryptedStore {
             AuditOp::Seal,
             credential_id,
             record_version,
-            sealed_plaintext,
+            &audit::payload_fingerprint(&self.audit_key, sealed_plaintext),
             actor,
         )
     }
@@ -6383,7 +6385,7 @@ impl EncryptedStore {
         op: AuditOp,
         credential_id: &str,
         record_version: u64,
-        payload: &[u8],
+        payload_hash: &[u8; 32],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         let audit_key = self.audit_key.clone();
@@ -6404,7 +6406,7 @@ impl EncryptedStore {
                 &AuditRecord {
                     op,
                     credential_id: Some(credential_id.to_string()),
-                    payload_hash: Some(hex32(&audit::payload_fingerprint(&audit_key, payload))),
+                    payload_hash: Some(hex32(payload_hash)),
                     actor: actor.to_string(),
                     alarm: None,
                 },
@@ -9142,6 +9144,26 @@ mod tests {
     }
 
     #[test]
+    fn signature_audit_is_public_sha256_while_seal_audit_is_keyed() {
+        let (_root, store) = tmp_store(0x6d);
+        let id = "opaque:key-use-audit";
+        let payload = b"published signed bytes";
+        let record =
+            VaultRecord::new_static(CredentialKind::Opaque, "operator", payload.to_vec(), None);
+        store.create(id, &record).unwrap();
+        let sign = store
+            .append_signature_audit(id, 1, payload, "operator")
+            .unwrap();
+        let seal = store.append_seal_audit(id, 1, payload, "operator").unwrap();
+        let plain = hex32(&payload_hash(payload));
+        let keyed = hex32(&audit::payload_fingerprint(&store.audit_key, payload));
+        assert_eq!(sign.payload_hash.as_deref(), Some(plain.as_str()));
+        assert_ne!(seal.payload_hash.as_deref(), Some(plain.as_str()));
+        assert_eq!(seal.payload_hash.as_deref(), Some(keyed.as_str()));
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
     fn confidential_audit_payloads_are_keyed_and_preserve_legacy_chain() {
         use hmac::{Hmac, Mac};
 
@@ -9192,6 +9214,10 @@ mod tests {
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0], legacy);
         for row in &rows[1..] {
+            if row.op == "sign" {
+                assert_eq!(row.payload_hash.as_deref(), Some(plain.as_str()));
+                continue;
+            }
             assert_ne!(
                 row.payload_hash.as_deref(),
                 Some(plain.as_str()),

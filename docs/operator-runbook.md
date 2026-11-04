@@ -533,9 +533,10 @@ ck auth sign --id signing:account-machine:1 --payload-file challenge.bin
 
 The private key never leaves the vault in plaintext. `--operator-sign` seals the
 permission with the key and implies `--audit-each-signature`. Every operator
-signature commits a chained `sign` audit row with a keyed payload fingerprint before
-signing; an audit failure returns no signature. Only the hash is audited, not the
-challenge bytes. The actor is `route-admin` online and `offline-cli` offline.
+signature commits a chained `sign` audit row with the payload's plain SHA-256 before
+signing; an audit failure returns no signature. Signed bytes are published with the
+signature, so anyone can compare their SHA-256 with the row. Only the hash is audited,
+not the challenge bytes. The actor is `route-admin` online and `offline-cli` offline.
 
 `sign` uses the same operator master-key authentication as other `ck auth` admin
 commands, or the offline single-writer lease when the daemon is stopped. It needs

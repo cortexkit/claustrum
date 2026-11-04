@@ -102,8 +102,9 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
-    /// A signing key opted into per-signature history. Only a keyed fingerprint of
-    /// the exact payload is recorded, never its bytes. The key id is derived from the public
+    /// A signing key opted into per-signature history. Signed bytes are published
+    /// with the signature, so their plain SHA-256 lets readers check the exact payload
+    /// against the audit row without a vault key. The key id is derived from the public
     /// key, not stored here: a sign row belongs to the key generation installed by
     /// the most recent put/overwrite row for its credential id. Chain order places
     /// signatures on either side of a replacement; normal rotation uses a new id.
@@ -441,8 +442,9 @@ pub struct AuditRecord {
     /// The credential affected, if the op is credential-scoped.
     pub credential_id: Option<String>,
     /// Hex commitment to the affected payload, if applicable. Confidential bytes
-    /// use a keyed fingerprint; public identifiers and approval manifests use plain
-    /// hashes. Historical confidential rows may still contain unkeyed hashes.
+    /// use a keyed fingerprint; sign rows use plain SHA-256 because signed bytes
+    /// are published with the signature. Public identifiers and approval manifests
+    /// also use plain hashes. Historical confidential rows may still contain unkeyed hashes.
     pub payload_hash: Option<String>,
     /// Who performed it: a connection id (daemon read-surface action) or
     /// `"offline-cli"` (an admin CLI write).

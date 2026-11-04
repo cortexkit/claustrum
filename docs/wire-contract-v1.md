@@ -274,12 +274,14 @@ both addresses or neither is refused as a malformed request
 Signing keys minted with `ck auth mint-signing-key --audit-each-signature` opt
 into a permanent per-signature history. After key and payload validation, but
 before signing, the vault commits one HMAC-chained row with `audit_log.op = sign`,
-the credential id, a keyed fingerprint of the exact decoded payload, and the resolved
+the credential id, the plain SHA-256 of the exact decoded payload, and the resolved
 `reserved:<module>` or `enrolled:<name>` actor. Anonymous handle holders use the
 existing `conn-N` channel attribution. Payload bytes are never recorded. A failed
 audit write (including a lost writer fence) returns `store_error` / `transient`
 and no signature; refused payloads write no signature row. Keys without this
-sealed flag (including existing keys) retain the no-write signing path.
+sealed flag (including existing keys) retain the no-write signing path. Signed bytes
+are published with the signature, so the plain hash lets anyone compare those bytes
+with the sign row without a vault key.
 
 The public key id is derived from the signing key and returned with the signature,
 not stored in an extra audit column. A sign row belongs to the key generation
@@ -607,11 +609,12 @@ operator signing`, before payload validation. Payloads use standard padded base6
 and a 64 KiB decoded limit (`MAX_OPERATOR_SIGN_PAYLOAD`), enforced in the shared
 admin applier online and offline. The admin envelope limits are unchanged; bus
 `credential.sign` retains its separate 1 MiB limit. After validation, the vault commits
-a `sign` audit row containing only a keyed payload fingerprint (never payload bytes), with
+a `sign` audit row containing only the payload's plain SHA-256 (never payload bytes), with
 actor `route-admin` online or `offline-cli` offline. The append checks the key's
 record version inside its transaction. Audit failure returns an error and no
 signature; signing happens only after the append succeeds, regardless of the
-record's separate `audit_each_signature` value.
+record's separate `audit_each_signature` value. Signed bytes are published with the
+signature; keeping the row's digest plain preserves external payload verification.
 
 The result has exactly three string fields: `key_id` (the first eight bytes of
 SHA-256 of the public key, lowercase hex), `public_key_hex` (64 lowercase hex

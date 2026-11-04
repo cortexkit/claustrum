@@ -981,7 +981,8 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Uses authenticated operator admin access, not a capability or grant.\n\
-             Every signature requires a keyed payload fingerprint audit row first.\n\
+             Every signature commits the payload's plain SHA-256 before signing.\n\
+             Signed bytes are published with the signature, so anyone can check the row.\n\
              Payloads are limited to 64 KiB. Prints exactly one JSON line with key_id,\n\
              public_key_hex and signature_hex (lowercase hex). Root keys must never\n\
              be enabled for this path."

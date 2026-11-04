@@ -2627,7 +2627,7 @@ mod operator_sign_tests {
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
-            assert_ne!(row.payload_hash.as_deref(), Some(hash.as_str()));
+            assert_eq!(row.payload_hash.as_deref(), Some(hash.as_str()));
             assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
             assert!(!format!("{row:?}").contains("server challenge"));
         }

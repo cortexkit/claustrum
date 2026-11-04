@@ -1390,6 +1390,10 @@ order. No grant, stale pairing, unknown/ungranted id, ineligible record and proj
 refusal are indistinguishable `not_found`. An authorized `needs_reauth` record keeps
 answering `needs_reauth` on subsequent reads, rather than degrading to `not_found`.
 
+Grant admission pins the local row lifetime for eligibility, refresh reads and forwarded
+stale-report updates. Removing and re-creating the id before one of those steps answers the
+same `not_found` as an unknown credential; the admitted call cannot follow the replacement.
+
 After the normal local get/refresh the home requires a nonempty `oauth.access_token`
 equal to `payload` and unequal to every nonempty refresh component (including packed-token
 segments, client secret and Meta session identity/refresh tokens). It then audits issuance

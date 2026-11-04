@@ -126,7 +126,12 @@ fn release_2_migrations_follow_release_1_and_keep_existing_rows_and_grants() {
         .copied()
         .filter(|version| *version > VAULT_RELEASE_1_SCHEMA_VERSION)
         .collect();
-    assert_eq!(release_2, (19..=32).collect::<Vec<_>>());
+    // Every migration after release 1 follows it contiguously, up to the newest. A gap
+    // or a reordered number fails here; adding the next migration needs no edit.
+    assert_eq!(
+        release_2,
+        (VAULT_RELEASE_1_SCHEMA_VERSION + 1..=newest_migration_version()).collect::<Vec<_>>()
+    );
     assert_eq!(*versions.last().unwrap(), newest_migration_version());
 
     let (_root, sqlite) = sqlite("federation-migrate", 190);

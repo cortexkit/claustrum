@@ -533,7 +533,7 @@ ck auth sign --id signing:account-machine:1 --payload-file challenge.bin
 
 The private key never leaves the vault in plaintext. `--operator-sign` seals the
 permission with the key and implies `--audit-each-signature`. Every operator
-signature commits a chained `sign` audit row with the payload SHA-256 before
+signature commits a chained `sign` audit row with a keyed payload fingerprint before
 signing; an audit failure returns no signature. Only the hash is audited, not the
 challenge bytes. The actor is `route-admin` online and `offline-cli` offline.
 
@@ -1025,7 +1025,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `enroll.reissue` | Operator-reissue a replacement enrollment token. |
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
-| `seal` | Record one `credential.seal` (auth-mode HPKE under a vault-held KEM key) before its ciphertext is returned; `payload_hash` is the SHA-256 of the plaintext. |
+| `seal` | Record one `credential.seal` (auth-mode HPKE under a vault-held KEM key) before its ciphertext is returned; `payload_hash` is a keyed fingerprint of the plaintext. |
 | `remote_issue` | The home issued an access token to a member; durable dedup bounds this to one row per member, credential, home version and encrypted material. |
 | `transfer_out` | Commit a sealed outgoing transfer before delivery; resuming it adds no second row. |
 | `transfer_in` | Accept a sealed transfer and create or replace the local static credential atomically. |

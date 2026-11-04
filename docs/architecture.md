@@ -216,6 +216,15 @@ Every durable mutation appends an entry to `audit_log`, an HMAC chain keyed by a
 key that is itself sealed under the master key. Each entry binds its predecessor, so an
 interior edit, reorder or insert fails verification (`audit::tests::tampered_entry_breaks_chain`).
 
+Confidential payloads use a keyed fingerprint in `audit_log.payload_hash`, not plain
+SHA-256: the fingerprint key is HMAC-SHA256 of the stable audit key and the fixed
+`cortexkit-credentials/audit-payload-key/v1` domain label; the fingerprint is
+HMAC-SHA256 of the payload under that derived key. This prevents a database copy
+from becoming an offline verifier for plaintext guesses. Public commitments, including
+`admin.approval` artifact hashes, remain plain so external comparisons still work.
+Existing rows are never rewritten: older confidential rows can retain unkeyed hashes,
+and the chain verifies both representations without interpreting their digest strings.
+
 The chain does not detect truncation on its own: deleting a suffix leaves a shorter chain
 that still verifies. The daemon therefore publishes the global chain tip (`auditSeq` and
 `auditTipMac`) in its health snapshot so an external witness can record it. The MAC

@@ -607,7 +607,7 @@ operator signing`, before payload validation. Payloads use standard padded base6
 and a 64 KiB decoded limit (`MAX_OPERATOR_SIGN_PAYLOAD`), enforced in the shared
 admin applier online and offline. The admin envelope limits are unchanged; bus
 `credential.sign` retains its separate 1 MiB limit. After validation, the vault commits
-a `sign` audit row containing only the payload SHA-256 (never payload bytes), with
+a `sign` audit row containing only a keyed payload fingerprint (never payload bytes), with
 actor `route-admin` online or `offline-cli` offline. The append checks the key's
 record version inside its transaction. Audit failure returns an error and no
 signature; signing happens only after the append succeeds, regardless of the
@@ -1014,8 +1014,8 @@ other reasons are
 
 A successful write and audit append commit in one transaction. Audit operations are
 `deposit_cookie_create` and `deposit_cookie_replace`, actor/source/created_by are the
-same `reserved:<module>` string, and alarm is false. The payload_hash is lowercase
-hex SHA-256 of:
+same `reserved:<module>` string, and alarm is false. First compute a lowercase
+hex SHA-256 consent commitment over:
 
 ```text
 UTF8("ck-deposit-cookie/v1") || u32be(len(UTF8(id))) || UTF8(id)
@@ -1025,9 +1025,10 @@ UTF8("ck-deposit-cookie/v1") || u32be(len(UTF8(id))) || UTF8(id)
 The inner SHA-256 is 32 raw bytes, not hex. Independent vector: id
 `cookie:example.com:work`, consent_ref `consent-123`, cookie `session=abc` yields
 `4b5a1cb62c56fc15d6dda4e1cd4ded71770ccb9f847e8fe1e254b01ea6837140`.
-The payload_hash commitment can be verified by recomputing the outer SHA-256 over
-the documented id, consent_ref and raw cookie digest layout and comparing the hex
-result. Verifying a replaced cookie requires retaining its digest outside the vault.
+The persisted `payload_hash` is a keyed fingerprint of the UTF-8 hex commitment,
+using the audit payload key described in [the architecture](architecture.md#5-audit-and-diagnostics).
+The unkeyed commitment is not persisted in new audit rows: it would let a database
+reader test cookie guesses. Historical rows retain their original commitment.
 
 **Trust line:** the vault trusts the depositing module's consent attestation and
 cannot see the consent card. The grant is not evidence that a card was shown.
@@ -1242,7 +1243,7 @@ no other grant authorizes `seal`.
 
 **Every seal is audited.** Before the ciphertext is returned the vault commits one
 HMAC-chained row with `audit_log.op = seal`, the credential id, `payload_hash` set to
-the SHA-256 of the decoded plaintext, and the resolved `reserved:<module>` or
+a keyed fingerprint of the decoded plaintext, and the resolved `reserved:<module>` or
 `enrolled:<name>` actor. The plaintext is never recorded; the audit row has no column
 for the recipient key, so it is not recorded either. If the row cannot be written, or
 the key record was replaced between the read and the audit write, the ciphertext is

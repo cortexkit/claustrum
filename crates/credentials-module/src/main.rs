@@ -3854,13 +3854,16 @@ mod tests {
             .filter(|a| a.credential_id.as_deref() == Some(DEPOSIT_COOKIE_ID))
             .collect();
         assert_eq!(audit.len(), 4);
+        let fingerprint = audit[0].payload_hash.clone().unwrap();
+        assert_eq!(fingerprint.len(), 64);
         for entry in audit {
             assert_eq!(entry.actor, "reserved:cerebellum");
             assert!(!entry.alarm);
-            assert_eq!(
+            assert_ne!(
                 entry.payload_hash.as_deref(),
                 Some("d523e692e03fc04a7700e325960047a0283a062980239e5ea7ad03b4eac9bcb7")
             );
+            assert_eq!(entry.payload_hash.as_deref(), Some(fingerprint.as_str()));
         }
         let events: Vec<(String,String,String,String)> = store.with_raw_conn(|c| {
             let mut q = c.prepare("SELECT credential_id, principal_kind, principal_id, detail FROM auth_events WHERE kind='scoped_first_use'")?;
@@ -13281,10 +13284,11 @@ mod tests {
             for (row, plaintext) in rows.iter().zip(plaintexts) {
                 assert_eq!(row.op, "seal");
                 assert_eq!(row.credential_id.as_deref(), Some("kem:push"));
-                assert_eq!(
+                assert_ne!(
                     row.payload_hash.as_deref(),
                     Some(sha256_hex(plaintext).as_str())
                 );
+                assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
                 assert_eq!(
                     row.actor,
                     if enrolled {
@@ -13295,7 +13299,9 @@ mod tests {
                 );
                 assert!(!row.alarm);
             }
-            store.verify_audit_chain().unwrap();
+            assert_eq!(rows[0].payload_hash, rows[2].payload_hash);
+            assert_ne!(rows[0].payload_hash, rows[1].payload_hash);
+            assert_eq!(store.verify_audit_chain().unwrap(), None);
         }
     }
 
@@ -13530,15 +13536,14 @@ mod tests {
             )
             .unwrap();
         let before = store.read_audit(None).unwrap();
-        let hash = credentials_core::store::payload_hash(b"push");
         assert!(matches!(
-            store.append_seal_audit("kem:push", original.record_version, &hash, "reserved:p"),
+            store.append_seal_audit("kem:push", original.record_version, b"push", "reserved:p"),
             Err(credentials_core::store::StoreOpError::CasMismatch)
         ));
         assert_eq!(store.read_audit(None).unwrap(), before);
         let current = store.get("kem:push").unwrap();
         let row = store
-            .append_seal_audit("kem:push", current.record_version, &hash, "reserved:p")
+            .append_seal_audit("kem:push", current.record_version, b"push", "reserved:p")
             .unwrap();
         assert_eq!(row.op, "seal");
         assert_eq!(store.read_audit(None).unwrap().len(), before.len() + 1);
@@ -13836,7 +13841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_record_vector_route_signs_exact_bytes_and_audits_their_hash() {
+    async fn catalog_record_vector_route_signs_exact_bytes_and_audits_their_fingerprint() {
         use base64::Engine as _;
         let vectors = catalog_vectors::fixture();
         let pem = catalog_vectors::trusted_key_pem(&vectors);
@@ -13879,12 +13884,13 @@ mod tests {
         assert_eq!(rows.len(), before + 1);
         let row = &rows[before];
         let digest = ring::digest::digest(&ring::digest::SHA256, &payload);
-        let expected_hash: String = digest
+        let plain_hash: String = digest
             .as_ref()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        assert_eq!(row.payload_hash.as_deref(), Some(expected_hash.as_str()));
+        assert_ne!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
+        assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
         assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
         assert_eq!(row.op, "sign");
         assert_eq!(row.actor, "reserved:entorhinal");
@@ -13991,14 +13997,15 @@ mod tests {
                 // Use ring rather than the daemon's sha2 implementation and decoded
                 // bytes rather than the request's base64 representation.
                 let digest = ring::digest::digest(&ring::digest::SHA256, payload);
-                let expected_hash: String = digest
+                let plain_hash: String = digest
                     .as_ref()
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect();
                 assert_eq!(row.op, "sign");
                 assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
-                assert_eq!(row.payload_hash.as_deref(), Some(expected_hash.as_str()));
+                assert_ne!(row.payload_hash.as_deref(), Some(plain_hash.as_str()));
+                assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
                 assert_eq!(
                     row.actor,
                     if enrolled {
@@ -14009,6 +14016,8 @@ mod tests {
                 );
                 assert!(!row.alarm);
             }
+            assert_eq!(rows[0].payload_hash, rows[2].payload_hash);
+            assert_ne!(rows[0].payload_hash, rows[1].payload_hash);
             store
                 .verify_audit_chain()
                 .expect("signatures must preserve chain integrity");
@@ -14153,12 +14162,11 @@ mod tests {
             )
             .unwrap();
         let before = store.read_audit(None).unwrap();
-        let hash = credentials_core::store::payload_hash(b"payload");
         assert!(matches!(
             store.append_signature_audit(
                 "signing:publish:1",
                 original.record_version,
-                &hash,
+                b"payload",
                 "reserved:entorhinal"
             ),
             Err(credentials_core::store::StoreOpError::CasMismatch)
@@ -14169,7 +14177,7 @@ mod tests {
             .append_signature_audit(
                 "signing:publish:1",
                 current.record_version,
-                &hash,
+                b"payload",
                 "reserved:entorhinal",
             )
             .unwrap();

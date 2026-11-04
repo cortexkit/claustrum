@@ -4151,6 +4151,10 @@ impl EncryptedStore {
             consent_ref,
             cookie.expose().as_bytes(),
         );
+        let hash = hex32(&audit::payload_fingerprint(
+            &self.audit_key,
+            hash.as_bytes(),
+        ));
         let outcome = self.fenced_write(|tx| {
             let inserted = tx.execute(
                 "INSERT INTO credentials (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms, created_by) \
@@ -4245,7 +4249,10 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
+        let payload_hash_hex = hex32(&audit::payload_fingerprint(
+            &audit_key,
+            record.payload.expose(),
+        ));
 
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
@@ -4357,7 +4364,10 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
+        let payload_hash_hex = hex32(&audit::payload_fingerprint(
+            &audit_key,
+            record.payload.expose(),
+        ));
 
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
         // version we read, so a concurrent writer that already bumped it leaves zero
@@ -4477,7 +4487,10 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
+        let payload_hash_hex = hex32(&audit::payload_fingerprint(
+            &audit_key,
+            record.payload.expose(),
+        ));
 
         // Read the current version, seal at version+1, and update — ALL inside the
         // one fenced transaction, gated on `WHERE record_version = <the version we
@@ -4651,7 +4664,10 @@ impl EncryptedStore {
             let mut updated = record.clone().with_identity(identity.clone());
             retain_detected_plan(&mut updated, Some(&record));
             updated.record_version = next_version;
-            let payload_hash_hex = hex32(&payload_hash(updated.payload.expose()));
+            let payload_hash_hex = hex32(&audit::payload_fingerprint(
+                &audit_key,
+                updated.payload.expose(),
+            ));
             let blob = self
                 .seal_record(credential_id, &updated)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -5722,7 +5738,10 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(new_record.payload.expose()));
+        let payload_hash_hex = hex32(&audit::payload_fingerprint(
+            &audit_key,
+            new_record.payload.expose(),
+        ));
 
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
@@ -6327,34 +6346,34 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
         record_version: u64,
-        signed_payload_hash: &[u8; 32],
+        signed_payload: &[u8],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         self.append_key_use_audit(
             AuditOp::Sign,
             credential_id,
             record_version,
-            signed_payload_hash,
+            signed_payload,
             actor,
         )
     }
 
     /// Record one `credential.seal` before its ciphertext is returned, under the same
     /// fence as a signature row: the row is written only while the key generation the
-    /// daemon sealed with is still the stored one. `sealed_plaintext_hash` is the
-    /// SHA-256 of the plaintext; the plaintext itself is never recorded.
+    /// daemon sealed with is still the stored one. Only a keyed fingerprint of
+    /// `sealed_plaintext` is recorded, so database readers cannot test plaintext guesses.
     pub fn append_seal_audit(
         &self,
         credential_id: &str,
         record_version: u64,
-        sealed_plaintext_hash: &[u8; 32],
+        sealed_plaintext: &[u8],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         self.append_key_use_audit(
             AuditOp::Seal,
             credential_id,
             record_version,
-            sealed_plaintext_hash,
+            sealed_plaintext,
             actor,
         )
     }
@@ -6364,7 +6383,7 @@ impl EncryptedStore {
         op: AuditOp,
         credential_id: &str,
         record_version: u64,
-        payload_hash: &[u8; 32],
+        payload: &[u8],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
         let audit_key = self.audit_key.clone();
@@ -6385,7 +6404,7 @@ impl EncryptedStore {
                 &AuditRecord {
                     op,
                     credential_id: Some(credential_id.to_string()),
-                    payload_hash: Some(hex32(payload_hash)),
+                    payload_hash: Some(hex32(&audit::payload_fingerprint(&audit_key, payload))),
                     actor: actor.to_string(),
                     alarm: None,
                 },
@@ -9120,6 +9139,86 @@ mod tests {
         EncryptedStore::migrate(&store).expect("migrate");
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
         (root, EncryptedStore::open(store, key).expect("open vault"))
+    }
+
+    #[test]
+    fn confidential_audit_payloads_are_keyed_and_preserve_legacy_chain() {
+        use hmac::{Hmac, Mac};
+
+        let (_root, mut store) = tmp_store(0x6b);
+        let payload = b"0420";
+        let plain = hex32(&payload_hash(payload));
+        // Independently compute the two HMAC steps, rather than using the writer's helper.
+        let mut derive = <Hmac<Sha256> as Mac>::new_from_slice(&*store.audit_key).unwrap();
+        derive.update(b"cortexkit-credentials/audit-payload-key/v1");
+        let mut mac =
+            <Hmac<Sha256> as Mac>::new_from_slice(&derive.finalize().into_bytes()).unwrap();
+        mac.update(payload);
+        let keyed = hex32(&mac.finalize().into_bytes().into());
+        assert_ne!(keyed, plain);
+
+        let legacy = store
+            .append_audit(&AuditRecord {
+                op: AuditOp::Put,
+                credential_id: Some("opaque:legacy".into()),
+                payload_hash: Some(plain.clone()),
+                actor: "operator".into(),
+                alarm: None,
+            })
+            .unwrap();
+        let record =
+            VaultRecord::new_static(CredentialKind::Opaque, "operator", payload.to_vec(), None);
+        let id = "opaque:keyed-audit";
+        store.create(id, &record).unwrap();
+        store
+            .overwrite_cas(id, &record, &payload_hash(payload))
+            .unwrap();
+        store
+            .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+            .unwrap();
+        store.commit_refresh(id, 3, &record).unwrap();
+        store
+            .set_identity_audited(
+                id,
+                RecordIdentity::default(),
+                AuditCtx::admin(AuditOp::SetIdentity),
+            )
+            .unwrap();
+        store
+            .append_signature_audit(id, 5, payload, "operator")
+            .unwrap();
+        store.append_seal_audit(id, 5, payload, "operator").unwrap();
+        let rows = store.read_audit(None).unwrap();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], legacy);
+        for row in &rows[1..] {
+            assert_ne!(
+                row.payload_hash.as_deref(),
+                Some(plain.as_str()),
+                "{}",
+                row.op
+            );
+            assert_eq!(
+                row.payload_hash.as_deref(),
+                Some(keyed.as_str()),
+                "{}",
+                row.op
+            );
+        }
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+
+        store
+            .rotate_master_key(MasterKey::from_bytes([0x6c; MASTER_KEY_LEN]))
+            .unwrap();
+        store.append_seal_audit(id, 5, payload, "operator").unwrap();
+        assert_eq!(store.read_audit(None).unwrap()[0], legacy);
+        assert_eq!(
+            store.read_audit(Some(1)).unwrap()[0]
+                .payload_hash
+                .as_deref(),
+            Some(keyed.as_str())
+        );
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
     }
 
     /// Migration 6 must make old grants explicitly read-only while allowing a new

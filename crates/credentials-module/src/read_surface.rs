@@ -1483,7 +1483,7 @@ impl ReadSurface {
                 self.engine.store().append_signature_audit(
                     &credential_id,
                     record.record_version,
-                    &credentials_core::store::payload_hash(&payload),
+                    &payload,
                     &actor,
                 )
             };
@@ -1760,7 +1760,7 @@ impl ReadSurface {
             self.engine.store().append_seal_audit(
                 credential_id,
                 record.record_version,
-                &credentials_core::store::payload_hash(plaintext.expose()),
+                plaintext.expose(),
                 &actor,
             )
         };

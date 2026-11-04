@@ -84,9 +84,14 @@ fn deposit_cookie_create_replace_preserves_creator_categories_birth_and_identity
     assert_eq!(after_birth, birth.0);
     let audit = store.read_audit(None).unwrap();
     assert_eq!(audit.len(), 2);
+    let keyed = hex32(&audit::payload_fingerprint(
+        &store.audit_key,
+        HASH.as_bytes(),
+    ));
     for entry in audit {
         assert_eq!(entry.actor, CALLER);
-        assert_eq!(entry.payload_hash.as_deref(), Some(HASH));
+        assert_ne!(entry.payload_hash.as_deref(), Some(HASH));
+        assert_eq!(entry.payload_hash.as_deref(), Some(keyed.as_str()));
         assert!(!entry.alarm);
     }
     assert_eq!(store.verify_audit_chain().unwrap(), None);

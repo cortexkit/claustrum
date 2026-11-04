@@ -2119,6 +2119,16 @@ fn transfer_key_recovery_rejects_pending_and_abandons_outgoing_in_one_transactio
     );
     let key = store.get(crate::federation::VAULT_TRANSFER_ID).unwrap();
     assert_eq!(key.payload.expose(), new_key.payload.expose());
+    let rows = audit_rows(&store, AuditOp::Overwrite);
+    let digest = rows.last().unwrap().payload_hash.as_deref().unwrap();
+    assert_ne!(digest, hex32(&payload_hash(new_key.payload.expose())));
+    assert_eq!(
+        digest,
+        hex32(&audit::payload_fingerprint(
+            &store.audit_key,
+            new_key.payload.expose()
+        ))
+    );
     for sender in [HOME, OTHER] {
         let row = store
             .incoming_transfer(sender, TRANSFER_ID)

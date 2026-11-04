@@ -16,12 +16,29 @@
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// The genesis predecessor mac for the first chain entry (a fixed, non-secret
 /// constant — the chain's anchor).
 pub const GENESIS_MAC: &str = "genesis";
+
+const PAYLOAD_KEY_DOMAIN: &[u8] = b"cortexkit-credentials/audit-payload-key/v1";
+
+/// Fingerprint confidential audit payloads without exposing a verifier for offline
+/// guesses. A separate key domain keeps payload MACs distinct from chain MACs;
+/// deriving from the stable audit key preserves fingerprints across master-key rotation.
+pub(crate) fn payload_fingerprint(audit_key: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+    let mut derivation =
+        <HmacSha256 as Mac>::new_from_slice(audit_key).expect("HMAC accepts a 32-byte key");
+    derivation.update(PAYLOAD_KEY_DOMAIN);
+    let key = Zeroizing::new(<[u8; 32]>::from(derivation.finalize().into_bytes()));
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key.as_ref()).expect("HMAC accepts a 32-byte key");
+    mac.update(payload);
+    mac.finalize().into_bytes().into()
+}
 
 /// What kind of mutation an audit entry records. Op-typed so the chain accounts for
 /// every record-version change and an unexplained bump is a detectable gap.
@@ -85,16 +102,16 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
-    /// A signing key opted into per-signature history. Only the exact payload's
-    /// SHA-256 is recorded, never its bytes. The key id is derived from the public
+    /// A signing key opted into per-signature history. Only a keyed fingerprint of
+    /// the exact payload is recorded, never its bytes. The key id is derived from the public
     /// key, not stored here: a sign row belongs to the key generation installed by
     /// the most recent put/overwrite row for its credential id. Chain order places
     /// signatures on either side of a replacement; normal rotation uses a new id.
     Sign,
     /// One `credential.seal`: an auth-mode HPKE seal under a vault-held KEM key. Every
     /// seal writes one row, before the ciphertext is returned, because a sealed message
-    /// is attributed to this key by whoever opens it. `payload_hash` is the SHA-256 of
-    /// the plaintext, never its bytes. Like a sign row, it belongs to the key generation
+    /// is attributed to this key by whoever opens it. `payload_hash` is a keyed fingerprint
+    /// of the plaintext, never its bytes. Like a sign row, it belongs to the key generation
     /// installed by the most recent put/overwrite row for its credential id.
     Seal,
     /// A principal-scoped operation grant was created.
@@ -423,7 +440,9 @@ pub struct AuditRecord {
     pub op: AuditOp,
     /// The credential affected, if the op is credential-scoped.
     pub credential_id: Option<String>,
-    /// Hex hash of the affected payload (for substitution detection), if applicable.
+    /// Hex commitment to the affected payload, if applicable. Confidential bytes
+    /// use a keyed fingerprint; public identifiers and approval manifests use plain
+    /// hashes. Historical confidential rows may still contain unkeyed hashes.
     pub payload_hash: Option<String>,
     /// Who performed it: a connection id (daemon read-surface action) or
     /// `"offline-cli"` (an admin CLI write).

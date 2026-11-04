@@ -1213,12 +1213,7 @@ pub fn apply(
             let public = crate::signing::public_key_ed25519(pem).map_err(|_| corrupt())?;
             // Operator permission always requires durable history, even if a record
             // was stored without the separate bus-signature audit opt-in.
-            store.append_signature_audit(
-                &id,
-                record.record_version,
-                &crate::store::payload_hash(&payload),
-                actor,
-            )?;
+            store.append_signature_audit(&id, record.record_version, &payload, actor)?;
             let signature = prepared.sign();
             let signature_bytes = base64::engine::general_purpose::STANDARD
                 .decode(&signature.signature_b64)
@@ -2632,7 +2627,8 @@ mod operator_sign_tests {
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
-            assert_eq!(row.payload_hash.as_deref(), Some(hash.as_str()));
+            assert_ne!(row.payload_hash.as_deref(), Some(hash.as_str()));
+            assert_eq!(row.payload_hash.as_ref().unwrap().len(), 64);
             assert!(!format!("{row:?}").contains("server challenge"));
         }
         assert_eq!(

@@ -443,16 +443,15 @@ mod tests {
         }
 
         #[test]
-        fn any_single_byte_flip_is_rejected(idx in 0usize..64, xor in 1u8..=255) {
+        fn any_single_byte_flip_is_rejected(xor in 1u8..=255) {
             let k = key(15);
             let mut blob = seal(&k, b"twenty-four-byte-payload!", &binding()).expect("seal");
-            let i = idx % blob.len();
-            blob[i] ^= xor;
             // A flip anywhere must be caught: magic/version/key_id/nonce/ciphertext
-            // /tag are all either structurally validated or authenticated. It must
-            // never decrypt to the original plaintext, and must never panic.
-            if let Ok(out) = open(&k, &blob, &binding()) {
-                proptest::prop_assert_ne!(out.as_slice(), &b"twenty-four-byte-payload!"[..]);
+            // /tag are all either structurally validated or authenticated.
+            for i in 0..blob.len() {
+                blob[i] ^= xor;
+                proptest::prop_assert!(open(&k, &blob, &binding()).is_err(), "accepted flip at byte {}", i);
+                blob[i] ^= xor;
             }
         }
     }

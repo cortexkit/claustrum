@@ -1761,7 +1761,10 @@ impl EncryptedStore {
         }
         let key_id_hex = self.key_id.to_hex();
         let audit_key = self.audit_key.clone();
-        let new_payload_hash = hex32(&payload_hash(new_key.payload.expose()));
+        let new_payload_hash = hex32(&audit::payload_fingerprint(
+            &audit_key,
+            new_key.payload.expose(),
+        ));
         let now = now_ms();
         self.fenced_write_or_refuse(|tx| {
             let Some((current_version, state)) = tx

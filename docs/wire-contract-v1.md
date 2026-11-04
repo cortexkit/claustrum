@@ -274,7 +274,7 @@ both addresses or neither is refused as a malformed request
 Signing keys minted with `ck auth mint-signing-key --audit-each-signature` opt
 into a permanent per-signature history. After key and payload validation, but
 before signing, the vault commits one HMAC-chained row with `audit_log.op = sign`,
-the credential id, the SHA-256 of the exact decoded payload, and the resolved
+the credential id, a keyed fingerprint of the exact decoded payload, and the resolved
 `reserved:<module>` or `enrolled:<name>` actor. Anonymous handle holders use the
 existing `conn-N` channel attribution. Payload bytes are never recorded. A failed
 audit write (including a lost writer fence) returns `store_error` / `transient`

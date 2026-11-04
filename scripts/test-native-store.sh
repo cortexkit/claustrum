@@ -2,6 +2,9 @@
 # Exercise Linux custody on a disposable session bus and unlocked login keyring.
 # A private HOME keeps the lock test away from any operator's real keyring.
 set -euo pipefail
+# Bash 3.2 can give EXIT traps status 0 after a nounset error. Require explicit
+# completion so an unset scalar or empty array cannot turn an abort into success.
+finished=0
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 command -v dbus-run-session >/dev/null || { echo 'native store tests require dbus-run-session' >&2; exit 1; }
 command -v gnome-keyring-daemon >/dev/null || { echo 'native store tests require gnome-keyring-daemon' >&2; exit 1; }
@@ -21,6 +24,11 @@ running() {
   [ -n "$state" ] && [ "$state" != Z ]
 }
 cleanup() {
+  local status=$?
+  if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+    echo "test-native-store.sh: exited before successful completion" >&2
+    status=1
+  fi
   local env pid pids=()
   for env in /proc/[0-9]*/environ; do
     pid=${env#/proc/}
@@ -40,6 +48,7 @@ cleanup() {
     fi
   done
   rm -rf "$root"
+  exit "$status"
 }
 trap cleanup EXIT
 mkdir -m 700 "$root/home" "$root/runtime"
@@ -53,3 +62,4 @@ dbus-run-session -- bash -euo pipefail -c '
   CK_NATIVE_STORE_TESTS=1 cargo test --locked -p credentials-core --test native_store -- --ignored --nocapture --test-threads=1 --skip secret_service_locked_collection_refuses_without_prompt
   CK_NATIVE_STORE_TESTS=1 CK_NATIVE_STORE_DISPOSABLE_SESSION=1 cargo test --locked -p credentials-core --test native_store secret_service_locked_collection_refuses_without_prompt -- --ignored --exact --nocapture
 '
+finished=1

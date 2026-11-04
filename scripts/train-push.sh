@@ -75,6 +75,10 @@
 #   3  the default branch kept moving through 3 re-queue rounds, or the rebase
 #      conflicted
 set -euo pipefail
+# Bash 3.2 can give EXIT traps status 0 after a nounset error. Require explicit
+# completion in both EXIT handlers: deleting the trigger-probe branch early on
+# and removing the CI/push logs later in the run.
+finished=0
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(git rev-parse --show-toplevel)"
@@ -411,7 +415,15 @@ run_trigger_probe() {
   git push -q --force "$remote" "$probe_sha:refs/heads/$probe_ref" ||
     refuse "could not push the trigger probe to $remote/$probe_ref"
 
-  trap 'git push -q "$remote" --delete train/trigger-probe >/dev/null 2>&1 || true' EXIT
+  trap '
+    status=$?
+    if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+      echo "train-push.sh: exited before successful completion" >&2
+      status=1
+    fi
+    git push -q "$remote" --delete train/trigger-probe >/dev/null 2>&1 || true
+    exit "$status"
+  ' EXIT
   trap 'exit 2' INT TERM
 
   # ~2 minutes. A run that is going to exist is queued within seconds; waiting
@@ -526,7 +538,15 @@ verified_sha=""
 
 watch_log="$(mktemp "${TMPDIR:-/tmp}/train-push-watch.XXXXXX")"
 push_log="$(mktemp "${TMPDIR:-/tmp}/train-push-push.XXXXXX")"
-trap 'rm -f "$watch_log" "$push_log"' EXIT
+trap '
+  status=$?
+  if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+    echo "train-push.sh: exited before successful completion" >&2
+    status=1
+  fi
+  rm -f "$watch_log" "$push_log"
+  exit "$status"
+' EXIT
 
 # What we believe $remote/$train_ref points at. Tracked explicitly so every
 # re-push leases against the sha WE pushed instead of trusting a remote-tracking
@@ -707,3 +727,4 @@ if ! git push -q "$remote" --delete "$train_ref"; then
   printf 'train-push: warning — could not delete %s/%s (delete it by hand)\n' "$remote" "$train_ref" >&2
 fi
 say "done"
+finished=1

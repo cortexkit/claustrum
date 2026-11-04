@@ -24,13 +24,16 @@
 # hours later at deploy time, by which point the binary looks like any other.
 
 set -euo pipefail
+# Bash 3.2 can give EXIT traps status 0 after a nounset error. Only an explicit
+# completion flag distinguishes success from an abort, including empty arrays.
+finished=0
 FAST=0
 case "${1:-}" in
   --fast) FAST=1; shift ;;
   --help|-h)
     echo "Usage: PROBE='<live check or none: reason>' $0 [--fast]"
     echo "--fast: check and build a clean local commit before landing; full gate/CI follow live acceptance."
-    exit 0 ;;
+    finished=1; exit 0 ;;
 esac
 [ "$#" -eq 0 ] || { echo "Unknown argument: $1" >&2; exit 1; }
 if [ -z "${PROBE:-}" ]; then
@@ -220,7 +223,15 @@ find target/staged -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
 
 source scripts/lib/ckdev-binary.sh
 SMOKE_SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SMOKE_SCRATCH"' EXIT
+trap '
+  status=$?
+  if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+    echo "release-build.sh: exited before successful completion" >&2
+    status=1
+  fi
+  rm -rf "$SMOKE_SCRATCH"
+  exit "$status"
+' EXIT
 for bin in ck-claustrum ck-auth; do
   cp "target/stamped/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
@@ -415,3 +426,4 @@ echo "reachability probe: ${PROBE}"
 echo "  ^ include this line VERBATIM in the staging request. The placer runs it as"
 echo "    a standard leg; it is the only one that proves the change is live rather"
 echo "    than merely placed."
+finished=1

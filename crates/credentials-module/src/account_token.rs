@@ -265,7 +265,7 @@ fn refusal(status: u16, body: &Value) -> AccountTokenError {
         "rate_limited" => "rate_limited",
         "exchange_disabled" => "exchange_disabled",
         "account_check_unavailable" => "account_check_unavailable",
-        _ => "account_exchange_unavailable",
+        _ => return AccountTokenError::network(),
     };
     let class = match status {
         400 => ErrorClass::Permanent,

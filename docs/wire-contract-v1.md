@@ -1200,6 +1200,10 @@ Refusals use the ordinary `result.error` object with `code`, `class`, and option
 | `rate_limited`, `exchange_disabled`, `account_check_unavailable` | `transient`; service `retry_after_s` is converted to `retry_after_ms` |
 | `account_exchange_unavailable` | `transient`; network, unusable upstream response, or already-expired delivery |
 
+At either exchange stage, malformed response bodies and unrecognized service error
+codes use `account_exchange_unavailable` / `transient`, including HTTP 400 and 403.
+An HTTP status alone is not a recognized account-service verdict.
+
 The vault sends no bearer to the account service: challenge POST takes exactly
 `{key_id,aud}`, redemption POST exactly `{key_id,aud,challenge,sig_hex}`. Before
 signing, the sealed challenge must bind the expected account, key, `worker_token`

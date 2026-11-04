@@ -17456,6 +17456,96 @@ mod tests {
 
     include!("../tests/support/daemon_regressions.rs");
 
+    #[test]
+    fn corrupt_kem_diagnostic_never_prints_payload() {
+        const CHILD: &str = "CK_TEST_CORRUPT_KEM_DIAGNOSTIC";
+        const MARKER: &str = "SYNTHETIC_PRIVATE_PAYLOAD_MARKER";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::corrupt_kem_diagnostic_never_prints_payload",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "diagnostic child failed");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                stderr.matches("kem credential").count(),
+                3,
+                "the corrupt-key diagnostic must run"
+            );
+            for captured in [&stdout, &stderr] {
+                assert!(
+                    !captured.contains(MARKER),
+                    "stored payload reached captured output"
+                );
+                assert!(
+                    !captured.contains('\u{1b}'),
+                    "stored control character reached captured output"
+                );
+            }
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (surface, _admin, store) = scoped_rig(91);
+            let id = "kem:corrupt:diagnostic";
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "entorhinal",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Open,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            let params = serde_json::from_value(json!({
+                "credential_id":id, "enc_b64":"", "ciphertext_b64":"", "info_b64":"", "aad_b64":""
+            }))
+            .unwrap();
+            for payload in [
+                format!("-----BEGIN {MARKER}\u{1b}[31m\tPRIVATE KEY-----\nbody").into_bytes(),
+                format!("-----BEGIN PRIVATE KEY-----\n{MARKER}\n-----END PRIVATE KEY-----")
+                    .into_bytes(),
+                [MARKER.as_bytes(), &[0xff]].concat(),
+            ] {
+                store
+                    .create(
+                        id,
+                        &VaultRecord::new_static(CredentialKind::KemKey, "test", payload, None),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    surface
+                        .open(77, Some(&reserved("entorhinal")), &params)
+                        .await
+                        .err(),
+                    Some(read_surface::ReadError::OpenFailed)
+                );
+                store
+                    .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+                    .unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn architecture_distinguishes_envelope_binding_from_record_freshness() {
+        let architecture = include_str!("../../../docs/architecture.md");
+        let architecture = architecture
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!architecture.contains("rolled back to an earlier version of itself"));
+        assert!(architecture.contains("does not independently detect restoring older ciphertext"));
+        assert!(architecture.contains("matching identity and version"));
+        assert!(architecture.contains("not a general record-freshness guarantee"));
+    }
+
     /// EVERY LINE THIS DAEMON CAN WRITE, ENUMERATED -- so a new one needs a reviewer.
     ///
     /// The read surface is anonymous and its callers carry bearer material: capability
@@ -17468,12 +17558,12 @@ mod tests {
     ///
     /// So the policy is structural rather than filter-based: ordinary consumer bytes
     /// never reach a log line. One exception records a bounded, escaped credential id
-    /// and the container found for a corrupt stored KEM payload so operators can repair
-    /// the record without exposing plaintext or private key bytes. The sites are:
+    /// and a fixed invalid-container message for a corrupt stored KEM payload so
+    /// operators can repair the record without exposing private bytes. The sites are:
     ///
     ///   println!  `--version`, before any connection exists
     ///   eprintln! the logger failed to install (no request has been read yet)
-    ///   eprintln! a corrupt KEM record's capped escaped id and container only
+    ///   eprintln! a corrupt KEM record's capped escaped id and fixed text only
     ///   warn!     route-epoch drop: frame-header integers and a value this module chose
     ///   warn!     undecodable channel-0 request: fixed text only, no body or decode error
     ///   warn!     route bind refused under a flow scope: fixed text and the daemon-chosen

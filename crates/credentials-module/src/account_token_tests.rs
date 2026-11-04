@@ -474,6 +474,50 @@ async fn account_token_refusal_classes_retry_and_diagnostics() {
 }
 
 #[tokio::test]
+async fn account_token_unusable_refusal_bodies_are_transient_at_both_stages() {
+    for status in [400, 403] {
+        for body in [
+            b"<html>upstream failure</html>".to_vec(),
+            serde_json::to_vec(&json!({"error":"unrecognized_service_code","retry_after_s":7}))
+                .unwrap(),
+            b"{}".to_vec(),
+            b"{\"error\":42}".to_vec(),
+        ] {
+            for on_token in [false, true] {
+                let mut responses = Vec::new();
+                if on_token {
+                    responses.push(reply(200, challenge()));
+                }
+                responses.push(Ok(HttpResponse {
+                    status,
+                    body: body.clone(),
+                }));
+                let rig = Rig::new(responses);
+                let error = error(rig.call().await);
+                assert_eq!(error.code, "account_exchange_unavailable");
+                assert_eq!(
+                    error.class,
+                    ErrorClass::Transient,
+                    "status={status}, on_token={on_token}"
+                );
+                assert_eq!(error.retry_after_ms, None);
+                assert_eq!(rig.http.requests().len(), if on_token { 2 } else { 1 });
+                let events = rig.store.recent_auth_events(64).unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event.kind == "scoped_read_refusal"
+                            && event.provider_status == Some(status)
+                            && event.detail.as_deref() == Some("account_exchange_unavailable"))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn account_token_machine_file_shape_and_custody() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../tests/fixtures/account-machine/machine.json"

@@ -980,9 +980,9 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
 /// The outcome of a keychain `find-generic-password` invocation, classified from
 /// its raw exit/output by the PURE [`classify_keychain_find`].
 #[derive(Debug, PartialEq, Eq)]
-enum KeychainFind {
+enum KeychainFind<'a> {
     /// The `-w` password line (expected to be the hex key).
-    Found(String),
+    Found(&'a str),
     /// The keychain is locked / interaction is not allowed → fail closed.
     Locked,
     /// No such item → not provisioned yet.
@@ -1000,9 +1000,13 @@ enum KeychainFind {
 /// real Mac, capture the actual `security` exit/stderr for the locked and
 /// duplicate cases and pin the classifiers against those real strings rather than
 /// guessing the wire format.
-fn classify_keychain_find(code: Option<i32>, stdout: &str, stderr: &str) -> KeychainFind {
+fn classify_keychain_find<'a>(
+    code: Option<i32>,
+    stdout: &'a str,
+    stderr: &str,
+) -> KeychainFind<'a> {
     if code == Some(0) {
-        return KeychainFind::Found(stdout.trim().to_string());
+        return KeychainFind::Found(stdout.trim());
     }
     let haystack = stderr.to_ascii_lowercase();
     // A locked keychain (or any non-interactive denial) must fail closed.
@@ -1079,12 +1083,14 @@ fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterK
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()
         .map_err(spawn_error)?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = Zeroizing::new(output.stdout);
+    // Invalid UTF-8 cannot be a hex key. Borrow the output without allocating a
+    // lossy copy; the strict hex decoder refuses an empty successful response.
+    let stdout_text = std::str::from_utf8(&stdout).unwrap_or("");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    match classify_keychain_find(output.status.code(), &stdout, &stderr) {
+    match classify_keychain_find(output.status.code(), stdout_text, &stderr) {
         KeychainFind::Found(hex) => {
-            let hex = Zeroizing::new(hex.into_bytes());
-            let key_bytes = decode_hex_key(&hex)?;
+            let key_bytes = decode_hex_key(hex.as_bytes())?;
             Ok(MasterKey::from_bytes(*key_bytes))
         }
         KeychainFind::Locked => Err(MasterKeyError::VaultLocked),
@@ -1328,6 +1334,38 @@ fn hex_val(c: u8) -> Result<u8, MasterKeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn keychain_stdout_has_zeroizing_ownership_and_no_secret_copy() {
+        // Source ownership is observable without invoking the platform keychain or
+        // inspecting an allocation after it has been freed.
+        let source = include_str!("resolver.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let source: String = source.split_whitespace().collect();
+        assert!(source.contains("letstdout=Zeroizing::new(output.stdout);"));
+        let classifier = source
+            .split("fnclassify_keychain_find")
+            .nth(1)
+            .unwrap()
+            .split("fnspawn_error")
+            .next()
+            .unwrap();
+        assert!(classifier.contains("KeychainFind::Found(stdout.trim())"));
+        assert!(!classifier.contains("stdout.trim().to_string()"));
+        let reader = source
+            .split("fnload_from_keychain")
+            .nth(1)
+            .unwrap()
+            .split("fnreplace_in_keychain")
+            .next()
+            .unwrap();
+        assert!(
+            !reader.contains("from_utf8_lossy(&stdout)"),
+            "lossy decoding may allocate another secret copy"
+        );
+    }
 
     /// Every keychain call spawns the tool by absolute path, never a bare name looked up
     /// through `PATH`, which the caller controls (see [`super::SECURITY_BIN`]).
@@ -2267,7 +2305,7 @@ mod tests {
     fn keychain_classifier_maps_outcomes() {
         assert_eq!(
             classify_keychain_find(Some(0), "deadbeef\n", ""),
-            KeychainFind::Found("deadbeef".to_string())
+            KeychainFind::Found("deadbeef")
         );
         assert_eq!(
             classify_keychain_find(Some(44), "", "security: ... could not be found ..."),

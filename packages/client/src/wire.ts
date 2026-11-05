@@ -82,14 +82,16 @@ export type ServedCredential = {
   expiresAtMs: number | null
   /**
    * Operator-chosen record label for verifying a caller-held binding. It is not a routing key:
-   * account-scoped routing joins `accountId` with `recordVersion`.
+   * Account-scoped routing joins `accountId` with `refreshAdapter` from the inventory,
+   * never `recordVersion`, which only invalidates cached material.
    */
   credentialId?: string
   /** Non-secret Code Assist project identity, present only for antigravity credentials. */
   projectId?: string
   /**
-   * Provider account identity the served token executes under. Account-scoped routing joins this
-   * value with `recordVersion`; it is neither the operator's credential label nor the bearer handle.
+   * Provider account identity the served token executes under. Account pools join this value with
+   * the inventory's `refreshAdapter`, not the material's `recordVersion`, so refreshes do not split
+   * one account into new pools. It is neither the operator's credential label nor the bearer handle.
    *
    * BEST-EFFORT, NEVER GUARANTEED, including for JWT providers. The vault parses the claim live
    * from the served access token and falls back to stored login-time identity; both legs can be

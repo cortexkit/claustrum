@@ -23,6 +23,9 @@ credential caching, refresh, account scheduling, and retry policy.
   as a version older than every real one.
 • Unknown server error classes are bounded to `transient`; callers must retry them
   rather than treating a forward-compatible class as permanent.
+• Account pools use the refresh adapter from `list_scoped` plus opaque `accountId`.
+  Use `recordVersion` to invalidate cached material, never as part of a pool key:
+  a token refresh must not split one account into a new pool.
 • **Changed in 0.13.0:** a transport `Error` frame whose answer no retry or reconnect
   can change is reported as `permanent` with action `gone`, and the client no longer
   reconnects for it: `unknown_method`, `invalid_params`, `invalid_request`,

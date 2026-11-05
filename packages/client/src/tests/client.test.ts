@@ -499,7 +499,7 @@ describe('ClaustrumClient', () => {
   })
 
   test('treats an envelope that omits code as malformed and falls back to transient', async () => {
-    // P2: the wire contract in read_surface.rs says BOTH `class` and `code` are always
+    // The wire contract in read_surface.rs says BOTH `class` and `code` are always
     // present. A frame missing `code` is therefore malformed; treating its `class`
     // as authoritative lets a malicious or broken peer drive a "gone" action (the
     // mapping of `permanent`) by sending a half-formed error. The cut-line rule

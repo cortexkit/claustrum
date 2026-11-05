@@ -13,8 +13,8 @@ The default `transport` feature provides the resolver and live watch connection.
 If you already own a bus connection, use `cortexkit-claustrum-client = { version =
 "0.8.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
-`subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains for the reply error
-codes; no socket or authentication code is built in this mode.
+`subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
+no socket or authentication code is built in this mode.
 
 Construct `ClaustrumCredentialResolver::new(connection_file_path,
 consumer_module_id)` and import the `CredentialResolver` trait to call it. Bind
@@ -33,6 +33,13 @@ served token must remain valid for a bounded request duration; ordinary
 optional `account_id`, `email`, and `org_name` metadata on `ResolvedCredential`
 when the vault has captured those identity fields. These values are non-secret;
 the credential payload remains redacted in `Debug` output.
+
+The read decoders require a byte-integer-array payload and an unsigned-integer
+`record_version` on the wire; the public version is still a string. String payloads
+and string versions are not supported. Malformed present expiry, identity, or status
+metadata returns `InvalidResponse` rather than silently becoming absent. Optional
+identity and expiry fields may be omitted or null; status `record_version` must be
+omitted when unavailable, and an absent `stale_pending` still defaults to `false`.
 
 `report_auth_failure(credential_id, record_version, provider_status)` sends a
 version-fenced report for the credential version that was used. The client
@@ -54,11 +61,15 @@ grant. Seal makes exactly one attempt and hands a retryable error back: every se
 a fresh ciphertext with its own audit row, so the caller decides whether to retry.
 `list_scoped` lists the credentials the caller's grants cover. Handle reads, signing
 and public-key reads retry transient and transport failures a bounded number of
-times; scoped reads return the first error and leave the redial to the caller. `auth_required` and permanent refusals always return at once. Listing
+times, with a 100 ms backoff between attempts, including refusals in Response frames;
+scoped reads return the first error and leave the redial to the caller. `auth_required`
+and permanent refusals always return at once. Listing
 failures are row-local: callers should check `undecodable_credentials` and
 `undecodable_grants`, because the library does not log them. A grant tuple with
 a missing, empty or non-string field is skipped and reported there, never turned
 into an empty-string grant.
+A missing `grant_tuples` field is accepted for older vaults; a present non-array
+rejects the whole listing as `InvalidResponse`, not an empty grant inventory.
 
 A transport `Error` frame (`{code, message}`, no class) whose code a retry cannot
 change, such as `unknown_method`, `invalid_params`, `invalid_request`,
@@ -73,6 +84,10 @@ predates the operation: update the vault. A scoped watch is the exception: there
 routing refusals are the exception: they are `Transport`, so the next call redials and
 the reads that retry transport failures retry them, because they say the credential
 module was not reachable rather than anything about the request.
+Unrecognized `Error` codes, including `route_closed`, also return `Transport` and
+clear the cached connection so a retry or the next call opens a fresh route.
+Their exact wire code remains available through `code()`, distinguishing a route
+refusal from a local transport failure without an Error frame.
 
 ## Watching for changes
 

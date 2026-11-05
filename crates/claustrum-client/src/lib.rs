@@ -9,7 +9,7 @@
 //! use cortexkit_claustrum_client::{decode_credential_reply, WatchAction, WatchNotice, WatchTracker};
 //!
 //! let credential = decode_credential_reply(serde_json::json!({
-//!     "result": {"payload": "example", "record_version": "1"}
+//!     "result": {"payload": [101, 120, 97, 109, 112, 108, 101], "record_version": 1}
 //! })).unwrap();
 //! assert_eq!(credential.expose(), b"example");
 //! let notice = WatchNotice::decode(
@@ -694,10 +694,12 @@ impl CredentialResolver for ClaustrumCredentialResolver {
                     .target
                     .credential_get(raw_handle, min_ttl_ms, force_refresh)
                     .await
+                    .and_then(decode_credential_reply)
                 {
-                    Ok(reply) => return decode_credential_reply(reply),
+                    Ok(credential) => return Ok(credential),
                     Err(error) if error.retryable() && retries < self.transient_retries => {
                         retries += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -770,10 +772,16 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         Box::pin(async move {
             let mut retries = 0;
             loop {
-                match self.target.credential_sign(credential_id, payload).await {
-                    Ok(reply) => return decode_signature_reply(reply),
+                match self
+                    .target
+                    .credential_sign(credential_id, payload)
+                    .await
+                    .and_then(decode_signature_reply)
+                {
+                    Ok(signature) => return Ok(signature),
                     Err(error) if error.retryable() && retries < self.transient_retries => {
                         retries += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -788,10 +796,16 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         Box::pin(async move {
             let mut retries = 0;
             loop {
-                match self.target.credential_public_key(credential_id).await {
-                    Ok(reply) => return decode_public_key_reply(reply),
+                match self
+                    .target
+                    .credential_public_key(credential_id)
+                    .await
+                    .and_then(decode_public_key_reply)
+                {
+                    Ok(public_key) => return Ok(public_key),
                     Err(error) if error.retryable() && retries < self.transient_retries => {
                         retries += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -1629,7 +1643,7 @@ fn listing_string(row: &Value, key: &str) -> Result<String, String> {
     optional_string(row, key).ok_or_else(|| format!("{key} is not a non-empty string"))
 }
 
-fn listing_optional_string(row: &Value, key: &str) -> Result<Option<String>, String> {
+fn decode_optional_string(row: &Value, key: &str) -> Result<Option<String>, String> {
     match row.get(key) {
         // Null is absent too; see listing_strings for why it isn't a decode failure.
         None | Some(Value::Null) => Ok(None),
@@ -1647,19 +1661,19 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         credential_type: listing_string(row, "type")?,
         serves: listing_strings(row, "serves", false)?,
         provider_ids: listing_strings(row, "provider_ids", true)?,
-        auth_method: listing_optional_string(row, "auth_method")?,
-        refresh_adapter: listing_optional_string(row, "refresh_adapter")?,
+        auth_method: decode_optional_string(row, "auth_method")?,
+        refresh_adapter: decode_optional_string(row, "refresh_adapter")?,
         state: listing_string(row, "state")?,
         record_version: row
             .get("record_version")
             .and_then(Value::as_u64)
             .ok_or_else(|| "record_version is not an unsigned integer".to_string())?,
         operations: listing_strings(row, "operations", false)?,
-        account_id: listing_optional_string(row, "account_id")?,
-        email: listing_optional_string(row, "email")?,
-        org_name: listing_optional_string(row, "org_name")?,
-        plan_tier: listing_optional_string(row, "plan_tier")?,
-        plan_tier_source: listing_optional_string(row, "plan_tier_source")?,
+        account_id: decode_optional_string(row, "account_id")?,
+        email: decode_optional_string(row, "email")?,
+        org_name: decode_optional_string(row, "org_name")?,
+        plan_tier: decode_optional_string(row, "plan_tier")?,
+        plan_tier_source: decode_optional_string(row, "plan_tier_source")?,
     })
 }
 
@@ -1700,7 +1714,10 @@ pub fn decode_list_scoped_reply(
     }
     let mut grant_tuples = Vec::new();
     let mut undecodable_grants = Vec::new();
-    if let Some(tuples) = result.get("grant_tuples").and_then(Value::as_array) {
+    if let Some(tuples) = result.get("grant_tuples") {
+        let tuples = tuples
+            .as_array()
+            .ok_or_else(|| invalid_listing("grant_tuples is not an array"))?;
         for (index, tuple) in tuples.iter().enumerate() {
             match decode_listed_grant(tuple) {
                 Ok(grant) => grant_tuples.push(grant),
@@ -1814,22 +1831,40 @@ fn credential_seal_request(request: SealRequest<'_>) -> Value {
 /// Decodes a subc error-frame body without opening a connection.
 pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
     let value = serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null);
-    classify_error_value(&value)
+    let Some(code) = value.get("code").and_then(Value::as_str) else {
+        return CredentialResolverError::transport(
+            "credential service returned an invalid error frame",
+        );
+    };
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("credential route refused the request");
+    // Error frames describe the route, never credential state. Only definitive
+    // request failures survive a fresh connection unchanged; new codes must redial.
+    // unknown_module remains retryable because the credential module was unreachable.
+    if matches!(
+        code,
+        "unknown_method"
+            | "invalid_params"
+            | "invalid_request"
+            | "flow_scopes_unsupported"
+            | "invalid_control_body"
+    ) {
+        CredentialResolverError::unclassified(code, message)
+    } else {
+        // Wire codes distinguish route refusals from local failures such as a
+        // dropped socket, even though both require a fresh connection.
+        CredentialResolverError {
+            class: CredentialErrorClass::Transport,
+            code: code.to_owned(),
+            safe_message: message.to_owned(),
+        }
+    }
 }
 
-/// Daemon relay refusals: the frame never reached the credential service.
-const RELAY_ROUTING_CODES: [&str; 7] = [
-    subc_protocol::error_codes::UNKNOWN_MODULE,
-    subc_protocol::error_codes::MODULE_RELOADING,
-    subc_protocol::error_codes::MODULE_WARMING,
-    subc_protocol::error_codes::TARGET_UNAVAILABLE,
-    subc_protocol::error_codes::MODULE_TIMEOUT,
-    "unknown_channel",
-    "stale_route_epoch",
-];
-
-/// Classify a refusal that may arrive as an error frame body or as a
-/// `result.error` member of a success frame. The broad class drives retry
+/// Classify a credential refusal in a `result.error` member of a Response frame.
+/// The broad class drives retry
 /// behavior, while preserving the producer's code in the safe message lets an
 /// operator distinguish a missing, revoked, or denied credential.
 fn classify_error_value(value: &Value) -> CredentialResolverError {
@@ -1875,24 +1910,6 @@ fn classify_error_value(value: &Value) -> CredentialResolverError {
         .or_else(|| value.pointer("/error/message"))
         .and_then(Value::as_str)
         .unwrap_or("credential service returned an unclassified error");
-    // Relay routing refusals mean the DAEMON could not route the frame: the
-    // credential service never spoke, so nothing about custody can be concluded
-    // from them. Classify these class-less refusals as transport errors so the
-    // client can redial a stale channel. The set is named here
-    // rather than borrowed from the protocol's retryable route-open list:
-    // whether the SDK retries a code is SUBC's policy, and subc-protocol 0.25
-    // made `unknown_module` terminal, which silently turned "the credential
-    // module is not there" back into a custody verdict. A copied list also
-    // missed `module_warming` once (GitHub #48). The two data-path codes cover
-    // an established route that died: `unknown_channel` and `stale_route_epoch`
-    // (the module restarted under the route; the SDK retries each once in place
-    // and surfaces it only when the retry fails the same way, GitHub #59).
-    if RELAY_ROUTING_CODES.contains(&code) {
-        return CredentialResolverError::new(
-            CredentialErrorClass::Transport,
-            format!("{code}: {message}"),
-        );
-    }
     CredentialResolverError::unclassified(code, message)
 }
 
@@ -2137,39 +2154,44 @@ pub fn decode_credential_status_reply(
                 "credential status reply has no ready flag",
             )
         })?;
-    let record_version = result.get("record_version").and_then(|value| match value {
-        Value::String(version) if !version.is_empty() => Some(version.clone()),
-        Value::Number(version) => Some(version.to_string()),
-        _ => None,
-    });
+    let record_version = result
+        .get("record_version")
+        .map(decode_record_version)
+        .transpose()?;
     Ok(CredentialStatus {
         ready,
         record_version,
         stale_pending: result
             .get("stale_pending")
-            .and_then(Value::as_bool)
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid_metadata("stale_pending is not a boolean"))
+            })
+            .transpose()?
             .unwrap_or(false),
-        last_error_code: result
-            .get("last_error_code")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        last_error_code: decode_optional_string(&result, "last_error_code")
+            .map_err(invalid_metadata)?,
     })
+}
+
+fn invalid_metadata(detail: impl Into<String>) -> CredentialResolverError {
+    CredentialResolverError::new(CredentialErrorClass::InvalidResponse, detail)
+}
+
+fn decode_record_version(value: &Value) -> Result<String, CredentialResolverError> {
+    value
+        .as_u64()
+        .map(|version| version.to_string())
+        .ok_or_else(|| invalid_metadata("record_version is not an unsigned integer"))
 }
 
 /// Decodes a `credential.get` or `credential.get_scoped` response into secret bytes.
 pub fn decode_credential_reply(
     value: Value,
 ) -> Result<ResolvedCredential, CredentialResolverError> {
-    let result = value.get("result").unwrap_or(&value);
-    // A refusal arrives as a SUCCESS frame carrying `result.error`; demanding a
-    // payload from it would launder the vault's typed answer (class + code)
-    // into invalid_response - the first live push fetch reported "no opaque
-    // payload" for a reply that said permanent/not_found in plain sight.
-    if result.get("error").is_some() {
-        return Err(classify_error_value(result));
-    }
+    let result = reply_result(value)?;
     let payload = match result.get("payload") {
-        Some(Value::String(payload)) => payload.as_bytes().to_vec(),
         Some(Value::Array(payload)) => payload
             .iter()
             .map(|byte| {
@@ -2192,25 +2214,23 @@ pub fn decode_credential_reply(
     };
     let version = result
         .get("record_version")
-        .map(|version| match version {
-            Value::String(version) => version.clone(),
-            version => version.to_string(),
-        })
-        .filter(|version| !version.is_empty())
-        .ok_or_else(|| {
-            CredentialResolverError::new(
-                CredentialErrorClass::InvalidResponse,
-                "credential reply has no record version",
-            )
-        })?;
-    let expires_at_ms = result.get("expires_at_ms").and_then(Value::as_i64);
+        .ok_or_else(|| invalid_metadata("credential reply has no record version"))
+        .and_then(decode_record_version)?;
+    let expires_at_ms = match result.get("expires_at_ms") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_i64()
+                .ok_or_else(|| invalid_metadata("expires_at_ms is not an integer"))?,
+        ),
+    };
     Ok(ResolvedCredential::new_with_identity(
         payload,
         version,
         expires_at_ms,
-        optional_string(result, "account_id"),
-        optional_string(result, "email"),
-        optional_string(result, "org_name"),
+        decode_optional_string(&result, "account_id").map_err(invalid_metadata)?,
+        decode_optional_string(&result, "email").map_err(invalid_metadata)?,
+        decode_optional_string(&result, "org_name").map_err(invalid_metadata)?,
     ))
 }
 
@@ -2232,6 +2252,9 @@ pub fn decode_report_auth_failure_reply(value: Value) -> Result<bool, Credential
 }
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod client_regressions;
 
 #[cfg(test)]
 mod tests {
@@ -2372,8 +2395,8 @@ mod tests {
                     std::future::pending().await
                 } else {
                     Ok(json!({
-                        "payload": "reconnected-secret",
-                        "record_version": "2",
+                        "payload": b"reconnected-secret".to_vec(),
+                        "record_version": 2,
                     }))
                 }
             })
@@ -2436,7 +2459,7 @@ mod tests {
             first_error.to_string(),
             "credential_transport: credential.get_scoped timed out waiting for the credential route"
         );
-        assert_eq!(second["payload"], json!("reconnected-secret"));
+        assert_eq!(second["payload"], json!(b"reconnected-secret".to_vec()));
         assert_eq!(
             dials.load(Ordering::SeqCst),
             2,
@@ -2456,7 +2479,7 @@ mod tests {
                 )),
                 Ok(json!({
                     "result": {
-                        "payload": "api-secret",
+                        "payload": b"api-secret".to_vec(),
                         "record_version": 7,
                         "expires_at_ms": 1234,
                     }
@@ -2499,10 +2522,13 @@ mod tests {
             "target_unavailable",
             "module_timeout",
         ] {
-            let error = classify_error_value(&json!({
-                "code": code,
-                "message": format!("{code} 1"),
-            }));
+            let error = decode_wire_error(
+                &serde_json::to_vec(&json!({
+                    "code": code,
+                    "message": format!("{code} 1"),
+                }))
+                .unwrap(),
+            );
             assert!(
                 error.is_transport(),
                 "{code} must classify transport (got {:?})",
@@ -2510,7 +2536,7 @@ mod tests {
             );
             assert!(error.to_string().contains(code), "verbatim code preserved");
         }
-        // The catch-all still exists for genuinely unknown codes.
+        // A Response refusal with an unknown code is not a transport verdict.
         let other = classify_error_value(&json!({"code": "weird_new_code"}));
         assert!(!other.is_transport());
     }
@@ -2586,14 +2612,12 @@ mod tests {
                 "params": { "credential_id": signing_credential },
             })
         );
-        let error = decode_wire_error(
-            json!({
-                "class": "auth_required",
-                "message": format!("unknown handle {raw_handle}"),
-            })
-            .to_string()
-            .as_bytes(),
-        );
+        let error = decode_credential_reply(json!({"result": {"error": {
+            "class": "auth_required",
+            "code": "needs_login",
+            "message": format!("unknown handle {raw_handle}"),
+        }}}))
+        .unwrap_err();
         assert_eq!(error.class, CredentialErrorClass::AuthRequired);
         assert_eq!(error.code(), "credential_auth_required");
         assert!(!error.to_string().contains(raw_handle));
@@ -2727,8 +2751,8 @@ mod tests {
                     "connection reset by peer",
                 )),
                 Ok(json!({
-                    "payload": "must-not-be-reached",
-                    "record_version": "2",
+                    "payload": b"must-not-be-reached".to_vec(),
+                    "record_version": 2,
                 })),
             ])),
             requests: Mutex::new(Vec::new()),
@@ -2751,7 +2775,7 @@ mod tests {
         let credential_id = "oauth:anthropic";
         let target = Arc::new(FakeCkcredTarget {
             script: Mutex::new(VecDeque::from([Ok(json!({
-                "payload": "served-token",
+                "payload": b"served-token".to_vec(),
                 "record_version": 4,
                 "expires_at_ms": 1_900_000_000_000_i64,
             }))])),
@@ -2799,8 +2823,8 @@ mod tests {
         let credential_id = "github_app:scoped-agent";
         let target = Arc::new(FakeCkcredTarget {
             script: Mutex::new(VecDeque::from([Ok(json!({
-                "payload": "-----BEGIN PRIVATE KEY-----\nscoped PEM\n-----END PRIVATE KEY-----",
-                "record_version": "7",
+                "payload": b"-----BEGIN PRIVATE KEY-----\nscoped PEM\n-----END PRIVATE KEY-----".to_vec(),
+                "record_version": 7,
             }))])),
             requests: Mutex::new(Vec::new()),
             reports: Mutex::new(Vec::new()),

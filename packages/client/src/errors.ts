@@ -5,13 +5,12 @@ export const ERROR_CLASS_WIRE_SET = [
   'context_overflow',
 ] as const
 
-export type ClaustrumCredentialErrorClass = (typeof ERROR_CLASS_WIRE_SET)[number] | 'unknown'
+export type ClaustrumCredentialErrorClass = (typeof ERROR_CLASS_WIRE_SET)[number]
 export type ClaustrumCredentialErrorAction =
   | 'gone'
   | 'reauth'
   | 'retry'
   | 'reduce_and_retry'
-  | 'degraded'
 
 export class ClaustrumCredentialError extends Error {
   readonly ['class']: ClaustrumCredentialErrorClass
@@ -20,7 +19,6 @@ export class ClaustrumCredentialError extends Error {
     public readonly code: string,
     errorClass: ClaustrumCredentialErrorClass,
     public readonly action: ClaustrumCredentialErrorAction,
-    public readonly rawClass?: string,
   ) {
     super(`Claustrum credential request failed: ${code}`)
     this.name = 'ClaustrumCredentialError'
@@ -46,8 +44,6 @@ export function credentialErrorAction(
       return 'reduce_and_retry'
     case 'transient':
       return 'retry'
-    case 'unknown':
-      return 'degraded'
   }
 }
 
@@ -60,24 +56,23 @@ export function asCredentialError(
   const error = result && isRecord(result.error) ? result.error : undefined
   const rawClass = error?.class
   const rawCode = error?.code
-  // An unfamiliar class specifies no known remedy. Preserve it for diagnostics,
-  // but expose a degraded state rather than guessing that retrying will help.
-  // A known class without a code is still malformed and must not drive a
-  // definitive action such as `gone`; keep its existing invalid-response fallback.
+  // The wire contract in `crates/credentials-module/src/read_surface.rs` carries BOTH
+  // `class` and `code` on every error envelope. A frame missing `code` is therefore
+  // malformed: even when `class` is itself in the wire set, the half-formed envelope
+  // is not a valid permanent reason — preserving `class` would let a malicious or
+  // broken peer drive a `gone` action with `{ error: { class: 'permanent' } }`.
+  // Anthropic's cut-line rule (unknown or absent class → transient) generalises to
+  // any malformed envelope; both fields must be present and class must be known.
   const hasValidClass = typeof rawClass === 'string' && (ERROR_CLASS_WIRE_SET as readonly string[]).includes(rawClass)
   const hasCode = typeof rawCode === 'string'
-  const errorClass: ClaustrumCredentialErrorClass = !hasValidClass
-    ? 'unknown'
-    : hasCode ? rawClass as ClaustrumCredentialErrorClass : 'transient'
+  const envelopeValid = hasValidClass && hasCode
+  const errorClass: ClaustrumCredentialErrorClass = envelopeValid
+    ? rawClass as ClaustrumCredentialErrorClass
+    : 'transient'
   if (typeof rawClass !== 'string') logUnknownClass('unknown')
   else if (!hasValidClass) logUnknownClass(rawClass)
   const code = hasCode ? rawCode : fallbackCode
-  return new ClaustrumCredentialError(
-    code,
-    errorClass,
-    credentialErrorAction(errorClass),
-    typeof rawClass === 'string' ? rawClass : undefined,
-  )
+  return new ClaustrumCredentialError(code, errorClass, credentialErrorAction(errorClass))
 }
 
 export function hasCredentialError(response: unknown): boolean {

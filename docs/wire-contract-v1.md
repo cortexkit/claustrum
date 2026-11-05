@@ -15,8 +15,10 @@ a `.rs` file, so this is the canonical statement of them.
 
 ## 1. The four error classes
 
-Every read-surface error body carries `class` alongside `code`, nested under
-`result.error`. **Branch on `class`, never on `code`** — codes are added as new
+Every credential refusal body carries `class` alongside `code`, normally nested under
+`result.error`. `credential.get_many` instead puts refusals in `results[i].error`
+(§ 2); transport `Error` frames carry no class (§ 1a).
+**Branch on `class`, never on `code`** — codes are added as new
 conditions are distinguished; the class set is a contract with an announcement
 obligation attached (`error_class_wire_strings_match_pinned_set` in `read_surface.rs`
 fails loudly if the set changes, and its failure message names the obligation).
@@ -98,11 +100,14 @@ would reasonably conclude that every refusal carries a class, and one of these d
 
 | | frame | body | carries `class` |
 |---|---|---|---|
-| the credential answered no | `Response` | `result.error.{code, class}` | yes |
+| the credential answered no | `Response` | `result.error.{code, class}` (or `results[i].error` for `credential.get_many`) | yes |
 | the request never got that far | `Error` | `{code, message}` | **no** |
 
 The second shape is the transport refusal: a malformed frame, an unknown operation, or
-params that failed to decode (`invalid_params`). It is emitted by `send_route_error` in
+ordinary read params that failed to decode (`invalid_params`). Enrollment operations
+are an exception: their typed-param decode failures are classified `Response` refusals
+(`invalid_params`/`permanent`), as described in § 2.1.
+The transport refusal is emitted by `send_route_error` in
 `main.rs` using `subc_protocol::ErrorBody`, whose fields are `code`, `message` and an
 optional `detail` — **there is no `class` field on that type**, so its absence is
 structural rather than an omission on some paths.
@@ -183,13 +188,21 @@ difference between a scoped call that works and one that answers `not_found`: a 
 dialling over a raw socket plus `authenticate_client` arrives `Direct` and every scoped op
 refuses it correctly.
 
-One precondition that bites silently: the nonce lives only in the environment of the
-process the daemon SPAWNED. A child process, a pool that scrubbed the environment, or
-anything after an `env_clear` has lost it, and the open arrives `Direct` with nothing said.
-That is deliberate — the nonce is kept out of grandchildren so a module cannot lend
-`Reserved` to a helper it spawned.
+**Nonce possession, not process ancestry, is the authority boundary.** The supported
+handoffs are an inherited descriptor and, when no descriptor is named, the
+`SUBC_LAUNCH_NONCE` environment fallback. The vault reads and closes its nonce
+descriptor before spawning children; before that read the descriptor is inheritable.
+The environment fallback can also be inherited unless scrubbed. Neither delivery mode
+alone proves that every helper lacks the nonce, and `env_clear` alone does not close an
+inherited descriptor. Do not assume a child is automatically `Direct`.
 
-A host-launched plugin has no nonce and can never have one; it uses an enrollment token.
+Helpers that should be anonymous must omit `consumer_identity` on `route.open`
+(`consumerIdentity: null` in subc-client), and launchers must scrub nonce environment
+variables and close nonce descriptors before spawning untrusted helpers. `ck auth` and
+the TypeScript vault client deliberately omit route identity so inherited launch
+credentials cannot lend them the host's `Reserved` identity.
+
+A host-launched plugin without a supervised launch identity uses an enrollment token.
 
 **A route opened under a flow's scope is refused at bind.** If the `route.bind` stamp's
 scope carries `flow_id`, the vault answers the bind with an error frame, code
@@ -215,8 +228,9 @@ read. No read grant, handle or enrollment token reaches an agent secret.
 
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
-reach. Present it in the params (`enrollment_token`) on `credential.get_scoped` and
-`credential.list_scoped`; see § 2.1.
+reach. Present it in the params (`enrollment_token`) on `credential.list_scoped` or
+the credential-id forms of the scoped operations in the address matrix below;
+see § 2.1. It is not a replacement for a bearer handle.
 
 Grants name one of the two principal kinds, per operation:
 
@@ -264,12 +278,12 @@ cannot use those surfaces to learn whether an id exists.
 | `credential.get_many` | yes | — | — |
 | `credential.get_scoped` | — | yes (`read`) | yes |
 | `credential.list_scoped` | — | principal-addressed; all of the caller's grants | yes |
-| `credential.sign` | yes | yes (`sign`) | — |
+| `credential.sign` | yes | yes (`sign`) | yes (credential-id form) |
 | `credential.open` | — | yes (`open`) | yes |
 | `credential.seal` | — | yes (`seal`) | yes |
-| `credential.public_key` | yes | yes (`read`) | — |
-| `credential.status` | yes | yes (`read`) | — |
-| `credential.report_auth_failure` | yes | yes (`read`) | — |
+| `credential.public_key` | yes | yes (`read`) | yes (credential-id form) |
+| `credential.status` | yes | yes (`read`) | yes (credential-id form) |
+| `credential.report_auth_failure` | yes | yes (`read`) | yes (credential-id form) |
 
 A request carries exactly one address. `credential.status` with both a handle and a
 `credential_id` is refused as `invalid_params`
@@ -277,6 +291,21 @@ A request carries exactly one address. `credential.status` with both a handle an
 both addresses or neither is refused as a malformed request
 (`tests::a_report_supplying_both_addresses_or_neither_is_refused`).
 `credential.status` with neither address is the overall vault-health probe.
+
+`enrollment_token` selects the principal for a scoped credential-id request or
+`credential.list_scoped`; it is not an additional credential address and does not
+authorize a handle-form request.
+
+**Batch envelope.** `credential.get_many` takes `params: { items: [{ handle, ... }, ...] }`
+and returns a `Response` with top-level `results`, not `result`. Each entry is either
+the ordinary get success fields or `{ "error": { "code": "...", "class": "..." } }`,
+in request order; one item's refusal does not fail the other items. An over-cap batch
+is refused as a whole with exactly one entry:
+
+    {"results":[{"error":{"code":"too_many_items","class":"context_overflow"}}]}
+
+There is no per-item execution in that case. A batch whose params cannot decode
+instead receives the classless `invalid_params` `Error` frame from § 1a.
 
 Signing keys minted with `ck auth mint-signing-key --audit-each-signature` opt
 into a permanent per-signature history. After key and payload validation, but
@@ -349,9 +378,12 @@ when the vault's store fails). Only `pending_queue_full` and `store_error` are
 `crates/credentials-module/tests/fixtures/enrollment_wire_contract.json` by
 `enrollment_wire_fixture_pins_exact_requests_successes_and_nine_refusals`.
 
-The § 1a rule holds here too: an `Error` frame from an enrollment op means the request
-never reached the module (for example params that failed to decode) and is never an
-enrollment verdict. Do not treat it as `not_found`, `superseded` or any other refusal.
+Malformed typed params for `auth.enroll_propose`, `auth.enroll_poll`, and
+`auth.enroll_rotate` produce the same classified `Response` envelope, with
+`invalid_params`/`permanent`. Unlike ordinary read-param decoding in § 1a, they do
+not produce an `Error` frame. Malformed outer request frames and unknown operations
+still produce classless `Error` frames, which are not enrollment verdicts. Do not
+treat those as `not_found`, `superseded` or any other enrollment refusal.
 
 Then present the token on the scoped ops. Three properties worth knowing:
 
@@ -413,9 +445,12 @@ of times, then fail clearly.
 
 ### `credential.list_scoped`
 
-`credential.list_scoped` takes exactly `params: {}` and returns
-`{ credentials, grants, grant_tuples, view }`. Unknown fields, including filters and
-`token`, are `invalid_params`. Rows are sorted by id. `categories`, lifecycle `state`,
+`credential.list_scoped` takes `params: {}` for the ambient principal, or
+`params: { "enrollment_token": "<token>" }` for an enrolled principal, and returns
+`{ "result": { credentials, grants, grant_tuples, view } }`. The only accepted param
+is the optional `enrollment_token`; unrelated fields, including filters and `token`,
+are `invalid_params`. `token` is not an alias for `enrollment_token`.
+Rows are sorted by id. `categories`, lifecycle `state`,
 `record_version`, derived `type`/`serves`, and the caller's covering `operations` are
 non-secret; no credential payload is returned. Identity and `refresh_adapter` are
 projected only when the caller holds `read` or `list` for that row, never for a row it
@@ -1418,7 +1453,7 @@ before sealing. The opened reply contains only:
 | `project_id`, `account_id` | Optional local-get projections (including Antigravity project and token-derived account). |
 | `identity` | Stored inventory identity: optional `account_id`, `email`, `org_name`; distinct from the get projection. |
 | `categories` | Home categories, used only to seed remote add. |
-| `refresh_adapter` | Optional adapter-name string. |
+| `refresh_adapter` | Required non-null adapter-name string, registered in the receiving vault's adapter registry. |
 | `detected_plan` | Optional object `{tier, raw, observed_at_ms}`; tier/raw may be null. |
 
 B validates payload, identity, detected tier and its own adapter registry before applying

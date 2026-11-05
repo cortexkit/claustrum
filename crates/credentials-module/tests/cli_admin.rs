@@ -4064,7 +4064,8 @@ fn read_only_inventory_verbs_succeed_while_exclusive_lease_is_held() {
 /// credential while printing "API key is valid." Shipping any of them would put an
 /// environment-controlled fault or validation bypass in the custody path.
 ///
-/// Asserted against a real release build rather than by reading the `#[cfg]`, because
+/// Asserted against a real release build with `import-prompt-seam` enabled, rather
+/// than by reading the `#[cfg]`, because
 /// the claim is about the artifact: a later edit could move the gate, widen it, or add
 /// a second read of the same var, and every one of those still reads correctly at the
 /// source while shipping the hole.
@@ -4090,6 +4091,8 @@ fn test_escape_hatches_are_absent_from_a_release_build() {
             "credentials-module",
             "--bin",
             "ck-auth",
+            "--features",
+            "import-prompt-seam",
         ])
         .current_dir(&manifest)
         .output()

@@ -56,7 +56,7 @@ const noLog = (): void => {}
 type KeyMapping = { property: string; expected?: (wire: unknown) => unknown }
 
 const GET_KEYS: Record<string, KeyMapping> = {
-  // The payload is surfaced only as decoded text, never as the raw byte array.
+  // The text decoder surfaces payload as UTF-8; byte-get methods preserve the bytes instead.
   payload: {
     property: 'material',
     expected: (wire) => new TextDecoder().decode(Uint8Array.from(wire as number[])),

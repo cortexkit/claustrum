@@ -1,10 +1,10 @@
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
 use credentials_core::record::VaultRecord;
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -120,7 +120,7 @@ impl PromptSeam for TerminalPrompts {
     }
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ScriptPrompt {
@@ -130,12 +130,12 @@ enum ScriptPrompt {
     Cancel { cancel: bool },
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 struct ScriptPrompts {
     responses: VecDeque<ScriptPrompt>,
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 impl ScriptPrompts {
     fn from_env() -> Result<Self, CliError> {
         let path = std::env::var(slice2_contract::PROMPT_SCRIPT_ENV).map_err(|_| {
@@ -152,7 +152,7 @@ impl ScriptPrompts {
     }
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 impl PromptSeam for ScriptPrompts {
     type Error = CliError;
 
@@ -206,7 +206,7 @@ impl CommitSeam for RealCommit<'_> {
     }
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ScriptCommit {
@@ -215,13 +215,13 @@ enum ScriptCommit {
     Indeterminate { indeterminate: bool },
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 struct InjectedCommit<'a> {
     outcomes: VecDeque<ScriptCommit>,
     real: RealCommit<'a>,
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 impl<'a> InjectedCommit<'a> {
     fn from_env(global: &'a GlobalArgs) -> Result<Option<Self>, CliError> {
         let Ok(path) = std::env::var(slice2_contract::COMMIT_SCRIPT_ENV) else {
@@ -239,7 +239,7 @@ impl<'a> InjectedCommit<'a> {
     }
 }
 
-#[cfg(feature = "import-prompt-seam")]
+#[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 impl CommitSeam for InjectedCommit<'_> {
     type Error = CliError;
 
@@ -587,12 +587,12 @@ fn inventory(global: &GlobalArgs) -> Result<Vec<InventoryTuple>, CliError> {
 }
 
 pub fn run(global: &GlobalArgs) -> Result<(), CliError> {
-    #[cfg(feature = "import-prompt-seam")]
+    #[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
     let prompt_script_is_set = std::env::var_os(slice2_contract::PROMPT_SCRIPT_ENV).is_some();
-    #[cfg(not(feature = "import-prompt-seam"))]
+    #[cfg(not(all(debug_assertions, feature = "import-prompt-seam")))]
     let prompt_script_is_set = false;
     let prompt_source = slice2_contract::prompt_source(
-        cfg!(feature = "import-prompt-seam"),
+        cfg!(all(debug_assertions, feature = "import-prompt-seam")),
         prompt_script_is_set,
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
@@ -635,7 +635,7 @@ pub fn run(global: &GlobalArgs) -> Result<(), CliError> {
         }))
         .collect::<Vec<_>>();
 
-    #[cfg(feature = "import-prompt-seam")]
+    #[cfg(all(debug_assertions, feature = "import-prompt-seam"))]
     if prompt_source == PromptSource::InjectedScript {
         let mut prompts = ScriptPrompts::from_env()?;
         if let Some(mut commits) = InjectedCommit::from_env(global)? {

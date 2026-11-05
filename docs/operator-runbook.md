@@ -43,6 +43,14 @@ environment**, set in `subc.jsonc`. The two must agree. In practice the recorded
 The supervisor supplies the other environment the vault is sensitive to:
 `XDG_DATA_HOME` and `XDG_RUNTIME_DIR` (which move the data directory and the connection
 file) and `SUBC_MODULE_ID` / `SUBC_LAUNCH_NONCE` (identity, echoed at registration).
+The nonce may instead arrive through an inherited descriptor. Nonce possession, not
+parent/child ancestry, controls route identity: the vault consumes and closes that
+descriptor before spawning children, while an environment fallback may be inherited
+unless scrubbed. Launchers must scrub nonce environment variables and close nonce
+descriptors before starting untrusted helpers. Helpers that should be anonymous must
+omit `consumer_identity` on `route.open` (`consumerIdentity: null` in subc-client);
+`ck auth` and the TypeScript vault client do this explicitly. Do not assume merely
+spawning a child strips the supervising module's identity.
 **Moving the data directory does not start a fresh vault**: the daemon never bootstraps,
 so a relocated vault finds no key for its new scope and refuses to serve rather than
 coming up empty.

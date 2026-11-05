@@ -64,13 +64,32 @@ credential caching, refresh, account scheduling, and retry policy.
   `invalid_params`.
 
 The client sends `consumerIdentity: null` for every managed request so inherited
-`SUBC_MODULE_ID` and `SUBC_LAUNCH_NONCE` cannot impersonate a supervising host.
+launch identity cannot impersonate a supervising host. Nonce possession, not process
+ancestry, is the authority boundary: environment variables and an inheritable nonce
+descriptor can reach helpers unless scrubbed or closed. Helpers using other clients
+must explicitly omit route identity (for subc-client, `consumerIdentity: null`) when
+they should be anonymous; process ancestry alone does not enforce isolation.
 
 **Changed in 0.11.0:** the client depends on `@cortexkit/subc-client` ^0.22.0 (was
 ^0.16.0). A host that also uses subc-client must move to the 0.22 line, so both share one
 copy. One behaviour reaches callers: while the vault is restarting or refusing route
 opens as retryable, a call now keeps retrying for up to 90 s (paced, with jitter) instead
 of 30 s. Give every vault call on a latency-sensitive path its own timeout.
+
+## Reading credential material
+
+The wire payload is opaque bytes. `getCredential(handle, minTtlMs?)` and
+`getScoped({ credentialId, enrollmentToken?, minTtlMs? })` keep their text results
+(`ServedCredential.material: string`) and require valid UTF-8. They refuse a
+non-UTF-8 payload with `invalid_response`; this does not mean the stored credential
+is corrupt.
+
+Use `getCredentialBytes(handle, minTtlMs?)` or
+`getScopedBytes({ credentialId, enrollmentToken?, minTtlMs? })` for binary cookies
+or any material that may not be UTF-8. Both return `ServedCredentialBytes`, with
+`material: Uint8Array` preserving every payload byte and the same metadata, grant
+checks, and TTL semantics as their text counterparts. Neither byte method performs
+text decoding.
 
 ## Watching for changes
 

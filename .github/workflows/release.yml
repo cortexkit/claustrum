@@ -449,7 +449,7 @@ jobs:
               *) echo "REFUSING: $b reports a revision that is not the checked-out source"
                  echo "  reported: $v"
                  echo "  built at: $BUILT_REV"
-                  exit 1 ;;
+                 exit 1 ;;
             esac
           done
           finished=1

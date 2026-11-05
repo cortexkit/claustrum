@@ -77,6 +77,7 @@ export type ClaustrumClientOptions = {
  * an outage caused that way is visible only to the consumer that caused it.
  */
 export type ServedCredential = {
+  /** UTF-8 text; use `ServedCredentialBytes` for opaque, potentially non-UTF-8 material. */
   material: string
   recordVersion: number
   expiresAtMs: number | null
@@ -104,6 +105,11 @@ export type ServedCredential = {
   email?: string
   /** Non-secret organization or workspace display metadata captured at login. */
   orgName?: string
+}
+
+/** The same credential metadata with opaque payload bytes, without text conversion. */
+export type ServedCredentialBytes = Omit<ServedCredential, 'material'> & {
+  material: Uint8Array
 }
 
 /**
@@ -163,6 +169,18 @@ export function decodeCredential(
   response: unknown,
   logUnknownClass: (errorClass: string) => void,
 ): ServedCredential {
+  const credential = decodeCredentialBytes(response, logUnknownClass)
+  let material: string
+  try { material = new TextDecoder('utf-8', { fatal: true }).decode(credential.material) } catch {
+    throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  }
+  return { ...credential, material }
+}
+
+function decodeCredentialBytes(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): ServedCredentialBytes {
   if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
   const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
   const payload = result?.payload
@@ -201,12 +219,8 @@ export function decodeCredential(
   ) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
-  let material: string
-  try { material = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(payload)) } catch {
-    throw asCredentialError(response, 'invalid_response', logUnknownClass)
-  }
   return {
-    material,
+    material: Uint8Array.from(payload),
     recordVersion,
     expiresAtMs,
     credentialId,
@@ -298,6 +312,7 @@ export class ClaustrumClient {
     )
   }
 
+  /** Fetch UTF-8 text; use `getCredentialBytes` if the payload may contain arbitrary bytes. */
   async getCredential(handle: string, minTtlMs?: number): Promise<ServedCredential> {
     const response = await this.#call('credential.get', {
       handle,
@@ -305,6 +320,16 @@ export class ClaustrumClient {
       force_refresh: false,
     })
     return decodeCredential(response, this.#logger)
+  }
+
+  /** Fetch opaque payload bytes by bearer handle without UTF-8 decoding. */
+  async getCredentialBytes(handle: string, minTtlMs?: number): Promise<ServedCredentialBytes> {
+    const response = await this.#call('credential.get', {
+      handle,
+      min_ttl_ms: minTtlMs,
+      force_refresh: false,
+    })
+    return decodeCredentialBytes(response, this.#logger)
   }
 
   async statusCredential(handle: string): Promise<CredentialStatus> {
@@ -355,7 +380,8 @@ export class ClaustrumClient {
   }
 
   /**
-   * Fetch by credential id, authorized by a grant rather than a bearer handle.
+   * Fetch UTF-8 text by credential id, authorized by a grant rather than a bearer handle.
+   * Use `getScopedBytes` if the payload may contain arbitrary bytes.
    *
    * `minTtlMs` is a DEMAND, not a hint: if a real upstream exchange still cannot satisfy
    * it, the vault refuses with `ttl_unsatisfiable` (class `context_overflow`) rather than
@@ -373,6 +399,20 @@ export class ClaustrumClient {
       min_ttl_ms: input.minTtlMs,
     })
     return decodeCredential(response, this.#logger)
+  }
+
+  /** Fetch opaque bytes by credential id, with the same grant and TTL rules as `getScoped`. */
+  async getScopedBytes(input: {
+    credentialId: string
+    enrollmentToken?: string
+    minTtlMs?: number
+  }): Promise<ServedCredentialBytes> {
+    const response = await this.#call('credential.get_scoped', {
+      credential_id: input.credentialId,
+      enrollment_token: input.enrollmentToken,
+      min_ttl_ms: input.minTtlMs,
+    })
+    return decodeCredentialBytes(response, this.#logger)
   }
 
   /**

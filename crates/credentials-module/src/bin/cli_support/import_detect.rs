@@ -821,8 +821,8 @@ pub mod slice2_contract {
         RefuseNoTty,
     }
 
-    /// Injected scripts outrank terminal checks. A default-feature binary passes
-    /// `seam_compiled = false`, so it ignores the script environment variable.
+    /// Injected scripts outrank terminal checks only in debug builds with the seam
+    /// feature. Other builds pass `seam_compiled = false` and ignore the script env.
     pub fn prompt_source(
         seam_compiled: bool,
         script_env_is_set: bool,

@@ -39,6 +39,7 @@ export {
   type ScopedInventory,
   type ScopedInventoryRow,
   type ServedCredential,
+  type ServedCredentialBytes,
 } from './wire.js'
 export {
   ScopedWatchError,

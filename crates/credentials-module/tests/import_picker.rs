@@ -1,4 +1,4 @@
-#![cfg(feature = "import-prompt-seam")]
+#![cfg(all(debug_assertions, feature = "import-prompt-seam"))]
 
 use cortexkit_test_support::ckdev_binary;
 use std::path::{Path, PathBuf};

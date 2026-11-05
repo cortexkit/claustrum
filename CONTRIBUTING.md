@@ -28,10 +28,10 @@ and local Bun install, typecheck and tests (run with no daemon reachable). Windo
 its command list with CI (`scripts/windows-ci.sh`): repository scans, formatting, both
 clippy feature sets, workspace tests, native Credential Manager round trips, the
 transport-free client, and the feature-gated operator tests that interrupt a write at a
-chosen point to prove recovery. Windows Bun install/build/typecheck and package tests currently run only in GitHub
-CI; the full-gate Windows runner reports all four as UNCHECKED because its offline Bun
-cache is not yet available. On macOS, the default-feature release `ck-auth` build is also
-placed on that machine.
+chosen point to prove recovery. Windows Bun install/build/typecheck and package tests
+run in both GitHub CI and the full gate, using the build-server hosts' offline cache
+for the latter. On macOS, the default-feature release `ck-auth` build is also placed
+on that machine.
 Local lanes start only after **both** remote jobs print `job_id=`, so local writes cannot
 invalidate a snapshot in progress. Apart from that macOS artifact build, no cargo check,
 clippy or test runs on the host. Every arm reports its duration, and arms with a test-count floor also
@@ -85,12 +85,13 @@ also UNCHECKED unless its Rust target and MinGW compiler are installed on the ru
 Windows-only native/ACL/filesystem checks run on Windows, not a cross-compilation substitute.
 GitHub supplies its own checkout/tool setup and may populate dependency caches.
 Only the Linux job requests network access. Windows build-server jobs are offline by design:
-Cargo uses the image's registry built from the committed lockfile. The four Windows Bun
-steps are UNCHECKED with the reason "Windows jobs have no offline Bun cache yet; GitHub CI
-runs these". Once offline Windows jobs have cached bun.lock packages, flip
-`WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=1` in `scripts/windows-ci.sh` to enable them with frozen,
-offline install; no other switch is needed. Missing required tools or Cargo cache entries
-still fail rather than fetching.
+Cargo uses the image's registry built from the committed lockfile. Windows Bun uses
+the pre-fetched `bun.lock` packages with `--frozen-lockfile --offline`. The checked-in
+`WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=1` in `scripts/windows-ci.sh` enables all four Bun
+steps. Only a cache-disabled configuration (`WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=0`)
+reports those steps as UNCHECKED on offline Windows jobs; GitHub CI still runs them.
+Missing required tools or cache entries in the enabled configuration fail rather
+than fetching.
 The inbound-contract check reads the sibling document, never a URL.
 Signing/hardened runtime and deployed binary
 acceptance remain separate release-builder/operator checks.

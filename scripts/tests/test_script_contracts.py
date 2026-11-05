@@ -424,6 +424,61 @@ class ScriptContracts(unittest.TestCase):
         self.assertLess(assets['steps'].index(next(step for step in assets['steps'] if step.get('id') == 'rev')),
                         next(index for index, step in enumerate(assets['steps']) if 'cargo build' in step.get('run', '')))
 
+    def test_release_runs_serialize_by_resolved_tag_without_cancellation(self):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
+        concurrency = workflow.get('concurrency', {})
+        self.assertEqual(concurrency.get('group'), 'release-${{ inputs.tag || github.ref_name }}')
+        self.assertEqual(concurrency.get('cancel-in-progress'), 'false')
+
+    def uploaded_release(self):
+        assets = self.root / 'uploaded'
+        assets.mkdir()
+        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
+            for binary in ('ck-auth', 'ck-claustrum'):
+                name = f'{binary}-{platform}.zip'
+                payload = (name + ' uploaded bytes').encode()
+                (assets / name).write_bytes(payload)
+                digest = hashlib.sha256(payload).hexdigest()
+                (assets / (name + '.sha256')).write_text(f'{digest}  {name}\n')
+        (assets / 'release-manifest.json').write_text('{}')
+        self.executable('gh', '''case "$*" in
+          *"--json assets"*) ls "$HOME/uploaded";;
+          *"--json body"*) echo "Permanent notes plus release-specific instructions.";;
+          *"release download"*)
+            shift 3
+            destination=.; patterns=()
+            while [ "$#" -gt 0 ]; do
+              case "$1" in
+                --dir) destination="$2"; shift 2;;
+                --pattern|-p) patterns+=("$2"); shift 2;;
+                --repo) shift 2;;
+                *) exit 99;;
+              esac
+            done
+            for pattern in "${patterns[@]}"; do
+              cp "$HOME/uploaded/"$pattern "$destination/"
+            done;;
+          *"release edit"*) cp release-notes.txt "$HOME/captured-notes";;
+          *) exit 99;;
+        esac''')
+        return assets
+
+    def test_release_publish_checks_uploaded_zip_bytes_against_sidecars(self):
+        assets = self.uploaded_release()
+        step = self.release_step('Undraft the release')
+        env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo')
+        for archive in sorted(assets.glob('*.zip')):
+            with self.subTest(archive=archive.name):
+                original = archive.read_bytes()
+                archive.write_bytes(original + b'changed after packaging')
+                result = self.run_shell(step['run'], env, cwd=self.root)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse((self.root / 'captured-notes').exists(), 'mismatched assets must stay in draft')
+                archive.write_bytes(original)
+        result = self.run_shell(step['run'], env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((self.root / 'captured-notes').exists())
+
     def test_release_asset_revision_refuses_a_different_checked_commit(self):
         built_sha = 'a' * 40
         self.executable('git', f'[[ "$*" == "rev-parse HEAD" ]] || exit 1; echo {built_sha}')
@@ -523,6 +578,35 @@ class ScriptContracts(unittest.TestCase):
                       (self.root / 'captured-notes').read_text())
         self.assertEqual(step['env']['REQUIRES_CORE'], '${{ steps.core.outputs.requires_core }}')
 
+    def test_acceptance_docs_describe_staged_identity_not_old_build_comparison(self):
+        accept = text('docs/operator-runbook.md').split('### Accept\n', 1)[1]
+        digest = next(line for line in accept.splitlines() if line.startswith('| ') and 'hash' in line)
+        self.assertIn('staged artifact', digest)
+        self.assertIn('installed', digest)
+        self.assertNotIn('differs from the **old**', digest)
+        self.assertIn('no-op deployment', accept)
+        self.assertIn('optional staged directory', accept)
+
+    def test_acceptance_docs_describe_healthy_retired_credentials(self):
+        accept = text('docs/operator-runbook.md').split('### Accept\n', 1)[1]
+        status = next(line for line in accept.splitlines() if line.startswith('| `ck auth status`'))
+        self.assertIn('vault: ok', status)
+        self.assertIn('retired', status)
+        self.assertNotIn('N/N serving', text('scripts/accept-deploy.sh'))
+
+    def test_post_deploy_train_command_supplies_required_name(self):
+        post = text('docs/operator-runbook.md').split('After `accept-deploy.sh` and the live probe pass', 1)[1]
+        post = post.split('`scripts/gate.sh` is post-deploy', 1)[0]
+        self.assertIn('./scripts/train-push.sh <train-name>', post)
+        self.assertIn('reuse', post)
+
+    def test_contributor_docs_match_enabled_windows_offline_bun_cache(self):
+        document = ' '.join(text('CONTRIBUTING.md').split())
+        self.assertIn('Windows Bun install/build/typecheck and package tests run in both GitHub CI and the full gate', document)
+        self.assertIn('WINDOWS_MOTOR_HAS_OFFLINE_BUN_CACHE=0', document)
+        self.assertIn('--frozen-lockfile --offline', document)
+        self.assertNotIn('not yet available', document)
+
     def test_operator_docs_require_workspace_core_floor(self):
         version = workspace_core_version()
         for path in ('README.md', 'docs/operator-runbook.md'):
@@ -606,11 +690,9 @@ class ScriptContracts(unittest.TestCase):
         self.assertNotIn('cortexkit/subconscious', repositories)
         self.assertNotIn('cortexkit/commons', repositories)
         self.assertFalse(any('sibling' in step.get('name', '').lower() for step in steps))
-        names = '\n'.join(f'{binary}-{platform}.{suffix}' for platform in ('darwin-arm64', 'linux-x64', 'windows-x64') for binary in ('ck-auth', 'ck-claustrum') for suffix in ('zip', 'zip.sha256'))
-        names += '\nrelease-manifest.json'
-        self.executable('gh', 'case "$*" in *"--json assets"*) printf "%s\\n" "$ASSET_NAMES";; *"--json body"*) echo "Permanent notes plus release-specific instructions.";; *"release edit"*) cp release-notes.txt "$HOME/captured-notes";; *) exit 1;; esac')
+        self.uploaded_release()
         publish = self.release_step('Undraft the release')
-        result = self.run_shell(publish['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', ASSET_NAMES=names), cwd=self.root)
+        result = self.run_shell(publish['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'), cwd=self.root)
         self.assertEqual(result.returncode, 0, result.stdout)
         notes = (self.root / 'captured-notes').read_text()
         self.assertIn('Permanent notes plus release-specific instructions.', notes)

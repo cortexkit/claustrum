@@ -1479,12 +1479,18 @@ Run the script rather than retyping its legs. Each leg is able to fail:
 
 | check | why it discriminates |
 |-------|----------------------|
-| deployed hash equals the **new** build's hash and differs from the **old** one | publish both values; comparing the system to itself passes trivially |
+| installed hash equals its staged artifact's hash | compares each installed binary with an independently staged build, not with itself |
 | `<dest> --version` reports the revision you built | the only check that asks the binary what it is |
 | the running process's image inode equals the deploy path's inode | proves the process is not still executing an unlinked predecessor |
 | the open `store.db` is the one you expect | every other check answers "is it healthy", not "is it the right vault" |
-| `ck auth status` reports every credential serving | a daemon whose master key was unavailable at boot is alive and serving nothing |
+| `ck auth status` exits 0 and reports `vault: ok` (retired credentials allowed) | requires healthy vault state, not every credential serving; reauth, corrupt and fenced-out states are refused |
 | mint a throwaway handle, then revoke it | exercises the fenced write path and its atomic audit append |
+
+The digest leg runs only when the optional staged directory is supplied. It proves
+staged-versus-installed identity, not a change from the previous installation; a
+no-op deployment of the same bytes is allowed. If the deployment must replace old
+bytes, capture each installed binary's digest before placement, then compare it
+with the staged digest separately and retain both values with the deployment record.
 
 The store check asks the kernel rather than the process:
 
@@ -1507,10 +1513,13 @@ deploy failed.
 
 After `accept-deploy.sh` and the live probe pass, run the full checks and fix forward on any failure:
 
+Choose a `<train-name>` for the deployment (for example, `deploy-v1.2.3`); reuse
+the same name when fixing and retrying that deployment's train.
+
 ```sh
 ./scripts/gate.sh
 # Land through the train so the Linux and Windows CI legs run too.
-./scripts/train-push.sh
+./scripts/train-push.sh <train-name>
 ```
 
 `scripts/gate.sh` is post-deploy feedback for local iteration, not permission to omit CI.

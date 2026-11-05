@@ -7496,8 +7496,12 @@ fn plan_cli_preflight_refuses_invalid_or_conflicting_tiers_before_key_resolution
             let out = command.output().unwrap();
             assert!(!out.status.success(), "{args:?}");
             let err = String::from_utf8_lossy(&out.stderr);
+            // A bare `--tier` is refused by option parsing itself, which also runs
+            // before any key is resolved.
             assert!(
-                err.contains("invalid_plan_tier") || err.contains("choose exactly one"),
+                err.contains("invalid_plan_tier")
+                    || err.contains("choose exactly one")
+                    || err.contains("--tier requires a value"),
                 "{args:?}: {err}"
             );
         }

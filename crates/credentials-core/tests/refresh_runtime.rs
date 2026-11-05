@@ -244,6 +244,6 @@ fn callback_listener_docs_distinguish_provider_bind_policies() {
         assert!(source.contains("--no-listener"));
     }
     let runbook = include_str!("../../../docs/operator-runbook.md");
-    assert!(runbook.contains("Google-family and DigitalOcean"));
+    assert!(runbook.contains("`google`, `antigravity` and `digitalocean` logins don't use PKCE"));
     assert!(runbook.contains("stop before the authorization URL"));
 }

@@ -51,7 +51,7 @@ def sourced_files(path, text, sources):
 def workflow_runs():
     parse = runpy.run_path(str(SCRIPTS / 'lib/workflow-gates.py'))['parse_workflow']
     for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
-        for job, body in parse(str(path))['jobs'].items():
+        for job, body in parse(os.fspath(path))['jobs'].items():
             for index, step in enumerate(body.get('steps', [])):
                 if 'run' in step:
                     yield path, f'{job}/{step.get("name", index)}', step['run']

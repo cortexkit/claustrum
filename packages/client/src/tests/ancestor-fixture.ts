@@ -4,14 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { privatePathContext } from './injected-files.js'
 
-// Handle-reader unit tests inject file and parent stats. A root-owned 0755 ancestor
-// passes @cortexkit/store's path check, isolating descriptor reads and validation order.
-export const readerFixtureOptions: OwnerOnlyPathAsyncOptions = { platform: 'linux', euid: 1000, egid: 1000, fs: {
-  realpath: async () => '/',
-  stat: async () => ({ isDirectory: () => true, mode: 0o755, uid: 0, gid: 0 }),
-  lstat: async () => ({ isDirectory: () => true, mode: 0o755, uid: 0, gid: 0 }),
-} }
-
 export function accountOptions(euid: number, egid: number, passwdPath: string, groupPath: string): OwnerOnlyPathAsyncOptions {
   return { euid, egid, fs: { readFile: (path) => readFile(path === '/etc/passwd' ? passwdPath : path === '/etc/group' ? groupPath : path) } }
 }

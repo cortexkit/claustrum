@@ -25,10 +25,9 @@ at the call site and is not what a comparison against a literal ever wants.
 
 THE TYPESCRIPT ARM IS A DIFFERENT DEFECT. Splitting a full path on `'/'` and then
 rejoining the result as a component is safe on POSIX but not Windows: a backslash
-path has no slash, so the "basename" becomes the whole path. The quarantine sweep
-then fails CLOSED because its bad prefix only fails to MATCH a directory entry;
-the atomic temp name instead fails to CREATE because `O_CREAT|O_EXCL` rejects the
-embedded separators and drive-letter colon. Same root cause, opposite blast radius.
+path has no slash, so the "basename" becomes the whole path. An atomic temp name
+then fails to CREATE because `O_CREAT|O_EXCL` rejects the embedded separators and
+drive-letter colon.
 
 The discriminator is decompose-then-rejoin, not string manipulation generally.
 Suffixes appended to a full path and fixed names passed to `join()` are safe. This
@@ -59,7 +58,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 TYPESCRIPT_GLOBS = ("packages/*/src/**/*.ts", "packages/*/src/**/*.tsx")
-MUTATION_CONTROL = ROOT / "packages/client/src/tests/manifest-lock.test.ts"
 
 # `str(` applied to something path-shaped. Deliberately narrow: a broad "no str()"
 # rule would fire on every f-string and be switched off within a week.
@@ -261,13 +259,6 @@ def main() -> int:
     typescript_files = sorted({path for pattern in TYPESCRIPT_GLOBS for path in ROOT.glob(pattern)})
     if not typescript_files:
         print("REFUSING: no TypeScript files found to check -- the sweep is broken", file=sys.stderr)
-        return 1
-    if MUTATION_CONTROL not in typescript_files or not is_test_typescript(MUTATION_CONTROL):
-        print(
-            "REFUSING: manifest-lock mutation control must be excluded by design -- "
-            "it contains the slash-split regression control this gate must not scan",
-            file=sys.stderr,
-        )
         return 1
 
     problems: list[str] = []

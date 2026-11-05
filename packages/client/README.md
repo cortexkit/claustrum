@@ -161,20 +161,10 @@ for (;;) {
 }
 ```
 
-## OpenCode handle-file exports
+## Private files and Windows support
 
-`defaultHandleFilePath`, `readHandleFile`, `handleFileRevision`, and `parseHandleFile`
-are exported for tenant plugins consuming the OpenCode handle manifest. The shared
-`HANDLE_FILE_CONTRACT` is pinned to `maxBytes: 262144`, `mode: 0o600`,
-`labelRe: /^[a-z0-9][a-z0-9._-]{0,63}$/`, and `handleRe: /^ckh_[A-Za-z0-9_-]{43}$/`.
-
-### Private files and Windows support
-
-Enrollment tokens support Windows as well as Unix. Reading a handle manifest works on
-Windows; writing one does not: the manifest lock's stale-lock eviction renames a lock
-another process may hold open, which Windows refuses, so `withManifestLock` and
-`writeHandleFileLocked` reject on Windows with code `unsupported_platform` rather than
-risk two writers overlapping. The client uses `@cortexkit/store` 0.2.1 or newer: exclusive private creation
+Enrollment tokens support Windows as well as Unix. The client uses
+`@cortexkit/store` 0.2.1 or newer: exclusive private creation
 protects files before any secret bytes are written, and atomic replacement keeps
 that protection. Unix files use mode 0600 and new directories use 0700. On Windows,
 the store's `@cortexkit/private-files` native module creates owner-only ACLs and the
@@ -196,7 +186,7 @@ preserved: an owned, non-sticky group-writable directory (including a 0775
 
 ## Testing a consumer of this client
 
-Three things on a developer box silently satisfy what a consumer's test is trying to
+Two things on a developer box silently satisfy what a consumer's test is trying to
 prove. Each was found by a consumer shipping green and failing elsewhere.
 
 • **A connection file at the default path is a host fact, not a fixture.** If the vault
@@ -204,9 +194,6 @@ prove. Each was found by a consumer shipping green and failing elsewhere.
   up, so a suite can pass on the daemon's real socket and fail anywhere without one.
   Force it absent (`CLAUSTRUM_SUBC_CONNECTION=/nonexistent/x.json`, and clear
   `XDG_RUNTIME_DIR`) and prove the suite still passes.
-• **Tests default into the operator's live config.** A suite that resolves
-  `~/.config/opencode` without an override writes lock files and manifests beside real
-  credentials — passing locally, and mutating state no CI runner has.
 • **A bare `bun` run is not an oracle for module resolution.** The Bun CLI auto-installs
   a public dependency it cannot resolve; a compiled binary does not. All readings below
   are bun 1.3.14, same module, no `node_modules` — a toolchain behaviour with no version
@@ -237,5 +224,5 @@ prove. Each was found by a consumer shipping green and failing elsewhere.
   result: a freshly linked unsigned binary is SIGKILLed, and `rc=137` with empty stderr
   reads as a resolution failure while being a signature one.
 
-The shape is the same in all three: the producing machine supplies the thing under test.
+The shape is the same in both: the producing machine supplies the thing under test.
 A passing check on it is evidence only when the ambient supply is removed first.

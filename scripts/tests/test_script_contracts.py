@@ -800,7 +800,6 @@ class ScriptContracts(unittest.TestCase):
         (self.root / 'packages' / 'tests').mkdir(parents=True)
         (self.root / 'packages' / 'tests' / 'control.ts').write_text('')
         paths.TYPESCRIPT_GLOBS = ['packages/**/*.ts']
-        paths.MUTATION_CONTROL = self.root / 'packages' / 'tests' / 'control.ts'
         self.assertEqual(paths.main(), 0)
         source.write_text('rel = str(path.relative_to(root))\n')
         self.assertEqual(paths.main(), 1)

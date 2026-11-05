@@ -11,17 +11,6 @@ export {
   type EnrollmentTokenFile,
 } from './enrollment.js'
 export {
-  MANIFEST_LOCK,
-  manifestLockQuarantinePrefix,
-  withManifestLock,
-  writeHandleFileLocked,
-  type ManifestHandleAccount,
-  type ManifestHandleFile,
-  type ManifestHandleProvider,
-  type ManifestLockError,
-  type ManifestLockErrorCode,
-} from './manifest-lock.js'
-export {
   ClaustrumCredentialError,
   credentialErrorAction,
   ERROR_CLASS_WIRE_SET,
@@ -48,17 +37,3 @@ export {
   type ScopedWatchOptions,
   type ScopedWatchOutcome,
 } from './watch.js'
-export {
-  HANDLE_FILE_CONTRACT,
-  HandleFileValidationError,
-  credentialIdMatchesProvider,
-  defaultHandleFilePath,
-  handleFileRevision,
-  identifierIsValid,
-  parseHandleFile,
-  readHandleFile,
-  type HandleAccount,
-  type HandleFileIo,
-  type HandleProvider,
-  type OpenCodeHandleFileV1,
-} from './handles.js'

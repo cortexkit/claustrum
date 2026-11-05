@@ -32,7 +32,6 @@ where it names `ckdev_command`, read `dev_command(ckdev_binary(...))`.
 | `scripts/accept-deploy.sh` / revision, status, mint/revoke checks | `$HOME/.local/share/cortexkit/bin/ck-*` | **No change**: checks exact production placement; linking would weaken dead-placement diagnosis |
 | `scripts/tests/test_script_contracts.py` / acceptance fixtures | Fake `ck-*` shell scripts interpreted by `/bin/bash` | **No change**: no native fleet binary is executed; the interpreter image is Bash. Fixtures must preserve the production acceptance script's name/path/signature assertions |
 | `scripts/gate.sh`, `.github/workflows/ci.yml` / shipped CLI export | Set `CK_AUTH_IMPORT_SHIPPED_BINARY` to release artifact | **No direct binary execution**; `Fixture::command` now wraps it |
-| `packages/client/src/tests/manifest-lock.test.ts` / subprocess | `spawnSync("chmod", ...)` | **No change**: system executable |
 | `crates/credentials-module/examples/`, remaining tests/scripts/workflows | Wire probes, system commands, Cargo/Bun/tool runners, data/signature/name checks | **No other `ck-*` execution found** |
 | `crates/credentials-module/src/bin/credentials_cli.rs` / test `current_exe` child | Cargo unit-test executable `ck_auth-<hash>` | **No change**: underscore test artifact, not the shipped `ck-auth`; production source untouched |
 

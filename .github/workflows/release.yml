@@ -32,6 +32,11 @@ on:
 permissions:
   contents: read
 
+# Keep draft creation, replacement uploads and publication for one tag in one run.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -411,8 +416,20 @@ jobs:
             fi
           }
           ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
-          t=$(mktemp -d); cp dist/*.zip "$t/"
-          trap 'rm -rf "$t"' EXIT
+          # Bash 3.2 can report success on a nounset abort; require explicit completion.
+          finished=0
+          t=$(mktemp -d)
+          cleanup() {
+            status=$?
+            if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+              echo "release.yml: exited before successful completion" >&2
+              status=1
+            fi
+            rm -rf "$t"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          cp dist/*.zip "$t/"
           (cd "$t" && for z in *.zip; do extract "$z"; done)
           for b in ck-claustrum ck-auth; do
             smoke_binary="$(ckdev_binary "$t/$b$ext" "$t")"
@@ -432,9 +449,10 @@ jobs:
               *) echo "REFUSING: $b reports a revision that is not the checked-out source"
                  echo "  reported: $v"
                  echo "  built at: $BUILT_REV"
-                 exit 1 ;;
+                  exit 1 ;;
             esac
           done
+          finished=1
 
       - name: Upload to the release
         env:
@@ -483,5 +501,27 @@ jobs:
             echo "REFUSING to publish: missing release-manifest.json. Leaving release in draft." >&2
             exit 1
           fi
+          # Bash 3.2 can report success on a nounset abort; require explicit completion.
+          finished=0
+          t=$(mktemp -d)
+          cleanup() {
+            status=$?
+            if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
+              echo "release.yml: exited before successful completion" >&2
+              status=1
+            fi
+            rm -rf "$t"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          # Verify the release's stored bytes, not the local files before upload.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$t" \
+            --pattern '*.zip' --pattern '*.zip.sha256'
+          for platform in darwin-arm64 linux-x64 windows-x64; do
+            for binary in ck-auth ck-claustrum; do
+              (cd "$t" && sha256sum -c "$binary-$platform.zip.sha256")
+            done
+          done
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > release-notes.txt
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.txt --draft=false
+          finished=1

@@ -100,7 +100,7 @@ COPY_IGNORED = {".git", "target", "node_modules", ".cortexkit", "__pycache__"}
 
 
 def mark_changed_sources(checkout, target):
-    """Give every file whose content changed since the last run a fresh mtime.
+    """Touch files changed since the last successful run and return pending hashes.
 
     Cargo decides what to rebuild by comparing source modification times with its
     cached outputs. A build-server snapshot does not carry real mtimes: on Windows
@@ -128,6 +128,12 @@ def mark_changed_sources(checkout, target):
             current[relative] = digest
             if previous.get(relative) != digest:
                 os.utime(path, (now, now))
+    return current
+
+
+def save_source_hashes(target, current):
+    """Commit invalidations only after the command has successfully consumed them."""
+    manifest = target / "gate-source-hashes.json"
     staged = manifest.with_suffix(".tmp")
     staged.write_text(json.dumps(current, sort_keys=True))
     os.replace(staged, manifest)
@@ -161,13 +167,14 @@ def main(argv=None):
     else:
         copy_checkout(source, checkout, source / "target")
     forget_binaries_from_another_copy(checkout, source / "target")
-    mark_changed_sources(checkout, source / "target")
+    pending_hashes = [(source / "target", mark_changed_sources(checkout, source / "target"))]
     if mode == "full":
         supervisor = scratch / "subconscious"
         # Cached under claustrum's writable target so the supervisor isn't rebuilt
         # from scratch on every gate run.
         copy_checkout(sibling, supervisor, source / "target" / "gate-subconscious")
-        mark_changed_sources(supervisor, source / "target" / "gate-subconscious")
+        target = source / "target" / "gate-subconscious"
+        pending_hashes.append((target, mark_changed_sources(supervisor, target)))
         os.environ["CRED_SUBCONSCIOUS_ROOT"] = str(supervisor)
     elif mode == "windows":
         assert sibling is not None
@@ -190,6 +197,8 @@ def main(argv=None):
         command = ["python3", "scripts/fast-check.py", "--linux-worker"]
     result = subprocess.run(command, cwd=checkout)
     if result.returncode == 0:
+        for target, hashes in pending_hashes:
+            save_source_hashes(target, hashes)
         print("CK_GATE_DONE", flush=True)
     return result.returncode
 

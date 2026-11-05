@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import runpy
 import shlex
 import subprocess
 import tempfile
@@ -47,6 +48,15 @@ def sourced_files(path, text, sources):
                 yield helper
 
 
+def workflow_runs():
+    parse = runpy.run_path(str(SCRIPTS / 'lib/workflow-gates.py'))['parse_workflow']
+    for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
+        for job, body in parse(str(path))['jobs'].items():
+            for index, step in enumerate(body.get('steps', [])):
+                if 'run' in step:
+                    yield path, f'{job}/{step.get("name", index)}', step['run']
+
+
 def source_closure(path, sources):
     pending = [path]
     found = set()
@@ -85,16 +95,20 @@ def statements(text):
 class ExitTrapContracts(unittest.TestCase):
     def test_nounset_exit_traps_require_finished_guard(self):
         sources = shell_sources()
+        entries = [(path, '', text) for path, text in sources.items()]
+        entries.extend(workflow_runs())
         checked = set()
-        for path, text in sources.items():
-            closure = source_closure(path, sources)
-            if not any(NOUNSET.search(sources[helper]) for helper in closure):
+        for path, step, text in entries:
+            scope = dict(sources)
+            scope[path] = text
+            closure = source_closure(path, scope)
+            if not any(NOUNSET.search(scope[helper]) for helper in closure):
                 continue
             traps = [(helper, offset, action) for helper in closure
-                     for offset, action in exit_traps(sources[helper])]
+                     for offset, action in exit_traps(scope[helper])]
             if not traps:
                 continue
-            with self.subTest(script=path.relative_to(ROOT).as_posix()):
+            with self.subTest(script=path.relative_to(ROOT).as_posix(), step=step):
                 self.assertRegex(text, r'(?m)^finished=0$', 'initialize the completion flag')
                 self.assertEqual(statements(text)[-1], 'finished=1',
                                  'successful fallthrough must set the completion flag last')
@@ -103,8 +117,8 @@ class ExitTrapContracts(unittest.TestCase):
                     self.assertRegex(executable[:success.start()], r'finished=1[;\s]*$',
                                      'set finished=1 immediately before each successful exit')
                 for helper, offset, action in traps:
-                    checked.add(helper.relative_to(SCRIPTS).as_posix())
-                    body = statements(trap_body(sources[helper], action))
+                    checked.add(helper.relative_to(ROOT).as_posix())
+                    body = statements(trap_body(scope[helper], action))
                     self.assertIn(body[0], ('status=$?', 'local status=$?'),
                                   'EXIT handlers must capture $? before doing anything else')
                     expected = statements(GUARD.format(script=helper.name))
@@ -114,6 +128,35 @@ class ExitTrapContracts(unittest.TestCase):
                     if helper == path:
                         self.assertIn('finished=0', text[:offset])
         self.assertTrue(checked, 'the tree-wide contract must exercise real EXIT traps')
+
+    def test_workflow_cleanup_rejects_unfinished_exit_and_nounset(self):
+        checked = 0
+        for path, step, text in workflow_runs():
+            if not NOUNSET.search(text):
+                continue
+            for _offset, action in exit_traps(text):
+                checked += 1
+                for injected, expected in (('exit 0', 1), (': "${EXIT_TRAP_UNSET}"', None),
+                                           ('exit 7', 7), ('finished=1\nexit 0', 0)):
+                    with self.subTest(workflow=path.name, step=step, injected=injected), \
+                            tempfile.TemporaryDirectory() as directory:
+                        temporary = Path(directory) / 'cleanup'
+                        temporary.mkdir()
+                        handler = trap_body(text, action)
+                        # Run the real handler without building or unpacking release assets.
+                        script = ('set -eu\nfinished=0\nt=' + shlex.quote(str(temporary))
+                                  + '\ncleanup() {\n' + handler + '\n}\ntrap cleanup EXIT\n' + injected)
+                        env = dict(os.environ)
+                        env.pop('EXIT_TRAP_UNSET', None)
+                        result = subprocess.run(['/bin/bash', '-c', script], env=env,
+                                                text=True, capture_output=True, timeout=10)
+                        if expected is None:
+                            self.assertNotEqual(result.returncode, 0, result.stderr)
+                            self.assertIn('unbound variable', result.stderr)
+                        else:
+                            self.assertEqual(result.returncode, expected, result.stderr)
+                        self.assertFalse(temporary.exists(), 'the EXIT handler must remove its temporary directory')
+        self.assertGreater(checked, 0, 'exercise real workflow cleanup handlers')
 
     def run_native_store_trap(self, injected):
         # Execute the actual script, stopping immediately after its trap is installed.

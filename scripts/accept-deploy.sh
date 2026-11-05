@@ -288,9 +288,9 @@ else
     fi
 fi
 
-# ---- leg (f): serving, not merely alive -------------------------------------
-# A daemon whose master key was unavailable at boot is up, answering, and serving
-# nothing. The assertion is N/N serving, never "the process is up".
+# ---- leg (f): vault health, not merely alive --------------------------------
+# A healthy vault may contain intentionally retired credentials. Require the
+# health policy's "vault: ok", not a fully active inventory or just a live process.
 status_rc=0
 status="$("$BIN_DIR/ck-auth" status 2>&1)" || status_rc=$?
 status="${status%%$'\n'*}"

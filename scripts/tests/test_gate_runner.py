@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real lane commands with a fake runner: no builds or bus credentials."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -304,6 +305,7 @@ exit "$SCENARIO"
                         patch.object(remote, "copy_checkout") as copy, \
                         patch.object(remote, "forget_binaries_from_another_copy"), \
                         patch.object(remote, "mark_changed_sources"), \
+                        patch.object(remote, "save_source_hashes"), \
                         patch.object(remote.subprocess, "run", side_effect=worker):
                     self.assertEqual(remote.main([mode, *arguments]), 0)
                 self.assertEqual(copy.call_args_list[0].args[0], ROOT)
@@ -449,6 +451,89 @@ exec "$REAL_PYTHON" "$@"
             remote.forget_binaries_from_another_copy(checkout, target)
             self.assertEqual(calls, [])
 
+    def test_unbuilt_change_remains_newer_than_cached_outputs(self):
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        checkout = self.bin / "checkout"
+        target = self.bin / "cache"
+        checkout.mkdir()
+        target.mkdir()
+        source = checkout / "lib.rs"
+        old = b'pub fn value() -> u8 { 1 }\n'
+        new = b'pub fn value() -> u8 { 2 }\n'
+        snapshot_time = 1_600_000_000
+        cached_output_time = snapshot_time + 100
+        manifest = target / "gate-source-hashes.json"
+        manifest.write_text(json.dumps({"lib.rs": hashlib.sha256(old).hexdigest()}))
+        for attempt in ("aborted before compilation", "retry"):
+            with self.subTest(attempt=attempt):
+                source.write_bytes(new)
+                os.utime(source, (snapshot_time, snapshot_time))
+                remote.mark_changed_sources(checkout, target)
+                self.assertGreater(source.stat().st_mtime, cached_output_time,
+                                   "retry discarded source invalidation before a build consumed the change")
+
+    def test_remote_hash_manifests_commit_only_after_success(self):
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        old = {"lib.rs": hashlib.sha256(b"old").hexdigest()}
+        for mode in ("full", "fast", "windows"):
+            with self.subTest(mode=mode):
+                source = self.bin / mode
+                sibling = self.bin / (mode + "-sibling")
+                scratch = self.bin / (mode + "-scratch")
+                source.mkdir()
+                (sibling / "docs").mkdir(parents=True)
+                (sibling / "docs/push-sealed-payload.md").write_text("contract")
+                for tree in (source, sibling):
+                    (tree / "lib.rs").write_text("new")
+                    os.utime(tree / "lib.rs", (1_600_000_000, 1_600_000_000))
+                targets = [source / "target"]
+                if mode == "full":
+                    targets.append(source / "target/gate-subconscious")
+                for target in targets:
+                    target.mkdir(parents=True, exist_ok=True)
+                    (target / "gate-source-hashes.json").write_text(json.dumps(old))
+
+                def fresh_scratch(_source):
+                    shutil.rmtree(scratch, ignore_errors=True)
+                    scratch.mkdir()
+                    return scratch
+
+                def copy(tree, destination, _target):
+                    shutil.copytree(tree, destination, ignore=shutil.ignore_patterns("target"))
+
+                def worker(command, cwd):
+                    for target in targets:
+                        self.assertEqual(json.loads((target / "gate-source-hashes.json").read_text()), old)
+                    self.assertGreater((cwd / "lib.rs").stat().st_mtime, 1_600_000_100)
+                    if outcome == "interrupt":
+                        raise KeyboardInterrupt
+                    assert isinstance(outcome, int)
+                    return subprocess.CompletedProcess(command, outcome)
+
+                args = [mode, "--plan", "{}"] if mode == "fast" else [mode, "--sibling", str(sibling)]
+                with patch.dict(os.environ), patch.object(remote.Path, "cwd", return_value=source), \
+                        patch.object(remote, "stable_scratch", side_effect=fresh_scratch), \
+                        patch.object(remote, "copy_checkout", side_effect=copy), \
+                        patch.object(remote, "copy_windows_snapshot", side_effect=copy), \
+                        patch.object(remote, "forget_binaries_from_another_copy"), \
+                        patch.object(remote.subprocess, "run", side_effect=worker):
+                    for outcome in (1, "interrupt", 0):
+                        if outcome == "interrupt":
+                            with self.assertRaises(KeyboardInterrupt):
+                                remote.main(args)
+                        else:
+                            self.assertEqual(remote.main(args), outcome)
+                        for target in targets:
+                            saved = json.loads((target / "gate-source-hashes.json").read_text())
+                            expected = hashlib.sha256(b"new").hexdigest() if outcome == 0 else old["lib.rs"]
+                            self.assertEqual(saved["lib.rs"], expected)
+
     def test_changed_sources_get_a_fresh_mtime_even_when_the_snapshot_time_is_fixed(self):
         # Build-server snapshots can stamp every file with one old time, so cargo would
         # reuse binaries built from older sources. Only content may decide.
@@ -470,9 +555,11 @@ exec "$REAL_PYTHON" "$@"
                 os.utime(path, (fixed, fixed))
 
         snapshot("first")
-        remote.mark_changed_sources(checkout, target)
+        hashes = remote.mark_changed_sources(checkout, target)
         # The first run knows nothing yet, so every source is stamped fresh.
         self.assertGreater((checkout / "src/lib.rs").stat().st_mtime, fixed)
+        # Only a successful worker command consumes the pending invalidations.
+        remote.save_source_hashes(target, hashes)
         snapshot("second")
         remote.mark_changed_sources(checkout, target)
         self.assertGreater((checkout / "src/lib.rs").stat().st_mtime, fixed)

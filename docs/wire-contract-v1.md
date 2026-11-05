@@ -58,7 +58,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `seal_rate_limited` | transient | this connection has reached the scoped refusal threshold `credential.open` and `credential.seal` share |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
 | `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
-| `needs_reauth` | auth_required | the credential is latched dead, deliberately retired, or has an unresolved refresh intent |
+| `needs_reauth` | auth_required | the provider refused the stored login for good (for example `invalid_grant`, or a GitHub App that is no longer installed) and it stays refused until a new login, the credential was deliberately retired, or it has an unresolved refresh intent |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
 | `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
@@ -194,13 +194,15 @@ handoffs are an inherited descriptor and, when no descriptor is named, the
 descriptor before spawning children; before that read the descriptor is inheritable.
 The environment fallback can also be inherited unless scrubbed. Neither delivery mode
 alone proves that every helper lacks the nonce, and `env_clear` alone does not close an
-inherited descriptor. Do not assume a child is automatically `Direct`.
+inherited descriptor. Do not assume a child is automatically `Direct`, the principal
+for a route that presents no launch identity.
 
 Helpers that should be anonymous must omit `consumer_identity` on `route.open`
 (`consumerIdentity: null` in subc-client), and launchers must scrub nonce environment
 variables and close nonce descriptors before spawning untrusted helpers. `ck auth` and
 the TypeScript vault client deliberately omit route identity so inherited launch
-credentials cannot lend them the host's `Reserved` identity.
+credentials cannot lend them the host's `Reserved` identity, the principal a supervised
+module gets by presenting its own launch nonce.
 
 A host-launched plugin without a supervised launch identity uses an enrollment token.
 

@@ -263,8 +263,9 @@ With `--approve-on other`, `--no-listener`, or a failed bind, it continues witho
 listener: OpenAI and xAI require the full address-bar URL after the loopback navigation
 fails; Anthropic instead displays a `code#state` value to paste.
 
-Google-family and DigitalOcean local-listener bind failures instead
-stop before the authorization URL is shown. Retry with `--approve-on other` or
+The `google`, `antigravity` and `digitalocean` logins don't use PKCE, so a callback
+port held by another program could catch their code. If their local listener can't
+bind, they stop before the authorization URL is shown. Retry with `--approve-on other` or
 `--no-listener` for a paste-only flow. DigitalOcean waits for its bound listener first,
 then offers paste if no callback arrives. Pasted values are read from stdin only,
 never argv, and never logged.

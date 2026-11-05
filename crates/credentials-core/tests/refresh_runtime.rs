@@ -195,7 +195,8 @@ async fn xai_entitlement_and_server_failures_stay_retryable() {
         );
         assert!(store.get("oauth:xai").is_ok());
         assert!(store.list_intents().unwrap().is_empty());
-        // Billing repair must be able to recover this credential without a new login.
+        // A billing refusal is not a dead login: once the account's billing is fixed, a
+        // later refresh must recover this credential without a new login.
         assert!(matches!(
             engine.get("oauth:xai", None, false).await,
             Err(EngineError::RefreshFailed(RefreshError::Status(code, _))) if code == status

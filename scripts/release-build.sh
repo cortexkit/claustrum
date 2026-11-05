@@ -354,6 +354,8 @@ fi
 #   3  github_apps.rs          GitHub API redirect; its arms skip under CRED_CLI_BIN
 #   1  google_login.rs         fake Google endpoints; covered by the login-arm skips
 #   1  credentials_cli.rs      the login wire hook; covered by the login-arm skips
+#  13  import_picker.rs        scripted prompts and injected commits; release builds
+#                              never compile them, even with import-prompt-seam on
 #   4  Windows-only seams      store.rs, test_support.rs and two in credentials_cli.rs;
 #                              never compiled into this macOS build
 #
@@ -361,7 +363,7 @@ fi
 # green, so the count is pinned. Raising it means deciding what the matching test arm
 # does under an override -- skip with a printed reason, or be rewritten not to need the
 # seam -- rather than discovering the narrowing at some later deploy.
-KNOWN_DEBUG_SEAMS=12
+KNOWN_DEBUG_SEAMS=25
 seams="$(grep -rcE 'cfg\(.*debug_assertions' crates/*/src --include='*.rs' 2>/dev/null \
   | awk -F: '{n += $2} END {print n + 0}')"
 if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then

@@ -229,11 +229,11 @@ mod tests {
     #[test]
     fn ed25519_private_temporaries_have_zeroizing_ownership() {
         // Inspect ownership rather than reading freed memory, which would be undefined.
-        let source = include_str!("signing.rs")
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap();
-        let source: String = source.split_whitespace().collect();
+        // Strip whitespace before cutting off this test module: a Windows checkout has
+        // CRLF line endings, so a newline-anchored marker would not match and the scan
+        // would also read this test's own forbidden strings.
+        let whole: String = include_str!("signing.rs").split_whitespace().collect();
+        let source = whole.split("#[cfg(test)]modtests").next().unwrap();
         for guarded in [
             "let mut body = Zeroizing::new(String::with_capacity(trimmed.len()));",
             "let mut der = Zeroizing::new(Vec::new());",

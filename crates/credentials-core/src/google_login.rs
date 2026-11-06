@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::refresh_adapters::{HttpTransport, RefreshError};
+use crate::refresh_adapters::{HttpResponse, HttpTransport, RefreshError};
 
 /// Google OAuth authorization endpoint shared by both login families.
 pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -44,14 +44,32 @@ pub const AUTHORIZE_EXTRA_PARAMS: &[(&str, &str)] =
 /// Code Assist project lookup endpoint used by Antigravity.
 pub const LOAD_CODE_ASSIST_URL: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-/// Code Assist free-tier provisioning endpoint used by Antigravity.
+/// Code Assist project provisioning endpoint used by Antigravity.
 pub const ONBOARD_USER_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
-const CODE_ASSIST_METADATA: &str =
-    "{\"metadata\":{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"ANTIGRAVITY\"}}";
-const ONBOARD_USER_BODY: &str =
-    "{\"tierId\":\"free-tier\",\"metadata\":{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"ANTIGRAVITY\"},\"cloudaicompanionProject\":null}";
+const CODE_ASSIST_METADATA: &str = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}";
+// Google uses this User-Agent to decide whether the free tier and companion project
+// are available. These values follow the antigravity-auth plugin's AGY_CLI_VERSION
+// and AGY_CLI_CHANGE_LIST in packages/core/src/fingerprint.ts.
+const AGY_CLI_VERSION: &str = "1.3.5";
+const AGY_CLI_CHANGE_LIST: &str = "998863838";
 const MAX_ONBOARD_ATTEMPTS: usize = 5;
 const ONBOARD_POLL_DELAY: Duration = Duration::from_secs(2);
+
+fn antigravity_user_agent(os: &str, arch: &str) -> String {
+    let os = match os {
+        "macos" => "darwin",
+        "" => "unknown",
+        other => other,
+    };
+    let arch = match arch {
+        "x86_64" => "amd64",
+        "x86" => "386",
+        "aarch64" => "arm64",
+        "" => "unknown",
+        other => other,
+    };
+    format!("antigravity/cli/{AGY_CLI_VERSION} (aidev_client; os_type={os}; arch={arch}; cl={AGY_CLI_CHANGE_LIST}; auth_method=consumer)")
+}
 
 /// Which Google client policy, scopes and redirect belong to a login provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,42 +223,64 @@ pub async fn discover_antigravity_project_with_delay(
     poll_delay: Duration,
 ) -> Result<AntigravityProject, GoogleLoginError> {
     let authorization = format!("Bearer {access_token}");
-    let load = http
-        .post(
+    let user_agent = antigravity_user_agent(std::env::consts::OS, std::env::consts::ARCH);
+    let headers = [
+        ("Authorization", authorization.as_str()),
+        ("User-Agent", user_agent.as_str()),
+    ];
+    let load_body = code_assist_response(
+        "loadCodeAssist",
+        http.post(
             LOAD_CODE_ASSIST_URL,
-            &[("Authorization", authorization.as_str())],
+            &headers,
             "application/json",
             CODE_ASSIST_METADATA.as_bytes().to_vec(),
         )
-        .await
-        .map_err(GoogleLoginError::from)?;
-    if load.status != 200 {
-        return Err(GoogleLoginError::Status(load.status));
-    }
-    let load_body: Value =
-        serde_json::from_slice(&load.body).map_err(|e| GoogleLoginError::Decode(e.to_string()))?;
+        .await,
+    )?;
     if let Some(project) = project_from_load_response(&load_body) {
         return Ok(project);
     }
+
+    let allowed_tiers = load_body.get("allowedTiers").and_then(Value::as_array);
+    let tier = allowed_tiers.and_then(|tiers| {
+        tiers
+            .iter()
+            .find(|tier| tier.get("isDefault").and_then(Value::as_bool) == Some(true))
+            .or_else(|| tiers.first())
+    });
+    if tier
+        .and_then(|tier| tier.get("userDefinedCloudaicompanionProject"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(GoogleLoginError::UserDefinedProject);
+    }
+    let tier_id = tier
+        .and_then(|tier| tier.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("free-tier");
+    let onboard_body = serde_json::json!({
+        "tierId": tier_id,
+        "metadata": { "ideType": "ANTIGRAVITY" }
+    })
+    .to_string()
+    .into_bytes();
 
     for attempt in 0..MAX_ONBOARD_ATTEMPTS {
         if attempt > 0 && !poll_delay.is_zero() {
             tokio::time::sleep(poll_delay).await;
         }
-        let onboard = http
-            .post(
+        let operation = code_assist_response(
+            "onboardUser",
+            http.post(
                 ONBOARD_USER_URL,
-                &[("Authorization", authorization.as_str())],
+                &headers,
                 "application/json",
-                ONBOARD_USER_BODY.as_bytes().to_vec(),
+                onboard_body.clone(),
             )
-            .await
-            .map_err(GoogleLoginError::from)?;
-        if onboard.status != 200 {
-            return Err(GoogleLoginError::Status(onboard.status));
-        }
-        let operation: Value = serde_json::from_slice(&onboard.body)
-            .map_err(|e| GoogleLoginError::Decode(e.to_string()))?;
+            .await,
+        )?;
         if operation.get("done").and_then(Value::as_bool) == Some(true) {
             if let Some(project) = project_from_onboard_response(&operation) {
                 return Ok(project);
@@ -272,32 +312,71 @@ pub async fn google_userinfo_email(http: &dyn HttpTransport, access_token: &str)
         .filter(|email| !email.is_empty())
 }
 
-/// Errors from Code Assist discovery. Error text never includes response bodies,
-/// which could contain provider-controlled sensitive data.
+fn code_assist_response(
+    call: &'static str,
+    response: Result<HttpResponse, RefreshError>,
+) -> Result<Value, GoogleLoginError> {
+    let result = response
+        .map_err(GoogleLoginError::from)
+        .and_then(|response| {
+            if response.status != 200 {
+                return Err(GoogleLoginError::from_status(
+                    response.status,
+                    &response.body,
+                ));
+            }
+            serde_json::from_slice(&response.body).map_err(|_| GoogleLoginError::Decode)
+        });
+    result.map_err(|error| GoogleLoginError::Call {
+        call,
+        error: Box::new(error),
+    })
+}
+
+/// Errors from Code Assist discovery. Only schema status names and field paths
+/// survive response parsing; free-form provider text can contain sensitive data.
 #[derive(Debug)]
 pub enum GoogleLoginError {
-    Transport(String),
-    Status(u16),
-    Decode(String),
+    Transport,
+    Status {
+        status: u16,
+        google_status: Option<&'static str>,
+        field_paths: Vec<String>,
+    },
+    Decode,
+    InvalidGrant,
+    SubscriptionRequired,
+    Call {
+        call: &'static str,
+        error: Box<Self>,
+    },
     NoProject,
+    UserDefinedProject,
 }
 
 impl std::fmt::Display for GoogleLoginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transport(message) => {
-                write!(f, "Google Code Assist discovery transport error: {message}")
+            Self::Transport => f.write_str("transport error"),
+            Self::Status { status, google_status, field_paths } => {
+                write!(f, "status {status}")?;
+                if let Some(google_status) = google_status {
+                    write!(f, " ({google_status})")?;
+                }
+                if !field_paths.is_empty() {
+                    write!(f, "; fields: {}", field_paths.join(", "))?;
+                }
+                Ok(())
             }
-            Self::Status(status) => write!(
-                f,
-                "Google Code Assist discovery failed with status {status}"
-            ),
-            Self::Decode(message) => write!(
-                f,
-                "Google Code Assist discovery response decode error: {message}"
-            ),
+            Self::Decode => f.write_str("response decode error"),
+            Self::InvalidGrant => f.write_str("authentication rejected (invalid_grant)"),
+            Self::SubscriptionRequired => f.write_str("subscription required (subscription_required)"),
+            Self::Call { call, error } => write!(f, "Google Code Assist {call} failed: {error}"),
             Self::NoProject => f.write_str(
                 "Google Code Assist did not return a project id; Antigravity login cannot continue",
+            ),
+            Self::UserDefinedProject => f.write_str(
+                "Antigravity account needs its own Google Cloud project; this login does not support user-defined projects",
             ),
         }
     }
@@ -308,10 +387,100 @@ impl std::error::Error for GoogleLoginError {}
 impl From<RefreshError> for GoogleLoginError {
     fn from(error: RefreshError) -> Self {
         match error {
-            RefreshError::Transport(message) => Self::Transport(message),
-            RefreshError::Decode(message) => Self::Decode(message),
-            RefreshError::Status(status, _) => Self::Status(status),
-            RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired => Self::Status(400),
+            RefreshError::Transport(_) => Self::Transport,
+            RefreshError::Decode(_) => Self::Decode,
+            RefreshError::Status(status, body) => Self::from_status(status, body.as_bytes()),
+            RefreshError::InvalidGrant(_) => Self::InvalidGrant,
+            RefreshError::SubscriptionRequired => Self::SubscriptionRequired,
+        }
+    }
+}
+
+impl GoogleLoginError {
+    fn from_status(status: u16, body: &[u8]) -> Self {
+        let body = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let error = &body["error"];
+        let google_status = match error["status"].as_str() {
+            Some("OK") => Some("OK"),
+            Some("CANCELLED") => Some("CANCELLED"),
+            Some("UNKNOWN") => Some("UNKNOWN"),
+            Some("INVALID_ARGUMENT") => Some("INVALID_ARGUMENT"),
+            Some("DEADLINE_EXCEEDED") => Some("DEADLINE_EXCEEDED"),
+            Some("NOT_FOUND") => Some("NOT_FOUND"),
+            Some("ALREADY_EXISTS") => Some("ALREADY_EXISTS"),
+            Some("PERMISSION_DENIED") => Some("PERMISSION_DENIED"),
+            Some("RESOURCE_EXHAUSTED") => Some("RESOURCE_EXHAUSTED"),
+            Some("FAILED_PRECONDITION") => Some("FAILED_PRECONDITION"),
+            Some("ABORTED") => Some("ABORTED"),
+            Some("OUT_OF_RANGE") => Some("OUT_OF_RANGE"),
+            Some("UNIMPLEMENTED") => Some("UNIMPLEMENTED"),
+            Some("INTERNAL") => Some("INTERNAL"),
+            Some("UNAVAILABLE") => Some("UNAVAILABLE"),
+            Some("DATA_LOSS") => Some("DATA_LOSS"),
+            Some("UNAUTHENTICATED") => Some("UNAUTHENTICATED"),
+            _ => None,
+        };
+        let mut field_paths = Vec::new();
+        if let Some(details) = error["details"].as_array() {
+            for detail in details {
+                if detail["@type"].as_str() != Some("type.googleapis.com/google.rpc.BadRequest") {
+                    continue;
+                }
+                if let Some(violations) = detail["fieldViolations"].as_array() {
+                    for violation in violations {
+                        if let Some(field) = violation["field"]
+                            .as_str()
+                            .filter(|field| is_schema_field_path(field))
+                        {
+                            field_paths.push(field.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        field_paths.sort();
+        field_paths.dedup();
+        Self::Status {
+            status,
+            google_status,
+            field_paths,
+        }
+    }
+}
+
+// Field paths contain identifiers and numeric list indices, not quoted map keys
+// or prose. Reject other forms rather than echoing provider-controlled data.
+fn is_schema_field_path(field: &str) -> bool {
+    let mut bytes = field.bytes().peekable();
+    loop {
+        if !bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        {
+            return false;
+        }
+        while bytes
+            .peek()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            bytes.next();
+        }
+        while bytes.peek() == Some(&b'[') {
+            bytes.next();
+            if !bytes.next().is_some_and(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            while bytes.peek().is_some_and(u8::is_ascii_digit) {
+                bytes.next();
+            }
+            if bytes.next() != Some(b']') {
+                return false;
+            }
+        }
+        match bytes.next() {
+            None => return true,
+            Some(b'.') => (),
+            _ => return false,
         }
     }
 }
@@ -356,6 +525,44 @@ mod tests {
 
     const ACCESS_TOKEN: &str = "ya29.access";
 
+    fn expected_user_agent() -> String {
+        let os = match std::env::consts::OS {
+            "macos" => "darwin",
+            other => other,
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "x86" => "386",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        format!("antigravity/cli/1.3.5 (aidev_client; os_type={os}; arch={arch}; cl=998863838; auth_method=consumer)")
+    }
+
+    fn assert_discovery_headers(request: &crate::refresh_adapters::fixture::RecordedRequest) {
+        assert_eq!(
+            request.headers,
+            vec![
+                ("Authorization".into(), "Bearer ya29.access".into()),
+                ("User-Agent".into(), expected_user_agent()),
+            ]
+        );
+    }
+
+    fn response(body: Value) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
+        Ok(crate::refresh_adapters::HttpResponse {
+            status: 200,
+            body: serde_json::to_vec(&body).unwrap(),
+        })
+    }
+
+    fn onboard_done() -> Value {
+        serde_json::json!({
+            "done": true,
+            "response": { "cloudaicompanionProject": { "id": "free-project" } }
+        })
+    }
+
     fn load_response(project: &str) -> Vec<u8> {
         serde_json::json!({ "cloudaicompanionProject": project })
             .to_string()
@@ -379,11 +586,8 @@ mod tests {
         assert_eq!(request.method, "POST");
         assert_eq!(request.url, LOAD_CODE_ASSIST_URL);
         assert_eq!(request.content_type, "application/json");
-        assert_eq!(request.body, CODE_ASSIST_METADATA.as_bytes());
-        assert_eq!(
-            request.headers,
-            vec![("Authorization".into(), "Bearer ya29.access".into())]
-        );
+        assert_eq!(request.body, br#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#);
+        assert_discovery_headers(request);
     }
 
     #[tokio::test]
@@ -412,7 +616,249 @@ mod tests {
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].url, ONBOARD_USER_URL);
         assert_eq!(requests[1].content_type, "application/json");
-        assert_eq!(requests[1].body, ONBOARD_USER_BODY.as_bytes());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&requests[1].body).unwrap(),
+            serde_json::json!({"tierId":"free-tier","metadata":{"ideType":"ANTIGRAVITY"}})
+        );
+        assert_discovery_headers(&requests[0]);
+        assert_discovery_headers(&requests[1]);
+    }
+
+    #[tokio::test]
+    async fn discovery_user_agent_is_sent_on_both_calls() {
+        let http = FixtureTransport::new(vec![
+            response(serde_json::json!({})),
+            response(onboard_done()),
+        ]);
+        discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+            .await
+            .unwrap();
+        let requests = http.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_discovery_headers(&request);
+        }
+    }
+
+    async fn assert_tier_choice(allowed_tiers: Value, expected: &str) {
+        let http = FixtureTransport::new(vec![
+            response(serde_json::json!({"allowedTiers": allowed_tiers})),
+            response(onboard_done()),
+        ]);
+        let project = discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(project.project_id, "free-project");
+        let requests = http.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].url, ONBOARD_USER_URL);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&requests[1].body).unwrap(),
+            serde_json::json!({"tierId": expected,"metadata":{"ideType":"ANTIGRAVITY"}})
+        );
+        assert_discovery_headers(&requests[1]);
+    }
+
+    #[tokio::test]
+    async fn discovery_chooses_default_allowed_tier() {
+        assert_tier_choice(
+            serde_json::json!([
+                {"id":"first-tier"}, {"id":"default-tier", "isDefault":true}
+            ]),
+            "default-tier",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_chooses_first_tier_without_default() {
+        assert_tier_choice(
+            serde_json::json!([
+                {"id":"first-tier"}, {"id":"second-tier"}
+            ]),
+            "first-tier",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_chooses_free_tier_when_allowed_tiers_empty() {
+        assert_tier_choice(serde_json::json!([]), "free-tier").await;
+    }
+
+    #[tokio::test]
+    async fn discovery_refuses_user_defined_project_without_onboarding() {
+        for tiers in [
+            serde_json::json!([{"id":"standard-tier","userDefinedCloudaicompanionProject":true}]),
+            serde_json::json!([
+                {"id":"free-tier"},
+                {"id":"standard-tier","isDefault":true,"userDefinedCloudaicompanionProject":true}
+            ]),
+        ] {
+            let http = FixtureTransport::new(vec![
+                response(serde_json::json!({"allowedTiers":tiers})),
+                response(onboard_done()),
+            ]);
+            let error =
+                discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+                    .await
+                    .expect_err("user-defined projects are unsupported");
+            let text = error.to_string();
+            assert!(text.contains("own Google Cloud project"), "{text}");
+            assert!(text.contains("not support"), "{text}");
+            assert_eq!(http.requests().len(), 1, "must not call onboardUser");
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_error_names_call_status_and_field_but_not_message() {
+        for call in ["loadCodeAssist", "onboardUser"] {
+            let mut responses = vec![];
+            if call == "onboardUser" {
+                responses.push(response(serde_json::json!({})));
+            }
+            responses.push(Ok(crate::refresh_adapters::HttpResponse {
+                status: 400,
+                body: serde_json::to_vec(&serde_json::json!({"error": {
+                    "code":400, "status":"INVALID_ARGUMENT", "message":"private error message",
+                    "details":[{
+                        "@type":"type.googleapis.com/google.rpc.BadRequest",
+                        "fieldViolations":[{"field":"metadata.plugin_type","description":"private violation description"}]
+                    }]
+                }})).unwrap(),
+            }));
+            let http = FixtureTransport::new(responses);
+            let text = discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+                .await
+                .unwrap_err()
+                .to_string();
+            for expected in [call, "400", "INVALID_ARGUMENT", "metadata.plugin_type"] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+            assert!(!text.contains("private"), "{text}");
+        }
+    }
+
+    #[test]
+    fn discovery_refresh_errors_keep_real_class_without_response_text() {
+        for (error, expected) in [
+            (
+                RefreshError::InvalidGrant("private response".into()),
+                "invalid_grant",
+            ),
+            (RefreshError::SubscriptionRequired, "subscription_required"),
+        ] {
+            let text = GoogleLoginError::from(error).to_string();
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("400"), "{text}");
+            assert!(!text.contains("private"), "{text}");
+        }
+    }
+
+    #[test]
+    fn antigravity_user_agent_maps_rust_platforms_and_architectures() {
+        for (os, expected_os) in [
+            ("macos", "darwin"),
+            ("linux", "linux"),
+            ("windows", "windows"),
+            ("freebsd", "freebsd"),
+            ("", "unknown"),
+        ] {
+            for (arch, expected_arch) in [
+                ("x86_64", "amd64"),
+                ("x86", "386"),
+                ("aarch64", "arm64"),
+                ("arm", "arm"),
+                ("", "unknown"),
+            ] {
+                assert_eq!(
+                    antigravity_user_agent(os, arch),
+                    format!("antigravity/cli/1.3.5 (aidev_client; os_type={expected_os}; arch={expected_arch}; cl=998863838; auth_method=consumer)")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_errors_discard_unstructured_or_untrusted_response_text() {
+        for (body, expected) in [
+            (
+                b"private non-JSON response".to_vec(),
+                "Google Code Assist loadCodeAssist failed: status 400",
+            ),
+            (
+                serde_json::to_vec(&serde_json::json!({"error":{
+                "status":"PRIVATE_UNKNOWN_ENUM",
+                "message":"private message",
+                "details":[
+                    {"@type":"private type", "fieldViolations":[{"field":"private_field"}]},
+                    {"@type":"type.googleapis.com/google.rpc.BadRequest", "fieldViolations":[
+                        {"field":"private prose"},
+                        {"field":"metadata[\"private-key\"]"},
+                        {"field":"metadata.plugin_type", "description":"private description"},
+                        {"field":"metadata.plugin_type"},
+                        {"field":"tiers[0].id"}
+                    ]}
+                ]
+                }}))
+                .unwrap(),
+                "Google Code Assist loadCodeAssist failed: status 400; fields: metadata.plugin_type, tiers[0].id",
+            ),
+        ] {
+            let http = FixtureTransport::ok(400, body);
+            let error =
+                discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+                    .await
+                    .unwrap_err();
+            let text = error.to_string();
+            assert_eq!(text, expected);
+            assert!(!text.to_lowercase().contains("private"), "{text}");
+            assert!(!format!("{error:?}").to_lowercase().contains("private"));
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_transport_and_decode_errors_name_call_without_raw_text() {
+        for call in ["loadCodeAssist", "onboardUser"] {
+            for (reply, kind) in [
+                (
+                    Err(RefreshError::Transport("private transport detail".into())),
+                    "transport error",
+                ),
+                (
+                    Err(RefreshError::Decode("private decode detail".into())),
+                    "response decode error",
+                ),
+                (
+                    Ok(HttpResponse {
+                        status: 200,
+                        body: b"private invalid JSON".to_vec(),
+                    }),
+                    "response decode error",
+                ),
+                (
+                    Err(RefreshError::InvalidGrant("private grant detail".into())),
+                    "authentication rejected (invalid_grant)",
+                ),
+                (
+                    Err(RefreshError::SubscriptionRequired),
+                    "subscription required (subscription_required)",
+                ),
+            ] {
+                let mut replies = vec![];
+                if call == "onboardUser" {
+                    replies.push(response(serde_json::json!({})));
+                }
+                replies.push(reply);
+                let http = FixtureTransport::new(replies);
+                let text =
+                    discover_antigravity_project_with_delay(&http, ACCESS_TOKEN, Duration::ZERO)
+                        .await
+                        .unwrap_err()
+                        .to_string();
+                assert_eq!(text, format!("Google Code Assist {call} failed: {kind}"));
+            }
+        }
     }
 
     #[tokio::test]

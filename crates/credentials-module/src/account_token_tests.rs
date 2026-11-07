@@ -717,28 +717,57 @@ fn account_token_vendored_fixture_checksums() {
     }
 }
 
-/// The vault must find the enrollment where `ck account` wrote it: a non-empty
-/// `XDG_STATE_HOME` wins over `HOME`, and an empty one is ignored, as in the CLI.
+/// The vault must find the enrollment where `ck account` wrote it. Off Windows a
+/// non-empty `XDG_STATE_HOME` wins over `HOME`, and an empty one is ignored, as in the
+/// CLI. On Windows only `LOCALAPPDATA` counts, so a stray XDG or HOME variable can't
+/// send the vault to a folder the CLI never writes.
 #[test]
 fn machine_state_path_resolves_like_the_account_cli() {
-    let p = |xdg: Option<&str>, home: Option<&str>| {
-        machine_state_path(xdg.map(Into::into), home.map(Into::into))
+    let p = |windows: bool, vars: &[(&str, &str)]| {
+        machine_state_path(windows, |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).into())
+        })
+    };
+    let account = |base: &str| {
+        Some(
+            PathBuf::from(base)
+                .join("cortexkit")
+                .join("account")
+                .join("machine.json"),
+        )
     };
     assert_eq!(
-        p(Some("/state"), Some("/home/u")),
-        Some(PathBuf::from("/state/cortexkit/account/machine.json"))
+        p(false, &[("XDG_STATE_HOME", "/state"), ("HOME", "/home/u")]),
+        account("/state")
     );
     assert_eq!(
-        p(Some(""), Some("/home/u")),
-        Some(PathBuf::from(
-            "/home/u/.local/state/cortexkit/account/machine.json"
-        ))
+        p(false, &[("XDG_STATE_HOME", ""), ("HOME", "/home/u")]),
+        account("/home/u/.local/state")
     );
     assert_eq!(
-        p(None, Some("/home/u")),
-        Some(PathBuf::from(
-            "/home/u/.local/state/cortexkit/account/machine.json"
-        ))
+        p(false, &[("HOME", "/home/u")]),
+        account("/home/u/.local/state")
     );
-    assert_eq!(p(None, None), None);
+    assert_eq!(
+        p(false, &[("LOCALAPPDATA", "C:/Users/u/AppData/Local")]),
+        None
+    );
+    assert_eq!(p(false, &[]), None);
+
+    let local = "C:/Users/u/AppData/Local";
+    assert_eq!(
+        p(
+            true,
+            &[
+                ("LOCALAPPDATA", local),
+                ("XDG_STATE_HOME", "/state"),
+                ("HOME", "/home/u")
+            ]
+        ),
+        account(local)
+    );
+    assert_eq!(p(true, &[("LOCALAPPDATA", ""), ("HOME", "/home/u")]), None);
+    assert_eq!(p(true, &[("XDG_STATE_HOME", "/state")]), None);
 }

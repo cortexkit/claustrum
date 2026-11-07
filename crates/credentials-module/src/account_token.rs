@@ -103,23 +103,35 @@ impl AccountTokens {
         if let Some(path) = &self.machine_path {
             return Ok(path.clone());
         }
-        machine_state_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+        machine_state_path(cfg!(windows), |name| std::env::var_os(name))
             .ok_or_else(AccountTokenError::login)
     }
 }
 
 /// Where `ck account login` records this machine's enrollment. It must resolve exactly as
-/// the account CLI's state path does (a non-empty `XDG_STATE_HOME` first, then
-/// `HOME`), or the vault would look in a different place and refuse a machine that
-/// is enrolled.
+/// the account CLI's state path does, or the vault would look in a different place and
+/// refuse a machine that is enrolled.
+///
+/// On Windows that is `%LOCALAPPDATA%\cortexkit\account`, ignoring the XDG variables, the
+/// same way the supervisor places its own data on Windows. Elsewhere a non-empty
+/// `XDG_STATE_HOME` wins, then `HOME/.local/state`. Empty variables count as unset.
 fn machine_state_path(
-    xdg_state_home: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
+    windows: bool,
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
-    if let Some(state) = xdg_state_home.filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(state).join("cortexkit/account/machine.json"));
-    }
-    home.map(|home| PathBuf::from(home).join(".local/state/cortexkit/account/machine.json"))
+    let set = |name: &str| {
+        var(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let state = if windows {
+        set("LOCALAPPDATA")?
+    } else if let Some(state) = set("XDG_STATE_HOME") {
+        state
+    } else {
+        set("HOME")?.join(".local").join("state")
+    };
+    Some(state.join("cortexkit").join("account").join("machine.json"))
 }
 
 // This is the account CLI's enrollment pointer, not signing authority. Its public

@@ -7,6 +7,8 @@ export {
 } from './detect.js'
 export { storeIdentity, storageFingerprint } from './identity.js'
 export {
+  enrollmentSecretHash,
+  newEnrollmentSecret,
   writeEnrollmentTokenFile,
   type EnrollmentTokenFile,
 } from './enrollment.js'

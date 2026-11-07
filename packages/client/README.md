@@ -76,6 +76,11 @@ copy. One behaviour reaches callers: while the vault is restarting or refusing r
 opens as retryable, a call now keeps retrying for up to 90 s (paced, with jitter) instead
 of 30 s. Give every vault call on a latency-sensitive path its own timeout.
 
+**Changed in 0.16.0:** the dependency is now `@cortexkit/subc-client` ^0.24.0.
+The SDK negotiates FIFO request/watch windows and retries only daemon-origin
+`route_busy` refusals within the request deadline. Claustrum adds no busy retry;
+older daemons keep the SDK's previous behavior.
+
 ## Reading credential material
 
 The wire payload is opaque bytes. `getCredential(handle, minTtlMs?)` and
@@ -161,10 +166,37 @@ for (;;) {
 }
 ```
 
+## Enrollment
+
+Use `newEnrollmentSecret()` to prepare an enrollment proposal. It generates 32
+random bytes as exactly 64 lowercase hex characters, plus `requestSecretHash`:
+the lowercase hex SHA-256 of the **32 decoded bytes**, not of the UTF-8 hex text.
+`enrollmentSecretHash(requestSecret)` recomputes the hash of a persisted secret
+and refuses anything other than exactly 64 lowercase hex characters.
+
+```ts
+import { ClaustrumClient, newEnrollmentSecret } from '@cortexkit/claustrum-client'
+
+const client = await ClaustrumClient.connect()
+const { requestSecret, requestSecretHash } = newEnrollmentSecret()
+// Persist the secret privately before proposing so a crash can recover the poll.
+await persistRequestSecret(requestSecret)
+const { requestId } = await client.enrollPropose({ name: 'consumer', requestSecretHash })
+await persistRequestId(requestId)
+// After operator approval, poll with the original secret, not its hash.
+const outcome = await client.enrollPoll({ requestId, requestSecret })
+```
+
+The persistence functions above are caller-provided. Re-proposing the same name
+with the same persisted secret/hash recovers the request id after a lost reply.
+Only `pending` means poll again; an approved outcome returns the token once, so
+persist it with `writeEnrollmentTokenFile` before using it. Never log the request
+secret or token.
+
 ## Private files and Windows support
 
 Enrollment tokens support Windows as well as Unix. The client uses
-`@cortexkit/store` 0.2.1 or newer: exclusive private creation
+`@cortexkit/store` 0.2.3 or newer: exclusive private creation
 protects files before any secret bytes are written, and atomic replacement keeps
 that protection. Unix files use mode 0600 and new directories use 0700. On Windows,
 the store's `@cortexkit/private-files` native module creates owner-only ACLs and the

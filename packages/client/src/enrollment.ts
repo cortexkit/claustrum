@@ -1,6 +1,6 @@
 import { createPrivateFile } from '@cortexkit/store'
 import { checkPrivatePath, createPrivateParents, notPrivate, privateCreationCode } from './private-path.js'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { open, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 
@@ -10,6 +10,20 @@ export type EnrollmentTokenFile = {
 }
 
 const TOKEN_RE = /^[0-9a-f]{64}$/
+
+/** Hash the 32 decoded bytes, not the UTF-8 text of the hex request secret. */
+export function enrollmentSecretHash(requestSecret: string): string {
+  if (typeof requestSecret !== 'string' || requestSecret.length !== 64 || !TOKEN_RE.test(requestSecret)) {
+    throw new Error('enrollment request secret must be exactly 64 lowercase hex characters')
+  }
+  return createHash('sha256').update(Buffer.from(requestSecret, 'hex')).digest('hex')
+}
+
+/** Mint an enrollment request secret and the hash to send with the proposal. */
+export function newEnrollmentSecret(): { requestSecret: string; requestSecretHash: string } {
+  const requestSecret = randomBytes(32).toString('hex')
+  return { requestSecret, requestSecretHash: enrollmentSecretHash(requestSecret) }
+}
 
 function validateTokenFile(value: EnrollmentTokenFile): void {
   if (!TOKEN_RE.test(value.token)) throw new Error('enrollment token must be exactly 64 lowercase hex characters')

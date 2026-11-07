@@ -333,13 +333,16 @@ but older binaries do not enforce this policy and drop it when rewriting a recor
 The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_poll`, with
 `auth.enroll_rotate` for later rotation.
 
-1. **Propose.** You mint a 32-byte request secret, send only its hash, and receive a
-   request id. **Persist both before you send**, so a crash between the call and its reply
+1. **Propose.** You mint a 32-byte request secret encoded as exactly 64 lowercase
+   hex characters. Send `request_secret_hash` as the lowercase hex SHA-256 of the
+   **32 decoded bytes**, not of the 64-character UTF-8 hex string, and receive a
+   request id. **Persist the secret and hash before you send**, so a crash between the call and its reply
    does not leave you unable to poll a request that exists.
 2. **Wait.** An operator approves with the master key (`ck auth enroll approve`).
    Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
    a name it does not hold from collecting a token even if approval is granted by mistake.
-3. **Poll.** The first successful poll, authenticated by your request secret, mints the
+3. **Poll.** Send `request_secret` as the original 64 lowercase hex characters,
+   not the hash. The first successful poll, authenticated by that secret, mints the
    token. Only `pending` means keep polling; every other outcome is terminal.
 4. **Persist at `0600`** with a parent directory that is not group- or world-writable.
 

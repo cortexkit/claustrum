@@ -1907,6 +1907,73 @@ Only the wrapper admits Direct. Plain `permissions.list {agent_id?}` and
 vendored vectors in `crates/credentials-module/tests/vectors/permissions-v1/`) and admit
 only `reserved:cingulate`.
 
+#### Credential-grant permissions rows
+
+An unfiltered `permissions.list {}` also lists the vault's credential grants for
+supervised modules and enrolled programs. These rows have no top-level `agent_id`,
+no `holder.agent_id`, and no `expires_at_ms`. Like flow grants, they are absent from
+every `permissions.list {agent_id}` reply. The plain route
+admits only `reserved:cingulate`; the operator uses the authenticated admin wrapper.
+
+Each stored selector/operation grant is one row:
+
+```json
+{"id":"cg_<opaque-digest>","holder":{"kind":"module","module_id":"broca"},"module":"claustrum","subject_label":"Model provider logins and keys","scope":"read","scope_label":"can read the secrets of 37 credentials in this group","granted_at_ms":1800000000000}
+```
+
+A `reserved:<id>` principal becomes `holder: {kind: "module", module_id: "<id>"}`;
+an `enrolled:<name>` principal becomes `holder: {kind: "enrolled", name: "<name>"}`.
+Neither holder includes its principal prefix. Other principal kinds are not listed.
+The `scope` is the stored operation: `read`, `list`, `sign`, `open`, `seal`,
+`deposit`, or `account_token`. The timestamp is the grant's creation time.
+
+The `subject_label` describes the selector without a reach count. An exact selector
+uses the credential id, and an audience selector uses
+`CortexKit account tokens for <audience>`. Category labels are:
+
+| Category | Subject label |
+| --- | --- |
+| `llm-provider` | Model provider logins and keys |
+| `web-search` | Web search keys |
+| `media-provider` | Speech and media keys |
+| `browser-session` | Browser sign-ins |
+| `github-app-native` | GitHub App keys |
+| `anthropic-native` | Claude logins |
+| `openai-native` | ChatGPT logins |
+| `antigravity-native` | Antigravity logins |
+| Any other category | Credentials in the &lt;name&gt; group |
+
+The provider supplies the complete `scope_label`; apps display it unchanged. It
+distinguishes reading secrets from listing accounts and plans without secrets,
+signing, encrypting or decrypting messages, storing browser sign-ins, and getting
+CortexKit account tokens. Category scope labels include the number of credentials reached
+now, using the same credential/category membership as `ck auth grants`. Adding or
+removing a category member changes that count, not the id or subject label. No row
+contains secret or token material. All permission rows are sorted by id.
+
+Credential-grant ids are `cg_` followed by lowercase SHA-256 hex. The digest input
+is `claustrum-credential-permission/v1\0` followed by the UTF-8 principal kind,
+principal id, selector kind, selector and operation, each prefixed by its unsigned
+64-bit big-endian byte length. This namespace is separate from secret-grant ids.
+The id is deterministic and stable while the identifying columns are unchanged.
+
+Exact grants whose selector starts with `signing:` or `kem:` are never listed or
+revocable through permissions: these vault-held runtime keys are not safe to
+revoke from the apps. `permissions.revoke {id}` resolves a visible credential
+grant and deletes exactly that selector/operation tuple in one transaction guarded
+by the vault's writer lease,
+using the same `grant_revoke` audit record and grant-generation update as
+`ck auth revoke`. Success is `{"outcome":"revoked"}`. Unknown, already-revoked,
+and excluded ids return `{"outcome":"not_found"}` without adding an audit entry or
+changing the audit chain's final hash.
+Existing secret-grant and flow-grant revocation is unchanged.
+
+Published, dispatcher-emitted samples (including an exact grant with a long,
+single credential id for app wrapping checks) are in
+`crates/credentials-core/tests/vectors/permissions-credential-grants-v1.json`.
+Regenerate them with
+`CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --bin ck-claustrum --features credentials-core/test-support permissions_credential_grants_dispatcher_lists_and_pins_samples`.
+
 ### Secret home: one vault holds every agent secret
 
 One vault holds every agent secret, every grant and every flow grant for the account.

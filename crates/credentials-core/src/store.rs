@@ -3453,40 +3453,17 @@ impl EncryptedStore {
         if selector.is_empty() {
             return Err(StoreOpError::InvalidCategoryName);
         }
-        let audit_key = self.audit_key.clone();
-        let audit_target = format!(
-            "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
-            operation.as_str(),
-            selector_kind.as_str()
-        );
         let changed = self.fenced_write(|tx| {
-            let changed = tx.execute(
-                "DELETE FROM read_grants \
-                  WHERE principal_kind = ?1 AND principal_id = ?2 \
-                    AND selector_kind = ?3 AND selector = ?4 AND operation = ?5",
-                rusqlite::params![
-                    principal_kind,
-                    principal_id,
-                    selector_kind.as_str(),
-                    selector,
-                    operation.as_str()
-                ],
-            )?;
-            if changed > 0 {
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: ctx.op,
-                        credential_id: Some(audit_target.clone()),
-                        payload_hash: None,
-                        actor: ctx.actor.to_string(),
-                        alarm: ctx.alarm,
-                    },
-                )?;
-                bump_grants_generation_tx(tx)?;
-            }
-            Ok(changed)
+            revoke_read_grant_audited_tx(
+                tx,
+                &self.audit_key,
+                principal_kind,
+                principal_id,
+                selector_kind,
+                selector,
+                operation,
+                ctx,
+            )
         })?;
         if changed == 0 {
             return Err(StoreOpError::NotFound);
@@ -7749,6 +7726,50 @@ pub fn list_meta_read_only(
     store_path: &std::path::Path,
 ) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
     list_meta_read_only_with_schema(store_path).map(|(rows, _)| rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn revoke_read_grant_audited_tx(
+    tx: &rusqlite::Transaction<'_>,
+    audit_key: &[u8; 32],
+    principal_kind: &str,
+    principal_id: &str,
+    selector_kind: SelectorKind,
+    selector: &str,
+    operation: GrantOperation,
+    ctx: AuditCtx<'_>,
+) -> rusqlite::Result<usize> {
+    let changed = tx.execute(
+        "DELETE FROM read_grants \
+         WHERE principal_kind = ?1 AND principal_id = ?2 \
+         AND selector_kind = ?3 AND selector = ?4 AND operation = ?5",
+        rusqlite::params![
+            principal_kind,
+            principal_id,
+            selector_kind.as_str(),
+            selector,
+            operation.as_str()
+        ],
+    )?;
+    if changed > 0 {
+        append_audit_tx(
+            tx,
+            audit_key,
+            &AuditRecord {
+                op: ctx.op,
+                credential_id: Some(format!(
+                    "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
+                    operation.as_str(),
+                    selector_kind.as_str()
+                )),
+                payload_hash: None,
+                actor: ctx.actor.to_string(),
+                alarm: ctx.alarm,
+            },
+        )?;
+        bump_grants_generation_tx(tx)?;
+    }
+    Ok(changed)
 }
 
 fn read_grants_from_conn(

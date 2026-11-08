@@ -2601,6 +2601,7 @@ mod tests {
     }
     include!("watch_scoped_tests.rs");
     include!("secret_contract_tests.rs");
+    include!("credential_permissions_tests.rs");
     include!("secret_flow_contract_tests.rs");
     include!("secret_home_vectors_tests.rs");
     include!("../tests/fixtures/federation_read_producer.rs");

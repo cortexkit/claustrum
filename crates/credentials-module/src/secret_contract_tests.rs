@@ -1790,6 +1790,16 @@ async fn secret_caller_gate_and_op_matrix_matches_the_wire_contract() {
             )
             .unwrap();
     }
+    let mut permission_rows: Vec<_> = store.list_read_grants().unwrap().into_iter().map(|grant| {
+        json!({
+            "id":cp_id(&grant.principal_kind, &grant.principal_id, grant.selector_kind, &grant.selector, grant.operation),
+            "holder":{"kind":"module","module_id":grant.principal_id},
+            "module":"claustrum","subject_label":FORWARDED_TEST_ID,
+            "scope":"read","scope_label":"can read the secret of this credential",
+            "granted_at_ms":grant.created_at_ms,
+        })
+    }).collect();
+    permission_rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let handle = mint_test_handle(&store, FORWARDED_TEST_ID);
     set_member_mapping(&store, true);
     store
@@ -1911,7 +1921,11 @@ async fn secret_caller_gate_and_op_matrix_matches_the_wire_contract() {
                 }
                 // permissions.list and permissions.revoke.
                 for (method, params, served) in [
-                    ("permissions.list", json!({}), json!({"grants":[]})),
+                    (
+                        "permissions.list",
+                        json!({}),
+                        json!({"grants":permission_rows}),
+                    ),
                     (
                         "permissions.revoke",
                         json!({"id":"unknown"}),

@@ -56,7 +56,9 @@ impl EncryptedStore {
             // agent-filtered listing never contains one (permissions-v1.1).
             if agent_id.is_none() {
                 grants.extend(flow_permission_rows(conn)?);
+                grants.extend(credential_permissions::permission_rows(conn)?);
             }
+            grants.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
             Ok(json!({"grants":grants}))
         }).map_err(|_|SecretError::StoreError)
     }
@@ -599,7 +601,7 @@ pub(super) fn revoke(
             )
             .optional()?;
         let Some((name, incarnation, flow_id, flow_version)) = flow else {
-            return Ok(json!({"outcome":"not_found"}));
+            return credential_permissions::revoke(tx, key, id, actor);
         };
         let flow_version = flow_version.to_string();
         tx.execute("DELETE FROM secret_flow_grants WHERE grant_id=?1", [id])?;

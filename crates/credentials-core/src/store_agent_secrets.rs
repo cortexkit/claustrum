@@ -6,6 +6,8 @@ mod phone;
 pub use phone::{secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation};
 #[path = "store_secret_approval.rs"]
 mod approval;
+#[path = "store_credential_permissions.rs"]
+mod credential_permissions;
 #[path = "store_secret_use.rs"]
 mod use_secret;
 pub use use_secret::{

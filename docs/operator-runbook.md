@@ -924,6 +924,13 @@ expected reading.
 A retired credential does not degrade health. `login --replace` or `reactivate` brings it
 back; consumers need freshly minted handles because `logout` revoked theirs.
 
+At a terminal, `ck auth logout` without flags offers a searchable picker of active and
+`needs_reauth` credentials, then asks for confirmation (default No). The picker leaves out
+retired or corrupt records and vault-held signing and key encapsulation mechanism (KEM)
+keys; use `--id` to log out a key deliberately. `--id <id>` or `--provider <name>` logs out
+without prompting, including at a terminal. Without a terminal, one of those flags is
+required.
+
 ### A consumer report put a credential in `needs_reauth`: try `reactivate` first
 
 A consumer report is a claim about a served token; it says nothing about the refresh

@@ -644,7 +644,7 @@ fn usage_short() -> String {
      \n\
      verbs:\n\
        login               OAuth/device/api-key login (interactive with no flags)\n\
-       logout              stop serving a credential (reversible)\n\
+       logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
@@ -797,15 +797,20 @@ fn help_verb(verb: &str) -> String {
              labeled id is an independent credential with its own refresh chain and handles)."
         }
         "logout" => {
-            "ck auth logout --provider <p> | --id <id>\n\
+            "ck auth logout [--provider <p> | --id <id>]\n\
              \n\
              \x20 --provider <p>  select the provider credential to stop serving\n\
              \x20 --id <id>       select an explicit credential id instead\n\
              \n\
              NOTES\n\
-             Stop serving a credential REVERSIBLY: invalidate it and revoke its handles,\n\
-             keeping the record and audit chain. `ck auth login --provider <p> --replace`\n\
-             restores it. Never a delete — use `remove` for that."
+             With no flags at a terminal, pick one active or needs_reauth credential,\n\
+             then confirm (default No). Retired, corrupt, signing and KEM keys are\n\
+             excluded from the picker. Use --id to log out a vault-held key.\n\
+             --id or --provider never prompts; one is required without a terminal.\n\
+             Stop serving now: retire the credential and revoke all its capability\n\
+             handles, keeping the record and audit chain. `ck auth reactivate --id <id>`\n\
+             or logging in again restores the credential, but revoked handles stay\n\
+             revoked. Never a delete — use `remove` for that."
         }
         "remove" => {
             "ck auth remove --id <id>\n\
@@ -3701,9 +3706,13 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             id
         }
         (None, None) => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                return logout_interactively(global);
+            }
             return Err(CliError::Usage(
-                "--provider <p> or --id <id> is required".to_string(),
-            ))
+                "--provider <p> or --id <id> is required\nRun `ck auth logout` in a terminal to choose a credential from a picker.".to_string(),
+            ));
         }
     };
     let ids = if optional(args, "--provider").as_deref() == Some("snowflake") {
@@ -3719,6 +3728,56 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         logout_id(global, &id)?;
     }
     Ok(())
+}
+
+fn logout_interactively(global: &GlobalArgs) -> Result<(), CliError> {
+    use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect};
+
+    let status = request_admin_status(global)?;
+    let mut credentials: Vec<_> = parse_inventory(&status)?
+        .into_iter()
+        .filter(|(state, _, id, _, _)| {
+            matches!(state.as_str(), "active" | "needs_reauth")
+                // Vault-held keys are infrastructure, not login sessions. Require an
+                // explicit id so a fuzzy selection cannot retire one by accident.
+                && !id.starts_with("signing:")
+                && !id.starts_with("kem:")
+        })
+        .collect();
+    credentials.sort_by(|a, b| a.2.cmp(&b.2));
+    if credentials.is_empty() {
+        println!("No credentials are eligible for interactive logout.");
+        return Ok(());
+    }
+
+    let items: Vec<_> = credentials
+        .iter()
+        .map(|(state, _, id, _, _)| format!("{id}  ({state})"))
+        .collect();
+    let theme = ColorfulTheme::default();
+    let prompt_error = |error| CliError::Io(format!("interactive logout cancelled: {error}"));
+    let selected = FuzzySelect::with_theme(&theme)
+        .with_prompt("Select a credential to log out (type to search)")
+        .items(&items)
+        .default(0)
+        .interact()
+        .map_err(prompt_error)?;
+    let id = &credentials[selected].2;
+    println!(
+        "Logging out {id} stops the credential serving now and revokes all its capability handles."
+    );
+    println!("`ck auth reactivate --id {id}` or logging in again restores the credential,");
+    println!("but revoked handles stay revoked.");
+    if !Confirm::with_theme(&theme)
+        .with_prompt(format!("Log out {id}?"))
+        .default(false)
+        .interact()
+        .map_err(prompt_error)?
+    {
+        println!("Logout cancelled; nothing changed.");
+        return Ok(());
+    }
+    logout_id(global, id)
 }
 
 fn logout_id(global: &GlobalArgs, id: &str) -> Result<(), CliError> {

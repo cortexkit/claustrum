@@ -10304,7 +10304,6 @@ mod tests {
         }
         if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
             std::fs::write(path, text).unwrap();
-            println!("emitted enrollment display-name proposal, approval and reply goldens");
         }
     }
 

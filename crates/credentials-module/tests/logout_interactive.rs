@@ -173,9 +173,7 @@ fn confirming_logout_retires_only_the_searched_id_and_matches_flag_audit() {
     );
     let output = flagged.success(&["logout", "--id", "apikey:zulu"]);
     assert!(screen.contains(output.lines().next().unwrap()), "{screen}");
-    let warning = screen
-        .find("stops the credential serving now")
-        .expect(&screen);
+    let warning = screen.find("stops it serving now").expect(&screen);
     let recovery = screen
         .find("ck auth reactivate --id apikey:zulu")
         .expect(&screen);

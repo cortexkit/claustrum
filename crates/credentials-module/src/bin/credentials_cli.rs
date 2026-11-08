@@ -3763,9 +3763,7 @@ fn logout_interactively(global: &GlobalArgs) -> Result<(), CliError> {
         .interact()
         .map_err(prompt_error)?;
     let id = &credentials[selected].2;
-    println!(
-        "Logging out {id} stops the credential serving now and revokes all its capability handles."
-    );
+    println!("Logging out {id} stops it serving now and revokes all its capability handles.");
     println!("`ck auth reactivate --id {id}` or logging in again restores the credential,");
     println!("but revoked handles stay revoked.");
     if !Confirm::with_theme(&theme)

@@ -57,8 +57,19 @@ fn cp_grants() -> Vec<CpGrant> {
             "signing:bus",
             GrantOperation::Sign,
         ),
+        (
+            "reserved",
+            "broca",
+            SelectorKind::Exact,
+            CP_RUNTIME_ID,
+            GrantOperation::Read,
+        ),
     ]
 }
+
+/// A stored secret its module needs in order to run, marked with the module-runtime
+/// category, so its grant must stay out of the list like a vault-held key's.
+const CP_RUNTIME_ID: &str = "opaque:broca-deployment:1";
 
 fn cp_id(
     kind: &str,
@@ -104,6 +115,25 @@ fn cp_rig(
             )
             .unwrap();
     }
+    store
+        .create(
+            CP_RUNTIME_ID,
+            &VaultRecord::new_static(
+                CredentialKind::Opaque,
+                "test",
+                b"permission-secret-canary".to_vec(),
+                None,
+            ),
+        )
+        .unwrap();
+    store
+        .set_categories_audited(
+            CP_RUNTIME_ID,
+            credentials_core::store::SetCategoryMode::Set,
+            &["module-runtime".to_owned()],
+            AuditCtx::admin(AuditOp::SetCategory),
+        )
+        .unwrap();
     for (kind, principal, selector_kind, selector, op) in cp_grants() {
         store
             .create_read_grant_audited(

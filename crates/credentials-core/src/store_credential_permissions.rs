@@ -2,7 +2,17 @@ use super::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// The category an operator puts on a stored secret that a module needs in order to run
+/// at all, such as Broca's session-storage key. Grants on such a record are left out of
+/// the apps' permission list, like grants on vault-held keys: one tap there would stop
+/// the module, and that's not something to offer next to ordinary access.
+pub const MODULE_RUNTIME_CATEGORY: &str = "module-runtime";
+
 fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant>> {
+    let runtime: std::collections::BTreeSet<String> = conn
+        .prepare("SELECT credential_id FROM credential_categories WHERE category=?1")?
+        .query_map([MODULE_RUNTIME_CATEGORY], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(
         read_grants_from_conn(conn, None, None, read_schema_version(conn)?)?
             .into_iter()
@@ -10,7 +20,8 @@ fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant
                 matches!(grant.principal_kind.as_str(), "reserved" | "enrolled")
                     && !(grant.selector_kind == SelectorKind::Exact
                         && (grant.selector.starts_with("signing:")
-                            || grant.selector.starts_with("kem:")))
+                            || grant.selector.starts_with("kem:")
+                            || runtime.contains(&grant.selector)))
             })
             .collect(),
     )

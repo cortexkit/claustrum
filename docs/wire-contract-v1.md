@@ -1975,7 +1975,10 @@ The id is deterministic and stable while the identifying columns are unchanged.
 
 Exact grants whose selector starts with `signing:` or `kem:` are never listed or
 revocable through permissions: these vault-held runtime keys are not safe to
-revoke from the apps. `permissions.revoke {id}` resolves a visible credential
+revoke from the apps. The same holds for an exact grant on a stored secret that
+carries the `module-runtime` category, which an operator sets on a secret a module
+needs in order to run at all, such as `opaque:broca-deployment:1`
+(`ck auth set-category <id> --add module-runtime`). `permissions.revoke {id}` resolves a visible credential
 grant and deletes exactly that selector/operation tuple in one transaction guarded
 by the vault's writer lease,
 using the same `grant_revoke` audit record and grant-generation update as

@@ -38,7 +38,7 @@ fn cp_grants() -> Vec<CpGrant> {
         ),
         (
             "reserved",
-            "ck-motor",
+            "motor",
             SelectorKind::Audience,
             "cortexkit-runners",
             GrantOperation::AccountToken,
@@ -159,7 +159,11 @@ async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
         6,
         "four credential grants, one secret and one flow"
     );
-    assert!(rows
+    // The secret and flow rows keep the order they had before credential grants were
+    // listed; the four credential rows follow them, sorted by id.
+    assert_eq!(rows[0]["id"], "sg_sample");
+    assert_eq!(rows[1]["id"], "fg_sample");
+    assert!(rows[2..]
         .windows(2)
         .all(|pair| pair[0]["id"].as_str() < pair[1]["id"].as_str()));
     for (kind, principal, selector_kind, selector, op) in cp_grants().into_iter().take(4) {

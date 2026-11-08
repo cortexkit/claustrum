@@ -149,6 +149,12 @@ async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
     let (surface, admin, store) = cp_rig(151);
+    for (name, label) in [("approved-plugin", "Claude sign-in for Pi"), ("broca", "Not the module name")] {
+        let request = store.propose_enrollment_with_display_name_by(None, name, &"a".repeat(64), Some(label)).unwrap();
+        store.approve_enrollment(&request.request_id, name, "operator").unwrap();
+    }
+    store.create_read_grant_audited("enrolled", "approved-plugin", SelectorKind::Exact, CP_LONG_ID, GrantOperation::Read, AuditCtx::admin(AuditOp::GrantCreate)).unwrap();
+    store.with_raw_conn(|conn| conn.execute("UPDATE read_grants SET created_at_ms=?1", [CP_NOW])).unwrap();
     let before = store.audit_tip().unwrap();
     let list = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
     assert_eq!(store.audit_tip().unwrap(), before);
@@ -156,11 +162,11 @@ async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
     let rows = body["result"]["grants"].as_array().unwrap();
     assert_eq!(
         rows.len(),
-        6,
-        "four credential grants, one secret and one flow"
+        7,
+        "five credential grants, one secret and one flow"
     );
     // The secret and flow rows keep the order they had before credential grants were
-    // listed; the four credential rows follow them, sorted by id.
+    // listed; the five credential rows follow them, sorted by id.
     assert_eq!(rows[0]["id"], "sg_sample");
     assert_eq!(rows[1]["id"], "fg_sample");
     assert!(rows[2..]
@@ -189,6 +195,9 @@ async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
         );
     }
     assert!(!String::from_utf8_lossy(&list).contains("canary"));
+    let labelled = rows.iter().find(|row| row["holder"]["name"] == "approved-plugin").unwrap();
+    assert_eq!(labelled["holder"], json!({"kind":"enrolled","name":"approved-plugin","label":"Claude sign-in for Pi"}));
+    assert!(rows.iter().filter(|row| row["holder"]["kind"] == "module").all(|row| row["holder"].get("label").is_none()));
     let filtered = cp_reply(
         &surface,
         &admin,

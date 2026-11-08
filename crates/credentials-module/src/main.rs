@@ -9161,6 +9161,7 @@ mod tests {
             serde_json::to_string(&EnrollProposeParams {
                 proposed_name: "consumer".into(),
                 request_secret_hash: "0".repeat(64),
+                display_name: None,
             })
             .unwrap(),
             operation(OP_ENROLL_PROPOSE)["request"]
@@ -10200,6 +10201,110 @@ mod tests {
                  in the read-surface error class set {:?}",
                 read_surface::ERROR_CLASS_WIRE_SET
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_display_name_wire_requests_replies_and_refusals() {
+        use credentials_core::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (surface, admin, store) = scoped_rig(117);
+        let before = store.audit_tip().unwrap();
+        for invalid in [
+            json!(""),
+            json!(" "),
+            json!("🦀".repeat(41)),
+            json!("a\nb"),
+            json!("a\u{2028}b"),
+            json!("a\u{2029}b"),
+            json!("a\u{202e}b"),
+            json!("a\u{200d}b"),
+            json!(null),
+            json!(7),
+        ] {
+            let frame = enrollment_route_frame(&surface, &admin, OP_ENROLL_PROPOSE, json!({"proposed_name":"consumer","request_secret_hash":"a".repeat(64),"display_name":invalid})).await;
+            assert_enrollment_refusal(&frame, "invalid_params", "permanent");
+            assert_eq!(store.audit_tip().unwrap(), before);
+        }
+        let params = read_surface::EnrollProposeParams {
+            proposed_name: "consumer".into(),
+            request_secret_hash: "a".repeat(64),
+            display_name: Some("Claude sign-in for Pi".into()),
+        };
+        let proposed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            serde_json::to_value(&params).unwrap(),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&proposed.body).unwrap();
+        assert_eq!(proposed.header.ty, FrameType::Response);
+        let request_id = body["result"]["request_id"].as_str().unwrap().to_owned();
+        let mut op = AdminOpBody::EnrollApprove {
+            v: ADMIN_OP_SCHEMA_V2,
+            request_id: "request-id".into(),
+            final_name: "consumer".into(),
+            display_name: Some("Approved Pi label".into()),
+            keep_grants: false,
+        };
+        let approval_bytes = String::from_utf8(op.to_bytes().unwrap()).unwrap();
+        if let AdminOpBody::EnrollApprove { request_id: id, .. } = &mut op {
+            *id = request_id;
+        }
+        let mut reply = apply(&store, op, "operator").unwrap();
+        assert_eq!(reply["display_name"], "Approved Pi label");
+        reply["enrollment_id"] = "enrollment-id".into();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/enrollment_wire_contract.json");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (operation, key, actual) in [
+            (
+                OP_ENROLL_PROPOSE,
+                "display_name_request",
+                serde_json::to_string(&params).unwrap(),
+            ),
+            (
+                "admin.enroll_approve",
+                "display_name_request",
+                approval_bytes,
+            ),
+            (
+                "admin.enroll_approve",
+                "display_name_success",
+                serde_json::to_string(&json!({"result":reply})).unwrap(),
+            ),
+        ] {
+            let row = fixture["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["op"] == operation)
+                .unwrap();
+            if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+                let replacement = format!("      \"{key}\": {},", json!(actual));
+                if let Some(old) = row.get(key) {
+                    let old_line = format!("      \"{key}\": {old},");
+                    assert_eq!(text.matches(&old_line).count(), 1);
+                    text = text.replacen(&old_line, &replacement, 1);
+                } else {
+                    let anchor = format!("      \"op\": \"{operation}\",");
+                    let operations_start = text.find("\"operations\":").unwrap();
+                    let offset = operations_start
+                        + text[operations_start..].find(&anchor).unwrap()
+                        + anchor.len();
+                    text.insert_str(offset, &format!("\n{replacement}"));
+                }
+            } else {
+                assert_eq!(
+                    row[key], actual,
+                    "regenerate with UPDATE_ENROLLMENT_WIRE_FIXTURE=1"
+                );
+            }
+        }
+        if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+            std::fs::write(path, text).unwrap();
+            println!("emitted enrollment display-name proposal, approval and reply goldens");
         }
     }
 
@@ -17407,6 +17512,7 @@ mod tests {
                 &read_surface::EnrollProposeParams {
                     proposed_name: "attributed-consumer".into(),
                     request_secret_hash: secret_hash,
+                    display_name: None,
                 },
             )
             .expect("propose");

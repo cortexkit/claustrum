@@ -782,6 +782,16 @@ is a stranger's claim rather than a fact. After approval, grant `enrolled:<name>
 needs. In `enroll list`, `awaiting-poll` means admitted but never collected: a stalled
 handover, not a live consumer.
 
+A plugin may also propose a display name, such as `Claude sign-in for Pi`.
+`enroll list` shows it beside the request; approval keeps and prints it. To replace
+the label, use `ck auth enroll approve --request-id <id> --display-name <text>`.
+Labels are trimmed and must contain 1–40 Unicode scalar values, without controls,
+line or paragraph separators, bidi controls or zero-width characters (the exact
+code points are in the wire contract). An empty label refuses rather than clearing
+or truncating the proposal. Without a proposal or override, no label is stored.
+Rotation and reissue keep the approved label; revocation removes it. A later
+enrollment under the same raw name starts with its own approval's label, if any.
+
 `revoke` stops the token from resolving immediately; a revoked enrollment answers like an
 unknown token. In the same transaction it removes every grant on `enrolled:<name>` and
 appends one `grant_revoke` audit row per removed grant, preserving the history without

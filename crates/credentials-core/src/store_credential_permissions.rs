@@ -30,11 +30,24 @@ pub(super) fn permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<V
     visible_grants(conn)?
         .into_iter()
         .map(|grant| {
-            let holder = if grant.principal_kind == "reserved" {
+            let mut holder = if grant.principal_kind == "reserved" {
                 json!({"kind":"module", "module_id":grant.principal_id})
             } else {
                 json!({"kind":"enrolled", "name":grant.principal_id})
             };
+            if grant.principal_kind == "enrolled" {
+                let label: Option<String> = conn
+                    .query_row(
+                        "SELECT display_name FROM enrolled_consumers WHERE name=?1 AND revoked_at_ms IS NULL",
+                        [&grant.principal_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if let Some(label) = label {
+                    holder["label"] = json!(label);
+                }
+            }
             let reach = if grant.selector_kind == SelectorKind::Category {
                 conn.query_row(
                     "SELECT COUNT(*) FROM credential_categories cc JOIN credentials c \

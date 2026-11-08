@@ -159,6 +159,13 @@ pub enum AdminOpBody {
         /// The name to admit. Usually the proposed one; an operator may correct it,
         /// because a name a stranger chose is a claim rather than a fact.
         final_name: String,
+        /// Operator replacement for the proposed person-facing label.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::display_name::deserialize_optional_display_name"
+        )]
+        display_name: Option<String>,
         /// Explicitly allow the new consumer to inherit existing name-bound grants.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_grants: bool,
@@ -509,11 +516,13 @@ impl std::fmt::Debug for AdminOpBody {
                 request_id,
                 final_name,
                 keep_grants,
+                display_name,
             } => f
                 .debug_struct("EnrollApprove")
                 .field("v", v)
                 .field("request_id", request_id)
                 .field("final_name", final_name)
+                .field("display_name", display_name)
                 .field("keep_grants", keep_grants)
                 .finish(),
             AdminOpBody::EnrollDeny { v, request_id } => f
@@ -1237,21 +1246,27 @@ pub fn apply(
             request_id,
             final_name,
             keep_grants,
+            display_name,
             ..
         } => {
-            let enrollment_id = store.approve_enrollment_with_grants(
+            let (enrollment_id, display_name) = store.approve_enrollment_with_display_name(
                 &request_id,
                 &final_name,
                 keep_grants,
+                display_name.as_deref(),
                 actor,
             )?;
             // The token is deliberately absent: approval admits a NAME, and only the
             // consumer's own poll -- authenticated by the request secret it minted --
             // turns that into bearer material.
-            Ok(serde_json::json!({
+            let mut reply = serde_json::json!({
                 "enrollment_id": enrollment_id,
                 "name": final_name,
-            }))
+            });
+            if let Some(name) = display_name {
+                reply["display_name"] = serde_json::json!(name);
+            }
+            Ok(reply)
         }
         AdminOpBody::EnrollDeny { request_id, .. } => {
             store.deny_enrollment(&request_id, actor)?;

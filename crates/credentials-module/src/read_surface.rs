@@ -129,6 +129,12 @@ fn valid_deposit_cookie_payload(params: &DepositCookieParams) -> bool {
 pub struct EnrollProposeParams {
     pub proposed_name: String,
     pub request_secret_hash: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "credentials_core::display_name::deserialize_optional_display_name"
+    )]
+    pub display_name: Option<String>,
 }
 
 /// Exact parameters for `auth.enroll_poll`. The request secret is the only resumption
@@ -1404,10 +1410,11 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &EnrollProposeParams,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.engine.store().propose_enrollment_by(
+        self.engine.store().propose_enrollment_with_display_name_by(
             Self::observed_principal(principal),
             &params.proposed_name,
             &params.request_secret_hash,
+            params.display_name.as_deref(),
         )
     }
 

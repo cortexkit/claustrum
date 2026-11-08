@@ -114,6 +114,34 @@ afterEach(async () => {
 })
 
 describe('ClaustrumClient', () => {
+  test('enrollPropose sends display_name only when displayName is given', async () => {
+    const daemon = new FakeDaemon(Array.from({ length: 4 }, () => ({ result: { request_id: 'request-id' } })))
+    const client = await ClaustrumClient.connect({ connector: async () => daemon as never })
+    try {
+      const input = { name: 'consumer', requestSecretHash: 'a'.repeat(64) }
+      await client.enrollPropose(input)
+      await client.enrollPropose({ ...input, displayName: undefined })
+      await client.enrollPropose({ ...input, displayName: 'Claude sign-in for Pi' })
+      await client.enrollPropose({ ...input, displayName: '' })
+      const legacy = { proposed_name: 'consumer', request_secret_hash: 'a'.repeat(64) }
+      expect(daemon.calls.map(call => call.params)).toEqual([
+        legacy, legacy,
+        { ...legacy, display_name: 'Claude sign-in for Pi' },
+        { ...legacy, display_name: '' },
+      ])
+    } finally { client.close() }
+  })
+
+  test('an older vault refusing display_name surfaces invalid_params without retry', async () => {
+    const daemon = new FakeDaemon([{ result: { error: { code: 'invalid_params', class: 'permanent' } } }])
+    const client = await ClaustrumClient.connect({ connector: async () => daemon as never })
+    try {
+      expect(await rejectionOf(client.enrollPropose({ name: 'consumer', requestSecretHash: 'a'.repeat(64), displayName: 'Pi' })))
+        .toMatchObject({ code: 'invalid_params', class: 'permanent' })
+      expect(daemon.calls).toHaveLength(1)
+    } finally { client.close() }
+  })
+
   test('SUBC_CONNECTION_FILE is exclusive even when missing', async () => {
     const runtimeFile = await tempPath('subc-connection.json')
     await writeFile(runtimeFile, '{}')

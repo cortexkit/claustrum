@@ -509,7 +509,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle", "--hash"],
-        "enroll" => &["--request-id", "--name"],
+        "enroll" => &["--request-id", "--name", "--display-name"],
         "approve" => &["--id", "--file", "--approver"],
         // `--prefix` stays in this table DELIBERATELY although it is refused. Removing it
         // would make an operator who types the old flag hit the generic
@@ -649,7 +649,7 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
-       enroll              manage this vault's pending requests and enrollments\n\
+       enroll              review consumer names and labels; manage enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
           put                 store a secret from a file or hidden prompt\n\
@@ -889,12 +889,14 @@ fn help_verb(verb: &str) -> String {
         "enroll" => {
             "ck auth enroll list\n\
              \x20             approve --request-id <id> [--name <name>] [--keep-grants]\n\
+             \x20                     [--display-name <text>]\n\
              \x20             deny --request-id <id>\n\
              \x20             revoke --name <name>\n\
              \x20             reissue --name <name>\n\
              \n\
              \x20 --request-id <id>             pending request, from `enroll list`\n\
              \x20 --name <name>                 consumer name to admit, revoke or reissue\n\
+             \x20 --display-name <text>         replace the proposed display name\n\
              \x20 --keep-grants                 explicitly inherit existing name grants\n\
              \n\
              NOTES\n\
@@ -904,6 +906,10 @@ fn help_verb(verb: &str) -> String {
              authenticated by the request secret it generated, so neither an operator nor a\n\
              squatter can collect a token for a name they do not hold. --name overrides the\n\
              proposed spelling, which is a stranger's claim rather than a fact.\n\
+             list shows proposed display names; approve prints the approved name.\n\
+             --display-name replaces the proposal: trimmed, 1-40 Unicode characters,\n\
+             no controls, separators, bidi controls or zero-width characters; never cut.\n\
+             Empty labels refuse. Rotation keeps the label; revocation removes it.\n\
              Requests are short-lived and stay on the vault on the computer\n\
              where the consumer ran setup. Approve there; `enroll list` shows pending ones.\n\
              revoke removes all the consumer's grants and lists them, auditing each one.\n\
@@ -5697,10 +5703,21 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "--keep-grants is only valid for enroll approve".into(),
         ));
     }
+    if sub != "approve" && optional(rest, "--display-name").is_some() {
+        return Err(CliError::Usage(
+            "--display-name is only valid for enroll approve".into(),
+        ));
+    }
     match sub.as_str() {
         "list" => cmd_enroll_list(global),
         "approve" => {
             let request_id = required(rest, "--request-id")?;
+            let display_name = optional(rest, "--display-name")
+                .map(|name| {
+                    credentials_core::display_name::validate_display_name(&name)
+                        .map_err(|error| CliError::Usage(format!("invalid_params: {error}")))
+                })
+                .transpose()?;
             let proposed_name = pending_proposed_name(global, &request_id)?;
             // The name defaults to what was proposed, and `--name` is how an operator
             // corrects it. A name a stranger chose is a claim, not a fact.
@@ -5733,16 +5750,23 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                     )));
                 }
             }
-            commit_admin(
+            let reply = commit_admin(
                 global,
                 AdminOpBody::EnrollApprove {
                     v: ADMIN_OP_SCHEMA_V2,
                     request_id: request_id.clone(),
                     final_name: final_name.clone(),
                     keep_grants,
+                    display_name,
                 },
             )?;
             println!("approved {request_id} as enrolled:{final_name}");
+            if let Some(name) = reply
+                .get("display_name")
+                .and_then(serde_json::Value::as_str)
+            {
+                println!("display name: \"{}\"", name.escape_debug());
+            }
             eprintln!(
                 "(no token was minted here: the consumer's own poll mints it, \
                  authenticated by the request secret it holds)"
@@ -5925,11 +5949,15 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
             String::new()
         };
         lines.push(format!(
-            "{:<width$}  {:<13}  {:<proposer_width$}  {}{suffix}",
+            "{:<width$}  {:<13}  {:<proposer_width$}  {}{suffix}{}",
             row.key,
             row.state,
             proposer,
             row.name,
+            row.display_name
+                .as_ref()
+                .map(|name| format!("  display name: \"{}\"", name.escape_debug()))
+                .unwrap_or_default(),
             width = width,
             proposer_width = proposer_width
         ));
@@ -7062,12 +7090,28 @@ mod tests {
         credentials_core::store::EnrollmentRow {
             key: key.to_string(),
             name: name.to_string(),
+            display_name: None,
             state: state.to_string(),
             created_at_ms: 0,
             token_generation: generation,
             proposer_kind: None,
             proposer_id: None,
         }
+    }
+
+    #[test]
+    fn enrollment_display_name_listing_escapes_terminal_text() {
+        let mut row = enrollment_row("request", "consumer", "pending", 0);
+        row.display_name = Some("Pi\n\u{1b}[31m\"\\".into());
+        let lines = super::render_enroll_list(&[row]);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[1].contains("Pi\\n\\u{1b}[31m\\\"\\\\"),
+            "{}",
+            lines[1]
+        );
+        assert!(!lines[1].contains('\n'));
+        assert!(!lines[1].contains('\u{1b}'));
     }
 
     /// A pending request under a name is not a live enrollment, so revoke and reissue

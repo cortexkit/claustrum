@@ -338,8 +338,14 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
    **32 decoded bytes**, not of the 64-character UTF-8 hex string, and receive a
    request id. **Persist the secret and hash before you send**, so a crash between the call and its reply
    does not leave you unable to poll a request that exists.
+   Optional `display_name` proposes a person-facing label, such as
+   `Claude sign-in for Pi`. The vault trims surrounding whitespace and accepts
+   1–40 Unicode scalar values. It refuses control characters (Cc), U+2028/U+2029,
+   bidi controls (U+061C, U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), and
+   zero-width characters (U+200B–U+200D, U+FEFF), with `invalid_params`; it never
+   truncates. An older vault refuses this field as `invalid_params`.
 2. **Wait.** An operator approves with the master key (`ck auth enroll approve`).
-   Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
+   `ck auth enroll list` shows the proposed display name. Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
    a name it does not hold from collecting a token even if approval is granted by mistake.
 3. **Poll.** Send `request_secret` as the original 64 lowercase hex characters,
    not the hash. The first successful poll, authenticated by that secret, mints the
@@ -355,7 +361,14 @@ admin refusal path as `enrollment_name_has_grants` / `permanent` unless
 `keep_grants:true` explicitly authorizes inheritance. The grant check and approval
 are one transaction. `ck auth enroll approve` lists those
 grants and explains how to revoke them or consent with `--keep-grants`. The success
-result remains `{"enrollment_id":"<id>","name":"consumer"}`.
+result is `{"enrollment_id":"<id>","name":"consumer"}`, with optional
+`display_name` when a label was approved. The optional admin field `display_name`
+(`ck auth enroll approve --display-name <text>`) replaces the proposed label under
+the same validation rules; an empty override refuses without changing the request.
+Without an override, approval keeps the proposed label. Without either, it stores
+no label. The CLI prints the approved label. Only an approved label is stored on
+the enrollment; token rotation preserves it, revocation removes it, and reusing
+the enrollment name does not inherit it.
 
 `{"op":"admin.enroll_revoke","v":2,"name":"consumer"}` revokes the live enrollment
 and every grant on `enrolled:consumer` in one transaction. Each removed grant gets a
@@ -368,7 +381,7 @@ removed grants. Consumer token rotation (`auth.enroll_rotate`) and operator reis
 preserve grants because they keep the same enrollment. Golden admin request and reply
 examples are pinned by
 `enrollment_regression_admin_wire_examples_pin_consent_and_removed_grants` in the
-enrollment wire fixture below. No consumer request, reply, or refusal shape changes.
+enrollment wire fixture below. Consumer token replies and refusal shapes are unchanged.
 
 **Refusals.** Every enrollment op refuses in the same shape as a read-surface
 refusal: a `Response` frame whose body is
@@ -1923,6 +1936,9 @@ Each stored selector/operation grant is one row:
 
 A `reserved:<id>` principal becomes `holder: {kind: "module", module_id: "<id>"}`;
 an `enrolled:<name>` principal becomes `holder: {kind: "enrolled", name: "<name>"}`.
+When that enrollment has an approved display name, its holder also includes
+`"label":"<approved name>"`; otherwise the `label` key is absent. Module holders
+never receive a vault label: apps get module names from the module's catalog entry.
 Neither holder includes its principal prefix. Other principal kinds are not listed.
 The `scope` is the stored operation: `read`, `list`, `sign`, `open`, `seal`,
 `deposit`, or `account_token`. The timestamp is the grant's creation time.

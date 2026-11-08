@@ -95,6 +95,9 @@ pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
 /// unknown proposer rather than failing the listing.
 pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
 
+/// The migration that records proposed and approved enrollment display names.
+pub const ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION: u32 = 34;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -986,6 +989,11 @@ const MIGRATIONS: &[Migration] = &[
                          WHERE credential_id = NEW.credential_id; \
                      END;",
     },
+    Migration {
+        version: ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION,
+        statements: "ALTER TABLE pending_enrollments ADD COLUMN display_name TEXT; \
+                     ALTER TABLE enrolled_consumers ADD COLUMN display_name TEXT;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1416,6 +1424,8 @@ pub enum StoreOpError {
     InvalidCategoryName,
     /// A tier is not a lowercase ASCII identifier of 1–32 characters.
     InvalidPlanTier,
+    /// An enrollment display name failed the shared person-facing label validation.
+    InvalidDisplayName,
     /// A provider-id write broke one of the provider-id rules. `value` is the id the
     /// rule names, which may be empty (an empty id fails `charset`).
     InvalidProviderId {
@@ -1576,6 +1586,7 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
+            StoreOpError::InvalidDisplayName => f.write_str("invalid_params/permanent: invalid display_name"),
             StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31}"),
             // Labelled fields, so a value that happens to spell a rule token (`count`)
             // cannot be read as a second rule.
@@ -1659,6 +1670,7 @@ impl StoreOpError {
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
+            StoreOpError::InvalidDisplayName => Some("invalid_params"),
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
@@ -2485,7 +2497,29 @@ impl EncryptedStore {
         proposed_name: &str,
         request_secret_hash: &str,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), principal)
+        self.propose_enrollment_with_display_name_by(
+            principal,
+            proposed_name,
+            request_secret_hash,
+            None,
+        )
+    }
+
+    /// Propose a label for the operator to review; resuming never rewrites the request.
+    pub fn propose_enrollment_with_display_name_by(
+        &self,
+        principal: Option<AuthEventPrincipal<'_>>,
+        proposed_name: &str,
+        request_secret_hash: &str,
+        display_name: Option<&str>,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.propose_enrollment_inner(
+            proposed_name,
+            request_secret_hash,
+            now_ms(),
+            principal,
+            display_name,
+        )
     }
 
     /// Test convenience: a proposal with no bus principal. Not compiled into the daemon,
@@ -2497,7 +2531,7 @@ impl EncryptedStore {
         proposed_name: &str,
         request_secret_hash: &str,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), None)
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), None, None)
     }
 
     #[cfg(test)]
@@ -2507,7 +2541,7 @@ impl EncryptedStore {
         request_secret_hash: &str,
         now: i64,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_inner(proposed_name, request_secret_hash, now, None)
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now, None, None)
     }
 
     fn propose_enrollment_inner(
@@ -2516,7 +2550,12 @@ impl EncryptedStore {
         request_secret_hash: &str,
         now: i64,
         principal: Option<AuthEventPrincipal<'_>>,
+        display_name: Option<&str>,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
+        let display_name = display_name
+            .map(crate::display_name::validate_display_name)
+            .transpose()
+            .map_err(|_| EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
         if !valid_enrollment_name(proposed_name) || !is_lower_hex_32(request_secret_hash) {
             return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
         }
@@ -2608,8 +2647,8 @@ impl EncryptedStore {
                     "INSERT INTO pending_enrollments \
                  (request_id, proposed_name, final_name, enrollment_id, request_secret_hash, \
                   state, approved_by, approved_at_ms, created_at_ms, expires_at_ms, \
-                  proposer_kind, proposer_id) \
-                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5, ?6, ?7)",
+                  proposer_kind, proposer_id, display_name) \
+                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
                         request_id,
                         proposed_name,
@@ -2618,6 +2657,7 @@ impl EncryptedStore {
                         expires_at_ms,
                         principal.map(AuthEventPrincipal::kind),
                         principal.and_then(AuthEventPrincipal::id),
+                        display_name,
                     ],
                 )?;
                 append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now, principal)?;
@@ -2992,6 +3032,23 @@ impl EncryptedStore {
         keep_grants: bool,
         actor: &str,
     ) -> Result<String, StoreOpError> {
+        self.approve_enrollment_with_display_name(request_id, final_name, keep_grants, None, actor)
+            .map(|(id, _)| id)
+    }
+
+    /// Approve the proposed label, or a validated operator replacement, atomically.
+    pub fn approve_enrollment_with_display_name(
+        &self,
+        request_id: &str,
+        final_name: &str,
+        keep_grants: bool,
+        display_name: Option<&str>,
+        actor: &str,
+    ) -> Result<(String, Option<String>), StoreOpError> {
+        let display_name = display_name
+            .map(crate::display_name::validate_display_name)
+            .transpose()
+            .map_err(|_| StoreOpError::InvalidDisplayName)?;
         if !valid_enrollment_name(final_name) {
             return Err(StoreOpError::InvalidPrincipal);
         }
@@ -3001,12 +3058,12 @@ impl EncryptedStore {
         self.fenced_write(|tx| {
             let state = tx
                 .query_row(
-                    "SELECT state, expires_at_ms FROM pending_enrollments WHERE request_id = ?1",
+                    "SELECT state, expires_at_ms, display_name FROM pending_enrollments WHERE request_id = ?1",
                     [request_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)),
                 )
                 .optional()?;
-            let Some((state, expires_at_ms)) = state else {
+            let Some((state, expires_at_ms, proposed_display_name)) = state else {
                 return Ok(Ok(None));
             };
             if state != "pending" || expires_at_ms <= now {
@@ -3042,11 +3099,12 @@ impl EncryptedStore {
                     name: final_name.to_string(),
                 }));
             }
+            let approved_display_name = display_name.clone().or(proposed_display_name);
             tx.execute(
                 "INSERT INTO enrolled_consumers \
-                 (enrollment_id, name, token_hash, token_generation, approved_at_ms, approved_by, revoked_at_ms) \
-                 VALUES (?1, ?2, NULL, 0, ?3, ?4, NULL)",
-                rusqlite::params![enrollment_id, final_name, now, actor],
+                 (enrollment_id, name, token_hash, token_generation, approved_at_ms, approved_by, revoked_at_ms, display_name) \
+                 VALUES (?1, ?2, NULL, 0, ?3, ?4, NULL, ?5)",
+                rusqlite::params![enrollment_id, final_name, now, actor, approved_display_name],
             )?;
             tx.execute(
                 "UPDATE pending_enrollments SET state = 'approved', final_name = ?1, \
@@ -3065,7 +3123,7 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(Ok(Some(enrollment_id.clone())))
+            Ok(Ok(Some((enrollment_id.clone(), approved_display_name))))
         })
         .map_err(StoreOpError::from)??
         // Missing and expired requests are gone for approval purposes, not store faults.
@@ -3219,7 +3277,7 @@ impl EncryptedStore {
                 bump_grants_generation_tx(tx)?;
             }
             tx.execute(
-                "UPDATE enrolled_consumers SET revoked_at_ms = ?1 WHERE enrollment_id = ?2",
+                "UPDATE enrolled_consumers SET revoked_at_ms = ?1, display_name = NULL WHERE enrollment_id = ?2",
                 rusqlite::params![now, enrollment_id],
             )?;
             append_audit_tx(
@@ -7908,6 +7966,8 @@ pub struct EnrollmentRow {
     /// `pending` requests carry their request id; live consumers carry their name.
     pub key: String,
     pub name: String,
+    /// Proposed on a pending request, approved on a live enrollment; absent before migration 34.
+    pub display_name: Option<String>,
     pub state: String,
     pub created_at_ms: i64,
     pub token_generation: i64,
@@ -7965,9 +8025,14 @@ pub fn list_enrollments_read_only_with_schema(
     } else {
         "NULL, NULL"
     };
+    let display_name_column = if schema_version >= ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION {
+        "display_name"
+    } else {
+        "NULL"
+    };
     let mut pending = conn
         .prepare(&format!(
-            "SELECT request_id, proposed_name, state, created_at_ms, {proposer_columns} \
+            "SELECT request_id, proposed_name, state, created_at_ms, {proposer_columns}, {display_name_column} \
              FROM pending_enrollments WHERE state = 'pending' ORDER BY created_at_ms"
         ))
         .map_err(map)?;
@@ -7981,6 +8046,7 @@ pub fn list_enrollments_read_only_with_schema(
                 token_generation: 0,
                 proposer_kind: row.get(4)?,
                 proposer_id: row.get(5)?,
+                display_name: row.get(6)?,
             })
         })
         .map_err(map)?;
@@ -7989,10 +8055,10 @@ pub fn list_enrollments_read_only_with_schema(
     }
 
     let mut live = conn
-        .prepare(
-            "SELECT name, approved_at_ms, token_generation, token_hash FROM enrolled_consumers \
+        .prepare(&format!(
+            "SELECT name, approved_at_ms, token_generation, token_hash, {display_name_column} FROM enrolled_consumers \
              WHERE revoked_at_ms IS NULL ORDER BY approved_at_ms",
-        )
+        ))
         .map_err(map)?;
     let mapped = live
         .query_map([], |row| {
@@ -8012,6 +8078,7 @@ pub fn list_enrollments_read_only_with_schema(
                 token_generation: row.get(2)?,
                 proposer_kind: None,
                 proposer_id: None,
+                display_name: row.get(4)?,
             })
         })
         .map_err(map)?;
@@ -13269,7 +13336,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            33,
+            34,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -15676,6 +15743,203 @@ mod migration_10_tests {
     }
 
     #[test]
+    fn migration_34_preserves_enrollments_and_pending_requests_without_labels() {
+        let (root, store) = sqlite("migration-34", 124);
+        migrate_through_for_test(&store, 33).unwrap();
+        store.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO enrolled_consumers VALUES ('live-id','older-consumer','hash',7,12,'operator',NULL); \
+                 INSERT INTO enrolled_consumers VALUES ('revoked-id','revoked-consumer',NULL,0,13,'operator',14);"
+            )?;
+            for state in ["pending", "approved", "consumed", "denied", "expired"] {
+                conn.execute(
+                    "INSERT INTO pending_enrollments (request_id,proposed_name,request_secret_hash,state,created_at_ms,expires_at_ms,proposer_kind,proposer_id) VALUES (?1,?1,?2,?1,15,9999999999999,'reserved','broca')",
+                    rusqlite::params![state, "d".repeat(64)],
+                )?;
+            }
+            Ok(())
+        }).unwrap();
+        let path = root.join("store.db");
+        let before = list_enrollments_read_only(&path).unwrap();
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|row| row.display_name.is_none()));
+        EncryptedStore::migrate(&store).unwrap();
+        assert_eq!(list_enrollments_read_only(&path).unwrap(), before);
+        store.with_conn(|conn| {
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pending_enrollments WHERE display_name IS NULL AND created_at_ms=15 AND proposer_id='broca'", [], |r| r.get::<_, i64>(0))?, 5);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM enrolled_consumers WHERE display_name IS NULL", [], |r| r.get::<_, i64>(0))?, 2);
+            assert_eq!(conn.query_row("SELECT token_generation FROM enrolled_consumers WHERE enrollment_id='live-id' AND token_hash='hash'", [], |r| r.get::<_, i64>(0))?, 7);
+            assert_eq!(conn.query_row("SELECT revoked_at_ms FROM enrolled_consumers WHERE enrollment_id='revoked-id'", [], |r| r.get::<_, i64>(0))?, 14);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn enrollment_display_names_survive_rotation_but_not_revocation_or_reuse() {
+        let (root, store) = rig("enrollment-labels", 125);
+        let secret = "ab".repeat(32);
+        let hash = enrollment_secret_hash(&secret).unwrap();
+        let proposal = store
+            .propose_enrollment_with_display_name_by(
+                None,
+                "consumer",
+                &hash,
+                Some("  Claude sign-in for Pi  "),
+            )
+            .unwrap();
+        let path = root.join("store.db");
+        assert_eq!(
+            list_enrollments_read_only(&path).unwrap()[0]
+                .display_name
+                .as_deref(),
+            Some("Claude sign-in for Pi")
+        );
+        let resumed = store
+            .propose_enrollment_with_display_name_by(
+                None,
+                "consumer",
+                &hash,
+                Some("Replacement claim"),
+            )
+            .unwrap();
+        assert_eq!(resumed, proposal);
+        assert_eq!(
+            list_enrollments_read_only(&path).unwrap()[0]
+                .display_name
+                .as_deref(),
+            Some("Claude sign-in for Pi")
+        );
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "consumer",
+                SelectorKind::Exact,
+                "apikey:label",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let permission_holder = || {
+            store.secret_permissions_list(None, now_ms()).unwrap()["grants"][0]["holder"].clone()
+        };
+        assert!(
+            permission_holder().get("label").is_none(),
+            "a proposal is not an approved label"
+        );
+        let before = store.audit_tip().unwrap();
+        for invalid in ["", "a\nb", "a\u{202e}b", "a\u{200d}b"] {
+            assert!(matches!(
+                store.approve_enrollment_with_display_name(
+                    &proposal.request_id,
+                    "consumer",
+                    false,
+                    Some(invalid),
+                    "operator"
+                ),
+                Err(StoreOpError::InvalidDisplayName)
+            ));
+            assert_eq!(store.audit_tip().unwrap(), before);
+            let rows = list_enrollments_read_only(&path).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].state, "pending");
+            assert_eq!(
+                rows[0].display_name.as_deref(),
+                Some("Claude sign-in for Pi")
+            );
+        }
+        let (id, label) = store
+            .approve_enrollment_with_display_name(
+                &proposal.request_id,
+                "consumer",
+                true,
+                None,
+                "operator",
+            )
+            .unwrap();
+        assert_eq!(label.as_deref(), Some("Claude sign-in for Pi"));
+        assert_eq!(permission_holder()["label"], "Claude sign-in for Pi");
+        let EnrollmentPoll::Approved { token, .. } = store
+            .poll_enrollment(&proposal.request_id, &secret)
+            .unwrap()
+        else {
+            panic!("approved")
+        };
+        store.rotate_enrollment(&token, 1).unwrap();
+        assert_eq!(permission_holder()["label"], "Claude sign-in for Pi");
+        assert_eq!(
+            list_enrollments_read_only(&path).unwrap()[0].display_name,
+            label
+        );
+        store.revoke_enrollment("consumer", "operator").unwrap();
+        assert!(list_enrollments_read_only(&path).unwrap().is_empty());
+        assert_eq!(
+            store.secret_permissions_list(None, now_ms()).unwrap()["grants"],
+            serde_json::json!([])
+        );
+        store
+            .with_raw_conn(|conn| {
+                let stored: Option<String> = conn.query_row(
+                    "SELECT display_name FROM enrolled_consumers WHERE enrollment_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(stored, None);
+                Ok(())
+            })
+            .unwrap();
+        let replacement = store.propose_enrollment("consumer", &hash).unwrap();
+        assert_eq!(
+            store
+                .approve_enrollment_with_display_name(
+                    &replacement.request_id,
+                    "consumer",
+                    false,
+                    None,
+                    "operator"
+                )
+                .unwrap()
+                .1,
+            None
+        );
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "consumer",
+                SelectorKind::Exact,
+                "apikey:label",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        assert!(
+            permission_holder().get("label").is_none(),
+            "a new enrollment must not inherit a label"
+        );
+        let override_request = store
+            .propose_enrollment_with_display_name_by(
+                None,
+                "other-consumer",
+                &hash,
+                Some("Proposal"),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .approve_enrollment_with_display_name(
+                    &override_request.request_id,
+                    "other-consumer",
+                    false,
+                    Some("  Person's choice  "),
+                    "operator"
+                )
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("Person's choice")
+        );
+    }
+
+    #[test]
     fn open_grants_round_trip_and_unknown_operations_are_refused_by_the_reader() {
         let (root, store) = sqlite("open-grant", 118);
         EncryptedStore::migrate(&store).expect("migrate");
@@ -15871,6 +16135,7 @@ mod migration_10_tests {
                 column("approved_at_ms", "INTEGER", true, None, false),
                 column("approved_by", "TEXT", true, None, false),
                 column("revoked_at_ms", "INTEGER", false, None, false),
+                column("display_name", "TEXT", false, None, false),
             ],
             "an incarnation carries no token until one is minted, so token_hash is \
              nullable and the generation starts at 0"
@@ -15892,6 +16157,7 @@ mod migration_10_tests {
                 // Migration 12: nullable, because rows proposed before it carry none.
                 column("proposer_kind", "TEXT", false, None, false),
                 column("proposer_id", "TEXT", false, None, false),
+                column("display_name", "TEXT", false, None, false),
             ],
             "everything an approval fills in is nullable at proposal time"
         );

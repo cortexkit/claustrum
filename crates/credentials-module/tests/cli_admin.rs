@@ -6327,6 +6327,102 @@ fn enrollment_regression_retained_grants_require_flag_and_revoke_lists_removed_g
 }
 
 #[test]
+fn enrollment_display_name_cli_reviews_keeps_overrides_and_refuses_empty() {
+    let vault = GrantCliVault::new("enrollment-display-names");
+    vault.bootstrap();
+    for (name, proposal, replacement, expected) in [
+        (
+            "proposed-label",
+            Some("  Claude sign-in for Pi  "),
+            None,
+            Some("Claude sign-in for Pi"),
+        ),
+        (
+            "override-label",
+            Some("Proposal"),
+            Some("  Person's choice  "),
+            Some("Person's choice"),
+        ),
+        ("no-label", None, None, None),
+    ] {
+        let request = {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            store
+                .propose_enrollment_with_display_name_by(None, name, &"a".repeat(64), proposal)
+                .unwrap()
+        };
+        let listed = vault.run(&["enroll", "list"]);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        if let Some(label) = proposal {
+            assert!(String::from_utf8_lossy(&listed.stdout).contains(&format!(
+                "display name: \"{}\"",
+                label.trim().escape_debug()
+            )));
+        }
+        {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            let before = credentials_core::store::list_enrollments_read_only(
+                &vault.data_dir.join("store.db"),
+            )
+            .unwrap();
+            let tip = store.audit_tip().unwrap();
+            let refused = vault.run(&[
+                "enroll",
+                "approve",
+                "--request-id",
+                &request.request_id,
+                "--display-name",
+                "",
+            ]);
+            assert!(!refused.status.success());
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("invalid_params"));
+            assert_eq!(
+                credentials_core::store::list_enrollments_read_only(
+                    &vault.data_dir.join("store.db")
+                )
+                .unwrap(),
+                before
+            );
+            assert_eq!(store.audit_tip().unwrap(), tip);
+        }
+        let mut args = vec!["enroll", "approve", "--request-id", &request.request_id];
+        if let Some(label) = replacement {
+            args.extend(["--display-name", label]);
+        }
+        let approved = vault.run(&args);
+        assert!(
+            approved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approved.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&approved.stdout);
+        if let Some(label) = expected {
+            assert!(
+                stdout.contains(&format!("display name: \"{}\"", label.escape_debug())),
+                "{stdout}"
+            );
+        } else {
+            assert!(!stdout.contains("display name:"));
+        }
+        let rows =
+            credentials_core::store::list_enrollments_read_only(&vault.data_dir.join("store.db"))
+                .unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.name == name)
+                .unwrap()
+                .display_name
+                .as_deref(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn enrollment_regression_admin_wire_examples_pin_consent_and_removed_grants() {
     use credentials_core::admin_ops::{apply, AdminOpBody};
     use credentials_core::audit::AuditCtx;

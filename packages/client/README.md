@@ -168,6 +168,13 @@ for (;;) {
 
 ## Enrollment
 
+`enrollPropose` accepts an optional `displayName`, for example
+`{ name: 'consumer', requestSecretHash, displayName: 'Claude sign-in for Pi' }`.
+The person sees and approves the proposed label, or replaces it during approval.
+This option needs a vault build with enrollment display-name support; an older
+vault refuses the `display_name` field as `invalid_params`. Omit `displayName`
+for compatibility with older vaults.
+
 Use `newEnrollmentSecret()` to prepare an enrollment proposal. It generates 32
 random bytes as exactly 64 lowercase hex characters, plus `requestSecretHash`:
 the lowercase hex SHA-256 of the **32 decoded bytes**, not of the UTF-8 hex text.

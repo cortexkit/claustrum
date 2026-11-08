@@ -476,11 +476,15 @@ export class ClaustrumClient {
    * BEFORE calling this, and a crash costs nothing.
    *
    * A different secret on the same name is a different caller and is refused.
+   * Optional `displayName` proposes a person-facing label for operator approval. It
+   * needs a vault build with enrollment display-name support; an older vault refuses
+   * the `display_name` field as `invalid_params`. Omit it for older vaults.
    */
-  async enrollPropose(input: { name: string; requestSecretHash: string }): Promise<{ requestId: string }> {
+  async enrollPropose(input: { name: string; requestSecretHash: string; displayName?: string }): Promise<{ requestId: string }> {
     const response = await this.#call('auth.enroll_propose', {
       proposed_name: input.name,
       request_secret_hash: input.requestSecretHash,
+      ...(input.displayName !== undefined ? { display_name: input.displayName } : {}),
     })
     const result = decodeEnrollmentResult(response, this.#logger)
     const requestId = result.request_id

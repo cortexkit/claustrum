@@ -26,6 +26,7 @@ pub mod contract;
 pub mod credential_id;
 pub mod deposit_cookie;
 pub mod device_flow;
+pub mod display_name;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;

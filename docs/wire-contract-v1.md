@@ -1968,8 +1968,9 @@ and excluded ids return `{"outcome":"not_found"}` without adding an audit entry 
 changing the audit chain's final hash.
 Existing secret-grant and flow-grant revocation is unchanged.
 
-Published, dispatcher-emitted samples (including an exact grant with a long,
-single credential id for app wrapping checks) are in
+Published samples, emitted through the real dispatcher, are in the file below.
+They include an exact grant whose `subject_label` is one long credential id, so
+the apps can check how a long label wraps on screen:
 `crates/credentials-core/tests/vectors/permissions-credential-grants-v1.json`.
 Regenerate them with
 `CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --bin ck-claustrum --features credentials-core/test-support permissions_credential_grants_dispatcher_lists_and_pins_samples`.

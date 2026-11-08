@@ -56,8 +56,9 @@ impl EncryptedStore {
             // agent-filtered listing never contains one (permissions-v1.1).
             if agent_id.is_none() {
                 grants.extend(flow_permission_rows(conn)?);
-                // Credential grants follow the secret and flow rows, sorted by id, so
-                // the rows listed before them keep the order phones already pinned.
+                // Credential grants are appended after the secret and flow rows and
+                // sorted by id among themselves, so the secret and flow rows keep the
+                // order they had before credential grants were listed.
                 let mut credential_rows = credential_permissions::permission_rows(conn)?;
                 credential_rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
                 grants.extend(credential_rows);

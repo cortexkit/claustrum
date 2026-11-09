@@ -318,6 +318,9 @@ impl EncryptedStore {
                 return Ok(Err(refusal));
             }
             gate();
+            if scope.is_extended() && !super::phone::multi_host_enabled(tx) {
+                return Ok(Err(StoreOpError::SecretMultiHostDisabled));
+            }
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM agent_secrets WHERE name=?1)",
                 [&put.name],
@@ -332,12 +335,10 @@ impl EncryptedStore {
             let incarnation = hex_of(&random);
             let blob = agent_secret::seal(&self.key, &incarnation, &put.name, &scope, &material)
                 .map_err(|_| rusqlite_err("secret seal failed"))?;
-            if scope.is_extended() {
-                return Ok(Err(secret_validation_error(agent_secret::ValidationError::InvalidParams)));
-            }
+            let scope_json = scope.scope_json().map_err(|_| rusqlite_err("secret scope encoding failed"))?;
             let (host, prefix, location, origin) = super::phone::columns(&scope);
-            tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",
-                rusqlite::params![put.name,scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now_ms()])?;
+            tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10,?11)",
+                rusqlite::params![put.name,scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now_ms(),scope_json])?;
             // The payload names the same fields a phone store does, minus the deposit id
             // an operator put never had. Material and any digest of it stay out.
             let mut fields: Vec<&[u8]> = vec![scope.kind().as_bytes(), incarnation.as_bytes()];
@@ -352,7 +353,13 @@ impl EncryptedStore {
                     location.as_bytes(),
                 ]),
                 SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
-                SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. } => return Ok(Err(secret_validation_error(agent_secret::ValidationError::InvalidParams))),
+                SecretScope::ApiKeyRules { location, .. } => fields.extend([
+                    scope_json.as_deref().expect("extended scope").as_bytes(),
+                    location.as_bytes(),
+                ]),
+                SecretScope::SiteLoginOrigins { .. } => fields.push(
+                    scope_json.as_deref().expect("extended scope").as_bytes(),
+                ),
             }
             super::phone::audit(
                 tx,

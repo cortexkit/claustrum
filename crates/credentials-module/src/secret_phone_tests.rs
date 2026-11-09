@@ -376,3 +376,135 @@ async fn phone_deposit_keys_skips_pairing_and_requires_setup() {
         vec!["key_id", "pub", "state"]
     );
 }
+fn extended_deposit_params(kind: &str, fields: Value) -> Value {
+    let mut params = json!({
+        "deposit_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "name": "token", "kind": kind,
+        "enc_b64url": URL_SAFE_NO_PAD.encode([0; 32]), "ciphertext_b64url": "AA"
+    });
+    params
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    if kind == "agent_api_key" {
+        params["location"] = json!("authorization_bearer");
+    }
+    params
+}
+
+#[test]
+fn phone_extended_deposit_scope_corpus_pins_grammar_psl_and_precedence() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../credentials-core/tests/vectors/multi-host/secret-scope-match-v1.json"
+    ))
+    .unwrap();
+    for case in corpus["cases"].as_array().unwrap() {
+        if case["form"] != "input" {
+            continue;
+        }
+        let params = extended_deposit_params(case["kind"].as_str().unwrap(), case["scope"].clone());
+        let parsed = parse("secret.deposit", &params);
+        if let Some(expected) = case["expect"].get("scope_refused") {
+            assert_eq!(
+                parsed.err().unwrap().code(),
+                expected.as_str().unwrap(),
+                "{}",
+                case["case"]
+            );
+        } else {
+            assert!(parsed.is_ok(), "{}: {:?}", case["case"], parsed.err());
+        }
+    }
+}
+
+#[test]
+fn phone_extended_deposit_key_sets_are_closed_and_presence_is_by_key() {
+    let api = extended_deposit_params("agent_api_key", json!({"rules": [{"host":"*.x.test"}]}));
+    let login = extended_deposit_params(
+        "site_login",
+        json!({"origins": ["https://b.test", "https://a.test"]}),
+    );
+    for params in [&api, &login] {
+        assert!(parse("secret.deposit", params).is_ok());
+        for key in params.as_object().unwrap().keys() {
+            let mut missing = params.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(parse("secret.deposit", &missing).is_err(), "missing {key}");
+        }
+        let mut unknown = params.clone();
+        unknown["unexpected"] = json!(null);
+        assert!(matches!(
+            parse("secret.deposit", &unknown),
+            Err(SecretError::InvalidParams)
+        ));
+    }
+    for (base, key, value) in [
+        (&api, "host", json!(null)),
+        (&api, "path_prefix", json!(null)),
+        (&api, "origins", json!(["https://a.test", "https://b.test"])),
+        (&api, "rules", json!(null)),
+        (&api, "rules", json!({"host":"*.x.test"})),
+        (&api, "rules", json!([])),
+        (&api, "rules", json!([{"host":false}])),
+        (
+            &api,
+            "rules",
+            json!([{"host":"*.x.test", "path_prefix":null}]),
+        ),
+        (&api, "rules", json!([{"host":"*.x.test", "extra":true}])),
+        (&login, "origin", json!(null)),
+        (&login, "rules", json!([])),
+        (&login, "origins", json!(null)),
+        (&login, "origins", json!("https://a.test")),
+        (&login, "origins", json!([])),
+        (&login, "origins", json!([false, "https://a.test"])),
+    ] {
+        let mut params = base.clone();
+        params[key] = value;
+        assert!(
+            matches!(
+                parse("secret.deposit", &params),
+                Err(SecretError::InvalidParams)
+            ),
+            "{params}"
+        );
+    }
+    let PhoneOperation::Deposit(parsed) = parse("secret.deposit", &login).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        parsed.scope,
+        SecretScope::SiteLoginOrigins {
+            origins: vec!["https://b.test".into(), "https://a.test".into()]
+        }
+    );
+}
+
+#[test]
+fn phone_extended_deposit_accepts_8_rules_and_4_origins_and_refuses_the_next_entry() {
+    use credentials_core::agent_secret::{MAX_SECRET_ORIGINS, MAX_SECRET_RULES};
+    for (kind, key, cap) in [
+        ("agent_api_key", "rules", MAX_SECRET_RULES),
+        ("site_login", "origins", MAX_SECRET_ORIGINS),
+    ] {
+        for count in [cap, cap + 1] {
+            let entries: Vec<Value> = (0..count)
+                .map(|i| {
+                    if key == "rules" {
+                        json!({"host":format!("h{i}.test")})
+                    } else {
+                        json!(format!("https://h{i}.test"))
+                    }
+                })
+                .collect();
+            let params = extended_deposit_params(kind, json!({key: entries}));
+            let parsed = parse("secret.deposit", &params);
+            if count == cap {
+                assert!(parsed.is_ok());
+            } else {
+                assert!(matches!(parsed, Err(SecretError::LimitExceeded)));
+            }
+        }
+    }
+}

@@ -33,6 +33,8 @@ fn api_key_put(name: &str, location: Option<&str>) -> SecretPut {
         path_prefix: Some("/repos/a".into()),
         location: Some(location.unwrap_or("authorization_bearer").to_owned()),
         origin: None,
+        rules: None,
+        origins: None,
         material_b64url: URL_SAFE_NO_PAD.encode(
             crate::agent_secret::deposit_plaintext(&SecretMaterial::ApiKey(Secret::new(
                 CANARY.to_vec(),
@@ -596,3 +598,277 @@ mod flow_schema_tests;
 
 #[path = "store_secret_listing_tests.rs"]
 mod listing_tests;
+fn put_for_scope(kind: &str, fields: &Value, name: &str) -> SecretPut {
+    let mut put = api_key_put(name, None);
+    put.kind = kind.into();
+    put.host = fields
+        .get("host")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    put.path_prefix = fields
+        .get("path_prefix")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    put.origin = fields
+        .get("origin")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    put.rules = fields.get("rules").cloned();
+    put.origins = fields.get("origins").cloned();
+    if kind == "site_login" {
+        put.location = None;
+        put.material_b64url = URL_SAFE_NO_PAD.encode(
+            crate::agent_secret::deposit_plaintext(&SecretMaterial::SiteLogin {
+                username: Secret::new("u".into()),
+                password: Secret::new("p".into()),
+                otpauth: None,
+            })
+            .expose(),
+        );
+    }
+    put
+}
+
+#[test]
+fn operator_extended_put_scope_corpus_pins_grammar_psl_and_refusal_mapping() {
+    let (_root, store) = setup("op-extended-corpus");
+    store
+        .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+        .unwrap();
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../tests/vectors/multi-host/secret-scope-match-v1.json"
+    ))
+    .unwrap();
+    for (i, case) in corpus["cases"].as_array().unwrap().iter().enumerate() {
+        if case["form"] != "input" {
+            continue;
+        }
+        let put = put_for_scope(
+            case["kind"].as_str().unwrap(),
+            &case["scope"],
+            &format!("scope-{i}"),
+        );
+        let before = counts(&store);
+        let result = store.secret_put_audited(&put, "test");
+        if let Some(expected) = case["expect"].get("scope_refused") {
+            let error = result.unwrap_err();
+            if expected == "limit_exceeded" {
+                assert!(
+                    matches!(&error, StoreOpError::Store(message) if message.starts_with("limit_exceeded:")),
+                    "{}: {error}",
+                    case["case"]
+                );
+            } else {
+                assert_eq!(
+                    error.wire_code(),
+                    Some("invalid_credential_id"),
+                    "{}: {error}",
+                    case["case"]
+                );
+            }
+            assert_eq!(counts(&store), before);
+        } else {
+            assert_eq!(result.unwrap()["status"], "stored", "{}", case["case"]);
+        }
+    }
+}
+
+#[test]
+fn operator_extended_put_refuses_non_arrays_unknown_rule_keys_and_mixed_encodings() {
+    let (_root, store) = setup("op-extended-shape");
+    let before = counts(&store);
+    for fields in [
+        json!({"rules":null}),
+        json!({"rules":{}}),
+        json!({"rules":[]}),
+        json!({"rules":[{"host":false}]}),
+        json!({"rules":[{"host":"*.x.test", "path_prefix":null}]}),
+        json!({"rules":[{"host":"*.x.test", "extra":true}]}),
+        json!({"rules":[{"host":"*.x.test"}], "host":"x.test"}),
+        json!({"rules":[{"host":"*.x.test"}], "path_prefix":"/v1"}),
+        json!({"rules":[{"host":"*.x.test"}], "origins":["https://a.test","https://b.test"]}),
+    ] {
+        let put = put_for_scope("agent_api_key", &fields, "token");
+        assert_eq!(
+            store
+                .secret_put_audited(&put, "test")
+                .unwrap_err()
+                .wire_code(),
+            Some("invalid_credential_id"),
+            "{fields}"
+        );
+    }
+    for fields in [
+        json!({"origins":null}),
+        json!({"origins":false}),
+        json!({"origins":[]}),
+        json!({"origins":[false,"https://a.test"]}),
+        json!({"origins":["https://a.test","https://b.test"],"origin":"https://a.test"}),
+        json!({"origins":["https://a.test","https://b.test"],"rules":[]}),
+    ] {
+        let put = put_for_scope("site_login", &fields, "token");
+        assert_eq!(
+            store
+                .secret_put_audited(&put, "test")
+                .unwrap_err()
+                .wire_code(),
+            Some("invalid_credential_id"),
+            "{fields}"
+        );
+    }
+    assert_eq!(counts(&store), before);
+}
+
+#[test]
+fn operator_extended_put_accepts_8_rules_and_4_origins_and_refuses_the_next_entry() {
+    use crate::agent_secret::{MAX_SECRET_ORIGINS, MAX_SECRET_RULES};
+    let (_root, store) = setup("op-extended-boundaries");
+    store
+        .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+        .unwrap();
+    for (kind, key, cap) in [
+        ("agent_api_key", "rules", MAX_SECRET_RULES),
+        ("site_login", "origins", MAX_SECRET_ORIGINS),
+    ] {
+        for count in [cap, cap + 1] {
+            let entries: Vec<Value> = (0..count)
+                .map(|i| {
+                    if key == "rules" {
+                        serde_json::json!({"host":format!("h{i}.test")})
+                    } else {
+                        serde_json::json!(format!("https://h{i}.test"))
+                    }
+                })
+                .collect();
+            let put = put_for_scope(
+                kind,
+                &serde_json::json!({key: entries}),
+                &format!("boundary-{kind}-{count}"),
+            );
+            let before = counts(&store);
+            let result = store.secret_put_audited(&put, "test");
+            if count == cap {
+                assert_eq!(result.unwrap()["status"], "stored");
+            } else {
+                assert!(
+                    matches!(result.unwrap_err(), StoreOpError::Store(message) if message.starts_with("limit_exceeded:"))
+                );
+                assert_eq!(counts(&store), before);
+            }
+        }
+    }
+}
+
+#[test]
+fn operator_extended_put_gate_is_transactional_and_canonical_scope_and_audit_are_stored() {
+    for (kind, fields, canonical, material) in [
+        (
+            "agent_api_key",
+            serde_json::json!({"rules":[{"host":"z.test"},{"host":"a.test","path_prefix":"/v1"}]}),
+            r#"[{"host":"a.test","path_prefix":"/v1"},{"host":"z.test","path_prefix":""}]"#,
+            SecretMaterial::ApiKey(Secret::new(CANARY.to_vec())),
+        ),
+        (
+            "site_login",
+            serde_json::json!({"origins":["https://z.test","https://a.test"]}),
+            r#"["https://a.test","https://z.test"]"#,
+            SecretMaterial::SiteLogin {
+                username: Secret::new("u".into()),
+                password: Secret::new("p".into()),
+                otpauth: None,
+            },
+        ),
+    ] {
+        let (root, store) = setup(&format!("op-extended-gate-{kind}"));
+        let put = put_for_scope(kind, &fields, "token");
+        for value in [None, Some("false"), Some("unreadable")] {
+            store.store.with_conn(|c| {
+                c.execute("DELETE FROM settings WHERE name='secret.multi_host'", [])?;
+                if let Some(value) = value { c.execute("INSERT INTO settings (name,value,updated_at_ms) VALUES ('secret.multi_host',?1,0)", [value])?; }
+                Ok(())
+            }).unwrap();
+            let before = counts(&store);
+            let error = store
+                .secret_put_audited_with_gate(&put, "test", &|| {
+                    let conn = rusqlite::Connection::open(store_file(&root)).unwrap();
+                    conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+                    let error = conn
+                        .execute(
+                            "UPDATE settings SET value='true' WHERE name='secret.multi_host'",
+                            [],
+                        )
+                        .unwrap_err();
+                    assert_eq!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy)
+                    );
+                })
+                .unwrap_err();
+            assert_eq!(error.wire_code(), Some("secret_multi_host_disabled"));
+            assert_eq!(counts(&store), before);
+        }
+        store
+            .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+            .unwrap();
+        let result = store.secret_put_audited(&put, "test").unwrap();
+        let incarnation = result["incarnation"].as_str().unwrap();
+        store.store.with_conn(|c| {
+            let (scope_json, host, prefix, origin, location, envelope) = c.query_row(
+                "SELECT scope_json,host,path_prefix,origin,location,envelope FROM agent_secrets WHERE name='token'", [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?,r.get::<_, Option<String>>(3)?,r.get::<_, Option<String>>(4)?,r.get::<_, Vec<u8>>(5)?)))?;
+            assert_eq!(scope_json, canonical);
+            assert_eq!((host,prefix,origin), (None,None,None));
+            let scope = crate::agent_secret::SecretScope::from_scope_json(kind, location.as_deref(), canonical).unwrap();
+            assert_eq!(crate::agent_secret::open(&store.key, incarnation, "token", &scope, &envelope).unwrap(), material);
+            let mut preimage = Vec::new();
+            for field in [kind.as_bytes(), incarnation.as_bytes(), canonical.as_bytes()].into_iter().chain(location.as_ref().map(|v| v.as_bytes())) {
+                preimage.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                preimage.extend_from_slice(field);
+            }
+            let hash: String = c.query_row("SELECT payload_hash FROM audit_log WHERE op='secret_store'", [], |r| r.get(0))?;
+            assert_eq!(hash, sha256_hex(&preimage));
+            Ok(())
+        }).unwrap();
+        store
+            .set_secret_multi_host_audited(false, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+            .unwrap();
+        assert_eq!(
+            store
+                .secret_put_audited(&put, "test")
+                .unwrap_err()
+                .wire_code(),
+            Some("secret_multi_host_disabled")
+        );
+    }
+}
+
+#[test]
+fn operator_extended_put_home_refusal_precedes_gate_and_legacy_ignores_gate() {
+    let (_root, store) = setup("op-extended-home");
+    let put = put_for_scope(
+        "agent_api_key",
+        &serde_json::json!({"rules":[{"host":"*.x.test"}]}),
+        "token",
+    );
+    store
+        .set_secret_home_audited(
+            Some("fed-computer:33333333333333333333333333333333"),
+            AuditCtx::admin(AuditOp::SecretHomeSet),
+        )
+        .unwrap();
+    let error = store
+        .secret_put_audited_with_gate(&put, "test", &|| panic!("home refusal must run first"))
+        .unwrap_err();
+    assert!(matches!(error, StoreOpError::SecretHomeElsewhere { .. }));
+    store
+        .set_secret_home_audited(None, AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    for (i, value) in ["false", "true", "unreadable"].into_iter().enumerate() {
+        store.store.with_conn(|c| c.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('secret.multi_host',?1,0)", [value])).unwrap();
+        assert_eq!(
+            store
+                .secret_put_audited(&api_key_put(&format!("legacy-{i}"), None), "test")
+                .unwrap()["status"],
+            "stored"
+        );
+    }
+}

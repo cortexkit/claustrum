@@ -34,6 +34,15 @@ pub const ADMIN_OP_SCHEMA_V2: u32 = 2;
 /// Keep the decoded limit below the unchanged admin-envelope limit online.
 pub const MAX_OPERATOR_SIGN_PAYLOAD: usize = 64 * 1024;
 
+// Preserve an explicit null so the shared scope parser refuses it as a non-array.
+// Only an omitted extended field is absent; legacy Option fields still accept null.
+fn present_scope_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// One authenticated admin operation. `#[serde(tag = "op")]` so the discriminator
 /// is an `op` string inside the same object the transcript covers.
 #[derive(Clone, Serialize, Deserialize)]
@@ -271,10 +280,9 @@ pub enum AdminOpBody {
     /// admin MAC already covers. A caller that could rewrite those bytes could also
     /// rewrite `op`, so carrying material here adds no new trust boundary.
     ///
-    /// The scope fields are the ones the referenced kind needs: `host` and `location`
-    /// for `agent_api_key` (`path_prefix` optional), `origin` for `site_login`. The
-    /// vault validates them with the same validators a phone deposit uses, so the two
-    /// paths cannot accept different shapes.
+    /// An API key uses `host` (optional `path_prefix`) or `rules`, plus `location`;
+    /// a login uses `origin` or `origins`. The vault validates them with the same
+    /// parser a phone deposit uses, so the two paths cannot accept different shapes.
     #[serde(rename = "admin.secret_put")]
     SecretPut {
         v: u32,
@@ -284,6 +292,18 @@ pub enum AdminOpBody {
         path_prefix: Option<String>,
         location: Option<String>,
         origin: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        rules: Option<serde_json::Value>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        origins: Option<serde_json::Value>,
         material_b64url: String,
     },
     /// `ck auth secret delete`: remove a secret, its grants and its pending requests.
@@ -666,6 +686,8 @@ impl std::fmt::Debug for AdminOpBody {
                 path_prefix,
                 location,
                 origin,
+                rules,
+                origins,
                 ..
             } => f
                 .debug_struct("SecretPut")
@@ -676,6 +698,8 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("path_prefix", path_prefix)
                 .field("location", location)
                 .field("origin", origin)
+                .field("rules", rules)
+                .field("origins", origins)
                 .field("material_b64url", &"<redacted>")
                 .finish(),
             AdminOpBody::SecretDelete { v, name } => f
@@ -1667,6 +1691,8 @@ pub fn apply(
             path_prefix,
             location,
             origin,
+            rules,
+            origins,
             material_b64url,
             ..
         } => store.secret_put_audited(
@@ -1677,6 +1703,8 @@ pub fn apply(
                 path_prefix,
                 location,
                 origin,
+                rules,
+                origins,
                 material_b64url,
             },
             actor,
@@ -2038,6 +2066,25 @@ mod tests {
     }
 
     #[test]
+    fn secret_put_legacy_bytes_omit_extended_fields_and_preserve_explicit_null() {
+        let legacy = br#"{"op":"admin.secret_put","v":2,"kind":"agent_api_key","name":"key","host":"x.test","path_prefix":null,"location":"authorization_bearer","origin":null,"material_b64url":""}"#;
+        let op: AdminOpBody = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(op.to_bytes().unwrap(), legacy);
+        let mut extended: serde_json::Value = serde_json::from_slice(legacy).unwrap();
+        extended["host"] = serde_json::Value::Null;
+        extended["rules"] = serde_json::json!([{"host":"*.x.test"}]);
+        let op: AdminOpBody = serde_json::from_value(extended.clone()).unwrap();
+        assert_eq!(serde_json::to_value(op).unwrap(), extended);
+        extended["rules"] = serde_json::Value::Null;
+        let op: AdminOpBody = serde_json::from_value(extended).unwrap();
+        let AdminOpBody::SecretPut { rules, origins, .. } = op else {
+            panic!()
+        };
+        assert_eq!(rules, Some(serde_json::Value::Null));
+        assert_eq!(origins, None);
+    }
+
+    #[test]
     fn debug_never_renders_agent_secret_material() {
         let op = AdminOpBody::SecretPut {
             v: 2,
@@ -2047,6 +2094,8 @@ mod tests {
             path_prefix: Some("/v1".into()),
             location: Some("authorization_bearer".into()),
             origin: None,
+            rules: None,
+            origins: None,
             material_b64url: "TUFURVJJQUwtQ0FOQVJZ".into(),
         };
         let rendered = format!("{op:?}");
@@ -2455,6 +2504,8 @@ mod admin_schema_v2_tests {
                     path_prefix: None,
                     location: Some("authorization_bearer".into()),
                     origin: None,
+                    rules: None,
+                    origins: None,
                     material_b64url: "".into(),
                 },
                 v2,

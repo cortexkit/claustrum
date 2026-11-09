@@ -5,6 +5,9 @@ use ValidationError::{InvalidParams, LimitExceeded};
 
 pub const MAX_SECRET_HOST_BYTES: usize = rules::MAX_HOST_BYTES;
 pub const MAX_SECRET_PATH_PREFIX_BYTES: usize = rules::MAX_PREFIX_BYTES;
+// Contract caps enforced by the shared parser and pinned by vault boundary tests.
+pub const MAX_SECRET_RULES: usize = 8;
+pub const MAX_SECRET_ORIGINS: usize = 4;
 pub const MAX_SECRET_HEADER_BYTES: usize = 64;
 pub const MAX_SECRET_QUERY_BYTES: usize = 64;
 pub const MAX_SECRET_POINTER_BYTES: usize = 256;
@@ -444,8 +447,8 @@ pub(super) fn validate_otpauth(uri: &str) -> Result<(), ValidationError> {
 
 /// The operator `ck auth secret put` request, as the admin op hands it to the store.
 ///
-/// Every field arrives as text or base64 text because it crossed a JSON admin op, so
-/// this type exists to turn that back into the validated `SecretScope` and
+/// The fields crossed a JSON admin op, so this type exists to turn its scope metadata
+/// and base64 material back into the validated `SecretScope` and
 /// `SecretMaterial` a phone deposit would have produced. Putting the conversion here
 /// keeps one validator for both doors: a scope that a phone deposit refuses must be
 /// refused by `put` as well, or the two would slowly accept different shapes.
@@ -463,6 +466,9 @@ pub struct SecretPut {
     pub path_prefix: Option<String>,
     pub location: Option<String>,
     pub origin: Option<String>,
+    /// Keep the input JSON intact so the shared parser owns shape and refusal order.
+    pub rules: Option<Value>,
+    pub origins: Option<Value>,
     /// Unpadded base64url of the deposit-plaintext bytes for `kind`.
     pub material_b64url: String,
 }
@@ -474,20 +480,29 @@ impl SecretPut {
     /// The returned errors deliberately carry no field of the request: `invalid_params`
     /// names no value, and the caller decides which rule to print for a human.
     pub fn scope_and_material(&self) -> Result<(SecretScope, SecretMaterial), ValidationError> {
-        let scope = match (self.kind.as_str(), &self.host, &self.location, &self.origin) {
-            ("agent_api_key", Some(host), Some(location), None) => SecretScope::ApiKey {
-                host: host.clone(),
-                path_prefix: self.path_prefix.clone(),
-                location: location.clone(),
-            },
-            ("site_login", None, None, Some(origin)) if self.path_prefix.is_none() => {
-                SecretScope::SiteLogin {
-                    origin: origin.clone(),
-                }
-            }
+        match self.kind.as_str() {
+            "agent_api_key" if self.location.is_some() => {}
+            "site_login" if self.location.is_none() => {}
             _ => return Err(InvalidParams),
-        };
-        validate_scope(&scope)?;
+        }
+        let mut fields = serde_json::Map::new();
+        for (key, value) in [
+            ("host", &self.host),
+            ("path_prefix", &self.path_prefix),
+            ("origin", &self.origin),
+        ] {
+            if let Some(value) = value {
+                fields.insert(key.into(), json!(value));
+            }
+        }
+        for (key, value) in [("rules", &self.rules), ("origins", &self.origins)] {
+            if let Some(value) = value {
+                fields.insert(key.into(), value.clone());
+            }
+        }
+        let scope =
+            SecretScope::from_input(&self.kind, &Value::Object(fields), self.location.as_deref())?
+                .canonicalized()?;
         let bytes = base64_url_no_pad(&self.material_b64url)?;
         let framed = super::Secret::new(bytes);
         let material = super::decode_deposit_plaintext(scope.kind(), &framed)?;
@@ -518,6 +533,8 @@ impl std::fmt::Debug for SecretPut {
             .field("path_prefix", &self.path_prefix)
             .field("location", &self.location)
             .field("origin", &self.origin)
+            .field("rules", &self.rules)
+            .field("origins", &self.origins)
             .field("material_b64url", &"<redacted>")
             .finish()
     }

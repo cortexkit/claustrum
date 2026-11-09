@@ -5,7 +5,7 @@ use credentials_core::{
     agent_secret::{self, SecretError, SecretScope},
     store::{EncryptedStore, PhoneDeposit, PhoneOperation},
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -210,8 +210,9 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
         }
         "secret.deposit" => {
             let kind = text(params, "kind")?;
-            let scope = match kind {
+            let (fields, location) = match kind {
                 "agent_api_key" => {
+                    let extended = params.get("rules").is_some();
                     keys(
                         params,
                         &[
@@ -219,23 +220,26 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
                             "member_id",
                             "name",
                             "kind",
-                            "host",
+                            if extended { "rules" } else { "host" },
                             "location",
                             "enc_b64url",
                             "ciphertext_b64url",
                         ],
-                        &["path_prefix"],
+                        if extended { &[] } else { &["path_prefix"] },
                     )?;
-                    SecretScope::ApiKey {
-                        host: text(params, "host")?.to_owned(),
-                        path_prefix: params
-                            .get("path_prefix")
-                            .map(|_| text(params, "path_prefix").map(str::to_owned))
-                            .transpose()?,
-                        location: text(params, "location")?.to_owned(),
-                    }
+                    let fields = if extended {
+                        json!({"rules": params["rules"]})
+                    } else {
+                        let mut fields = json!({"host": text(params, "host")?});
+                        if params.get("path_prefix").is_some() {
+                            fields["path_prefix"] = json!(text(params, "path_prefix")?);
+                        }
+                        fields
+                    };
+                    (fields, Some(text(params, "location")?))
                 }
                 "site_login" => {
+                    let extended = params.get("origins").is_some();
                     keys(
                         params,
                         &[
@@ -243,21 +247,26 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
                             "member_id",
                             "name",
                             "kind",
-                            "origin",
+                            if extended { "origins" } else { "origin" },
                             "enc_b64url",
                             "ciphertext_b64url",
                         ],
                         &[],
                     )?;
-                    SecretScope::SiteLogin {
-                        origin: text(params, "origin")?.to_owned(),
-                    }
+                    (
+                        if extended {
+                            json!({"origins": params["origins"]})
+                        } else {
+                            json!({"origin": text(params, "origin")?})
+                        },
+                        None,
+                    )
                 }
                 _ => return Err(SecretError::InvalidParams),
             };
             let name = text(params, "name")?;
             agent_secret::validate_name(name)?;
-            agent_secret::validate_scope(&scope)?;
+            let scope = SecretScope::from_input(kind, &fields, location)?;
             let deposit_id = text(params, "deposit_id")?;
             if !valid_ulid(deposit_id) {
                 return Err(SecretError::InvalidParams);

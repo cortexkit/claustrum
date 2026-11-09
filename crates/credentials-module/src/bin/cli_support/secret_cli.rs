@@ -306,6 +306,8 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             path_prefix,
             location: (op_kind == "agent_api_key").then_some(location),
             origin,
+            rules: None,
+            origins: None,
             material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(frame_plaintext(&material).expose()),
         },

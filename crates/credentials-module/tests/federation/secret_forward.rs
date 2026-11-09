@@ -165,6 +165,8 @@ fn api_key_put() -> SecretPut {
         path_prefix: Some("/repos/a".into()),
         location: Some("header:X-Api-Key".into()),
         origin: None,
+        rules: None,
+        origins: None,
         material_b64url: b64url(
             deposit_plaintext(&SecretMaterial::ApiKey(Secret::new(API_KEY.to_vec()))).expose(),
         ),
@@ -179,6 +181,8 @@ fn site_login_put() -> SecretPut {
         path_prefix: None,
         location: None,
         origin: Some("https://x.test".into()),
+        rules: None,
+        origins: None,
         material_b64url: b64url(
             deposit_plaintext(&SecretMaterial::SiteLogin {
                 username: Secret::new(USERNAME.to_owned()),

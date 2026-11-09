@@ -5,6 +5,17 @@ use serde_json::{json, Value};
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
 
+pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
+    matches!(
+        conn.query_row(
+            "SELECT value FROM settings WHERE name=?1",
+            [MULTI_HOST_SETTING],
+            |r| r.get::<_, String>(0),
+        ).optional(),
+        Ok(Some(value)) if value == "true"
+    )
+}
+
 /// Read the multi-host setting without taking the writer lease or loading secrets.
 pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
     if !path
@@ -361,6 +372,9 @@ impl EncryptedStore {
                 Err(SecretError::DepositConflict)
             });
         }
+        if d.scope.is_extended() && !multi_host_enabled(tx) {
+            return Ok(Err(SecretError::SecretMultiHostDisabled));
+        }
         if d.member_id != member {
             return Ok(Err(SecretError::NotFound));
         }
@@ -396,17 +410,22 @@ impl EncryptedStore {
         getrandom::getrandom(&mut random)
             .map_err(|_| rusqlite_err("secret incarnation generation failed"))?;
         let incarnation = hex(&random);
-        let blob = agent_secret::seal(&self.key, &incarnation, &d.name, &d.scope, &material)
+        // Authenticate the sent order before sorting the scope stored in the row and body.
+        let scope = match d.scope.canonicalized() {
+            Ok(scope) => scope,
+            Err(e) => return Ok(Err(e.into())),
+        };
+        let scope_json = scope
+            .scope_json()
+            .map_err(|_| rusqlite_err("secret scope encoding failed"))?;
+        let blob = agent_secret::seal(&self.key, &incarnation, &d.name, &scope, &material)
             .map_err(|_| rusqlite_err("secret seal failed"))?;
-        if d.scope.is_extended() {
-            return Ok(Err(SecretError::InvalidParams));
-        }
-        let (host, prefix, location, origin) = columns(&d.scope);
-        tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",
-            rusqlite::params![d.name,d.scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now])?;
+        let (host, prefix, location, origin) = columns(&scope);
+        tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10,?11)",
+            rusqlite::params![d.name,scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now,scope_json])?;
         tx.execute("INSERT INTO secret_deposit_tombstones (deposit_id,digest,member_id,incarnation) VALUES (?1,?2,?3,?4)", rusqlite::params![d.deposit_id,digest,member,incarnation])?;
-        let mut fields = vec![d.scope.kind().as_bytes(), incarnation.as_bytes()];
-        match &d.scope {
+        let mut fields = vec![scope.kind().as_bytes(), incarnation.as_bytes()];
+        match &scope {
             SecretScope::ApiKey {
                 host,
                 path_prefix,
@@ -417,8 +436,12 @@ impl EncryptedStore {
                 location.as_bytes(),
             ]),
             SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
-            SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. } => {
-                return Ok(Err(SecretError::InvalidParams))
+            SecretScope::ApiKeyRules { location, .. } => fields.extend([
+                scope_json.as_deref().expect("extended scope").as_bytes(),
+                location.as_bytes(),
+            ]),
+            SecretScope::SiteLoginOrigins { .. } => {
+                fields.push(scope_json.as_deref().expect("extended scope").as_bytes())
             }
         }
         fields.push(d.deposit_id.as_bytes());

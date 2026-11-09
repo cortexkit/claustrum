@@ -966,3 +966,183 @@ fn secret_shared_validators_pin_material_and_header_boundaries() {
         }
     }
 }
+#[test]
+fn phone_extended_deposit_gate_replay_sent_order_canonical_storage_and_audit() {
+    use crate::agent_secret::SecretRule;
+    let rules = SecretScope::ApiKeyRules {
+        rules: vec![
+            SecretRule {
+                host: "z.test".into(),
+                path_prefix: None,
+            },
+            SecretRule {
+                host: "a.test".into(),
+                path_prefix: Some("/v1".into()),
+            },
+        ],
+        location: "authorization_bearer".into(),
+    };
+    let origins = SecretScope::SiteLoginOrigins {
+        origins: vec!["https://z.test".into(), "https://a.test".into()],
+    };
+    for (scope, canonical_json, material) in [
+        (
+            rules,
+            r#"[{"host":"a.test","path_prefix":"/v1"},{"host":"z.test","path_prefix":""}]"#,
+            key(),
+        ),
+        (
+            origins,
+            r#"["https://a.test","https://z.test"]"#,
+            SecretMaterial::SiteLogin {
+                username: Secret::new("u".into()),
+                password: Secret::new("p".into()),
+                otpauth: None,
+            },
+        ),
+    ] {
+        let (_root, store, sender) = setup(&format!("phone-extended-{}", scope.kind()));
+        let d = deposit(
+            &store,
+            &sender,
+            "token",
+            ID,
+            scope.clone(),
+            material.clone(),
+        );
+        for value in [None, Some("false"), Some("unreadable")] {
+            store.store.with_conn(|c| {
+                c.execute("DELETE FROM settings WHERE name='secret.multi_host'", [])?;
+                if let Some(value) = value { c.execute("INSERT INTO settings (name,value,updated_at_ms) VALUES ('secret.multi_host',?1,0)", [value])?; }
+                Ok(())
+            }).unwrap();
+            let before = snapshot(&store);
+            assert_eq!(
+                run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())),
+                Err(SecretError::SecretMultiHostDisabled)
+            );
+            let mut bad = d.clone();
+            bad.member_id = "fed-computer:33333333333333333333333333333333".into();
+            bad.ciphertext.clear();
+            assert_eq!(
+                run(&store, Some("pair-A"), &PhoneOperation::Deposit(bad)),
+                Err(SecretError::SecretMultiHostDisabled)
+            );
+            assert_eq!(snapshot(&store), before);
+        }
+        store
+            .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+            .unwrap();
+        let result = run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap();
+        assert_eq!(result["status"], "stored");
+        let incarnation = result["incarnation"].as_str().unwrap();
+        store.store.with_conn(|c| {
+            let (scope_json, host, prefix, origin, location, envelope) = c.query_row(
+                "SELECT scope_json,host,path_prefix,origin,location,envelope FROM agent_secrets WHERE name='token'", [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?,r.get::<_, Option<String>>(3)?,r.get::<_, Option<String>>(4)?,r.get::<_, Vec<u8>>(5)?)))?;
+            assert_eq!(scope_json, canonical_json);
+            assert_eq!((host,prefix,origin), (None,None,None));
+            let canonical = SecretScope::from_scope_json(scope.kind(), location.as_deref(), canonical_json).unwrap();
+            assert_eq!(agent_secret::open(&store.key, incarnation, "token", &canonical, &envelope).unwrap(), material);
+            assert_ne!(agent_secret::deposit_aad(ID, MEMBER, "token", &scope).unwrap(), agent_secret::deposit_aad(ID, MEMBER, "token", &canonical).unwrap());
+            let mut preimage = Vec::new();
+            for field in [scope.kind().as_bytes(), incarnation.as_bytes(), canonical_json.as_bytes()].into_iter().chain(location.as_ref().map(|v| v.as_bytes())).chain([ID.as_bytes()]) {
+                preimage.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                preimage.extend_from_slice(field);
+            }
+            let hash: String = c.query_row("SELECT payload_hash FROM audit_log WHERE op='secret_store'", [], |r| r.get(0))?;
+            use sha2::{Digest, Sha256};
+            assert_eq!(hash, format!("{:x}", Sha256::digest(&preimage)));
+            Ok(())
+        }).unwrap();
+        store
+            .set_secret_multi_host_audited(false, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+            .unwrap();
+        let before = snapshot(&store);
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap(),
+            json!({"status":"already_stored"})
+        );
+        let mut reordered = d.clone();
+        match &mut reordered.scope {
+            SecretScope::ApiKeyRules { rules, .. } => rules.reverse(),
+            SecretScope::SiteLoginOrigins { origins } => origins.reverse(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(reordered)),
+            Err(SecretError::DepositConflict)
+        );
+        let mut fresh = d.clone();
+        fresh.deposit_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".into();
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(fresh)),
+            Err(SecretError::SecretMultiHostDisabled)
+        );
+        assert_eq!(snapshot(&store), before);
+    }
+}
+
+#[test]
+fn phone_extended_deposit_stores_the_rule_and_origin_caps_and_legacy_ignores_gate() {
+    use crate::agent_secret::{SecretRule, MAX_SECRET_ORIGINS, MAX_SECRET_RULES};
+    let (_root, store, sender) = setup("phone-extended-boundary");
+    store
+        .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+        .unwrap();
+    let rules = SecretScope::ApiKeyRules {
+        rules: (0..MAX_SECRET_RULES)
+            .map(|i| SecretRule {
+                host: format!("h{i}.test"),
+                path_prefix: None,
+            })
+            .collect(),
+        location: "authorization_bearer".into(),
+    };
+    let origins = SecretScope::SiteLoginOrigins {
+        origins: (0..MAX_SECRET_ORIGINS)
+            .map(|i| format!("https://h{i}.test"))
+            .collect(),
+    };
+    for (i, (scope, material)) in [
+        (rules, key()),
+        (
+            origins,
+            SecretMaterial::SiteLogin {
+                username: Secret::new("u".into()),
+                password: Secret::new("p".into()),
+                otpauth: None,
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let d = deposit(
+            &store,
+            &sender,
+            &format!("cap-{i}"),
+            &format!("cap-{i}"),
+            scope,
+            material,
+        );
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(d)).unwrap()["status"],
+            "stored"
+        );
+    }
+    for (i, value) in ["false", "true", "unreadable"].into_iter().enumerate() {
+        store.store.with_conn(|c| c.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('secret.multi_host',?1,0)", [value])).unwrap();
+        let d = deposit(
+            &store,
+            &sender,
+            &format!("legacy-{i}"),
+            &format!("legacy-{i}"),
+            scope(),
+            key(),
+        );
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(d)).unwrap()["status"],
+            "stored"
+        );
+    }
+}

@@ -182,6 +182,8 @@ crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_001 example.com
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_002 example.com
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_003 x.test
+crates/credentials-core/src/store_secret_flow_schema_tests.rs INLINE_001 x.test
+crates/credentials-core/src/store_secret_flow_schema_tests.rs INLINE_002 x.test
 crates/credentials-core/src/store_secret_flow_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_flow_tests.rs INLINE_002 x.test
 crates/credentials-core/src/store_secret_flow_tests.rs INLINE_003 x.test

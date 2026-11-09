@@ -28,7 +28,7 @@ fn insert_secret(store: &EncryptedStore, name: &str, incarnation: &str) {
 #[test]
 fn secret_migrations_create_exactly_eight_secret_tables() {
     let (_root, store) = rig("secret-schema", 50);
-    assert_eq!(newest_migration_version(), 34);
+    assert_eq!(newest_migration_version(), 35);
     let tables = store.store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'agent_secrets' OR name LIKE 'secret_%') ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -60,7 +60,7 @@ fn secret_migrations_create_exactly_eight_secret_tables() {
 #[test]
 fn every_secret_table_blocks_audit_key_regeneration() {
     let inserts = [
-        "INSERT INTO agent_secrets VALUES ('Example', 'agent_api_key', '00000000000000000000000000000000', 'active', 'x.test', NULL, 'authorization_bearer', NULL, 1, 'key', x'00', 0)",
+        "INSERT INTO agent_secrets (name, kind, incarnation, state, host, path_prefix, location, origin, record_version, key_id, envelope, created_at_ms) VALUES ('Example', 'agent_api_key', '00000000000000000000000000000000', 'active', 'x.test', NULL, 'authorization_bearer', NULL, 1, 'key', x'00', 0)",
         "INSERT INTO secret_phone_keys VALUES ('fp', 'pairing', zeroblob(32), zeroblob(65), 0)",
         "INSERT INTO secret_phone_observations VALUES ('fp', NULL, 0)",
         "INSERT INTO secret_pending_requests (request_id, request_kind, secret_name, incarnation, member_id, statement_bytes, statement_sha256, request_expires_at_ms) VALUES ('req', 'delete', 'Example', 'inc', 'member', x'00', 'hash', 0)",

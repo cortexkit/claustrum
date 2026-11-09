@@ -5,6 +5,234 @@ use rusqlite::types::Value as SqlValue;
 const INC: &str = "00000000000000000000000000000001";
 const CODE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+#[test]
+fn migration_35_preserves_legacy_secrets_and_all_related_rows() {
+    use crate::agent_secret::{self, SecretMaterial, SecretScope};
+    use crate::secret::Secret;
+
+    let (_root, sqlite) = crate::store::taxonomy_tests::sqlite("secret-scope-migration", 155);
+    migrate_through_for_test(&sqlite, 34).unwrap();
+    let key = MasterKey::from_bytes([155; 32]);
+    let fixtures = [
+        (
+            "ops-key",
+            INC,
+            "active",
+            SecretScope::ApiKey {
+                host: "x.test".into(),
+                path_prefix: Some("/repos/a".into()),
+                location: "authorization_bearer".into(),
+            },
+            SecretMaterial::ApiKey(Secret::new(b"migration-test-key".to_vec())),
+        ),
+        (
+            "login",
+            "00000000000000000000000000000002",
+            "corrupt",
+            SecretScope::SiteLogin {
+                origin: "https://x.test".into(),
+            },
+            SecretMaterial::SiteLogin {
+                username: Secret::new("migration-user".into()),
+                password: Secret::new("migration-test-password".into()),
+                otpauth: None,
+            },
+        ),
+    ];
+    for (name, incarnation, state, scope, material) in &fixtures {
+        let blob = agent_secret::seal(&key, incarnation, name, scope, material).unwrap();
+        let (host, prefix, location, origin) = if let SecretScope::ApiKey {
+            host,
+            path_prefix,
+            location,
+        } = scope
+        {
+            (
+                Some(host.as_str()),
+                path_prefix.as_deref(),
+                Some(location.as_str()),
+                None,
+            )
+        } else if let SecretScope::SiteLogin { origin } = scope {
+            (None, None, None, Some(origin.as_str()))
+        } else {
+            panic!("migration fixtures must use legacy scopes")
+        };
+        sqlite.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,'legacy-key-id',?9,10)",
+                rusqlite::params![name, scope.kind(), incarnation, state, host, prefix, location, origin, blob],
+            )?;
+            Ok(())
+        }).unwrap();
+    }
+    seed_flow(
+        &sqlite,
+        "flow-grant",
+        "ops-key",
+        INC,
+        Some(r#"["GET","POST"]"#),
+    );
+    sqlite.with_conn(|conn| conn.execute_batch(&format!(
+        "INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,agent_id,card_ref,first_released,last_use_ms,asking_member_id) VALUES ('agent-grant','ops-key','{INC}','owner','head','H','scope','hour',500,11,'envelope-hash','agent-A','card',1,12,'asking-vault');
+         UPDATE secret_flow_grants SET asking_member_id='asking-vault';
+         INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods,asking_member_id) VALUES ('flow-request','approve','ops-key','{INC}','member','owner','head','H',7,'scope','agent-A',x'1234','digest',999,0,'daily-fetch',7,'{CODE_HASH}','flow-grant','[\"GET\"]','asking-vault');
+         INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed) VALUES ('delete-request','delete','login','00000000000000000000000000000002','member',x'5678','digest2',1000,1);
+         INSERT INTO secret_deposit_tombstones VALUES ('deposit','digest','member','{INC}');
+         INSERT INTO secret_release_receipts VALUES ('asking-vault','nonce','aad-hash','{INC}','flow','flow-grant',x'001122',x'334455',1000);"
+    ))).unwrap();
+    let tables = [
+        "agent_secrets",
+        "secret_grants",
+        "secret_flow_grants",
+        "secret_pending_requests",
+        "secret_deposit_tombstones",
+        "secret_release_receipts",
+    ];
+    let before: Vec<_> = tables.iter().map(|table| rows(&sqlite, table)).collect();
+    migrate_through_for_test(&sqlite, SECRET_SCOPE_SCHEMA_VERSION).unwrap();
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 35);
+    for (table, before) in tables.into_iter().zip(before) {
+        let after = rows(&sqlite, table);
+        assert_eq!(after.len(), before.len(), "{table}");
+        for (old, new) in before.iter().zip(after) {
+            if table == "agent_secrets" {
+                assert_eq!(&new[..old.len()], old, "{table}");
+                assert_eq!(&new[old.len()..], &[SqlValue::Null]);
+            } else {
+                assert_eq!(&new, old, "{table}");
+            }
+        }
+    }
+    sqlite.with_conn(|conn| {
+        let columns = conn.prepare("PRAGMA table_info(agent_secrets)")?
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(columns.len(), 13);
+        assert_eq!(columns.last().unwrap(), &("scope_json".into(), "TEXT".into(), false));
+        let indexes = conn.prepare("SELECT il.origin, il.\"unique\", ii.name FROM pragma_index_list('agent_secrets') AS il JOIN pragma_index_info(il.name) AS ii ORDER BY il.origin")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(indexes, [("pk".into(), true, "name".into()), ("u".into(), true, "incarnation".into())]);
+        for (name, incarnation, _, scope, material) in &fixtures {
+            let blob: Vec<u8> = conn.query_row("SELECT envelope FROM agent_secrets WHERE name=?1", [name], |r| r.get(0))?;
+            assert_eq!(&agent_secret::open(&key, incarnation, name, scope, &blob).unwrap(), material);
+        }
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn migration_35_check_requires_exactly_one_scope_form_for_each_kind() {
+    let (_root, sqlite) = crate::store::taxonomy_tests::sqlite("secret-scope-check", 156);
+    migrate_through_for_test(&sqlite, SECRET_SCOPE_SCHEMA_VERSION).unwrap();
+    let api = "agent_api_key";
+    let login = "site_login";
+    let host = Some("x.test");
+    let prefix = Some("/repos/a");
+    let location = Some("authorization_bearer");
+    let origin = Some("https://x.test");
+    // The table CHECK selects the scope form; stored decoding validates JSON contents.
+    let scope = Some("[]");
+    let accepted = [
+        (api, host, prefix, location, None, None),
+        (api, None, None, location, None, scope),
+        (login, None, None, None, origin, None),
+        (login, None, None, None, None, scope),
+    ];
+    let refused = [
+        ("api both forms", (api, host, None, location, None, scope)),
+        ("api neither form", (api, None, None, location, None, None)),
+        (
+            "api extended prefix",
+            (api, None, prefix, location, None, scope),
+        ),
+        ("api missing location", (api, None, None, None, None, scope)),
+        (
+            "api empty location",
+            (api, None, None, Some(""), None, scope),
+        ),
+        (
+            "api with origin",
+            (api, None, None, location, origin, scope),
+        ),
+        ("login both forms", (login, None, None, None, origin, scope)),
+        ("login neither form", (login, None, None, None, None, None)),
+        ("login with host", (login, host, None, None, None, scope)),
+        (
+            "login with prefix",
+            (login, None, prefix, None, None, scope),
+        ),
+        (
+            "login with location",
+            (login, None, None, location, None, scope),
+        ),
+    ];
+    sqlite.with_conn(|conn| {
+        let insert = |name, incarnation, (kind, host, prefix, location, origin, scope)| conn.execute(
+            "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,'key',x'1234',10,?8)",
+            rusqlite::params![name, kind, incarnation, host, prefix, location, origin, scope],
+        );
+        for (i, fields) in accepted.into_iter().enumerate() {
+            assert_eq!(insert(format!("valid-{i}"), format!("{i:032x}"), fields)?, 1);
+        }
+        for (i, (case, fields)) in refused.into_iter().enumerate() {
+            let error = insert(format!("invalid-{i}"), format!("{:032x}", i + 100), fields).unwrap_err();
+            assert_eq!(error.sqlite_error().unwrap().extended_code, rusqlite::ffi::SQLITE_CONSTRAINT_CHECK, "{case}: {error}");
+        }
+        let duplicate_name = insert("valid-0".into(), format!("{:032x}", 200), accepted[0]).unwrap_err();
+        assert_eq!(duplicate_name.sqlite_error().unwrap().extended_code, rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY);
+        let duplicate_incarnation = insert("duplicate-incarnation".into(), format!("{:032x}", 0), accepted[0]).unwrap_err();
+        assert_eq!(duplicate_incarnation.sqlite_error().unwrap().extended_code, rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn read_only_scope_listing_reads_steps_27_34_and_35_without_decoding_or_migrating() {
+    let (root, sqlite) = crate::store::taxonomy_tests::sqlite("secret-scope-listing", 157);
+    migrate_through_for_test(&sqlite, 27).unwrap();
+    seed_agent_rows(&sqlite);
+    let path = store_file(&root);
+    let legacy = list_agent_secrets_read_only(&path).unwrap().unwrap();
+    assert_eq!(legacy.secrets.len(), 1);
+    assert_eq!(legacy.secrets[0].scope_json, None);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 27);
+
+    migrate_through_for_test(&sqlite, 34).unwrap();
+    assert_eq!(
+        list_agent_secrets_read_only(&path).unwrap().unwrap(),
+        legacy
+    );
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 34);
+
+    migrate_through_for_test(&sqlite, SECRET_SCOPE_SCHEMA_VERSION).unwrap();
+    assert_eq!(
+        list_agent_secrets_read_only(&path).unwrap().unwrap(),
+        legacy
+    );
+    let rules = r#"[{"host":"*.x.test","path_prefix":""}]"#;
+    let unreadable = " not-json [ ";
+    sqlite.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO agent_secrets (name,kind,incarnation,state,location,record_version,key_id,envelope,created_at_ms,scope_json) VALUES ('extended-key','agent_api_key',?1,'active','authorization_bearer',1,'key',x'00',10,?2)",
+            rusqlite::params!["00000000000000000000000000000003", rules],
+        )?;
+        conn.execute(
+            "INSERT INTO agent_secrets (name,kind,incarnation,state,record_version,key_id,envelope,created_at_ms,scope_json) VALUES ('unreadable-login','site_login',?1,'corrupt',1,'key',x'00',10,?2)",
+            rusqlite::params!["00000000000000000000000000000004", unreadable],
+        )?;
+        Ok(())
+    }).unwrap();
+    let listing = list_agent_secrets_read_only(&path).unwrap().unwrap();
+    assert_eq!(listing.secrets.len(), 3);
+    assert_eq!(listing.secrets[0].scope_json.as_deref(), Some(rules));
+    assert_eq!(listing.secrets[1], legacy.secrets[0]);
+    assert_eq!(listing.secrets[2].scope_json.as_deref(), Some(unreadable));
+    assert_eq!(list_agent_secret_grants_read_only(&path).unwrap().len(), 1);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 35);
+}
+
 fn old_store(version: u32) -> (crate::test_support::TestTempDir, SqliteStore) {
     // Each caller migrates to a different version, so the version keeps tests that run in
     // parallel out of each other's directory; the pid keeps separate runs apart.
@@ -128,7 +356,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
     seed_flow(&sqlite, "flow-A", "ops-key", INC, Some(r#"["GET","POST"]"#));
     seed_flow(&sqlite, "flow-B", "ops-key", INC, Some(r#"["GET"]"#));
     sqlite.with_conn(|conn| conn.execute_batch(
-        "INSERT INTO agent_secrets VALUES ('login','site_login','00000000000000000000000000000002','active',NULL,NULL,NULL,'https://x.test',1,'key',x'00',10);"
+        "INSERT INTO agent_secrets (name, kind, incarnation, state, host, path_prefix, location, origin, record_version, key_id, envelope, created_at_ms) VALUES ('login','site_login','00000000000000000000000000000002','active',NULL,NULL,NULL,'https://x.test',1,'key',x'00',10);"
     )).unwrap();
     seed_flow(
         &sqlite,
@@ -138,7 +366,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         None,
     );
     let after = list_agent_secrets_read_only(&path).unwrap().unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 34);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 35);
     assert_eq!(after.phones, before.phones);
     let key = after.secrets.iter().find(|s| s.name == "ops-key").unwrap();
     assert_eq!(key.grants, before.secrets[0].grants);
@@ -174,7 +402,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         .collect();
     ids.sort();
     assert_eq!(ids, ["agent-grant", "flow-A", "flow-B", "flow-login"]);
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 34);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 35);
 }
 
 #[test]

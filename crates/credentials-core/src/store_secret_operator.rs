@@ -511,6 +511,8 @@ pub struct OperatorSecretRow {
     pub path_prefix: Option<String>,
     pub location: Option<String>,
     pub origin: Option<String>,
+    /// Raw stored text, so an unreadable scope never prevents listing grants or names.
+    pub scope_json: Option<String>,
     pub grants: Vec<OperatorGrantRow>,
     /// Flow holders are separate because they have no agent scope or coverage.
     pub flow_grants: Vec<OperatorFlowGrantRow>,
@@ -589,8 +591,13 @@ pub fn list_agent_secrets_read_only(
     if schema_version < AGENT_SECRET_SCHEMA_VERSION {
         return Ok(None);
     }
+    let scope_json = if schema_version >= SECRET_SCOPE_SCHEMA_VERSION {
+        "scope_json"
+    } else {
+        "NULL"
+    };
     let mut secrets = conn
-        .prepare("SELECT name,kind,incarnation,state,host,path_prefix,location,origin FROM agent_secrets ORDER BY name")
+        .prepare(&format!("SELECT name,kind,incarnation,state,host,path_prefix,location,origin,{scope_json} FROM agent_secrets ORDER BY name"))
         .map_err(map)?
         .query_map([], |r| {
             Ok(OperatorSecretRow {
@@ -602,6 +609,7 @@ pub fn list_agent_secrets_read_only(
                 path_prefix: r.get(5)?,
                 location: r.get(6)?,
                 origin: r.get(7)?,
+                scope_json: r.get(8)?,
                 grants: Vec::new(),
                 flow_grants: Vec::new(),
             })

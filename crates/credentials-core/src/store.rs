@@ -149,6 +149,9 @@ pub const SECRET_ASKING_MEMBER_SCHEMA_VERSION: u32 = 30;
 /// retry a forwarded secret release and receive the same sealed reply.
 pub const SECRET_RELEASE_RECEIPT_SCHEMA_VERSION: u32 = 31;
 
+/// The migration that adds extended scopes while preserving legacy scope columns.
+pub const SECRET_SCOPE_SCHEMA_VERSION: u32 = 35;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -993,6 +996,34 @@ const MIGRATIONS: &[Migration] = &[
         version: ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION,
         statements: "ALTER TABLE pending_enrollments ADD COLUMN display_name TEXT; \
                      ALTER TABLE enrolled_consumers ADD COLUMN display_name TEXT;",
+    },
+    // SQLite cannot alter a CHECK in place. Rebuild only the secret table, keeping
+    // legacy columns and sealed bodies unchanged; NULL scope_json marks legacy rows.
+    Migration {
+        version: SECRET_SCOPE_SCHEMA_VERSION,
+        statements: "CREATE TABLE agent_secrets_v35 (\
+                         name TEXT PRIMARY KEY, \
+                         kind TEXT NOT NULL CHECK (kind IN ('agent_api_key', 'site_login')), \
+                         incarnation TEXT NOT NULL UNIQUE CHECK (length(incarnation) = 32), \
+                         state TEXT NOT NULL CHECK (state IN ('active', 'corrupt')), \
+                         host TEXT, path_prefix TEXT, location TEXT, origin TEXT, \
+                         record_version INTEGER NOT NULL CHECK (record_version = 1), \
+                         key_id TEXT NOT NULL, envelope BLOB NOT NULL, \
+                         created_at_ms INTEGER NOT NULL, \
+                         scope_json TEXT, \
+                         CHECK ((kind = 'agent_api_key' AND location IS NOT NULL AND location != '' AND origin IS NULL \
+                             AND ((host IS NOT NULL AND scope_json IS NULL) \
+                                 OR (host IS NULL AND path_prefix IS NULL AND scope_json IS NOT NULL))) \
+                             OR (kind = 'site_login' AND host IS NULL AND path_prefix IS NULL AND location IS NULL \
+                                 AND ((origin IS NOT NULL AND scope_json IS NULL) \
+                                     OR (origin IS NULL AND scope_json IS NOT NULL))))\
+                     ); \
+                     INSERT INTO agent_secrets_v35 \
+                         (name, kind, incarnation, state, host, path_prefix, location, origin, record_version, key_id, envelope, created_at_ms) \
+                         SELECT name, kind, incarnation, state, host, path_prefix, location, origin, record_version, key_id, envelope, created_at_ms \
+                         FROM agent_secrets; \
+                     DROP TABLE agent_secrets; \
+                     ALTER TABLE agent_secrets_v35 RENAME TO agent_secrets;",
     },
 ];
 
@@ -13384,7 +13415,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            34,
+            35,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

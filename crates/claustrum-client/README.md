@@ -193,6 +193,11 @@ and decodes its reply's exact bytes.
 
 ## Changes
 
+- 0.9.0: requires subc-protocol 0.36 and, with the default `transport` feature,
+  subc-transport 0.17 and subc-os 0.1.30. The client's own API is unchanged, and
+  no subc type appears in it. The minor version moves so that a consumer still on
+  subc-protocol 0.34 keeps 0.8 and a single protocol copy, and moves to 0.9 when
+  it moves to 0.36.
 - 0.8.0 (breaking): `ClaustrumCredentialResolver::new` and the hidden
   `with_live_consumer_identity` constructor no longer take `project_root`.
   `route.open` omits project fields, matching subc-protocol 0.34. Bind identity

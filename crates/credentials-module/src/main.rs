@@ -2184,6 +2184,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     // than of what the supervisor currently bothers to read -- which is a fact about the
     // reader, and readers change.
     .trust_tier(Some(TrustTier::FirstParty))
+    // The person-facing name the apps' Permissions pages show for this module's grants.
+    // The builder refuses text that isn't plain or is over 40 characters; this literal
+    // passes, and every test that builds the manifest would panic here if it ever didn't.
+    .display_name(Some("Credential Vault".into()))
+    .expect("the vault's display name is a valid literal")
     .bindings(Some(Bindings {
         storage: StorageBinding {
             kind: StorageKind::Sqlite,
@@ -2860,6 +2865,14 @@ mod tests {
     /// DOES own a project-scoped SQLite schema whose migrations it applies itself. A
     /// manifest should describe the module rather than describe what the supervisor
     /// currently bothers to read, because the reader changes and the module does not.
+    /// The apps name this module from the manifest; the vault writes no label of its own
+    /// on module permission rows, so this is the only source of the name.
+    #[test]
+    fn the_manifest_declares_the_person_facing_name() {
+        let manifest = super::manifest("claustrum", None);
+        assert_eq!(manifest.display_name.as_deref(), Some("Credential Vault"));
+    }
+
     #[test]
     fn the_manifest_still_declares_the_fields_protocol_0_19_made_optional() {
         let manifest = super::manifest("claustrum", None);

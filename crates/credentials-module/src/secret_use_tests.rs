@@ -82,6 +82,31 @@ fn secret_use_only_trusted_senders_parse_and_write_diagnostics() {
 }
 
 #[test]
+fn secret_federated_scope_maps_to_nothing_and_is_refused() {
+    // A federated agent scope comes from another computer and has no approval shape on
+    // this one, so it must not map even with a linked prefrontal parent.
+    let parent = ScopeParent::new(principal("prefrontal-core"), "parent-H", 7);
+    let federated = stamp(ScopeKind::Federated)
+        .with_parent(Some(parent))
+        .with_parent_state(Some(ParentState::Linked));
+    assert!(asking(&federated).is_none());
+    let (_root, store) = rig("federated");
+    let mut p = params();
+    p["stamp"] = json!(federated);
+    for module in ["aft", "cerebellum"] {
+        assert_eq!(
+            body(serve(&store, Some(&principal(module)), &p, || 1000)),
+            SecretError::NotFound.body()
+        );
+    }
+    assert!(store
+        .recent_auth_events(100)
+        .unwrap()
+        .iter()
+        .all(|e| e.kind == "secret_use_refusal"));
+}
+
+#[test]
 fn secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch() {
     let parent = ScopeParent::new(principal("prefrontal-core"), "parent-H", 7);
     let base = stamp(ScopeKind::Ephemeral)

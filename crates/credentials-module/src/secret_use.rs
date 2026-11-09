@@ -92,14 +92,18 @@ fn asking(stamp: &ScopeStamp) -> Option<(AskingScope, Option<AskingScope>)> {
     if stamp.attributes.flow_id.is_some() {
         return None;
     }
+    // Approvals bind to a head, worker or ephemeral scope on this computer. Any other
+    // kind, such as a federated agent identity from another computer, has no approval
+    // shape yet, so it maps to nothing and the use is refused as unmapped.
+    let kind = match stamp.kind {
+        ScopeKind::Head => "head",
+        ScopeKind::Worker => "worker",
+        ScopeKind::Ephemeral => "ephemeral",
+        _ => return None,
+    };
     let scope = AskingScope {
         owner: owner(&stamp.owner),
-        kind: match stamp.kind {
-            ScopeKind::Head => "head",
-            ScopeKind::Worker => "worker",
-            ScopeKind::Ephemeral => "ephemeral",
-        }
-        .into(),
+        kind: kind.into(),
         scope_ref: stamp.scope_ref.clone(),
         epoch: stamp.scope_epoch,
     };
@@ -122,6 +126,7 @@ fn asking(stamp: &ScopeStamp) -> Option<(AskingScope, Option<AskingScope>)> {
         ScopeKind::Ephemeral => parent
             .filter(|p| p.owner == "reserved:prefrontal-core")
             .map(|p| (p, None)),
+        _ => None,
     }
 }
 

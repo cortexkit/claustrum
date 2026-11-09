@@ -239,10 +239,8 @@ impl EncryptedStore {
         {
             return Ok(false);
         }
-        // The statement's asker and version must match the pending row: a local
-        // row carries a v1 statement with no asker key, a forwarded row carries
-        // a v2 statement naming its asker. A v1-only decoder therefore refuses
-        // a forwarded statement rather than approving what it cannot read.
+        // The statement names an asker exactly when the pending request was forwarded.
+        // Each branch below checks its exact version after loading the secret's scope.
         {
             let asker_ok = if p.asking_member.is_empty() {
                 statement.get("asking_member_id").is_none()
@@ -250,11 +248,7 @@ impl EncryptedStore {
                 statement.get("asking_member_id").and_then(|v| v.as_str())
                     == Some(p.asking_member.as_str())
             };
-            let is_v2 = statement
-                .get("v")
-                .and_then(|v| v.as_str())
-                .is_some_and(|v| v.ends_with("/v2"));
-            if !asker_ok || is_v2 != !p.asking_member.is_empty() {
+            if !asker_ok {
                 return Ok(false);
             }
         }
@@ -269,13 +263,16 @@ impl EncryptedStore {
         if expected_expiry != Some(e.grant_expires_at_ms as i64) {
             return Ok(false);
         }
-        let row = tx.query_row("SELECT kind,state,host,path_prefix,location,origin,envelope FROM agent_secrets WHERE name=?1 AND incarnation=?2",rusqlite::params![p.name,p.incarnation], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Vec<u8>>(6)?))).optional()?;
-        let Some((kind, state, host, path_prefix, location, origin, blob)) = row else {
+        let row = tx.query_row("SELECT kind,state,host,path_prefix,location,origin,envelope,scope_json FROM agent_secrets WHERE name=?1 AND incarnation=?2",rusqlite::params![p.name,p.incarnation], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,Option<String>>(7)?))).optional()?;
+        let Some((kind, state, host, path_prefix, location, origin, blob, scope_json)) = row else {
             return Ok(false);
         };
         let actor = format!("fed-phone:{fingerprint}");
         if delete {
-            if e.duration != "none" || statement["v"] != "ck-secret-delete-statement/v1" {
+            if e.duration != "none"
+                || statement["v"] != "ck-secret-delete-statement/v1"
+                || statement.get("asking_member_id").is_some()
+            {
                 return Ok(false);
             }
             for table in [
@@ -321,7 +318,9 @@ impl EncryptedStore {
         if !flow_item
             && (e.duration == "version"
                 || statement["v"]
-                    != if p.asking_member.is_empty() {
+                    != if scope_json.is_some() {
+                        agent_secret::USE_STATEMENT_V3
+                    } else if p.asking_member.is_empty() {
                         "ck-secret-use-statement/v1"
                     } else {
                         "ck-secret-use-statement/v2"
@@ -336,18 +335,16 @@ impl EncryptedStore {
         {
             return Ok(false);
         }
-        let scope = match (kind.as_str(), host, location, origin) {
-            ("agent_api_key", Some(host), Some(location), None) => {
-                agent_secret::SecretScope::ApiKey {
-                    host,
-                    path_prefix,
-                    location,
-                }
-            }
-            ("site_login", None, None, Some(origin)) => {
-                agent_secret::SecretScope::SiteLogin { origin }
-            }
-            _ => {
+        let scope = match agent_secret::SecretScope::from_columns(
+            &kind,
+            host.as_deref(),
+            path_prefix.as_deref(),
+            location.as_deref(),
+            origin.as_deref(),
+            scope_json.as_deref(),
+        ) {
+            Ok(scope) => scope,
+            Err(_) => {
                 self.approval_quarantine(tx, &p)?;
                 return Ok(false);
             }
@@ -428,10 +425,12 @@ impl EncryptedStore {
             code_hash: code_hash.clone(),
             install_id: install_id.clone(),
         };
-        // Only a forwarded flow approval refuses a flow id equal to a v2 tag:
-        // the local sender boundary stays v1-only, so a local flow id holding
-        // a v2 tag is still accepted.
-        if !p.asking_member.is_empty() && agent_secret::flow_id_is_v2_statement_tag(&flow.flow_id) {
+        // Extended statements reserve both v3 tags. Forwarded requests also retain
+        // the v2 reservations; local requests may still use a v2 tag as their flow id.
+        if (scope.is_extended() && agent_secret::flow_id_is_v3_statement_tag(&flow.flow_id))
+            || (!p.asking_member.is_empty()
+                && agent_secret::flow_id_is_v2_statement_tag(&flow.flow_id))
+        {
             return Ok(false);
         }
         let methods: Option<Vec<String>> =
@@ -1029,5 +1028,508 @@ mod v2_approval_tests {
                 .unwrap(),
             0
         );
+    }
+
+    mod v3_approval_tests {
+        use super::*;
+
+        fn setup(login: bool) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let tag = format!(
+                "v3-approval-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let (root, store) = v2_setup(&tag);
+            let scope = if login {
+                agent_secret::SecretScope::SiteLoginOrigins {
+                    origins: vec!["https://x.test".into(), "https://y.test".into()],
+                }
+            } else {
+                agent_secret::SecretScope::ApiKeyRules {
+                    rules: vec![
+                        agent_secret::SecretRule {
+                            host: "x.test".into(),
+                            path_prefix: Some("/repos/a".into()),
+                        },
+                        agent_secret::SecretRule {
+                            host: "y.test".into(),
+                            path_prefix: None,
+                        },
+                    ],
+                    location: "header:X-Api-Key".into(),
+                }
+            };
+            let material = if login {
+                agent_secret::SecretMaterial::SiteLogin {
+                    username: Secret::new("test-user".into()),
+                    password: Secret::new("test-password".into()),
+                    otpauth: None,
+                }
+            } else {
+                agent_secret::SecretMaterial::ApiKey(Secret::new(b"material-canary".to_vec()))
+            };
+            store.store.with_conn(|c| {
+                let incarnation: String = c.query_row("SELECT incarnation FROM agent_secrets", [], |r| r.get(0))?;
+                let blob = agent_secret::seal(&store.key, &incarnation, "key", &scope, &material).unwrap();
+                c.execute("UPDATE agent_secrets SET kind=?1,host=NULL,path_prefix=NULL,location=?2,origin=NULL,scope_json=?3,envelope=?4", rusqlite::params![scope.kind(), if login { None } else { Some("header:X-Api-Key") }, scope.scope_json().unwrap(), blob])?;
+                Ok(())
+            }).unwrap();
+            (root, store)
+        }
+
+        fn call(login: bool) -> agent_secret::SecretUse {
+            let mut call = v2_call();
+            if login {
+                call.sender = agent_secret::SecretSender::Cerebellum;
+                call.target = agent_secret::UseTarget::SiteLogin {
+                    origin: "https://x.test".into(),
+                };
+            }
+            call
+        }
+
+        fn flow_call(login: bool) -> agent_secret::SecretFlowApproval {
+            let mut call = v2_flow_call();
+            if login {
+                call.target = agent_secret::UseTarget::SiteLogin {
+                    origin: "https://x.test".into(),
+                };
+                call.methods = None;
+            }
+            call
+        }
+
+        fn pending(store: &EncryptedStore, login: bool, flow: bool, asker: &str) -> Value {
+            let result = if flow {
+                store.secret_request_flow_approval_from(&flow_call(login), asker, || V2_NOW)
+            } else {
+                store.secret_use_from(&call(login), asker, || V2_NOW)
+            };
+            let request = result.unwrap().reply;
+            assert_eq!(request["status"], "approval_required");
+            request
+        }
+
+        fn statement(request: &Value) -> Value {
+            serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(request["statement_b64url"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn rewrite(store: &EncryptedStore, request: &Value, statement: &Value) -> Value {
+            let bytes = serde_json::to_vec(statement).unwrap();
+            let digest = phone::hex(&payload_hash(&bytes));
+            store.store.with_conn(|c| c.execute(
+                "UPDATE secret_pending_requests SET statement_bytes=?1,statement_sha256=?2 WHERE request_id=?3",
+                rusqlite::params![bytes, digest, request["request_id"].as_str().unwrap()],
+            )).unwrap();
+            let mut request = request.clone();
+            request["statement_b64url"] = json!(URL_SAFE_NO_PAD.encode(bytes));
+            request
+        }
+
+        fn assert_refused(store: &EncryptedStore, request: &Value, flow: bool) {
+            assert_eq!(
+                v2_approve(store, request, if flow { "version" } else { "hour" }),
+                json!({"results":[{"request_id":request["request_id"],"outcome":"refused","code":"approval_invalid"}]})
+            );
+            assert_eq!(count(store, "secret_grants"), 0);
+            assert_eq!(count(store, "secret_flow_grants"), 0);
+        }
+
+        fn count(store: &EncryptedStore, table: &str) -> i64 {
+            store
+                .store
+                .with_conn(|c| {
+                    c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                })
+                .unwrap()
+        }
+
+        #[test]
+        fn v3_agent_and_flow_approvals_release_both_kinds_for_local_and_forwarded_askers() {
+            for login in [false, true] {
+                for flow in [false, true] {
+                    for asker in ["", V2_ASKER] {
+                        let (_root, store) = setup(login);
+                        let request = pending(&store, login, flow, asker);
+                        let signed = statement(&request);
+                        assert_eq!(
+                            signed["v"],
+                            if flow {
+                                agent_secret::FLOW_STATEMENT_V3
+                            } else {
+                                agent_secret::USE_STATEMENT_V3
+                            }
+                        );
+                        assert_eq!(
+                            signed.get("asking_member_id").cloned(),
+                            if asker.is_empty() {
+                                None
+                            } else {
+                                Some(json!(asker))
+                            }
+                        );
+                        assert_eq!(
+                            v2_approve(&store, &request, if flow { "version" } else { "hour" }),
+                            json!({"results":[{"request_id":request["request_id"],"outcome":"granted"}]})
+                        );
+                        assert_eq!(
+                            v2_grant_asker(
+                                &store,
+                                if flow {
+                                    "secret_flow_grants"
+                                } else {
+                                    "secret_grants"
+                                }
+                            ),
+                            asker
+                        );
+                        let released = if flow {
+                            let call = flow_call(login);
+                            store.secret_flow_use_from(
+                                &agent_secret::SecretFlowUse {
+                                    name: call.name,
+                                    flow: call.flow,
+                                    target: call.target,
+                                    method: if login { None } else { Some("GET".into()) },
+                                },
+                                asker,
+                                || V2_NOW,
+                            )
+                        } else {
+                            store.secret_use_from(&call(login), asker, || V2_NOW)
+                        }
+                        .unwrap()
+                        .reply;
+                        assert_eq!(released["status"], "released");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn v3_approvals_refuse_asker_presence_and_value_mismatches() {
+            for login in [false, true] {
+                for flow in [false, true] {
+                    for asker in ["", V2_ASKER] {
+                        for replacement in [None, Some(""), Some(V2_ASKER), Some(V2_OTHER_ASKER)] {
+                            if replacement == if asker.is_empty() { None } else { Some(asker) } {
+                                continue;
+                            }
+                            let (_root, store) = setup(login);
+                            let request = pending(&store, login, flow, asker);
+                            let mut signed = statement(&request);
+                            match replacement {
+                                None => {
+                                    signed.as_object_mut().unwrap().remove("asking_member_id");
+                                }
+                                Some(value) => signed["asking_member_id"] = json!(value),
+                            }
+                            let request = rewrite(&store, &request, &signed);
+                            assert_refused(&store, &request, flow);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn approvals_require_the_exact_tag_for_the_stored_scope_and_asker() {
+            for extended in [false, true] {
+                for flow in [false, true] {
+                    for asker in ["", V2_ASKER] {
+                        for tag in [
+                            "ck-secret-use-statement/v1",
+                            "ck-secret-use-statement/v2",
+                            agent_secret::USE_STATEMENT_V3,
+                            "ck-secret-flow-statement/v1",
+                            agent_secret::FLOW_STATEMENT_V2,
+                            agent_secret::FLOW_STATEMENT_V3,
+                            "unknown/v2",
+                        ] {
+                            let (_root, store) = if extended {
+                                setup(false)
+                            } else {
+                                v2_setup("exact-tag")
+                            };
+                            let request = pending(&store, false, flow, asker);
+                            let mut signed = statement(&request);
+                            if signed["v"] == tag {
+                                continue;
+                            }
+                            signed["v"] = json!(tag);
+                            let request = rewrite(&store, &request, &signed);
+                            assert_refused(&store, &request, flow);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn v3_approvals_compare_stored_use_and_the_whole_flow_statement() {
+            for login in [false, true] {
+                for flow in [false, true] {
+                    for asker in ["", V2_ASKER] {
+                        for extra_field in [false, true] {
+                            if extra_field && !flow {
+                                continue;
+                            }
+                            let (_root, store) = setup(login);
+                            let request = pending(&store, login, flow, asker);
+                            let mut signed = statement(&request);
+                            if extra_field {
+                                signed["unsigned_extension"] = json!(true);
+                            } else if login {
+                                signed["use"]["origins"][1] = json!("https://z.test");
+                            } else {
+                                signed["use"]["rules"][1]["host"] = json!("z.test");
+                            }
+                            let request = rewrite(&store, &request, &signed);
+                            assert_refused(&store, &request, flow);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn extended_flow_reserved_tags_are_invalid_params_without_pending_rows() {
+            for login in [false, true] {
+                for asker in ["", V2_ASKER] {
+                    for tag in [
+                        agent_secret::USE_STATEMENT_V3,
+                        agent_secret::FLOW_STATEMENT_V3,
+                        agent_secret::USE_STATEMENT_V2,
+                        agent_secret::FLOW_STATEMENT_V2,
+                    ] {
+                        let (_root, store) = setup(login);
+                        let mut call = flow_call(login);
+                        call.flow.flow_id = tag.into();
+                        let result =
+                            store.secret_request_flow_approval_from(&call, asker, || V2_NOW);
+                        if tag.ends_with("/v2") && asker.is_empty() {
+                            let request = result.unwrap().reply;
+                            assert_eq!(statement(&request)["v"], agent_secret::FLOW_STATEMENT_V3);
+                            assert_eq!(
+                                v2_approve(&store, &request, "version")["results"][0]["outcome"],
+                                "granted"
+                            );
+                        } else {
+                            assert_eq!(
+                                result.err(),
+                                Some(agent_secret::SecretError::InvalidParams),
+                                "{login} {asker} {tag}"
+                            );
+                            assert_eq!(count(&store, "secret_pending_requests"), 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn extended_flow_commit_refuses_reserved_tags_in_pending_rows() {
+            for login in [false, true] {
+                for asker in ["", V2_ASKER] {
+                    for tag in [
+                        agent_secret::USE_STATEMENT_V3,
+                        agent_secret::FLOW_STATEMENT_V3,
+                        agent_secret::USE_STATEMENT_V2,
+                        agent_secret::FLOW_STATEMENT_V2,
+                    ] {
+                        if asker.is_empty() && tag.ends_with("/v2") {
+                            continue;
+                        }
+                        let (_root, store) = setup(login);
+                        let request = pending(&store, login, true, asker);
+                        let mut signed = statement(&request);
+                        signed["flow"]["flow_id"] = json!(tag);
+                        let request = rewrite(&store, &request, &signed);
+                        store
+                            .store
+                            .with_conn(|c| {
+                                c.execute(
+                            "UPDATE secret_pending_requests SET flow_id=?1 WHERE request_id=?2",
+                            rusqlite::params![tag, request["request_id"].as_str().unwrap()],
+                        )
+                            })
+                            .unwrap();
+                        assert_refused(&store, &request, true);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn corrupt_stored_scopes_quarantine_approve_items_once() {
+            for login in [false, true] {
+                for asker in ["", V2_ASKER] {
+                    for corruption in 0..7 {
+                        let (_root, store) = setup(login);
+                        let agent = pending(&store, login, false, asker);
+                        let flow = pending(&store, login, true, asker);
+                        let use_scope = statement(&agent)["use"].clone();
+                        let entries = use_scope[if login { "origins" } else { "rules" }]
+                            .as_array()
+                            .unwrap();
+                        let corrupt = match corruption {
+                            0 => "[".into(),
+                            1 => format!("{} ", json!(entries)),
+                            2 => "[]".into(),
+                            3 => json!([entries[0]]).to_string(),
+                            4 => json!([entries[0], entries[0]]).to_string(),
+                            5 => json!(vec![entries[0].clone(); if login { 5 } else { 9 }])
+                                .to_string(),
+                            6 => json!([entries[1], entries[0]]).to_string(),
+                            _ => unreachable!(),
+                        };
+                        store
+                            .store
+                            .with_conn(|c| {
+                                c.execute("UPDATE agent_secrets SET scope_json=?1", [&corrupt])
+                            })
+                            .unwrap();
+                        // Either approval branch must perform the stored decode before granting.
+                        let first_flow = corruption % 2 == 0;
+                        let (first, second) = if first_flow {
+                            (&flow, &agent)
+                        } else {
+                            (&agent, &flow)
+                        };
+                        assert_refused(&store, first, first_flow);
+                        assert_refused(&store, second, !first_flow);
+                        store
+                            .store
+                            .with_conn(|c| {
+                                let state: String =
+                                    c.query_row("SELECT state FROM agent_secrets", [], |r| {
+                                        r.get(0)
+                                    })?;
+                                let audits: i64 = c.query_row(
+                                    "SELECT COUNT(*) FROM audit_log WHERE op='secret_quarantine'",
+                                    [],
+                                    |r| r.get(0),
+                                )?;
+                                assert_eq!(state, "corrupt");
+                                assert_eq!(audits, 1);
+                                Ok(())
+                            })
+                            .unwrap();
+                    }
+                }
+            }
+        }
+
+        fn phone_operation(store: &EncryptedStore, op: &super::super::PhoneOperation) -> Value {
+            store
+                .secret_phone_operation(V2_FP, Some("pair-A"), V2_NOW, op, || true, || V2_NOW)
+                .unwrap()
+        }
+
+        fn delete_commit(store: &EncryptedStore, request: &Value) -> Value {
+            let bytes = serde_json::to_vec(&json!({
+                "v":"ck-secret-use-envelope/v1", "items":[v2_item(request)],
+                "decision":"delete", "duration":"none",
+                "grant_expires_at_ms":request["expires_at_ms"],
+                "device_fingerprint":V2_FP, "issued_at_ms":V2_NOW,
+            }))
+            .unwrap();
+            let signature: p256::ecdsa::Signature = v2_signer().sign(&bytes);
+            phone_operation(
+                store,
+                &super::super::PhoneOperation::DeleteCommit {
+                    envelope: bytes,
+                    signature: signature.to_der().as_bytes().to_vec(),
+                },
+            )
+        }
+
+        #[test]
+        fn phone_v1_delete_removes_extended_rows_grants_and_pending_even_with_corrupt_scope() {
+            for login in [false, true] {
+                for corrupt in [false, true] {
+                    let (_root, store) = setup(login);
+                    for flow in [false, true] {
+                        for asker in ["", V2_ASKER] {
+                            let request = pending(&store, login, flow, asker);
+                            assert_eq!(
+                                v2_approve(&store, &request, if flow { "version" } else { "hour" })
+                                    ["results"][0]["outcome"],
+                                "granted"
+                            );
+                        }
+                        pending(&store, login, flow, V2_OTHER_ASKER);
+                    }
+                    assert_eq!(count(&store, "secret_grants"), 2);
+                    assert_eq!(count(&store, "secret_flow_grants"), 2);
+                    if corrupt {
+                        store
+                            .store
+                            .with_conn(|c| c.execute("UPDATE agent_secrets SET scope_json='['", []))
+                            .unwrap();
+                    }
+                    let request = phone_operation(
+                        &store,
+                        &super::super::PhoneOperation::DeleteRequest { name: "key".into() },
+                    );
+                    let signed = statement(&request);
+                    assert_eq!(signed["v"], "ck-secret-delete-statement/v1");
+                    assert!(signed.get("asking_member_id").is_none());
+                    assert!(count(&store, "secret_pending_requests") >= 3);
+                    assert_eq!(
+                        delete_commit(&store, &request),
+                        json!({"results":[{"request_id":request["request_id"],"outcome":"granted"}]})
+                    );
+                    for table in [
+                        "agent_secrets",
+                        "secret_grants",
+                        "secret_flow_grants",
+                        "secret_pending_requests",
+                    ] {
+                        assert_eq!(count(&store, table), 0, "{table}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn phone_delete_keeps_its_exact_v1_tag_and_absent_asker_contract() {
+            for tag in [
+                "ck-secret-delete-statement/v2",
+                agent_secret::USE_STATEMENT_V3,
+                "ck-secret-delete-statement/v1",
+            ] {
+                let (_root, store) = setup(false);
+                let request = phone_operation(
+                    &store,
+                    &super::super::PhoneOperation::DeleteRequest { name: "key".into() },
+                );
+                let mut signed = statement(&request);
+                signed["v"] = json!(tag);
+                if tag == "ck-secret-delete-statement/v1" {
+                    signed["asking_member_id"] = json!(V2_ASKER);
+                    store
+                        .store
+                        .with_conn(|c| {
+                            c.execute(
+                                "UPDATE secret_pending_requests SET asking_member_id=?1",
+                                [V2_ASKER],
+                            )
+                        })
+                        .unwrap();
+                }
+                let request = rewrite(&store, &request, &signed);
+                assert_eq!(
+                    delete_commit(&store, &request),
+                    json!({"results":[{"request_id":request["request_id"],"outcome":"refused","code":"approval_invalid"}]})
+                );
+                assert_eq!(count(&store, "agent_secrets"), 1);
+            }
+        }
     }
 }

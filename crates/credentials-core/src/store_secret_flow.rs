@@ -345,14 +345,15 @@ fn flow_pending(
     let id =
         agent_secret::request_id(now).map_err(|_| rusqlite_err("request id generation failed"))?;
     let expiry = now + FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS;
-    // Only a forwarded request refuses a flow id equal to a v2 tag: the local
-    // sender boundary stays v1-only, so a local flow id holding a v2 tag is
-    // still accepted and still encodes as a v1 statement.
-    if !asking_member.is_empty() && agent_secret::flow_id_is_v2_statement_tag(&call.flow.flow_id) {
+    // Refuse reserved tags before encoding so a collision is invalid_params,
+    // not a statement-encoding store_error. Local requests still accept v2 tags.
+    if (record.scope.is_extended() && agent_secret::flow_id_is_v3_statement_tag(&call.flow.flow_id))
+        || (!asking_member.is_empty()
+            && agent_secret::flow_id_is_v2_statement_tag(&call.flow.flow_id))
+    {
         return Ok(Err(SecretError::InvalidParams));
     }
-    // A forwarded request carries the v1 object plus `asking_member_id` under a
-    // v2 tag; a local one stays v1 byte for byte.
+    // The builder selects v1/v2 for legacy scopes and v3 for extended scopes.
     let statement = agent_secret::flow_approval_statement_for_asker(
         &id,
         &member,

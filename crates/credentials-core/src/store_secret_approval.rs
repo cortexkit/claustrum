@@ -1,7 +1,8 @@
 use super::*;
 use crate::agent_secret::{
-    ApprovalEnvelope, ApprovalItem, SecretError, FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS,
-    SECRET_ISSUE_SKEW_LIMIT_MS, SECRET_PENDING_LIFETIME_LIMIT_MS,
+    ApprovalEnvelope, ApprovalItem, SecretError, SecretScope,
+    FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS, SECRET_ISSUE_SKEW_LIMIT_MS,
+    SECRET_PENDING_LIFETIME_LIMIT_MS,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
@@ -39,11 +40,18 @@ impl EncryptedStore {
         now: i64,
     ) -> Result<Value, SecretError> {
         self.store.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT g.grant_id,g.agent_id,g.scope_kind,g.scope_ref,s.name,s.kind,s.host,s.path_prefix,s.origin,g.duration,g.expires_at_ms,g.granted_at_ms,g.card_ref FROM secret_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name WHERE (g.duration='permanent' OR g.expires_at_ms>?1) AND (?2 IS NULL OR g.agent_id=?2) ORDER BY g.grant_id")?;
+            let mut stmt = conn.prepare("SELECT g.grant_id,g.agent_id,g.scope_kind,g.scope_ref,s.name,s.kind,s.host,s.path_prefix,s.origin,g.duration,g.expires_at_ms,g.granted_at_ms,g.card_ref,s.location,s.scope_json FROM secret_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name WHERE (g.duration='permanent' OR g.expires_at_ms>?1) AND (?2 IS NULL OR g.agent_id=?2) ORDER BY g.grant_id")?;
             let rows = stmt.query_map(rusqlite::params![now,agent_id],|r| {
                 let name: String = r.get(4)?;
                 let kind: String = r.get(5)?;
-                let label = if kind == "agent_api_key" { format!("use {name} on {}{}",r.get::<_,String>(6)?,r.get::<_,Option<String>>(7)?.unwrap_or_default()) } else { format!("fill {name} on {}",r.get::<_,String>(8)?) };
+                let label = if let Some(raw) = r.get::<_,Option<String>>(14)? {
+                    let location: Option<String> = r.get(13)?;
+                    extended_permission_scope_label(&name, &kind, location.as_deref(), &raw)?
+                } else if kind == "agent_api_key" {
+                    format!("use {name} on {}{}",r.get::<_,String>(6)?,r.get::<_,Option<String>>(7)?.unwrap_or_default())
+                } else {
+                    format!("fill {name} on {}",r.get::<_,String>(8)?)
+                };
                 let scope_kind: String = r.get(2)?;
                 let mut row = json!({"id":r.get::<_,String>(0)?,"holder":{"kind":if scope_kind=="head" {"agent"}else{"worker"},"scope_ref":r.get::<_,String>(3)?},"module":"claustrum","subject_label":name,"scope":if kind=="agent_api_key" {"api_key"}else{"site_login"},"scope_label":label,"granted_at_ms":r.get::<_,i64>(11)?});
                 if let Some(agent) = r.get::<_,Option<String>>(1)? { row["agent_id"]=json!(agent);row["holder"]["agent_id"]=json!(agent); }
@@ -529,6 +537,30 @@ fn envelope_audit(
     .map(|_| ())
 }
 
+fn extended_permission_scope_label(
+    name: &str,
+    kind: &str,
+    location: Option<&str>,
+    raw: &str,
+) -> rusqlite::Result<String> {
+    let scope = SecretScope::from_scope_json(kind, location, raw)
+        .map_err(|_| rusqlite_err("invalid stored secret scope"))?;
+    match scope {
+        SecretScope::ApiKeyRules { rules, .. } => {
+            let targets = rules
+                .iter()
+                .map(|rule| format!("{}{}", rule.host, rule.path_prefix.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!("use {name} on {targets}"))
+        }
+        SecretScope::SiteLoginOrigins { origins } => {
+            Ok(format!("fill {name} on {}", origins.join(", ")))
+        }
+        _ => Err(rusqlite_err("expected extended secret scope")),
+    }
+}
+
 /// One `permissions.list` row per live flow grant.
 ///
 /// A flow grant has no wall-clock expiry and no agent, so it carries no `expires_at_ms`
@@ -537,12 +569,15 @@ fn envelope_audit(
 /// name and kind. `methods` describes how an API key may be used, so a site login, which
 /// has no method at all, omits the key rather than sending an empty list.
 fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Value>> {
-    conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
+    conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref,s.location,s.scope_json FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
         .query_map([], |r| {
             let name: String = r.get(4)?;
             let kind: String = r.get(5)?;
             let api_key = kind == "agent_api_key";
-            let label = if api_key {
+            let label = if let Some(raw) = r.get::<_,Option<String>>(13)? {
+                let location: Option<String> = r.get(12)?;
+                extended_permission_scope_label(&name, &kind, location.as_deref(), &raw)?
+            } else if api_key {
                 format!("use {name} on {}{}", r.get::<_,String>(6)?, r.get::<_,Option<String>>(7)?.unwrap_or_default())
             } else {
                 format!("fill {name} on {}", r.get::<_,String>(8)?)

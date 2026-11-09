@@ -593,11 +593,22 @@ pub(super) fn sweep_release_receipts(
 }
 
 fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
-    let mut stmt = tx.prepare("SELECT name,kind,incarnation,state,host,path_prefix,location,origin FROM agent_secrets ORDER BY name")?;
+    let mut stmt = tx.prepare("SELECT name,kind,incarnation,state,host,path_prefix,location,origin,scope_json FROM agent_secrets ORDER BY name")?;
     let mut secrets = stmt.query_map([], |r| {
         let mut value = json!({"name":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"incarnation":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?});
-        for (index,key) in [(4,"host"),(5,"path_prefix"),(6,"location"),(7,"origin")] {
-            if let Some(text) = r.get::<_,Option<String>>(index)? { value[key]=json!(text); }
+        if let Some(raw) = r.get::<_,Option<String>>(8)? {
+            let kind: String = r.get(1)?;
+            let location: Option<String> = r.get(6)?;
+            let scope = SecretScope::from_scope_json(&kind, location.as_deref(), &raw)
+                .map_err(|_| rusqlite_err("invalid stored secret scope"))?;
+            let Value::Object(fields) = scope.use_fields() else {
+                return Err(rusqlite_err("invalid secret scope fields"));
+            };
+            for (key, field) in fields { value[key] = field; }
+        } else {
+            for (index,key) in [(4,"host"),(5,"path_prefix"),(6,"location"),(7,"origin")] {
+                if let Some(text) = r.get::<_,Option<String>>(index)? { value[key]=json!(text); }
+            }
         }
         Ok(value)
     })?.collect::<rusqlite::Result<Vec<_>>>()?;

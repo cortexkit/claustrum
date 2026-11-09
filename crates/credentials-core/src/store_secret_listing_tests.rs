@@ -175,6 +175,181 @@ fn seed_agent_grant(store: &EncryptedStore, grant_id: &str, name: &str, agent: O
         .unwrap();
 }
 
+fn seed_extended_secret(
+    store: &EncryptedStore,
+    name: &str,
+    kind: &str,
+    incarnation: &str,
+    scope_json: &str,
+    location: Option<&str>,
+) {
+    store
+        .store
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO agent_secrets (name,kind,incarnation,state,location,scope_json,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,1,'key',x'00',1)",
+                rusqlite::params![name, kind, incarnation, location, scope_json],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn check_multi_host_list_vectors(operation: &str) -> usize {
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../tests/vectors/multi-host/secret-list-v2.json"
+    ))
+    .unwrap();
+    let mut checked = 0;
+    for case in vectors["cases"].as_array().unwrap() {
+        if case["operation"] != operation {
+            continue;
+        }
+        let setup = &case["setup"];
+        let Some(scope) = setup.get("stored_scope") else {
+            let (_root, store) = list_setup(case["case"].as_str().unwrap());
+            let name = setup["name"].as_str().unwrap();
+            seed_extended_secret(
+                &store,
+                name,
+                setup["kind"].as_str().unwrap(),
+                incarnation(name),
+                setup["scope_json"].as_str().unwrap(),
+                Some("header:X-Api-Key"),
+            );
+            let refusal = if operation == "secret.list" {
+                phone(&store, &PhoneOperation::List, NOW).unwrap_err()
+            } else {
+                seed_agent_grant(&store, "agent", name, Some("agent-A"));
+                store.secret_permissions_list(None, NOW).unwrap_err()
+            };
+            assert_eq!(
+                refusal.body()["error"]["code"],
+                case["expect"]["code"],
+                "{}",
+                case["case"]
+            );
+            checked += 1;
+            continue;
+        };
+        let (_root, store) = list_setup(case["case"].as_str().unwrap());
+        let name = setup["name"].as_str().unwrap();
+        let kind = setup["kind"].as_str().unwrap();
+        let array = if kind == "agent_api_key" {
+            "rules"
+        } else {
+            "origins"
+        };
+        let raw = serde_json::to_string(&scope[array]).unwrap();
+        let inc = if operation == "secret.list" {
+            "00000000000000000000000000000149"
+        } else {
+            incarnation(name)
+        };
+        seed_extended_secret(&store, name, kind, inc, &raw, scope["location"].as_str());
+        if operation == "secret.list" {
+            assert_eq!(
+                phone(&store, &PhoneOperation::List, NOW).unwrap(),
+                case["expect"],
+                "{}",
+                case["case"]
+            );
+        } else {
+            let flow = setup["grant_kind"] == "flow";
+            if flow {
+                seed_flow_grant(&store, "flow", name, "install-A");
+            } else {
+                seed_agent_grant(&store, "agent", name, Some("agent-A"));
+            }
+            let listed = store.secret_permissions_list(None, NOW).unwrap();
+            assert_eq!(listed["grants"].as_array().unwrap().len(), 1);
+            let row = &listed["grants"][0];
+            assert_eq!(
+                row["scope_label"], case["expect"]["scope_label"],
+                "{}",
+                case["case"]
+            );
+            assert_eq!(row["holder"]["kind"], if flow { "flow" } else { "agent" });
+            if !flow {
+                assert_eq!(
+                    store.secret_permissions_list(Some("agent-A"), NOW).unwrap(),
+                    listed
+                );
+            }
+        }
+        checked += 1;
+    }
+    checked
+}
+
+#[test]
+fn multi_host_list_vectors_match_phone() {
+    assert_eq!(check_multi_host_list_vectors("secret.list"), 3);
+}
+
+#[test]
+fn multi_host_list_vectors_match_permissions() {
+    assert_eq!(check_multi_host_list_vectors("permissions.list"), 5);
+}
+
+#[test]
+fn multi_host_list_corrupt_scopes_return_store_error() {
+    let cases = [
+        (
+            "key",
+            "agent_api_key",
+            Some("header:X-Api-Key"),
+            vec![
+                "not-json",
+                "[]",
+                r#"[{"host":"a.x.test","path_prefix":""}]"#,
+                r#"[{"host":"a.x.test","path_prefix":""},{"host":"a.x.test","path_prefix":""}]"#,
+                r#"[{"host":"b.x.test","path_prefix":""},{"host":"a.x.test","path_prefix":""}]"#,
+            ],
+        ),
+        (
+            "login",
+            "site_login",
+            None,
+            vec![
+                "not-json",
+                "[]",
+                r#"["https://x.test"]"#,
+                r#"["https://x.test","https://x.test:443"]"#,
+                r#"["https://y.test","https://x.test"]"#,
+            ],
+        ),
+    ];
+    for (name, kind, location, corrupt_scopes) in cases {
+        for raw in corrupt_scopes {
+            let (_root, store) = list_setup("multi-host-list-corrupt");
+            seed_extended_secret(&store, name, kind, incarnation(name), raw, location);
+            let listed = phone(&store, &PhoneOperation::List, NOW);
+            assert_eq!(
+                listed,
+                Err(agent_secret::SecretError::StoreError),
+                "{kind}: {raw}"
+            );
+            seed_agent_grant(&store, "agent", name, Some("agent-A"));
+            assert_eq!(
+                store.secret_permissions_list(Some("agent-A"), NOW),
+                Err(agent_secret::SecretError::StoreError),
+                "agent {kind}: {raw}"
+            );
+            store
+                .store
+                .with_conn(|conn| conn.execute("DELETE FROM secret_grants", []).map(|_| ()))
+                .unwrap();
+            seed_flow_grant(&store, "flow", name, "install-A");
+            assert_eq!(
+                store.secret_permissions_list(None, NOW),
+                Err(agent_secret::SecretError::StoreError),
+                "flow {kind}: {raw}"
+            );
+        }
+    }
+}
+
 #[test]
 fn permissions_list_names_each_flow_holder_and_omits_it_for_an_agent_filter() {
     let (_root, store) = rig("flow-permissions-list", 91);

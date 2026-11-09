@@ -217,6 +217,11 @@ crates/credentials-core/src/store_secret_flow_tests.rs INLINE_005 x.test
 crates/credentials-core/src/store_secret_flow_tests.rs INLINE_006 x.test
 crates/credentials-core/src/store_secret_list_vectors_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_list_vectors_tests.rs INLINE_002 x.test
+crates/credentials-core/src/store_secret_listing_tests.rs INLINE_001 x.test
+crates/credentials-core/src/store_secret_listing_tests.rs INLINE_002 x.test
+crates/credentials-core/src/store_secret_listing_tests.rs INLINE_003 x.test:443
+crates/credentials-core/src/store_secret_listing_tests.rs INLINE_004 y.test
+crates/credentials-core/src/store_secret_listing_tests.rs INLINE_005 x.test
 crates/credentials-core/src/store_secret_operator_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_operator_tests.rs INLINE_002 a.test
 crates/credentials-core/src/store_secret_operator_tests.rs INLINE_003 b.test

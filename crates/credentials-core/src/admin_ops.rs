@@ -170,6 +170,13 @@ pub enum AdminOpBody {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_grants: bool,
     },
+    /// Set or clear the display name of a live, approved enrollment.
+    #[serde(rename = "admin.enroll_label")]
+    EnrollLabel {
+        v: u32,
+        name: String,
+        display_name: Option<String>,
+    },
     /// Deny a pending enrollment request.
     #[serde(rename = "admin.enroll_deny")]
     EnrollDeny { v: u32, request_id: String },
@@ -525,6 +532,16 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("display_name", display_name)
                 .field("keep_grants", keep_grants)
                 .finish(),
+            AdminOpBody::EnrollLabel {
+                v,
+                name,
+                display_name,
+            } => f
+                .debug_struct("EnrollLabel")
+                .field("v", v)
+                .field("name", name)
+                .field("display_name", display_name)
+                .finish(),
             AdminOpBody::EnrollDeny { v, request_id } => f
                 .debug_struct("EnrollDeny")
                 .field("v", v)
@@ -800,6 +817,7 @@ impl AdminOpBody {
             | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
             | AdminOpBody::EnrollApprove { v, .. }
+            | AdminOpBody::EnrollLabel { v, .. }
             | AdminOpBody::EnrollDeny { v, .. }
             | AdminOpBody::EnrollRevoke { v, .. }
             | AdminOpBody::EnrollReissue { v, .. }
@@ -838,6 +856,7 @@ impl AdminOpBody {
             | AdminOpBody::SetPlan { .. }
             | AdminOpBody::Reclassify { .. }
             | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollLabel { .. }
             | AdminOpBody::EnrollDeny { .. }
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
@@ -941,6 +960,7 @@ impl AdminOpBody {
             // ledger, not any credential's record, so there is no id to serialize on.
             // The store's fenced write is what orders them against each other.
             | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollLabel { .. }
             | AdminOpBody::EnrollDeny { .. }
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
@@ -1000,6 +1020,7 @@ impl AdminOpBody {
             AdminOpBody::GrantCreateV2 { .. } => "admin.grant_create_v2",
             AdminOpBody::GrantRevokeV2 { .. } => "admin.grant_revoke_v2",
             AdminOpBody::EnrollApprove { .. } => "admin.enroll_approve",
+            AdminOpBody::EnrollLabel { .. } => "admin.enroll_label",
             AdminOpBody::EnrollDeny { .. } => "admin.enroll_deny",
             AdminOpBody::EnrollRevoke { .. } => "admin.enroll_revoke",
             AdminOpBody::EnrollReissue { .. } => "admin.enroll_reissue",
@@ -1059,6 +1080,7 @@ impl AdminOpBody {
             | AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollLabel { .. }
             | AdminOpBody::EnrollDeny { .. }
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
@@ -1267,6 +1289,16 @@ pub fn apply(
                 reply["display_name"] = serde_json::json!(name);
             }
             Ok(reply)
+        }
+        AdminOpBody::EnrollLabel {
+            name, display_name, ..
+        } => {
+            let changed = store.label_enrollment(&name, display_name.as_deref(), actor)?;
+            Ok(serde_json::json!({
+                "name": name,
+                "display_name": display_name.map(|label| label.trim().to_string()),
+                "changed": changed,
+            }))
         }
         AdminOpBody::EnrollDeny { request_id, .. } => {
             store.deny_enrollment(&request_id, actor)?;

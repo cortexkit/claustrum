@@ -1148,6 +1148,54 @@ mod tests {
         (hex(&rig.caller_mac.sign(&parts)), nonce_hex)
     }
 
+    #[tokio::test]
+    async fn enrollment_label_dispatches_through_authenticated_admin_plane() {
+        let r = rig(177);
+        let request = r
+            .store
+            .propose_enrollment("plugin", &"a".repeat(64))
+            .unwrap();
+        r.store
+            .approve_enrollment(&request.request_id, "plugin", "operator")
+            .unwrap();
+        r.admin.record_bind(5, Principal::Direct);
+        for (display_name, changed) in [
+            (Some("  My plugin  "), true),
+            (Some("My plugin"), false),
+            (None, true),
+        ] {
+            let body = serde_json::to_string(&AdminOpBody::EnrollLabel {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                name: "plugin".into(),
+                display_name: display_name.map(str::to_owned),
+            })
+            .unwrap();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let outcome = r.admin.execute(5, body.as_bytes(), &tag).await;
+            let value = match outcome {
+                AdminOutcome::Ok(value) => value,
+                AdminOutcome::Refused(reason) => panic!("enrollment label refused: {reason}"),
+                AdminOutcome::Challenge { .. } => {
+                    panic!("expected a label result, not a challenge")
+                }
+            };
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "name":"plugin", "display_name":display_name.map(str::trim), "changed":changed,
+                })
+            );
+        }
+        let audit =
+            credentials_core::store::read_audit_read_only(&r._root.join("store.db"), None).unwrap();
+        let labels: Vec<_> = audit
+            .iter()
+            .filter(|entry| entry.op == "enroll.label")
+            .collect();
+        assert_eq!(labels.len(), 2);
+        assert!(labels.iter().all(|entry| entry.actor == ROUTE_ADMIN_ACTOR));
+    }
+
     fn store_op_body(id: &str) -> String {
         let record =
             VaultRecord::new_static(CredentialKind::ApiKey, "test", b"sk-1".to_vec(), None);

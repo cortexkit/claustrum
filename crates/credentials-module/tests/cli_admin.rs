@@ -6327,6 +6327,98 @@ fn enrollment_regression_retained_grants_require_flag_and_revoke_lists_removed_g
 }
 
 #[test]
+fn enrollment_label_cli_sets_lists_and_clears_approved_name() {
+    let vault = GrantCliVault::new("enrollment-label-command");
+    vault.bootstrap();
+    let request = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        store.propose_enrollment("plugin", &"a".repeat(64)).unwrap()
+    };
+    let approved = vault.run(&["enroll", "approve", "--request-id", &request.request_id]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let listed = vault.run(&["enroll", "list"]);
+    assert!(listed.status.success());
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("display name:"));
+    let label = "  Person's \\\"plugin\\\"  ";
+    for (value, changed) in [(label, true), (label.trim(), false)] {
+        let labelled = vault.run(&[
+            "enroll",
+            "label",
+            "--name",
+            "plugin",
+            "--display-name",
+            value,
+        ]);
+        assert!(
+            labelled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&labelled.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&labelled.stdout);
+        assert!(stdout.contains("enrolled:plugin"), "{stdout}");
+        assert!(
+            stdout.contains(&format!(
+                "display name: \"{}\"",
+                label.trim().escape_debug()
+            )),
+            "{stdout}"
+        );
+        assert_eq!(stdout.contains("nothing changed"), !changed);
+        let listed = vault.run(&["enroll", "list"]);
+        assert!(listed.status.success());
+        assert!(String::from_utf8_lossy(&listed.stdout).contains(&format!(
+            "display name: \"{}\"",
+            label.trim().escape_debug()
+        )));
+    }
+    for flags in [vec![], vec!["--clear", "--display-name", "Name"]] {
+        let mut args = vec!["enroll", "label", "--name", "plugin"];
+        args.extend(flags);
+        let refused = vault.run(&args);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("exactly one"));
+    }
+    for invalid in ["".to_string(), "a\u{202e}b".into(), "x".repeat(41)] {
+        let refused = vault.run(&[
+            "enroll",
+            "label",
+            "--name",
+            "plugin",
+            "--display-name",
+            &invalid,
+        ]);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("invalid_params"));
+    }
+    for changed in [true, false] {
+        let cleared = vault.run(&["enroll", "label", "--name", "plugin", "--clear"]);
+        assert!(
+            cleared.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cleared.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&cleared.stdout);
+        assert!(stdout.contains("enrolled:plugin display name cleared"));
+        assert_eq!(stdout.contains("nothing changed"), !changed);
+    }
+    let listed = vault.run(&["enroll", "list"]);
+    assert!(listed.status.success());
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("display name:"));
+    let revoked = vault.run(&["enroll", "revoke", "--name", "plugin"]);
+    assert!(revoked.status.success());
+    for name in ["unknown", "plugin"] {
+        let refused = vault.run(&["enroll", "label", "--name", name, "--clear"]);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr)
+            .contains(&format!("no live enrollment named {name}")));
+    }
+}
+
+#[test]
 fn enrollment_display_name_cli_reviews_keeps_overrides_and_refuses_empty() {
     let vault = GrantCliVault::new("enrollment-display-names");
     vault.bootstrap();

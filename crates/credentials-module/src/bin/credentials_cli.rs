@@ -543,7 +543,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
-        "enroll" => &["--keep-grants"],
+        "enroll" => &["--keep-grants", "--clear"],
         _ => &[],
     };
     let mut options = ParsedOptions::default();
@@ -565,7 +565,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         // most expensive place to find it. Keep subcommands in one table so a new
         // verb can declare its positional actions alongside the existing ones.
         let subcommands: &[&str] = match command {
-            "enroll" => &["list", "approve", "deny", "revoke", "reissue"],
+            "enroll" => &["list", "approve", "label", "deny", "revoke", "reissue"],
             "transfer" => &["init", "send", "receive", "accept", "reject"],
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
@@ -649,7 +649,7 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
-       enroll              review consumer names and labels; manage enrollments\n\
+       enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
           put                 store a secret from a file or hidden prompt\n\
@@ -890,13 +890,15 @@ fn help_verb(verb: &str) -> String {
             "ck auth enroll list\n\
              \x20             approve --request-id <id> [--name <name>] [--keep-grants]\n\
              \x20                     [--display-name <text>]\n\
+             \x20             label --name <name> (--display-name <text> | --clear)\n\
              \x20             deny --request-id <id>\n\
              \x20             revoke --name <name>\n\
              \x20             reissue --name <name>\n\
              \n\
              \x20 --request-id <id>             pending request, from `enroll list`\n\
-             \x20 --name <name>                 consumer name to admit, revoke or reissue\n\
-             \x20 --display-name <text>         replace the proposed display name\n\
+             \x20 --name <name>                 consumer name to admit or manage\n\
+             \x20 --display-name <text>         set or replace the display name\n\
+             \x20 --clear                       clear an approved label (label only)\n\
              \x20 --keep-grants                 explicitly inherit existing name grants\n\
              \n\
              NOTES\n\
@@ -910,6 +912,8 @@ fn help_verb(verb: &str) -> String {
              --display-name replaces the proposal: trimmed, 1-40 Unicode characters,\n\
              no controls, separators, bidi controls or zero-width characters; never cut.\n\
              Empty labels refuse. Rotation keeps the label; revocation removes it.\n\
+             label changes an approved name without changing grants or tokens. Choose\n\
+             exactly one of --display-name or --clear. An identical label is a no-op.\n\
              Requests are short-lived and stay on the vault on the computer\n\
              where the consumer ran setup. Approve there; `enroll list` shows pending ones.\n\
              revoke removes all the consumer's grants and lists them, auditing each one.\n\
@@ -1399,9 +1403,11 @@ fn commit_admin(
     let not_found = match &op {
         AdminOpBody::EnrollApprove { request_id, .. }
         | AdminOpBody::EnrollDeny { request_id, .. } => Some(missing_pending_request(request_id)),
-        AdminOpBody::EnrollRevoke { name, .. } | AdminOpBody::EnrollReissue { name, .. } => Some(
-            format!("no live enrollment named {name} (list them with `ck auth enroll list`)"),
-        ),
+        AdminOpBody::EnrollRevoke { name, .. }
+        | AdminOpBody::EnrollLabel { name, .. }
+        | AdminOpBody::EnrollReissue { name, .. } => Some(format!(
+            "no live enrollment named {name} (list them with `ck auth enroll list`)"
+        )),
         _ => None,
     };
     commit_admin_with_key(global, op, None)
@@ -5677,7 +5683,7 @@ fn inventory_auth_methods(
     })
 }
 
-/// `ck auth enroll <list|approve|deny|revoke|reissue>` — the operator half of consumer
+/// `ck auth enroll <list|approve|label|deny|revoke|reissue>` — the operator half of consumer
 /// enrollment.
 ///
 /// WITHOUT THIS THE CEREMONY IS UNREACHABLE. A consumer can propose, and the store can
@@ -5694,7 +5700,9 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .first()
         .filter(|value| !value.starts_with("--"))
         .ok_or_else(|| {
-            CliError::Usage("enroll requires a subcommand: list|approve|deny|revoke|reissue".into())
+            CliError::Usage(
+                "enroll requires a subcommand: list|approve|label|deny|revoke|reissue".into(),
+            )
         })?
         .clone();
     let rest = &args[1..];
@@ -5703,13 +5711,54 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "--keep-grants is only valid for enroll approve".into(),
         ));
     }
-    if sub != "approve" && optional(rest, "--display-name").is_some() {
+    if sub != "approve" && sub != "label" && optional(rest, "--display-name").is_some() {
         return Err(CliError::Usage(
-            "--display-name is only valid for enroll approve".into(),
+            "--display-name is only valid for enroll approve or label".into(),
+        ));
+    }
+    if sub != "label" && has_flag(rest, "--clear") {
+        return Err(CliError::Usage(
+            "--clear is only valid for enroll label".into(),
         ));
     }
     match sub.as_str() {
         "list" => cmd_enroll_list(global),
+        "label" => {
+            let name = required(rest, "--name")?;
+            let display_name = optional(rest, "--display-name");
+            if display_name.is_some() == has_flag(rest, "--clear") {
+                return Err(CliError::Usage(
+                    "enroll label requires exactly one of --display-name or --clear".into(),
+                ));
+            }
+            let display_name = display_name
+                .map(|label| {
+                    credentials_core::display_name::validate_display_name(&label)
+                        .map_err(|error| CliError::Usage(format!("invalid_params: {error}")))
+                })
+                .transpose()?;
+            require_live_enrollment(global, &name)?;
+            let reply = commit_admin(
+                global,
+                AdminOpBody::EnrollLabel {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    name: name.clone(),
+                    display_name: display_name.clone(),
+                },
+            )?;
+            if reply.get("changed").and_then(serde_json::Value::as_bool) == Some(false) {
+                println!("enrolled:{}: nothing changed", name.escape_debug());
+            }
+            match display_name {
+                Some(label) => println!(
+                    "enrolled:{} display name: \"{}\"",
+                    name.escape_debug(),
+                    label.escape_debug()
+                ),
+                None => println!("enrolled:{} display name cleared", name.escape_debug()),
+            }
+            Ok(())
+        }
         "approve" => {
             let request_id = required(rest, "--request-id")?;
             let display_name = optional(rest, "--display-name")
@@ -5839,7 +5888,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         other => Err(CliError::Usage(format!(
-            "unknown enroll subcommand {other}: expected list|approve|deny|revoke|reissue"
+            "unknown enroll subcommand {other}: expected list|approve|label|deny|revoke|reissue"
         ))),
     }
 }
@@ -6002,7 +6051,7 @@ fn missing_pending_request(request_id: &str) -> String {
     )
 }
 
-/// Refuse `revoke` or `reissue` for a name with no live enrollment, before the admin op.
+/// Refuse `label`, `revoke` or `reissue` for a name with no live enrollment.
 ///
 /// Without this the op reaches the store, which finds no row and reports it as a storage
 /// failure, so the operator reads "the running module refused the op: store error" for

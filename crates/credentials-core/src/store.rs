@@ -3036,6 +3036,54 @@ impl EncryptedStore {
             .map(|(id, _)| id)
     }
 
+    /// Change only a live enrollment's display name, auditing real changes atomically.
+    pub fn label_enrollment(
+        &self,
+        name: &str,
+        display_name: Option<&str>,
+        actor: &str,
+    ) -> Result<bool, StoreOpError> {
+        let display_name = display_name
+            .map(crate::display_name::validate_display_name)
+            .transpose()
+            .map_err(|_| StoreOpError::InvalidDisplayName)?;
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let row = tx
+                .query_row(
+                    "SELECT enrollment_id, display_name FROM enrolled_consumers \
+                 WHERE name = ?1 AND revoked_at_ms IS NULL",
+                    [name],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            let Some((id, current)) = row else {
+                return Ok(None);
+            };
+            if current == display_name {
+                return Ok(Some(false));
+            }
+            tx.execute(
+                "UPDATE enrolled_consumers SET display_name = ?1 WHERE enrollment_id = ?2",
+                rusqlite::params![display_name, id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::EnrollLabel,
+                    credential_id: Some(id),
+                    payload_hash: None,
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(Some(true))
+        })
+        .map_err(StoreOpError::from)?
+        .ok_or(StoreOpError::NotFound)
+    }
+
     /// Approve the proposed label, or a validated operator replacement, atomically.
     pub fn approve_enrollment_with_display_name(
         &self,
@@ -15772,6 +15820,166 @@ mod migration_10_tests {
             assert_eq!(conn.query_row("SELECT revoked_at_ms FROM enrolled_consumers WHERE enrollment_id='revoked-id'", [], |r| r.get::<_, i64>(0))?, 14);
             Ok(())
         }).unwrap();
+    }
+
+    #[test]
+    fn enrollment_label_admin_op_changes_only_label_and_audits_real_changes() {
+        use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (root, store) = rig("enrollment-label-admin", 126);
+        let secret = "ab".repeat(32);
+        let proposal = store
+            .propose_enrollment("consumer", &enrollment_secret_hash(&secret).unwrap())
+            .unwrap();
+        let id = store
+            .approve_enrollment(&proposal.request_id, "consumer", "approver")
+            .unwrap();
+        store
+            .poll_enrollment(&proposal.request_id, &secret)
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "consumer",
+                SelectorKind::Exact,
+                "apikey:label",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let snapshot = || {
+            store.with_raw_conn(|conn| conn.query_row(
+            "SELECT enrollment_id, name, token_hash, token_generation, approved_at_ms, approved_by, revoked_at_ms \
+             FROM enrolled_consumers WHERE enrollment_id=?1", [&id], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?, row.get::<_, Option<i64>>(6)?,
+            )))).unwrap()
+        };
+        let original = snapshot();
+        assert!(
+            original.2.is_some(),
+            "exercise an enrollment with a minted token"
+        );
+        assert_eq!(original.3, 1);
+        let grants = store.list_read_grants().unwrap();
+        let generation = store.grants_generation().unwrap();
+        let pending = store.with_raw_conn(|conn| conn.query_row(
+            "SELECT state, final_name, approved_by, approved_at_ms FROM pending_enrollments WHERE request_id=?1",
+            [&proposal.request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))).unwrap();
+        let label = |value: Option<&str>| {
+            apply(
+                &store,
+                AdminOpBody::EnrollLabel {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    name: "consumer".into(),
+                    display_name: value.map(str::to_owned),
+                },
+                "offline-cli",
+            )
+            .unwrap()
+        };
+        let mut tip = store.audit_tip().unwrap().unwrap();
+        for value in [Some("  Person's plugin  "), Some("New label"), None] {
+            let reply = label(value);
+            assert_eq!(
+                reply,
+                serde_json::json!({"name":"consumer", "display_name":value.map(str::trim), "changed":true})
+            );
+            let rows = list_enrollments_read_only(&root.join("store.db")).unwrap();
+            assert_eq!(rows[0].display_name.as_deref(), value.map(str::trim));
+            let after = store.audit_tip().unwrap().unwrap();
+            assert_eq!(after.0, tip.0 + 1);
+            store.with_raw_conn(|conn| {
+                let audit = conn.query_row("SELECT op, credential_id, payload_hash, actor, alarm FROM audit_log WHERE seq=?1", [after.0], |row| Ok((
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?,
+                )))?;
+                assert_eq!(audit, ("enroll.label".into(), id.clone(), None, "offline-cli".into(), false));
+                Ok(())
+            }).unwrap();
+            assert_eq!(label(value)["changed"], false);
+            assert_eq!(store.audit_tip().unwrap(), Some(after.clone()));
+            assert_eq!(snapshot(), original);
+            assert_eq!(store.list_read_grants().unwrap(), grants);
+            assert_eq!(store.grants_generation().unwrap(), generation);
+            tip = after;
+        }
+        let after_pending = store.with_raw_conn(|conn| conn.query_row(
+            "SELECT state, final_name, approved_by, approved_at_ms FROM pending_enrollments WHERE request_id=?1",
+            [&proposal.request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))).unwrap();
+        assert_eq!(pending, after_pending);
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn enrollment_label_refusals_and_audit_failure_write_nothing() {
+        use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (root, store) = rig("enrollment-label-refusals", 127);
+        let request = store
+            .propose_enrollment("consumer", &"a".repeat(64))
+            .unwrap();
+        store
+            .approve_enrollment(&request.request_id, "consumer", "approver")
+            .unwrap();
+        let label = |name: &str, value: Option<&str>| {
+            apply(
+                &store,
+                AdminOpBody::EnrollLabel {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    name: name.into(),
+                    display_name: value.map(str::to_owned),
+                },
+                "route-admin",
+            )
+        };
+        let before = list_enrollments_read_only(&root.join("store.db")).unwrap();
+        let tip = store.audit_tip().unwrap();
+        for invalid in ["".to_string(), "a\u{202e}b".into(), "x".repeat(41)] {
+            assert!(matches!(
+                label("consumer", Some(&invalid)),
+                Err(StoreOpError::InvalidDisplayName)
+            ));
+            assert_eq!(
+                list_enrollments_read_only(&root.join("store.db")).unwrap(),
+                before
+            );
+            assert_eq!(store.audit_tip().unwrap(), tip);
+        }
+        assert!(matches!(
+            label("unknown", Some("Name")),
+            Err(StoreOpError::NotFound)
+        ));
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        store.with_raw_conn(|conn| conn.execute_batch(
+            "CREATE TRIGGER refuse_label_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;"
+        )).unwrap();
+        assert!(label("consumer", Some("Name")).is_err());
+        assert_eq!(
+            list_enrollments_read_only(&root.join("store.db")).unwrap(),
+            before
+        );
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        store
+            .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER refuse_label_audit"))
+            .unwrap();
+        store.revoke_enrollment("consumer", "operator").unwrap();
+        let tip = store.audit_tip().unwrap();
+        for value in [Some("Name"), None] {
+            assert!(matches!(
+                label("consumer", value),
+                Err(StoreOpError::NotFound)
+            ));
+            assert_eq!(store.audit_tip().unwrap(), tip);
+        }
+        store
+            .with_raw_conn(|conn| {
+                let value: Option<String> = conn.query_row(
+                    "SELECT display_name FROM enrolled_consumers WHERE name='consumer'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(value, None);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

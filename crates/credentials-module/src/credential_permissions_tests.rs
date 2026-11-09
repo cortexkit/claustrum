@@ -228,6 +228,20 @@ async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
     let labelled = rows.iter().find(|row| row["holder"]["name"] == "approved-plugin").unwrap();
     assert_eq!(labelled["holder"], json!({"kind":"enrolled","name":"approved-plugin","label":"Claude sign-in for Pi"}));
     assert!(rows.iter().filter(|row| row["holder"]["kind"] == "module").all(|row| row["holder"].get("label").is_none()));
+    for label in [Some("Updated plugin"), None] {
+        credentials_core::admin_ops::apply(&store, credentials_core::admin_ops::AdminOpBody::EnrollLabel {
+            v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+            name: "approved-plugin".into(),
+            display_name: label.map(str::to_owned),
+        }, "operator").unwrap();
+        let updated = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+        let body: serde_json::Value = serde_json::from_slice(&updated).unwrap();
+        let holder = &body["result"]["grants"].as_array().unwrap().iter()
+            .find(|row| row["holder"]["name"] == "approved-plugin").unwrap()["holder"];
+        assert_eq!(holder["kind"], "enrolled");
+        assert_eq!(holder["name"], "approved-plugin");
+        assert_eq!(holder.get("label").and_then(serde_json::Value::as_str), label);
+    }
     let filtered = cp_reply(
         &surface,
         &admin,

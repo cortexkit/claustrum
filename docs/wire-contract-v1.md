@@ -370,6 +370,17 @@ no label. The CLI prints the approved label. Only an approved label is stored on
 the enrollment; token rotation preserves it, revocation removes it, and reusing
 the enrollment name does not inherit it.
 
+**Operator labeling.** The master-key-authenticated `admin.op` body
+`{"op":"admin.enroll_label","v":2,"name":"consumer","display_name":"My plugin"}`
+sets the display name of a live approved enrollment under the same validation
+rules. `display_name:null` clears it. The result is
+`{"name":"consumer","display_name":"My plugin","changed":true}` (or a null
+display name when cleared). Repeating the current value returns `changed:false`
+without an audit row. Unknown and revoked names refuse as missing enrollments.
+The label update and audit append are atomic; grants, token material, token
+generation and approval details are unchanged. This is an operator operation,
+not a consumer route.
+
 `{"op":"admin.enroll_revoke","v":2,"name":"consumer"}` revokes the live enrollment
 and every grant on `enrolled:consumer` in one transaction. Each removed grant gets a
 normal `grant_revoke` audit row. Its success result keeps `revoked:true` and adds

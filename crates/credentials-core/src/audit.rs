@@ -129,6 +129,8 @@ pub enum AuditOp {
     /// Migration 10 assigned a category while converting schema-9 selectors.
     /// An operator approved a pending consumer enrollment.
     EnrollApprove,
+    /// An operator set or cleared an approved enrollment's display name.
+    EnrollLabel,
     /// An operator denied a pending consumer enrollment.
     EnrollDeny,
     /// An operator revoked one enrolled-consumer incarnation.
@@ -232,6 +234,7 @@ impl AuditOp {
             AuditOp::SetProviders => "set_providers",
             AuditOp::SetPlan => "set_plan",
             AuditOp::EnrollApprove => "enroll.approve",
+            AuditOp::EnrollLabel => "enroll.label",
             AuditOp::EnrollDeny => "enroll.deny",
             AuditOp::EnrollRevoke => "enroll.revoke",
             AuditOp::EnrollRotate => "enroll.rotate",
@@ -780,6 +783,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
                 AuditOp::SetPlan => AuditOp::SetPlan.as_str(),
                 AuditOp::EnrollApprove => AuditOp::EnrollApprove.as_str(),
+                AuditOp::EnrollLabel => AuditOp::EnrollLabel.as_str(),
                 AuditOp::EnrollDeny => AuditOp::EnrollDeny.as_str(),
                 AuditOp::EnrollRevoke => AuditOp::EnrollRevoke.as_str(),
                 AuditOp::EnrollRotate => AuditOp::EnrollRotate.as_str(),
@@ -830,6 +834,7 @@ mod vocabulary_documentation_tests {
         );
         for op in [
             AuditOp::EnrollApprove,
+            AuditOp::EnrollLabel,
             AuditOp::EnrollDeny,
             AuditOp::EnrollRevoke,
             AuditOp::EnrollRotate,

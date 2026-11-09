@@ -792,6 +792,16 @@ or truncating the proposal. Without a proposal or override, no label is stored.
 Rotation and reissue keep the approved label; revocation removes it. A later
 enrollment under the same raw name starts with its own approval's label, if any.
 
+To name an already-approved enrollment, including one approved before labels were
+available, run `ck auth enroll label --name <name> --display-name <text>`.
+To remove its label, use `ck auth enroll label --name <name> --clear` instead.
+Exactly one of `--display-name` and `--clear` is required. The same label rules
+apply; an empty string is not a way to clear. The enrollment must be live.
+The command preserves grants, tokens and approval details. Repeating the current
+label succeeds with "nothing changed" and adds no audit row. `enroll list` shows
+the updated label. Phone and desktop apps receive it as `holder.label` on
+`permissions.list` grant rows for that enrolled consumer.
+
 `revoke` stops the token from resolving immediately; a revoked enrollment answers like an
 unknown token. In the same transaction it removes every grant on `enrolled:<name>` and
 appends one `grant_revoke` audit row per removed grant, preserving the history without
@@ -1079,6 +1089,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `grant_create` | Create a principal-scoped exact or category operation grant. |
 | `grant_revoke` | Revoke a principal-scoped exact or category operation grant. |
 | `enroll.approve` | Approve a pending enrolled-consumer incarnation. |
+| `enroll.label` | Set or clear a live enrollment's display name. |
 | `enroll.deny` | Deny a pending enrollment request. |
 | `enroll.revoke` | Revoke one enrolled-consumer incarnation. |
 | `enroll.rotate` | Rotate a live enrollment token at its current generation. |

@@ -118,42 +118,34 @@ impl UseTarget {
     }
 
     pub fn matches(&self, scope: &SecretScope) -> bool {
-        match (self, scope) {
-            (
-                Self::ApiKey {
-                    scheme,
-                    host,
-                    port,
-                    path,
-                },
-                SecretScope::ApiKey {
-                    host: expected,
-                    path_prefix,
-                    ..
-                },
-            ) => {
-                scheme == "https"
-                    && *port == 443
-                    && host == expected
-                    && path_prefix.as_ref().is_none_or(|prefix| {
-                        path == prefix
-                            || path
-                                .strip_prefix(prefix)
-                                .is_some_and(|rest| rest.starts_with('/'))
-                    })
+        use secret_rules::scope::{SecretScope as RuleScope, UseTarget as RuleTarget};
+        let normalized_origin;
+        let target = match self {
+            Self::ApiKey {
+                scheme,
+                host,
+                port,
+                path,
+            } => RuleTarget::ApiKey {
+                scheme,
+                host,
+                port: *port,
+                path,
+            },
+            Self::SiteLogin { origin } => {
+                let Ok((scheme, host, port)) = origin_parts(origin) else {
+                    return false;
+                };
+                // Site-login targets accept numeric ports, including leading zeros or `+`.
+                normalized_origin = format!("{scheme}://{host}:{port}");
+                RuleTarget::SiteLogin {
+                    origin: &normalized_origin,
+                }
             }
-            (Self::SiteLogin { origin }, SecretScope::SiteLogin { origin: expected }) => {
-                origin_parts(origin)
-                    .ok()
-                    .is_some_and(|(scheme, host, port)| {
-                        scheme == "https"
-                            && port == 443
-                            && super::canonical_origin(expected).ok().as_deref()
-                                == Some(format!("https://{host}").as_str())
-                    })
-            }
-            _ => false,
-        }
+        };
+        // Stored secrets remain usable when the Public Suffix List changes.
+        RuleScope::decode_stored(scope.kind(), &scope.rule_fields())
+            .is_ok_and(|scope| scope.matches(target))
     }
 }
 

@@ -1,8 +1,10 @@
 use super::{SecretMaterial, SecretScope, ValidationError};
+use secret_rules::scope as rules;
+use serde_json::{json, Value};
 use ValidationError::{InvalidParams, LimitExceeded};
 
-pub const MAX_SECRET_HOST_BYTES: usize = 253;
-pub const MAX_SECRET_PATH_PREFIX_BYTES: usize = 1024;
+pub const MAX_SECRET_HOST_BYTES: usize = rules::MAX_HOST_BYTES;
+pub const MAX_SECRET_PATH_PREFIX_BYTES: usize = rules::MAX_PREFIX_BYTES;
 pub const MAX_SECRET_HEADER_BYTES: usize = 64;
 pub const MAX_SECRET_QUERY_BYTES: usize = 64;
 pub const MAX_SECRET_POINTER_BYTES: usize = 256;
@@ -13,66 +15,65 @@ pub const MIN_SECRET_TOTP_PERIOD: u64 = 15;
 pub const MAX_SECRET_TOTP_PERIOD: u64 = 120;
 
 pub fn validate_host(host: &str) -> Result<(), ValidationError> {
-    if host.is_empty()
-        || host.ends_with('.')
-        || host.parse::<std::net::IpAddr>().is_ok()
-        || !host.split('.').all(|label| {
-            !label.is_empty()
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-    {
-        return Err(InvalidParams);
-    }
-    if host.len() > MAX_SECRET_HOST_BYTES {
-        return Err(LimitExceeded);
-    }
-    Ok(())
+    rules::SecretScope::parse_input("agent_api_key", &json!({"host": host}))
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Compare origins without URL path normalization or accepting user information.
 pub fn canonical_origin(origin: &str) -> Result<String, ValidationError> {
-    let authority = origin.strip_prefix("https://").ok_or(InvalidParams)?;
-    let host = authority.strip_suffix(":443").unwrap_or(authority);
-    validate_host(host)?;
-    Ok(format!("https://{host}"))
+    rules::canonical_origin(origin)
+        .map(str::to_owned)
+        .map_err(Into::into)
+}
+
+impl From<rules::ScopeRefusal> for ValidationError {
+    fn from(refusal: rules::ScopeRefusal) -> Self {
+        match refusal {
+            rules::ScopeRefusal::InvalidParams => InvalidParams,
+            rules::ScopeRefusal::LimitExceeded => LimitExceeded,
+        }
+    }
+}
+
+impl SecretScope {
+    /// The shared parser owns scope grammar; location remains vault-only metadata.
+    pub(super) fn rule_fields(&self) -> Value {
+        match self {
+            Self::ApiKey {
+                host, path_prefix, ..
+            } => {
+                let mut fields = json!({"host": host});
+                if let Some(prefix) = path_prefix {
+                    fields["path_prefix"] = json!(prefix);
+                }
+                fields
+            }
+            Self::SiteLogin { origin } => json!({"origin": origin}),
+        }
+    }
 }
 
 pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
+    rules::SecretScope::parse_input(scope.kind(), &scope.rule_fields())?;
     match scope {
-        SecretScope::ApiKey {
-            host,
-            path_prefix,
-            location,
-        } => {
-            validate_host(host)?;
-            if let Some(prefix) = path_prefix {
-                validate_path_prefix(prefix)?;
-            }
-            validate_location(location)
-        }
-        SecretScope::SiteLogin { origin } => {
-            canonical_origin(origin)?;
-            Ok(())
-        }
+        SecretScope::ApiKey { location, .. } => validate_location(location),
+        SecretScope::SiteLogin { .. } => Ok(()),
     }
 }
 
 /// Scope prefixes use the request-path grammar but cannot end with a slash.
 pub fn validate_path_prefix(prefix: &str) -> Result<(), ValidationError> {
-    validate_path(prefix)?;
-    if prefix.ends_with('/') {
-        return Err(InvalidParams);
-    }
-    if prefix.len() > MAX_SECRET_PATH_PREFIX_BYTES {
-        return Err(LimitExceeded);
-    }
-    Ok(())
+    // The crate exposes scope parsing rather than a standalone prefix validator.
+    rules::SecretScope::parse_input(
+        "agent_api_key",
+        &json!({"host": "scope", "path_prefix": prefix}),
+    )
+    .map(|_| ())
+    .map_err(Into::into)
 }
 
+/// Validate concrete request paths, which unlike scope prefixes may end in `/`.
 pub fn validate_path(path: &str) -> Result<(), ValidationError> {
     if !path.starts_with('/')
         || path.contains("//")

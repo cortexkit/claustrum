@@ -90,6 +90,7 @@ required-features = ["login-test-seam"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+aft-secret-rules = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }

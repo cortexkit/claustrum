@@ -38,6 +38,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aft-secret-rules"
+version = "0.63.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b4e1fb48d7c9806f649c6606af253facd61fbae868b4232f4526e91d4c88a39"
+dependencies = [
+ "idna",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -500,6 +512,7 @@ dependencies = [
 name = "credentials-core"
 version = "0.3.0"
 dependencies = [
+ "aft-secret-rules",
  "async-trait",
  "base64",
  "chacha20poly1305",

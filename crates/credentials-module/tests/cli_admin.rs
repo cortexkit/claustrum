@@ -7942,6 +7942,224 @@ fn material_file(root: &std::path::Path, mode: u32, body: &str) -> PathBuf {
 }
 
 #[test]
+fn secret_put_scope_validation_names_invalid_fields_without_storing() {
+    let vault = GrantCliVault::new("secret-put-scope-validation");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let long_prefix = format!("/{}", "a".repeat(1024));
+    let long_name = "a".repeat(65);
+    let long_host = "a".repeat(254);
+    let long_location = format!("header:{}", "a".repeat(65));
+    let cases = [
+        ("api-key", "--path-prefix", "/v1/watch/", "use /v1/watch"),
+        ("api-key", "--path-prefix", "/", "omit --path-prefix"),
+        (
+            "api-key",
+            "--path-prefix",
+            "v1/watch",
+            "must start with '/'",
+        ),
+        (
+            "api-key",
+            "--path-prefix",
+            "/v1//watch",
+            "must not contain '//'",
+        ),
+        (
+            "api-key",
+            "--path-prefix",
+            "/v1/../watch",
+            "no dot segments",
+        ),
+        (
+            "api-key",
+            "--path-prefix",
+            "/v1/%2fwatch",
+            "percent escapes",
+        ),
+        (
+            "api-key",
+            "--path-prefix",
+            long_prefix.as_str(),
+            "1024 bytes",
+        ),
+        (
+            "api-key",
+            "--host",
+            "X.test",
+            "plain lowercase DNS host name",
+        ),
+        (
+            "api-key",
+            "--host",
+            "127.0.0.1",
+            "no leading or trailing hyphens, trailing dot, IP address",
+        ),
+        ("api-key", "--host", long_host.as_str(), "253 bytes"),
+        (
+            "api-key",
+            "--location",
+            "header:Authorization",
+            "not Host, Cookie, Content-Length or Authorization",
+        ),
+        (
+            "api-key",
+            "--location",
+            "query:bad/name",
+            "query:<ASCII letters",
+        ),
+        (
+            "api-key",
+            "--location",
+            "json_pointer:/bad~2",
+            "only ~0 and ~1 escapes",
+        ),
+        ("api-key", "--location", long_location.as_str(), "64 bytes"),
+        (
+            "site-login",
+            "--origin",
+            "https://x.test/",
+            "no user information, path, query, fragment or other port",
+        ),
+        (
+            "site-login",
+            "--origin",
+            "http://x.test",
+            "must be https://",
+        ),
+        (
+            "api-key",
+            "--name",
+            "bad/name",
+            "must start with an ASCII letter or digit",
+        ),
+        ("api-key", "--name", long_name.as_str(), "64 bytes"),
+    ];
+    for (kind, flag, value, rule) in cases {
+        let mut args = vec!["secret", "put", "--kind", kind];
+        if flag != "--name" {
+            args.extend(["--name", "ops-key"]);
+        }
+        if kind == "api-key" && flag != "--host" {
+            args.extend(["--host", "x.test"]);
+        }
+        args.extend([flag, value, "--material-file", file.to_str().unwrap()]);
+        let refused = vault.run(&args);
+        assert!(!refused.status.success(), "{flag} was accepted");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains(flag), "{stderr}");
+        assert!(stderr.contains(rule), "{stderr}");
+        assert!(!stderr.contains("invalid_credential_id"), "{stderr}");
+        assert!(!stderr.contains(MATERIAL_CANARY), "{stderr}");
+        let list = vault.run(&["secret", "list"]);
+        assert!(
+            list.status.success(),
+            "{}",
+            String::from_utf8_lossy(&list.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&list.stdout).trim(),
+            "no agent-secret tables yet"
+        );
+    }
+
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "--name",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--path-prefix",
+        "/v1/watch",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let list = vault.run(&["secret", "list"]);
+    assert!(list.status.success());
+    let text = String::from_utf8_lossy(&list.stdout);
+    assert!(text.contains("ops-key agent_api_key active"), "{text}");
+    assert!(
+        text.contains("prefix=/v1/watch location=authorization_bearer"),
+        "{text}"
+    );
+}
+
+#[test]
+fn secret_put_scope_validation_precedes_material_daemon_and_lease() {
+    let vault = GrantCliVault::new("secret-put-scope-preflight");
+    let refused = cli()
+        .args([
+            "secret",
+            "put",
+            "--name",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--path-prefix",
+            "/v1/watch/",
+            "--material-file",
+        ])
+        .arg(vault.root.join("missing-material"))
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .env(
+            "SUBC_CONNECTION_FILE",
+            vault.root.join("missing-connection.json"),
+        )
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--path-prefix"), "{stderr}");
+    assert!(stderr.contains("use /v1/watch"), "{stderr}");
+    assert!(!stderr.contains("missing-material"), "{stderr}");
+    assert!(!stderr.contains("missing-connection"), "{stderr}");
+    assert!(!vault.data_dir.join("store.db").exists());
+    assert!(!vault.key_path.exists());
+}
+
+#[test]
+fn secret_put_scope_validation_accepts_site_login_origin_with_default_port() {
+    let vault = GrantCliVault::new("secret-put-scope-origin");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, "operator\npassword");
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "--name",
+        "ops-login",
+        "--kind",
+        "site-login",
+        "--origin",
+        "https://x.test:443",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let list = vault.run(&["secret", "list"]);
+    assert!(list.status.success());
+    let text = String::from_utf8_lossy(&list.stdout);
+    assert!(text.contains("ops-login site_login active"), "{text}");
+    assert!(text.contains("origin=https://x.test:443"), "{text}");
+}
+
+#[test]
 fn secret_put_offline_stores_a_releaseable_key_and_refuses_the_name_twice() {
     let vault = GrantCliVault::new("secret-put-offline");
     vault.bootstrap();

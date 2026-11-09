@@ -50,13 +50,7 @@ pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
         } => {
             validate_host(host)?;
             if let Some(prefix) = path_prefix {
-                validate_path(prefix)?;
-                if prefix.ends_with('/') {
-                    return Err(InvalidParams);
-                }
-                if prefix.len() > MAX_SECRET_PATH_PREFIX_BYTES {
-                    return Err(LimitExceeded);
-                }
+                validate_path_prefix(prefix)?;
             }
             validate_location(location)
         }
@@ -65,6 +59,18 @@ pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
             Ok(())
         }
     }
+}
+
+/// Scope prefixes use the request-path grammar but cannot end with a slash.
+pub fn validate_path_prefix(prefix: &str) -> Result<(), ValidationError> {
+    validate_path(prefix)?;
+    if prefix.ends_with('/') {
+        return Err(InvalidParams);
+    }
+    if prefix.len() > MAX_SECRET_PATH_PREFIX_BYTES {
+        return Err(LimitExceeded);
+    }
+    Ok(())
 }
 
 pub fn validate_path(path: &str) -> Result<(), ValidationError> {
@@ -103,7 +109,7 @@ pub fn validate_path(path: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_location(location: &str) -> Result<(), ValidationError> {
+pub fn validate_location(location: &str) -> Result<(), ValidationError> {
     if location == "authorization_bearer" {
         return Ok(());
     }

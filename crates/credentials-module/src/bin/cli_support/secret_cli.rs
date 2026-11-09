@@ -15,6 +15,7 @@
 use crate::{commit_admin, optional, required, store_path, CliError, GlobalArgs};
 use base64::Engine;
 use credentials_core::admin_ops::{AdminOpBody, SecretHomeTarget, ADMIN_OP_SCHEMA_V2};
+use credentials_core::agent_secret::{self, ValidationError};
 
 const BEARER: &str = "authorization_bearer";
 const NO_TABLES: &str = "no agent-secret tables yet";
@@ -139,7 +140,7 @@ pub fn help_text() -> &'static str {
       \x20 --kind <api-key|site-login>  which kind of secret to store\n\
       \x20 --name <name>                secret name; put also takes it first\n\
       \x20 --host <host>                api key: the approved host\n\
-      \x20 --path-prefix <path>         api key: an optional path prefix\n\
+      \x20 --path-prefix <path>         api key: prefix without a trailing /\n\
       \x20 --location <where>           api key: where to put it; the default\n\
       \x20                             is authorization_bearer\n\
       \x20 --origin <https://host>      site login: the approved origin\n\
@@ -160,6 +161,8 @@ pub fn help_text() -> &'static str {
       phone deposit carries: the key bytes, or username, password and otpauth on\n\
       separate lines. A file that is not mode 0600 is refused, naming the path and\n\
       the rule.\n\
+      Scope flags and names are checked before reading material or contacting the\n\
+      daemon. Use /v1/watch, not /v1/watch/, for a path prefix.\n\
       \n\
       Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and\n\
       never by a credential id. Names are create-only: a second put of a name is\n\
@@ -222,6 +225,14 @@ enum Material {
 fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let kind = required(args, "--kind")?;
     let name = secret_name(args)?;
+    agent_secret::validate_name(&name).map_err(|error| {
+        put_field_error(
+            "--name",
+            error,
+            "must start with an ASCII letter or digit and contain only ASCII letters, digits, '.', '_' or '-'",
+            &format!("must be at most {} bytes", agent_secret::MAX_SECRET_NAME_BYTES),
+        )
+    })?;
     let optional_plain = |flag: &str| -> Result<Option<String>, CliError> {
         match optional(args, flag) {
             None => Ok(None),
@@ -246,9 +257,10 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                     "an api key names a host, never an origin".into(),
                 ));
             }
-            if host.is_none() {
-                return Err(CliError::Usage("an api key requires the host flag".into()));
-            }
+            let host = host
+                .as_deref()
+                .ok_or_else(|| CliError::Usage("an api key requires the host flag".into()))?;
+            validate_api_key_scope(host, path_prefix.as_deref(), &location)?;
         }
         "site-login" => {
             if host.is_some() || path_prefix.is_some() || optional(args, "--location").is_some() {
@@ -257,11 +269,17 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                         .into(),
                 ));
             }
-            if origin.is_none() {
-                return Err(CliError::Usage(
-                    "a site login requires the origin flag".into(),
-                ));
-            }
+            let origin = origin
+                .as_deref()
+                .ok_or_else(|| CliError::Usage("a site login requires the origin flag".into()))?;
+            agent_secret::canonical_origin(origin).map_err(|error| {
+                put_field_error(
+                    "--origin",
+                    error,
+                    "must be https:// followed by a plain lowercase DNS host name, optionally with :443; no user information, path, query, fragment or other port",
+                    &format!("host must be at most {} bytes", agent_secret::MAX_SECRET_HOST_BYTES),
+                )
+            })?;
         }
         other => {
             return Err(CliError::Usage(format!(
@@ -299,6 +317,62 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         reply["incarnation"].as_str().unwrap_or("unknown")
     );
     Ok(())
+}
+
+fn put_field_error(flag: &str, error: ValidationError, rule: &str, limit: &str) -> CliError {
+    let reason = match error {
+        ValidationError::InvalidParams => rule,
+        ValidationError::LimitExceeded => limit,
+    };
+    CliError::Usage(format!("{flag} {reason}"))
+}
+
+/// Diagnose scope fields before reading material, contacting a daemon or acquiring the
+/// vault's writer lease.
+fn validate_api_key_scope(
+    host: &str,
+    path_prefix: Option<&str>,
+    location: &str,
+) -> Result<(), CliError> {
+    agent_secret::validate_host(host).map_err(|error| {
+        put_field_error(
+            "--host",
+            error,
+            "must be a plain lowercase DNS host name (letters, digits and hyphens in nonempty labels; no leading or trailing hyphens, trailing dot, IP address, scheme, path or port)",
+            &format!("must be at most {} bytes", agent_secret::MAX_SECRET_HOST_BYTES),
+        )
+    })?;
+    if let Some(prefix) = path_prefix {
+        agent_secret::validate_path_prefix(prefix).map_err(|error| {
+            let mut rule = "must start with '/', must not end with '/', and must not contain '//' or characters outside RFC 3986 path characters; no dot segments; percent escapes must encode printable ASCII other than space, '/', '.', '%', backslash or ';'".to_owned();
+            if prefix.ends_with('/') && agent_secret::validate_path(prefix).is_ok() {
+                if prefix == "/" {
+                    rule.push_str("; omit --path-prefix to cover all paths");
+                } else {
+                    rule.push_str(&format!("; use {}", prefix.trim_end_matches('/')));
+                }
+            }
+            put_field_error(
+                "--path-prefix",
+                error,
+                &rule,
+                &format!("must be at most {} bytes", agent_secret::MAX_SECRET_PATH_PREFIX_BYTES),
+            )
+        })?;
+    }
+    agent_secret::validate_location(location).map_err(|error| {
+        put_field_error(
+            "--location",
+            error,
+            "must be authorization_bearer, header:<HTTP token> (not Host, Cookie, Content-Length or Authorization), query:<ASCII letters, digits, '.', '_' or '-'>, or json_pointer:</...> (printable ASCII without spaces, with only ~0 and ~1 escapes); values must be nonempty",
+            &format!(
+                "header and query names must be at most {} and {} bytes respectively; JSON pointers must be at most {} bytes",
+                agent_secret::MAX_SECRET_HEADER_BYTES,
+                agent_secret::MAX_SECRET_QUERY_BYTES,
+                agent_secret::MAX_SECRET_POINTER_BYTES,
+            ),
+        )
+    })
 }
 
 /// Read the material file, refusing a mode other than 0600 or a body that is not the kind's

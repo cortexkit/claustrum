@@ -354,12 +354,12 @@ impl EncryptedStore {
                 ]),
                 SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
                 SecretScope::ApiKeyRules { location, .. } => fields.extend([
-                    scope_json.as_deref().expect("extended scope").as_bytes(),
+                    super::phone::extended_scope_json(&scope_json)?,
                     location.as_bytes(),
                 ]),
-                SecretScope::SiteLoginOrigins { .. } => fields.push(
-                    scope_json.as_deref().expect("extended scope").as_bytes(),
-                ),
+                SecretScope::SiteLoginOrigins { .. } => {
+                    fields.push(super::phone::extended_scope_json(&scope_json)?)
+                }
             }
             super::phone::audit(
                 tx,

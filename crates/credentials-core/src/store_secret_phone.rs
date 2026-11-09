@@ -5,6 +5,16 @@ use serde_json::{json, Value};
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
 
+/// The audit payload of an extended scope names its stored `scope_json`. Encoding an
+/// extended scope always yields it, so a missing value is a store error, never a panic
+/// inside the write transaction.
+pub(super) fn extended_scope_json(scope_json: &Option<String>) -> rusqlite::Result<&[u8]> {
+    scope_json
+        .as_deref()
+        .map(str::as_bytes)
+        .ok_or_else(|| rusqlite_err("extended secret scope has no scope_json"))
+}
+
 pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
     matches!(
         conn.query_row(
@@ -436,13 +446,10 @@ impl EncryptedStore {
                 location.as_bytes(),
             ]),
             SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
-            SecretScope::ApiKeyRules { location, .. } => fields.extend([
-                scope_json.as_deref().expect("extended scope").as_bytes(),
-                location.as_bytes(),
-            ]),
-            SecretScope::SiteLoginOrigins { .. } => {
-                fields.push(scope_json.as_deref().expect("extended scope").as_bytes())
+            SecretScope::ApiKeyRules { location, .. } => {
+                fields.extend([extended_scope_json(&scope_json)?, location.as_bytes()])
             }
+            SecretScope::SiteLoginOrigins { .. } => fields.push(extended_scope_json(&scope_json)?),
         }
         fields.push(d.deposit_id.as_bytes());
         audit(

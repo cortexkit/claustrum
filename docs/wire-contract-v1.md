@@ -2894,3 +2894,302 @@ material or its digest. Vault-global rows have no target.
 | `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
 | `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
 | `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |
+
+### Multi-host secret scopes (normative extension)
+
+This extension defines the contract for extended scopes. Until the creation setting is
+enabled, readers must still understand these shapes but no new extended secret can be
+created. A **legacy scope** is one exact API-key host with an optional prefix and one
+location, or one login origin. An **extended scope** is two or more API-key rules, any
+wildcard rule (including a lone wildcard), or two or more login origins. All legacy
+encodings, published vectors, use requests and replies, delete statements, grant
+durations and coverage remain byte-identical. Only extended scopes use the encodings
+below. Earlier single-host examples describe legacy scopes, not the extended key sets.
+
+#### Input, emitted and stored shapes
+
+The kind strings remain `agent_api_key` and `site_login`. Scope fields in phone
+`secret.deposit` and `admin.secret_put` have exactly one of these forms:
+
+* Legacy API key: `{host, path_prefix?, location}`. A wildcard in `host` is
+  `invalid_params`; legacy `--host` never accepts wildcards.
+* Extended API key: `{rules: [{host, path_prefix?}, …], location}` with no top-level
+  `host` or `path_prefix`. A one-entry array is valid only for a wildcard rule.
+* Legacy login: `{origin}`. Extended login: `{origins: [origin, …]}` with no `origin`.
+  A one-entry `origins` array is always `invalid_params`.
+
+A rule has exactly `host` and optional `path_prefix`, both strings. Unknown keys,
+non-string entries or field values, non-array or empty `rules`/`origins`, mixed legacy
+and extended scope fields, and fields for the other kind are `invalid_params`.
+Phone field presence is by key, even if its value is null, and its key sets are closed.
+For `admin.secret_put` only, the legacy optional fields count as present when non-null:
+unused legacy fields serialize as null. New optional `rules` and `origins` fields are
+omitted when absent, so a legacy put has exactly its old serialization.
+
+Canonical rules sort bytewise by `(host, path_prefix)`, with an absent prefix sorting
+as `""`. Exact duplicate rules are refused. Overlapping distinct rules are accepted:
+`*.x.y` with `a.x.y`, or one host with and without a prefix. Origins sort bytewise by
+the strings **as sent**, which are stored unchanged. Equal `canonical_origin` results
+are duplicates (`https://x.test` and `https://x.test:443`); these are refused.
+Canonical order is the stored, listed, signed and approval-card reading order. Core
+canonicalizes deposit and put scopes, including crafted admin operations; sorting is
+not merely a CLI responsibility. A deposit may arrive in non-canonical order, but the
+vault canonicalizes only after verifying the AAD over the sent order.
+
+Every vault-emitted rule object (statement v3, `secret.list`, stored column) has both
+`host` and `path_prefix`, with `""` for no prefix. Stored decode maps that empty string
+to absent before applying grammar and limits. Explicit `path_prefix: ""` in input is
+still `invalid_params`. Stored decode never consults the PSL.
+
+#### Grammar, matching, limits and refusal order
+
+The shared rule crate parses every scope at deposit, put and use, legacy included.
+An exact host is nonempty lowercase ASCII DNS text: nonempty dot-separated labels,
+each containing only `a`–`z`, digits and `-`, with no edge hyphen, trailing dot or IP
+literal. A-labels (`xn--…`) are accepted, U-labels refused. The legacy grammar does not
+add a separate label-length cap. Host grammar is checked before its 253-byte cap.
+A wildcard host is `*.` followed by that exact-host grammar and matches **exactly one**
+additional leftmost label: `*.x.y` matches `a.x.y`, not `x.y` or `a.b.x.y`.
+The 253-byte host cap includes `*.`. No other placement of `*` is valid: `*`, `*.`,
+`a.*.b`, `*a.b` and `*.*.b` are refused. Login origins never accept wildcards.
+
+Prefixes retain the legacy path grammar and 1,024-byte cap. A path starts with `/`,
+contains no `//`, and uses only ASCII alphanumerics or `-._~!$&'()*+,;=:@/%`.
+Each `%` must have two hex digits; the decoded byte must be printable ASCII
+(`0x21`–`0x7e`) other than `/`, `.`, `%`, `\` or `;`. A segment before its first `;`
+must not decode to `.` or `..`. A prefix cannot end in `/`, so `/`, `/repos/a/` and
+`""` are refused. Grammar (including the trailing slash check) precedes the byte cap.
+The `*` in `/v1/*` is literal: it matches `/v1/*` and `/v1/*/x`, not `/v1/items`.
+
+API-key matching requires HTTPS, port 443, a matching host and either no prefix, an
+exact prefix, or a prefix followed by `/`. There is no percent-decoding during match:
+`/repos/%7E` does not match prefix `/repos/~`; `/repos/ab` does not match `/repos/a`,
+but `/repos/a/` and `/repos/a/x` do. A scope matches if any rule matches. With no prefix,
+`/` and `/x/y` match. A login scope origin is exactly `https://<valid-host>` with
+optional `:443`; `canonical_origin` removes that suffix, with no URL normalization.
+A login target matches an origin with the same host, HTTPS and port 443; HTTP,
+another host or port 444 does not match. A login target never matches an API-key scope,
+and an API-key target never matches a login scope. Targets remain one concrete URL or
+origin in the unchanged `secret.use` shape, never a wildcard or an array.
+
+There are at most **8 rules per API key** and **4 origins per login**. Nine rules or
+five origins are `limit_exceeded`. Existing per-field byte caps are unchanged: host
+253, prefix 1,024, header name 64, query name 64, JSON pointer 256, username 256,
+password 1,024 and API key 8,192 bytes. Location retains its legacy grammar:
+`authorization_bearer`, `header:<token>`, `query:<ASCII alphanumeric/._- name>`, or
+`json_pointer:<nonempty /-prefixed printable ASCII pointer>` with only `~0`/`~1`
+escapes. Header names are RFC 9110 tokens; Host, Cookie, Content-Length and
+Authorization are forbidden case-insensitively. Location is required for API keys and
+absent for logins. Material and TOTP validation and limits remain as above.
+
+The **first failing check** decides the refusal, in this order:
+
+1. Transport shape (vault).
+2. Entry count: over the maximum is `limit_exceeded`; a one-entry `origins` array is
+   `invalid_params`.
+3. Each entry in sent order: host grammar, host byte cap, prefix grammar, prefix byte
+   cap (or the origin grammar and host cap for login entries).
+4. A one-entry exact `rules` array (`invalid_params`).
+5. Duplicates (`invalid_params`).
+6. The public-suffix check (`invalid_params`).
+7. Location grammar and byte cap (vault).
+
+Byte-cap refusals are `limit_exceeded`; all other grammar refusals are
+`invalid_params`. The crate owns checks 2–6. At `admin.secret_put`, existing operator
+mapping remains: `invalid_params` becomes `invalid_credential_id`, and
+`limit_exceeded` becomes a `limit_exceeded:` store message. CLI validation runs first,
+names the field, and precedes reading material or contacting the daemon.
+
+#### Public Suffix List and crate capabilities
+
+Input `*.<base>` is refused exactly when `<base>` is itself a public suffix under the
+pinned PSL prevailing-rule algorithm: ICANN **and PRIVATE**, wildcard and exception
+rules, and the default `*` rule for unknown TLDs. PSL entries are compared after
+ToASCII, so a U-label entry governs its A-label form. Thus `*.com`, `*.github.io` and
+`*.xn--55qx5d.cn` are refused; `*.foo.github.io` and `*.x.test` are allowed. The PSL's
+`*.ck` and `!www.ck` rules refuse `*.a.ck` but permit `*.www.ck`. Use-time matching
+and stored decode never consult the PSL: an already stored `*.github.io` rule still
+decodes and matches `a.github.io`, even if a newer snapshot would refuse its creation.
+
+The pinned `psl_snapshot` identity is:
+
+* URL: `https://raw.githubusercontent.com/publicsuffix/list/ab73a956765706dc3f42dbac5c7e48df2297e1ac/public_suffix_list.dat`
+* Date: `2026-11-09`
+* SHA-256: `7bd9c5479d1ac1a4118b982a3a05b65719e3215cb873474f9799af6222006da4`
+
+`aft-secret-rules` (library `secret_rules`) is the single parser and matcher, with
+these four capabilities for the vault:
+
+* **Input parse:** all checks from entry count through PSL, with refusals mapping
+  one-to-one to `invalid_params` or `limit_exceeded`.
+* **Stored decode:** the same grammar and limits without PSL, interpreting emitted
+  `path_prefix: ""` as absent.
+* **Match:** one parsed scope against one `secret.use` target, for legacy and extended
+  scopes alike.
+* **Snapshot identity:** the PSL URL, date and SHA-256 above. The vault pins equality
+  with the corpus identity, so a dependency update cannot silently change the PSL.
+
+`UseTarget::matches` and `validate_scope` retain their signatures but delegate to this
+crate; there is no second rule parser or matcher. The legacy `SecretScope::ApiKey`
+and `SiteLogin` fields stay unchanged; extended scopes use new variants.
+
+#### Statements, approval and listings
+
+Extended scopes emit `ck-secret-use-statement/v3` or `ck-secret-flow-statement/v3`,
+for both local and forwarded requests. The object retains every v1 field, replacing
+`use` with `{rules: [{host, path_prefix}, …], location}` or `{origins: […]}`.
+Flow API-key `use` also carries the existing sorted `methods` beside `rules`.
+`asking_member_id` is present exactly for forwarded requests, with the asking member's
+id, as in v2. Statements are RFC 8785 (JCS) bytes. Approval envelopes and signatures
+are unchanged. Legacy local requests still use v1 and legacy forwarded requests v2.
+
+At approval commit, `asking_member_id` presence and value must equal the pending
+row's asker exactly. Tag checks happen per item branch after loading the row, not by
+assuming that only a `/v2` tag can be forwarded. An agent approve requires exactly
+use v1 for a legacy local row, v2 for a legacy forwarded row, or v3 for an extended
+row, and compares `use` rebuilt from storage. A flow approve rebuilds and compares
+the entire expected statement bytes with the row's v1/v2/v3 builder. Other cases
+refuse the item `approval_invalid`.
+
+For extended secrets a flow_id equal to **either v3 statement tag** is
+`invalid_params`, local or forwarded. Request-time prechecks run before encoding,
+so this is not `store_error`; commit repeats the check. The existing v2-tag rule
+remains for every secret: a forwarded flow_id equal to either v2 tag is refused at
+request and commit, while a local flow_id equal to a v2 tag remains accepted.
+
+Delete is unchanged: `ck-secret-delete-statement/v1` carries no scope or asker.
+Its commit branch decodes no scope and removes even a corrupt extended row, its
+grants and pending requests. A corrupt scope on an approve instead takes
+`approval_quarantine`: the row becomes `corrupt`, one `SecretQuarantine` audit is
+written, and the item is refused. A relaying asking vault still checks only the four
+`approval_required` members (`status`, `request_id`, `statement_b64url`,
+`expires_at_ms`) and never parses its statement.
+
+An extended `secret.list` row carries `rules` and `location`, or `origins`, instead
+of legacy `host`/`path_prefix`/`origin`; other row and grant fields are unchanged.
+`permissions.list` renders `scope_label` as `use <name> on <host><prefix>, …` or
+`fill <name> on <origin>, …`, in canonical order for **both agent and flow grants**.
+Legacy labels are unchanged. `ck auth secret list` prints one `rule=<host><prefix>`
+token per canonical rule followed by `location=…`, or one `origin=<origin>` token
+per canonical origin. Unreadable scope prints `<name> <kind> <state> scope=unreadable`.
+
+#### Deposit and sealed-body byte encodings
+
+Every field below uses `push_field`: its unsigned u64 little-endian byte length,
+then its bytes. Text is UTF-8 without normalization. Extended **deposit AAD v2**
+fields, in order, are `ck-secret-deposit-aad/v2`, deposit_id, member_id, name, kind,
+entry count as **decimal ASCII**, then:
+
+* API key: each rule's host and prefix-or-empty **in sent order**, then location.
+* Login: each origin **in sent order**.
+
+HPKE info (`cortexkit/claustrum/secret-deposit/v1`) and the
+`ck-secret-deposit-plaintext/v1` material encoding are unchanged. The tombstone
+digest covers the AAD, so reordering entries on a resend is `deposit_conflict`.
+An exact resend remains `already_stored` if its original record is still live.
+
+Extended **sealed body v2** fields are `ck-secret-sealed-body/v2`, kind, entry
+count as a decimal-ASCII frame, then canonical rule host/prefix pairs and location,
+or canonical origins, followed by the unchanged v1 material fields: one API-key
+byte field, or username, password and otpauth-URI-or-empty. `record_version` stays
+1. A row with `scope_json` set opens only a v2 body; a legacy row opens only a v1
+body. A mismatch follows the existing `sealed_scope` refusal path. Master-key
+rotation re-seals opened body bytes unchanged without reading scope columns.
+
+#### Creation setting, precedence and persistence
+
+The `settings` key `secret.multi_host` stores `"true"` or `"false"`. A missing row
+means off; any other value or failed read is unreadable. Legacy creation never
+reads it. Off or unreadable refuses creation of an extended scope on deposit and
+put with `secret_multi_host_disabled`: class **permanent**, form **result error**,
+body `{"error":{"code":"secret_multi_host_disabled","class":"permanent"}}`.
+It means creating a multi-host scope while `secret.multi_host` is off or
+unreadable. The new `StoreOpError` for put has that same `wire_code`; its message
+names `secret.multi_host` and `ck auth secret multi-host on` as the remedy.
+
+`admin.secret_multi_host_set {v: 2, enabled: boolean}` uses the same schema version
+as `admin.secret_phone_gate_set`. A changed value audits once as
+`SecretMultiHostSet` (`secret_multi_host_set`), with payload `push_field("true")`
+or `push_field("false")`; an unchanged value changes nothing, audits nothing and
+replies `changed: false`. CLI `ck auth secret multi-host on|off` prints exactly
+`multi-host setting on` or `multi-host setting off`. Lease-free `status` prints
+`multi-host setting on|off|unreadable` with one of those final words; no store,
+settings table or row means `multi-host setting off`.
+
+Scope refusal order above comes before any transaction. Inside the deposit
+transaction, tombstone replay (`already_stored` / `deposit_conflict`) precedes the
+creation setting, which precedes member check, HPKE open and `name_exists`. Put
+reads the setting inside the insert's `fenced_write` transaction, after the
+home-role refusal (`local_create_allowed`) and before `name_exists`. Neither path
+uses a cached value or relies on a CLI preflight. A setting refusal writes no
+secret row, tombstone or `secret_store` audit: the identical deposit can succeed
+once enabled. Disabling later stops new extended creation, not existing use.
+
+Migration 35 appends nullable `scope_json`, rebuilding by create/copy/drop/rename
+without rewriting migration 27 or `agent_secrets.sql`. It preserves every old
+column and row, the name primary key and UNIQUE incarnation index, and leaves
+other tables unchanged. The value is the JCS bytes of the canonical rules array
+`[{host, path_prefix}, …]` or origins array; location stays in `location`.
+For an API key the CHECK requires nonempty location, NULL origin, and either
+non-NULL host with NULL scope_json, or NULL host/path_prefix with non-NULL
+scope_json. For a login host/path_prefix/location are NULL, and exactly one of
+origin and scope_json is non-NULL. Migration is forward-only, with a pre-migration
+snapshot at deployment. No foreign keys, triggers or extra indexes are added.
+
+Every scope reader uses `scope_json`: use load, approval commit, phone list,
+permissions agent/flow rows and operator listing. Put and deposit write it. Invalid
+JSON, non-canonical bytes or order, duplicates, excess count or an exact-rule or
+origin singleton are corrupt. Use refuses `sealed_scope`; phone `secret.list`
+and `permissions.list` fail `store_error`; approve quarantines as above. Operator
+delete reads no scope and can still delete. `list_agent_secrets_read_only` returns
+raw scope_json without decoding (NULL below step 35), so `ck auth secret grants`
+still lists and the lease-free operator list can identify unreadable rows. The
+extended `secret_store` audit frames kind, incarnation, scope_json, location for
+API keys and deposit_id for deposits; legacy payloads are unchanged.
+
+CLI put accepts repeatable `--rule <host[/prefix]>` for API keys. One exact rule
+maps to legacy host/prefix; one wildcard or multiple rules maps to `rules`.
+`--host`/`--path-prefix` remain and cannot mix with `--rule`. Repeatable `--origin`
+maps one login origin to legacy `origin` and multiple to `origins`. Location
+handling is unchanged. Help and the verb table must describe these forms.
+
+#### Conformance corpus and its single writer
+
+`scripts/secret-multi-host-vectors.py` is the **only writer** of
+`crates/credentials-core/tests/vectors/multi-host/` and its `SHA256SUMS`. Regenerate
+only with that generator and the claustrum repository owner's sign-off; never
+hand-edit generated files.
+The manifest lists the five JSON files in `shasum -a 256` format. Rust tests compare
+parsed values reproduced by real encoders and have no multi-host write branch;
+even `CK_EMIT_SECRET_VECTORS=1` must leave this directory byte-unchanged. A mismatch
+is a code defect, not permission to rewrite the corpus.
+
+`secret-scope-match-v1.json` is `{v, psl_snapshot: {url, date, sha256}, cases}`.
+A case is `{case, form, kind, scope, target?, expect}`. `form: "input"` uses deposit
+scope fields without location and goes through input parse; `form: "stored"` uses
+emitted scope fields and goes through stored decode. `expect` is `"match"` or
+`"no_match"`, with target `{scheme, host, port, path}` or `{origin}`, or
+`{"scope_refused": "invalid_params"|"limit_exceeded"}` without a target. No gate,
+location or store state belongs in this file. A refusal has one fault unless it
+explicitly pins precedence. Stored cases include public-private suffix matching,
+empty-prefix decoding and a refusal. A vault test stores accepted input cases
+with the setting on and matches through use; input refusals must agree between
+deposit and put (with operator mapping); stored cases exercise scope_json decode
+and the use path's crate match call.
+
+Vault-only cases live in `secret-approval-v3.json`, `secret-flow-approval-v3.json`,
+`secret-deposit-v2.json` and `secret-list-v2.json`. Each names `operation` and
+`setup`, including the creation setting where relevant; `expect` describes the
+outcome or the named projection of a reply. Deposit byte samples carry unencrypted
+params, fixed test-only material, AAD hex, plaintext hex and sealed-body hex; HPKE
+envelope fields are omitted because the wrap is unchanged. Statement samples carry
+the object, `statement_jcs_hex` (exact JCS bytes) and `statement_sha256`. The corpus
+pins boundary counts, wildcard depth and PSL rules, legacy grammar and matching,
+sent versus canonical order, missing versus empty prefixes, literal path stars,
+list/permission labels, local versus forwarded v3 and reserved flow tags.
+
+Implementation of extended-scope vault readers and writers waits until an
+`aft-secret-rules` release passes this corpus and provides all four capabilities.
+Existing published samples
+outside `multi-host/` stay unchanged. New numeric count boundaries require tests
+on both sides and registration in `docs/threshold-controls.txt` when implemented.

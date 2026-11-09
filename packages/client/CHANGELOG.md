@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.0
+
+- `enrollPropose` takes an optional `displayName`, a name the person sees and
+  approves for the program (for example "Claude sign-in for Pi"). It is sent as
+  `display_name` only when given. It needs claustrum 94b5c9a6 or newer; an older
+  vault refuses the field as `invalid_params`, so omit it there. The vault refuses
+  a name that is empty, longer than 40 characters, or contains control,
+  bidirectional or zero-width characters, rather than shortening it.
+
 ## 0.16.0
 
 - Export `newEnrollmentSecret()` to mint a 32-byte request secret and its

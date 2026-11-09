@@ -28,6 +28,7 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     };
     match verb.as_str() {
         "phone-gate" => phone_gate(global, rest),
+        "multi-host" => multi_host(global, rest),
         "put" => put(global, rest),
         "list" => list(global, rest),
         "grants" => grants(global, rest),
@@ -48,6 +49,7 @@ fn put_flags() -> &'static [&'static str] {
         "--kind",
         "--name",
         "--host",
+        "--rule",
         "--path-prefix",
         "--location",
         "--origin",
@@ -73,8 +75,8 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     };
     let (value_flags, positional) = match verb.as_str() {
-        // `phone-gate` takes one positional operand and no flags.
-        "phone-gate" => (&[][..], true),
+        // Each setting takes one positional operand and no flags.
+        "phone-gate" | "multi-host" => (&[][..], true),
         // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
         "delete" => (DELETE_FLAGS, true),
         // `put` names the secret first or with `--name`, then its flags.
@@ -140,10 +142,11 @@ pub fn help_text() -> &'static str {
       \x20 --kind <api-key|site-login>  which kind of secret to store\n\
       \x20 --name <name>                secret name; put also takes it first\n\
       \x20 --host <host>                api key: the approved host\n\
+      \x20 --rule <host[/prefix]>       api key: repeat for each approved rule\n\
       \x20 --path-prefix <path>         api key: prefix without a trailing /\n\
       \x20 --location <where>           api key: where to put it; the default\n\
       \x20                             is authorization_bearer\n\
-      \x20 --origin <https://host>      site login: the approved origin\n\
+      \x20 --origin <https://host>      site login: repeat for each origin\n\
       \x20 --material-file <path>       read the material from a 0600 file\n\
       \x20 --grant-id <id>              remove one grant by id (revoke)\n\
       \n\
@@ -151,8 +154,10 @@ pub fn help_text() -> &'static str {
       put creates a secret. list shows secrets, scopes and grants. grants shows one\n\
       row per live grant. delete removes a secret with its grants and pending\n\
       requests. revoke removes one grant. phone-gate turns the phone channel on or\n\
-      off, or prints its state. home set <member-id>|self names the vault that\n\
-      holds agent secrets, home unset clears it, and home show prints it.\n\
+      off, or prints its state. multi-host on|off|status controls creation of\n\
+      multi-rule, wildcard and multi-origin secrets. home set <member-id>|self\n\
+      names the vault that holds agent secrets, home unset clears it, and home\n\
+      show prints it.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\
@@ -163,16 +168,18 @@ pub fn help_text() -> &'static str {
       the rule.\n\
       Scope flags and names are checked before reading material or contacting the\n\
       daemon. Write a path prefix without a trailing /, for example /v1/items.\n\
+      Use --rule or --host/--path-prefix, never both. One exact rule or one origin\n\
+      keeps the legacy scope; wildcards or multiple entries need multi-host on.\n\
       \n\
       Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and\n\
       never by a credential id. Names are create-only: a second put of a name is\n\
       refused, and reusing a name means deleting it first. Writes use the admin MAC\n\
-      online or the offline lease; list, grants, phone-gate status and home show\n\
-      read the store without either. home set <member-id> needs the daemon, which\n\
-      checks the member against callosum's pairing; it is refused while this vault\n\
-      still holds secrets, grants or pending requests. Keep the phone setting off\n\
-      until callosum derives the forwarded harness from the authenticated phone\n\
-      peer on every call."
+      online or the offline lease; list, grants, phone-gate status, multi-host\n\
+      status and home show read without either. home set <member-id> needs the\n\
+      daemon, which checks the member against callosum's pairing; it is refused\n\
+      while this vault still holds secrets, grants or pending requests. Keep the\n\
+      phone setting off until callosum derives the forwarded harness from the\n\
+      authenticated phone peer on every call."
 }
 
 fn phone_gate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -212,6 +219,39 @@ fn phone_gate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn multi_host(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let [action] = args else {
+        return Err(CliError::Usage(
+            "secret multi-host takes on, off or status".into(),
+        ));
+    };
+    if action == "status" {
+        let status =
+            credentials_core::store::secret_multi_host_status_read_only(&store_path(global))
+                .map_err(|_| CliError::Usage("cannot read multi-host setting".into()))?;
+        println!("multi-host setting {status}");
+        return Ok(());
+    }
+    let enabled = match action.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return Err(CliError::Usage(
+                "secret multi-host takes on, off or status".into(),
+            ))
+        }
+    };
+    commit_admin(
+        global,
+        AdminOpBody::SecretMultiHostSet {
+            v: ADMIN_OP_SCHEMA_V2,
+            enabled,
+        },
+    )?;
+    println!("multi-host setting {}", if enabled { "on" } else { "off" });
+    Ok(())
+}
+
 /// What the operator supplied, already split into the kind's plaintext fields.
 enum Material {
     ApiKey(Vec<u8>),
@@ -243,41 +283,112 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Some(value) => Ok(Some(value)),
         }
     };
-    let host = optional_plain("--host")?;
-    let path_prefix = optional_plain("--path-prefix")?;
-    let origin = optional_plain("--origin")?;
+    let mut host = optional_plain("--host")?;
+    let mut path_prefix = optional_plain("--path-prefix")?;
+    let rule_values = repeated(args, "--rule");
+    let origin_values = repeated(args, "--origin");
+    let mut origin = None;
+    let mut rules = None;
+    let mut origins = None;
     let location = optional_plain("--location")?.unwrap_or_else(|| BEARER.to_owned());
 
     // Refuse a scope the kind cannot carry before reading anything at all, so a bad
     // invocation never touches the material or the terminal.
     match kind.as_str() {
         "api-key" => {
-            if origin.is_some() {
+            if !origin_values.is_empty() {
                 return Err(CliError::Usage(
-                    "an api key names a host, never an origin".into(),
+                    "--origin is only for a site login, not an api key".into(),
                 ));
             }
-            let host = host
-                .as_deref()
-                .ok_or_else(|| CliError::Usage("an api key requires the host flag".into()))?;
-            validate_api_key_scope(host, path_prefix.as_deref(), &location)?;
+            if !rule_values.is_empty() {
+                if host.is_some() || path_prefix.is_some() {
+                    return Err(CliError::Usage(
+                        "--rule cannot be combined with --host or --path-prefix".into(),
+                    ));
+                }
+                let entries: Vec<serde_json::Value> = rule_values
+                    .iter()
+                    .map(|value| {
+                        let (host, prefix) = value
+                            .find('/')
+                            .map_or((*value, None), |at| (&value[..at], Some(&value[at..])));
+                        let mut rule = serde_json::json!({"host": host});
+                        if let Some(prefix) = prefix {
+                            rule["path_prefix"] = prefix.into();
+                        }
+                        rule
+                    })
+                    .collect();
+                // A lone exact rule has the original wire shape. Grammar and public
+                // suffix list decisions belong to the shared scope parser, not this split.
+                let fields = if entries.len() == 1
+                    && !entries[0]["host"]
+                        .as_str()
+                        .is_some_and(|host| host.contains('*'))
+                {
+                    entries[0].clone()
+                } else {
+                    serde_json::json!({"rules": entries})
+                };
+                agent_secret::SecretScope::from_input("agent_api_key", &fields, Some(BEARER))
+                    .map_err(|error| put_field_error(
+                        "--rule", error,
+                        "requires lowercase DNS hosts with optional path prefixes, no duplicate rules, and wildcards only as '*.' over a non-public suffix; prefixes must not end with '/'",
+                        "exceeds the rule-count, host-byte or prefix-byte limit",
+                    ))?;
+                if let Some(entries) = fields.get("rules") {
+                    rules = Some(entries.clone());
+                } else {
+                    host = fields["host"].as_str().map(str::to_owned);
+                    path_prefix = fields
+                        .get("path_prefix")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
+                validate_api_key_location(&location)?;
+            } else {
+                let host = host.as_deref().ok_or_else(|| {
+                    CliError::Usage("an api key requires --host or --rule".into())
+                })?;
+                validate_api_key_scope(host, path_prefix.as_deref(), &location)?;
+            }
         }
         "site-login" => {
+            if !rule_values.is_empty() {
+                return Err(CliError::Usage(
+                    "--rule is only for an api key, not a site login".into(),
+                ));
+            }
             if host.is_some() || path_prefix.is_some() || optional(args, "--location").is_some() {
                 return Err(CliError::Usage(
-                    "a site login takes only the origin flag, never the host, prefix or location"
+                    "a site login takes only --origin, never --host, --path-prefix or --location"
                         .into(),
                 ));
             }
-            let origin = origin
-                .as_deref()
-                .ok_or_else(|| CliError::Usage("a site login requires the origin flag".into()))?;
-            agent_secret::canonical_origin(origin).map_err(|error| {
+            let Some(first) = origin_values.first() else {
+                return Err(CliError::Usage("a site login requires --origin".into()));
+            };
+            let validation = if origin_values.len() == 1 {
+                origin = Some((*first).to_owned());
+                agent_secret::canonical_origin(first).map(|_| ())
+            } else {
+                let values = serde_json::json!(origin_values);
+                let result = agent_secret::SecretScope::from_input(
+                    "site_login",
+                    &serde_json::json!({"origins": values}),
+                    None,
+                )
+                .map(|_| ());
+                origins = Some(values);
+                result
+            };
+            validation.map_err(|error| {
                 put_field_error(
                     "--origin",
                     error,
-                    "must be https:// followed by a plain lowercase DNS host name, optionally with :443; no user information, path, query, fragment or other port",
-                    &format!("host must be at most {} bytes", agent_secret::MAX_SECRET_HOST_BYTES),
+                    "must be https:// followed by a plain lowercase DNS host name, optionally with :443; no user information, path, query, fragment or other port; repeated origins must be distinct",
+                    &format!("host must be at most {} bytes and the origin count must not exceed the scope limit", agent_secret::MAX_SECRET_HOST_BYTES),
                 )
             })?;
         }
@@ -306,8 +417,8 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             path_prefix,
             location: (op_kind == "agent_api_key").then_some(location),
             origin,
-            rules: None,
-            origins: None,
+            rules,
+            origins,
             material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(frame_plaintext(&material).expose()),
         },
@@ -319,6 +430,13 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         reply["incarnation"].as_str().unwrap_or("unknown")
     );
     Ok(())
+}
+
+fn repeated<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.windows(2)
+        .filter(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
+        .collect()
 }
 
 fn put_field_error(flag: &str, error: ValidationError, rule: &str, limit: &str) -> CliError {
@@ -362,6 +480,10 @@ fn validate_api_key_scope(
             )
         })?;
     }
+    validate_api_key_location(location)
+}
+
+fn validate_api_key_location(location: &str) -> Result<(), CliError> {
     agent_secret::validate_location(location).map_err(|error| {
         put_field_error(
             "--location",
@@ -549,14 +671,44 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         println!("{NO_SECRETS}");
     }
     for secret in &listing.secrets {
-        let scope = match (&secret.host, &secret.origin) {
-            (Some(host), _) => format!(
+        let scope = match agent_secret::SecretScope::from_columns(
+            &secret.kind,
+            secret.host.as_deref(),
+            secret.path_prefix.as_deref(),
+            secret.location.as_deref(),
+            secret.origin.as_deref(),
+            secret.scope_json.as_deref(),
+        ) {
+            Ok(agent_secret::SecretScope::ApiKey {
+                host,
+                path_prefix,
+                location,
+            }) => format!(
                 "host={host} prefix={} location={}",
-                secret.path_prefix.as_deref().unwrap_or(""),
-                secret.location.as_deref().unwrap_or("")
+                path_prefix.as_deref().unwrap_or(""),
+                location
             ),
-            (_, Some(origin)) => format!("origin={origin}"),
-            _ => String::new(),
+            Ok(agent_secret::SecretScope::SiteLogin { origin }) => format!("origin={origin}"),
+            Ok(agent_secret::SecretScope::ApiKeyRules { rules, location }) => {
+                let mut tokens: Vec<String> = rules
+                    .iter()
+                    .map(|rule| {
+                        format!(
+                            "rule={}{}",
+                            rule.host,
+                            rule.path_prefix.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect();
+                tokens.push(format!("location={location}"));
+                tokens.join(" ")
+            }
+            Ok(agent_secret::SecretScope::SiteLoginOrigins { origins }) => origins
+                .iter()
+                .map(|origin| format!("origin={origin}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            Err(_) => "scope=unreadable".into(),
         };
         println!("{} {} {} {scope}", secret.name, secret.kind, secret.state);
         for grant in &secret.grants {

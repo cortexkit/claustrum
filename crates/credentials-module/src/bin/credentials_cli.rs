@@ -581,6 +581,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
                 "delete",
                 "revoke",
                 "phone-gate",
+                "multi-host",
                 "on",
                 "off",
                 "status",
@@ -678,7 +679,7 @@ fn usage_short() -> String {
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
         federation          set this vault's member id or the mapping gate\n\
-        secret              put, list, delete or revoke agent secrets; phone gate\n\
+         secret              agent secrets; phone-gate and multi-host settings\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\

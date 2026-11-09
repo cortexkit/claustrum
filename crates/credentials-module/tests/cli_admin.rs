@@ -47,6 +47,9 @@ const CLI_BIN_ENV: &str = "CRED_CLI_BIN";
 #[path = "support/isolated_cli.rs"]
 mod isolated_cli;
 
+#[path = "support/secret_multi_host_cli.rs"]
+mod secret_multi_host_cli;
+
 fn cli() -> Command {
     let mut command = cli_binary();
     isolated_cli::isolate(&mut command);

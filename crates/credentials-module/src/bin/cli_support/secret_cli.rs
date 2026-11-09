@@ -162,7 +162,7 @@ pub fn help_text() -> &'static str {
       separate lines. A file that is not mode 0600 is refused, naming the path and\n\
       the rule.\n\
       Scope flags and names are checked before reading material or contacting the\n\
-      daemon. Use /v1/watch, not /v1/watch/, for a path prefix.\n\
+      daemon. Write a path prefix without a trailing /, for example /v1/items.\n\
       \n\
       Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and\n\
       never by a credential id. Names are create-only: a second put of a name is\n\

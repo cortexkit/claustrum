@@ -258,6 +258,8 @@ pub enum AdminOpBody {
     FederationGateSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_phone_gate_set")]
     SecretPhoneGateSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_multi_host_set")]
+    SecretMultiHostSet { v: u32, enabled: bool },
     /// `ck auth secret put`: create an agent secret from operator-supplied material.
     ///
     /// THE ONLY ADMIN OP THAT CARRIES SECRET MATERIAL INBOUND, shortly after
@@ -641,6 +643,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("approver", approver)
                 .finish(),
             AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+            AdminOpBody::SecretMultiHostSet { v, enabled } => f
+                .debug_struct("SecretMultiHostSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::SecretPhoneGateSet { v, enabled } => f
                 .debug_struct("SecretPhoneGateSet")
                 .field("v", v)
@@ -823,6 +830,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollReissue { v, .. }
             | AdminOpBody::FederationGateSet { v, .. }
             | AdminOpBody::SecretPhoneGateSet { v, .. }
+            | AdminOpBody::SecretMultiHostSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
@@ -862,6 +870,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollReissue { .. }
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -971,6 +980,7 @@ impl AdminOpBody {
             // orders them against each other and against the phone path's transactions.
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1032,6 +1042,7 @@ impl AdminOpBody {
             AdminOpBody::Status { .. } => "admin.status",
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
             AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
+            AdminOpBody::SecretMultiHostSet { .. } => "admin.secret_multi_host_set",
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
@@ -1096,6 +1107,7 @@ impl AdminOpBody {
             // lets an operator put and delete secrets with the daemon stopped.
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1633,6 +1645,13 @@ pub fn apply(
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
+        }
+        AdminOpBody::SecretMultiHostSet { enabled, .. } => {
+            let changed = store.set_secret_multi_host_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretMultiHostSet, actor),
+            )?;
+            Ok(serde_json::json!({"multi_host": enabled, "changed": changed}))
         }
         AdminOpBody::SecretPhoneGateSet { enabled, .. } => {
             let changed = store.set_secret_phone_mapping_audited(
@@ -2402,6 +2421,15 @@ mod admin_schema_v2_tests {
             (
                 "FederationGateSet",
                 AdminOpBody::FederationGateSet {
+                    v: v2,
+                    enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretMultiHostSet",
+                AdminOpBody::SecretMultiHostSet {
                     v: v2,
                     enabled: true,
                 },

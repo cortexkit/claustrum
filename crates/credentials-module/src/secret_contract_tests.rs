@@ -1605,6 +1605,7 @@ secret_error_golden! {
     DepositConflict => "deposit_conflict", "permanent", "result error";
     NameExists => "name_exists", "permanent", "result error";
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
+    SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
     PendingLimit => "pending_limit", "transient", "result error";
     StoreError => "store_error", "transient", "result error";

@@ -3,6 +3,44 @@ use crate::agent_secret::{SecretError, SecretScope};
 use serde_json::{json, Value};
 
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
+pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
+
+/// Read the multi-host setting without taking the writer lease or loading secrets.
+pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
+    if !path
+        .try_exists()
+        .map_err(|e| StoreOpError::Store(e.to_string()))?
+    {
+        return Ok("off".to_owned());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| StoreOpError::Store(e.to_string()))?;
+    let has_settings: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| StoreOpError::Store(e.to_string()))?;
+    if !has_settings {
+        return Ok("off".to_owned());
+    }
+    Ok(match conn
+        .query_row(
+            "SELECT value FROM settings WHERE name=?1",
+            [MULTI_HOST_SETTING],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+    {
+        Ok(None) => "off",
+        Ok(Some(v)) if v == "true" => "on",
+        Ok(Some(v)) if v == "false" => "off",
+        _ => "unreadable",
+    }
+    .to_owned())
+}
 
 /// Read persisted gates without taking the writer lease or loading any secret material.
 pub fn secret_phone_gate_status_read_only(
@@ -79,6 +117,38 @@ pub enum PhoneOperation {
 }
 
 impl EncryptedStore {
+    pub fn set_secret_multi_host_audited(
+        &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        self.fenced_write(|tx| {
+            let wanted = if enabled { "true" } else { "false" };
+            let old: Option<rusqlite::types::Value> = tx.query_row(
+                "SELECT value FROM settings WHERE name=?1",
+                [MULTI_HOST_SETTING],
+                |r| r.get(0),
+            ).optional()?;
+            if old == Some(rusqlite::types::Value::Text(wanted.to_owned())) {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at_ms=excluded.updated_at_ms",
+                rusqlite::params![MULTI_HOST_SETTING, wanted, now_ms()],
+            )?;
+            let mut payload = Vec::new();
+            agent_secret::push_field(&mut payload, wanted.as_bytes());
+            append_audit_tx(tx, &self.audit_key, &AuditRecord {
+                op: AuditOp::SecretMultiHostSet,
+                credential_id: None,
+                payload_hash: Some(hex(&payload_hash(&payload))),
+                actor: ctx.actor.to_string(),
+                alarm: ctx.alarm,
+            })?;
+            Ok(true)
+        }).map_err(StoreOpError::from)
+    }
+
     /// Both mapping gates come from one SQLite snapshot, so concurrent gate changes
     /// cannot combine a past member setting with a later phone setting.
     pub fn secret_phone_mapping_gates(&self) -> Result<(bool, Option<bool>), StoreOpError> {

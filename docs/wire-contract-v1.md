@@ -2875,6 +2875,7 @@ the message is fixed text and never echoes the request.
 | `deposit_conflict` | `permanent` | result error | a used deposit id with different bytes, member id or a deleted record |
 | `name_exists` | `permanent` | result error | a new deposit for a name that already has a record, corrupt included |
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
+| `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
 | `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
 | `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
@@ -2891,6 +2892,7 @@ material or its digest. Vault-global rows have no target.
 | Op | Actor | Target | Payload fields |
 |---|---|---|---|
 | `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `secret_multi_host_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
 | `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
 | `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |

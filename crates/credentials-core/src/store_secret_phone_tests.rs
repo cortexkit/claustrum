@@ -579,6 +579,190 @@ fn phone_list_sweeps_only_after_current_registration() {
 }
 
 #[test]
+fn multi_host_setting_changes_are_persisted_and_audited_once() {
+    let (root, store) = rig("multi-host-setting", 59);
+    let path = root.join("store.db");
+    assert_eq!(secret_multi_host_status_read_only(&path).unwrap(), "off");
+    let mut expected_audits = Vec::new();
+    for (enabled, changed) in [
+        (false, true),
+        (false, false),
+        (true, true),
+        (true, false),
+        (false, true),
+    ] {
+        let op = crate::AdminOpBody::SecretMultiHostSet {
+            v: crate::ADMIN_OP_SCHEMA_V2,
+            enabled,
+        };
+        let before = store
+            .store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT value,updated_at_ms FROM settings WHERE name='secret.multi_host'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()
+            })
+            .unwrap();
+        assert_eq!(
+            crate::admin_ops::apply(&store, op, "offline-cli").unwrap(),
+            json!({"multi_host": enabled, "changed": changed}),
+        );
+        assert_eq!(
+            secret_multi_host_status_read_only(&path).unwrap(),
+            if enabled { "on" } else { "off" },
+        );
+        if changed {
+            expected_audits.push((
+                "offline-cli".to_owned(),
+                if enabled {
+                    "46d058fc4ef77f3fd874fde10d5335b24dbbb60eb4f66d45d732ab1c5b0d7250"
+                } else {
+                    "69a57fcf27b39980093d7313846dd4879f4f80d83d4453fa43addc073712c57e"
+                }
+                .to_owned(),
+            ));
+        }
+        store.store.with_conn(|conn| {
+            let after: (String, i64) = conn.query_row(
+                "SELECT value,updated_at_ms FROM settings WHERE name='secret.multi_host'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(after.0, if enabled { "true" } else { "false" });
+            if !changed {
+                assert_eq!(Some(after), before);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT actor,payload_hash FROM audit_log WHERE op='secret_multi_host_set' ORDER BY seq",
+            )?;
+            let audits = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(audits, expected_audits);
+            Ok(())
+        }).unwrap();
+    }
+    drop(store);
+    assert_eq!(secret_multi_host_status_read_only(&path).unwrap(), "off");
+}
+
+#[test]
+fn multi_host_setting_read_only_handles_absence_and_unreadable_values() {
+    let (root, store) = rig("multi-host-read-only", 60);
+    let missing = root.join("absent.db");
+    assert_eq!(secret_multi_host_status_read_only(&missing).unwrap(), "off");
+    assert!(!missing.exists());
+    let empty = root.join("empty.db");
+    let conn = rusqlite::Connection::open(&empty).unwrap();
+    assert_eq!(secret_multi_host_status_read_only(&empty).unwrap(), "off");
+    conn.execute_batch("CREATE TABLE settings(name TEXT PRIMARY KEY, value TEXT)")
+        .unwrap();
+    assert_eq!(secret_multi_host_status_read_only(&empty).unwrap(), "off");
+    for (value, expected) in [
+        ("true", "on"),
+        ("false", "off"),
+        ("TRUE", "unreadable"),
+        (" true", "unreadable"),
+        ("1", "unreadable"),
+        ("", "unreadable"),
+    ] {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('secret.multi_host', ?1)",
+            [value],
+        )
+        .unwrap();
+        assert_eq!(
+            secret_multi_host_status_read_only(&empty).unwrap(),
+            expected
+        );
+    }
+    conn.execute_batch("UPDATE settings SET value=NULL")
+        .unwrap();
+    assert_eq!(
+        secret_multi_host_status_read_only(&empty).unwrap(),
+        "unreadable"
+    );
+    conn.execute_batch("UPDATE settings SET value=x'74727565'")
+        .unwrap();
+    assert_eq!(
+        secret_multi_host_status_read_only(&empty).unwrap(),
+        "unreadable"
+    );
+    assert_eq!(
+        secret_multi_host_status_read_only(&root.join("store.db")).unwrap(),
+        "off"
+    );
+    drop(store);
+}
+
+#[test]
+fn multi_host_setting_unreadable_values_can_be_repaired() {
+    let (root, store) = rig("multi-host-repair", 61);
+    for value in [
+        rusqlite::types::Value::Text("damaged".into()),
+        rusqlite::types::Value::Blob(b"true".to_vec()),
+    ] {
+        store.store.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO settings(name,value,updated_at_ms) VALUES ('secret.multi_host',?1,0)",
+                [value],
+            )?;
+            Ok(())
+        }).unwrap();
+        let path = root.join("store.db");
+        assert_eq!(
+            secret_multi_host_status_read_only(&path).unwrap(),
+            "unreadable"
+        );
+        assert!(store
+            .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+            .unwrap());
+        assert_eq!(secret_multi_host_status_read_only(&path).unwrap(), "on");
+    }
+}
+
+#[test]
+fn multi_host_admin_schema_and_disabled_errors_are_pinned() {
+    let value = json!({"op":"admin.secret_multi_host_set","v":2,"enabled":true});
+    let op: crate::AdminOpBody = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&op).unwrap(), value);
+    assert_eq!(
+        format!("{op:?}"),
+        "SecretMultiHostSet { v: 2, enabled: true }"
+    );
+    assert_eq!(op.op_name(), "admin.secret_multi_host_set");
+    assert_eq!(op.lock_id(), None);
+    assert!(!op.requires_daemon());
+    assert!(op.has_valid_schema_version());
+    assert_eq!(
+        op.required_schema_version(),
+        crate::AdminOpBody::SecretPhoneGateSet {
+            v: crate::ADMIN_OP_SCHEMA_V2,
+            enabled: true,
+        }
+        .required_schema_version()
+    );
+    assert!(!crate::AdminOpBody::SecretMultiHostSet {
+        v: crate::ADMIN_OP_SCHEMA_V1,
+        enabled: true,
+    }
+    .has_valid_schema_version());
+    assert_eq!(
+        SecretError::SecretMultiHostDisabled.body(),
+        json!({
+            "error":{"code":"secret_multi_host_disabled","class":"permanent"}
+        })
+    );
+    let error = StoreOpError::SecretMultiHostDisabled;
+    assert_eq!(error.wire_code(), Some("secret_multi_host_disabled"));
+    assert_eq!(error.wire_class(), Some("permanent"));
+    assert!(error.to_string().contains("secret.multi_host"));
+    assert!(error.to_string().contains("ck auth secret multi-host on"));
+}
+
+#[test]
 fn phone_gate_persists_and_defaults_off_and_audits_once() {
     let (root, store) = rig("phone-gate", 58);
     assert!(!store.secret_phone_mapping().unwrap());

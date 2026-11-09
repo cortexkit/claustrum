@@ -1514,6 +1514,9 @@ pub enum StoreOpError {
     /// The reserved deposit key is absent, inactive, or undecodable. Bootstrap leaves
     /// an existing key untouched so deposits fail closed; no recovery command exists.
     SecretSetupIncomplete,
+    /// An API key with multiple host rules or a wildcard, or a login with multiple
+    /// origins, requires `secret.multi_host` to be on.
+    SecretMultiHostDisabled,
     /// An agent secret already exists under the requested name, live or `corrupt`.
     /// Names are create-only, so the operator must delete before storing again.
     SecretNameExists,
@@ -1581,6 +1584,7 @@ impl std::fmt::Display for StoreOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
+            StoreOpError::SecretMultiHostDisabled => f.write_str("secret_multi_host_disabled: secret.multi_host is off or unreadable; enable it with ck auth secret multi-host on"),
             StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
             // These three print the same `code/class: detail` text the daemon's admin
             // route answers with, so the online and offline `ck auth secret` paths agree.
@@ -1698,6 +1702,7 @@ impl StoreOpError {
     pub fn wire_code(&self) -> Option<&'static str> {
         match self {
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
+            StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
@@ -17837,8 +17842,8 @@ pub use store_agent_secrets::{
     SecretHomeStatus, SECRET_HOME_SELF, SECRET_HOME_SETTING,
 };
 pub use store_agent_secrets::{
-    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
-    SecretUseOutcome,
+    secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,
+    PhoneOperation, SecretDepositPublicKey, SecretUseOutcome,
 };
 /// Sealed releases to paired computers and the receipts that answer their retries.
 pub use store_agent_secrets::{

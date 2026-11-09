@@ -48,6 +48,7 @@ pub enum AuditOp {
     /// Daemon bootstrap generated the reserved HPKE deposit receiver.
     SecretDepositKeyCreate,
     SecretPhoneGateSet,
+    SecretMultiHostSet,
     /// The operator set or cleared `secrets.home_member`, the vault that holds agent secrets.
     SecretHomeSet,
     SecretPhoneRegister,
@@ -200,6 +201,7 @@ impl AuditOp {
         match self {
             AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
             AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
+            AuditOp::SecretMultiHostSet => "secret_multi_host_set",
             AuditOp::SecretHomeSet => "secret_home_set",
             AuditOp::SecretPhoneRegister => "secret_phone_register",
             AuditOp::SecretStore => "secret_store",
@@ -749,6 +751,7 @@ mod vocabulary_documentation_tests {
             match op {
                 AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
                 AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
+                AuditOp::SecretMultiHostSet => AuditOp::SecretMultiHostSet.as_str(),
                 AuditOp::SecretHomeSet => AuditOp::SecretHomeSet.as_str(),
                 AuditOp::SecretPhoneRegister => AuditOp::SecretPhoneRegister.as_str(),
                 AuditOp::SecretStore => AuditOp::SecretStore.as_str(),
@@ -844,6 +847,7 @@ mod vocabulary_documentation_tests {
             assert_documented(section, "audit_log.op", value(op));
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
+        assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
         // Backticked, because "seal" alone also matches "sealed" elsewhere in the text.
         assert_documented(section, "audit_log.op", "`seal`");
         assert_eq!(value(AuditOp::Seal), "seal");

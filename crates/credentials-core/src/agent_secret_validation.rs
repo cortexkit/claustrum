@@ -1,4 +1,4 @@
-use super::{SecretMaterial, SecretScope, ValidationError};
+use super::{SecretMaterial, SecretRule, SecretScope, ValidationError};
 use secret_rules::scope as rules;
 use serde_json::{json, Value};
 use ValidationError::{InvalidParams, LimitExceeded};
@@ -50,16 +50,215 @@ impl SecretScope {
                 fields
             }
             Self::SiteLogin { origin } => json!({"origin": origin}),
+            Self::ApiKeyRules { rules, .. } => json!({"rules": rules}),
+            Self::SiteLoginOrigins { origins } => json!({"origins": origins}),
+        }
+    }
+
+    pub(super) fn stored_rule_fields(&self) -> Value {
+        if !self.is_extended() {
+            return self.rule_fields();
+        }
+        let mut fields = self.use_fields();
+        if let Some(object) = fields.as_object_mut() {
+            object.remove("location");
+        }
+        fields
+    }
+
+    /// Validate input without reordering it: the deposit's additional authenticated
+    /// data authenticates the sent order.
+    /// `fields` contains only the shared scope fields; location is vault metadata.
+    pub fn from_input(
+        kind: &str,
+        fields: &Value,
+        location: Option<&str>,
+    ) -> Result<Self, ValidationError> {
+        rules::SecretScope::parse_input(kind, fields)?;
+        let scope = Self::from_rule_fields(kind, fields, location)?;
+        scope.validate_location()?;
+        Ok(scope)
+    }
+
+    fn from_rule_fields(
+        kind: &str,
+        fields: &Value,
+        location: Option<&str>,
+    ) -> Result<Self, ValidationError> {
+        let text = |key| {
+            fields
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or(InvalidParams)
+        };
+        match kind {
+            "agent_api_key" => {
+                let location = location.ok_or(InvalidParams)?.to_owned();
+                if let Some(entries) = fields.get("rules") {
+                    let mut rules: Vec<SecretRule> =
+                        serde_json::from_value(entries.clone()).map_err(|_| InvalidParams)?;
+                    for rule in &mut rules {
+                        if rule.path_prefix.as_deref() == Some("") {
+                            rule.path_prefix = None;
+                        }
+                    }
+                    Ok(Self::ApiKeyRules { rules, location })
+                } else {
+                    Ok(Self::ApiKey {
+                        host: text("host")?,
+                        path_prefix: fields
+                            .get("path_prefix")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                        location,
+                    })
+                }
+            }
+            "site_login" if location.is_none() => {
+                if let Some(entries) = fields.get("origins") {
+                    Ok(Self::SiteLoginOrigins {
+                        origins: serde_json::from_value(entries.clone())
+                            .map_err(|_| InvalidParams)?,
+                    })
+                } else {
+                    Ok(Self::SiteLogin {
+                        origin: text("origin")?,
+                    })
+                }
+            }
+            _ => Err(InvalidParams),
+        }
+    }
+
+    fn validate_location(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::ApiKey { location, .. } | Self::ApiKeyRules { location, .. } => {
+                validate_location(location)
+            }
+            Self::SiteLogin { .. } | Self::SiteLoginOrigins { .. } => Ok(()),
+        }
+    }
+
+    /// Stored scopes obey grammar and limits, but never recheck the public suffix list.
+    pub fn canonicalized(&self) -> Result<Self, ValidationError> {
+        rules::SecretScope::decode_stored(self.kind(), &self.stored_rule_fields())?;
+        self.validate_location()?;
+        let mut scope = self.clone();
+        match &mut scope {
+            Self::ApiKeyRules { rules, .. } => rules.sort_by(|a, b| {
+                (&a.host, a.path_prefix.as_deref().unwrap_or(""))
+                    .cmp(&(&b.host, b.path_prefix.as_deref().unwrap_or("")))
+            }),
+            Self::SiteLoginOrigins { origins } => origins.sort(),
+            _ => {}
+        }
+        Ok(scope)
+    }
+
+    /// Vault-emitted scope fields always include an empty prefix when it is absent.
+    pub fn use_fields(&self) -> Value {
+        match self {
+            Self::ApiKey {
+                host,
+                path_prefix,
+                location,
+            } => {
+                json!({"host": host, "path_prefix": path_prefix.as_deref().unwrap_or(""), "location": location})
+            }
+            Self::ApiKeyRules { rules, location } => {
+                let mut rules = rules.clone();
+                rules.sort_by(|a, b| {
+                    (&a.host, a.path_prefix.as_deref().unwrap_or(""))
+                        .cmp(&(&b.host, b.path_prefix.as_deref().unwrap_or("")))
+                });
+                let rules: Vec<_> = rules.iter().map(|r| json!({"host": r.host, "path_prefix": r.path_prefix.as_deref().unwrap_or("")})).collect();
+                json!({"rules": rules, "location": location})
+            }
+            Self::SiteLoginOrigins { origins } => {
+                let mut origins = origins.clone();
+                origins.sort();
+                json!({"origins": origins})
+            }
+            Self::SiteLogin { origin } => json!({"origin": origin}),
+        }
+    }
+
+    /// The last table column contains only the canonical array, not location.
+    pub fn scope_json(&self) -> Result<Option<String>, ValidationError> {
+        if !self.is_extended() {
+            return Ok(None);
+        }
+        let canonical = self.canonicalized()?.use_fields();
+        let array = if self.kind() == "agent_api_key" {
+            &canonical["rules"]
+        } else {
+            &canonical["origins"]
+        };
+        // These arrays contain strings and ASCII-keyed objects only. serde_json's
+        // sorted map keys and string escaping give their RFC 8785 canonical JSON bytes.
+        serde_json::to_string(array)
+            .map(Some)
+            .map_err(|_| InvalidParams)
+    }
+
+    /// Refuse even parseable JSON if its bytes differ from the canonical stored form.
+    pub fn from_scope_json(
+        kind: &str,
+        location: Option<&str>,
+        raw: &str,
+    ) -> Result<Self, ValidationError> {
+        let array: Value = serde_json::from_str(raw).map_err(|_| InvalidParams)?;
+        let fields = match kind {
+            "agent_api_key" => json!({"rules": array}),
+            "site_login" => json!({"origins": array}),
+            _ => return Err(InvalidParams),
+        };
+        rules::SecretScope::decode_stored(kind, &fields)?;
+        let scope = Self::from_rule_fields(kind, &fields, location)?.canonicalized()?;
+        if scope.scope_json()?.as_deref() != Some(raw) {
+            return Err(InvalidParams);
+        }
+        Ok(scope)
+    }
+
+    /// Decode the mutually exclusive legacy columns or the extended scope column.
+    pub fn from_columns(
+        kind: &str,
+        host: Option<&str>,
+        path_prefix: Option<&str>,
+        location: Option<&str>,
+        origin: Option<&str>,
+        scope_json: Option<&str>,
+    ) -> Result<Self, ValidationError> {
+        match (kind, host, path_prefix, location, origin, scope_json) {
+            ("agent_api_key", None, None, Some(location), None, Some(raw)) => {
+                Self::from_scope_json(kind, Some(location), raw)
+            }
+            ("site_login", None, None, None, None, Some(raw)) => {
+                Self::from_scope_json(kind, None, raw)
+            }
+            ("agent_api_key", Some(host), prefix, Some(location), None, None) => {
+                let scope = Self::ApiKey {
+                    host: host.to_owned(),
+                    path_prefix: prefix.map(str::to_owned),
+                    location: location.to_owned(),
+                };
+                scope.canonicalized()
+            }
+            ("site_login", None, None, None, Some(origin), None) => Self::SiteLogin {
+                origin: origin.to_owned(),
+            }
+            .canonicalized(),
+            _ => Err(InvalidParams),
         }
     }
 }
 
 pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
     rules::SecretScope::parse_input(scope.kind(), &scope.rule_fields())?;
-    match scope {
-        SecretScope::ApiKey { location, .. } => validate_location(location),
-        SecretScope::SiteLogin { .. } => Ok(()),
-    }
+    scope.validate_location()
 }
 
 /// Scope prefixes use the request-path grammar but cannot end with a slash.

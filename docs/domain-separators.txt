@@ -20,13 +20,17 @@ crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-op/v1\0 co
 crates/credentials-core/src/admin_auth.rs cortexkit-credentials/vault-id/v1 cortexkit-credentials/vault-id/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-delete-statement/v1 ck-secret-delete-statement/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-deposit-aad/v1 ck-secret-deposit-aad/v1
+crates/credentials-core/src/agent_secret.rs ck-secret-deposit-aad/v2 ck-secret-deposit-aad/v2
 crates/credentials-core/src/agent_secret.rs ck-secret-deposit-plaintext/v1 ck-secret-deposit-plaintext/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-flow-statement/v1 ck-secret-flow-statement/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-flow-statement/v2 ck-secret-flow-statement/v2
+crates/credentials-core/src/agent_secret.rs ck-secret-flow-statement/v3 ck-secret-flow-statement/v3
 crates/credentials-core/src/agent_secret.rs ck-secret-sealed-body/v1 ck-secret-sealed-body/v1
+crates/credentials-core/src/agent_secret.rs ck-secret-sealed-body/v2 ck-secret-sealed-body/v2
 crates/credentials-core/src/agent_secret.rs ck-secret-use-envelope/v1 ck-secret-use-envelope/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v1 ck-secret-use-statement/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v2 ck-secret-use-statement/v2
+crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v3 ck-secret-use-statement/v3
 crates/credentials-core/src/agent_secret.rs cortexkit/claustrum/secret-deposit/v1 cortexkit/claustrum/secret-deposit/v1
 crates/credentials-core/src/audit.rs cortexkit-credentials/audit-payload-key/v1 cortexkit-credentials/audit-payload-key/v1
 crates/credentials-core/src/deposit_cookie.rs ck-deposit-cookie/v1 ck-deposit-cookie/v1

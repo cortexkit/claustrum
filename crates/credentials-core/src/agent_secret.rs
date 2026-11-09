@@ -6,12 +6,16 @@ pub const DEPOSIT_KEY_ID: &str = "kem:secret-deposit:1";
 pub const DEPOSIT_KEY_PREFIX: &str = "kem:secret-deposit:";
 pub const DEPOSIT_INFO: &[u8] = b"cortexkit/claustrum/secret-deposit/v1";
 pub const DEPOSIT_AAD_TAG: &[u8] = b"ck-secret-deposit-aad/v1";
+pub const DEPOSIT_AAD_V2_TAG: &[u8] = b"ck-secret-deposit-aad/v2";
 pub const DEPOSIT_PLAINTEXT_TAG: &[u8] = b"ck-secret-deposit-plaintext/v1";
 pub const SEALED_BODY_TAG: &[u8] = b"ck-secret-sealed-body/v1";
+pub const SEALED_BODY_V2_TAG: &[u8] = b"ck-secret-sealed-body/v2";
 pub const USE_STATEMENT_TAG: &[u8] = b"ck-secret-use-statement/v1";
 pub const USE_STATEMENT_V2_TAG: &[u8] = b"ck-secret-use-statement/v2";
+pub const USE_STATEMENT_V3_TAG: &[u8] = b"ck-secret-use-statement/v3";
 pub const FLOW_STATEMENT_TAG: &[u8] = b"ck-secret-flow-statement/v1";
 pub const FLOW_STATEMENT_V2_TAG: &[u8] = b"ck-secret-flow-statement/v2";
+pub const FLOW_STATEMENT_V3_TAG: &[u8] = b"ck-secret-flow-statement/v3";
 pub const DELETE_STATEMENT_TAG: &[u8] = b"ck-secret-delete-statement/v1";
 pub const USE_ENVELOPE_TAG: &[u8] = b"ck-secret-use-envelope/v1";
 pub const MAX_SECRET_NAME_BYTES: usize = 64;
@@ -148,14 +152,36 @@ pub enum SecretScope {
     SiteLogin {
         origin: String,
     },
+    ApiKeyRules {
+        rules: Vec<SecretRule>,
+        location: String,
+    },
+    SiteLoginOrigins {
+        origins: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretRule {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
 }
 
 impl SecretScope {
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::ApiKey { .. } => "agent_api_key",
-            Self::SiteLogin { .. } => "site_login",
+            Self::ApiKey { .. } | Self::ApiKeyRules { .. } => "agent_api_key",
+            Self::SiteLogin { .. } | Self::SiteLoginOrigins { .. } => "site_login",
         }
+    }
+
+    pub fn is_extended(&self) -> bool {
+        matches!(
+            self,
+            Self::ApiKeyRules { .. } | Self::SiteLoginOrigins { .. }
+        )
     }
 
     fn encode_fields(&self, out: &mut Vec<u8>) -> Result<(), ValidationError> {
@@ -173,6 +199,23 @@ impl SecretScope {
                 push_field(out, location.as_bytes());
             }
             Self::SiteLogin { origin } => push_field(out, origin.as_bytes()),
+            Self::ApiKeyRules { rules, location } => {
+                if location.is_empty() {
+                    return Err(ValidationError::InvalidParams);
+                }
+                push_field(out, rules.len().to_string().as_bytes());
+                for rule in rules {
+                    push_field(out, rule.host.as_bytes());
+                    push_field(out, rule.path_prefix.as_deref().unwrap_or("").as_bytes());
+                }
+                push_field(out, location.as_bytes());
+            }
+            Self::SiteLoginOrigins { origins } => {
+                push_field(out, origins.len().to_string().as_bytes());
+                for origin in origins {
+                    push_field(out, origin.as_bytes());
+                }
+            }
         }
         Ok(())
     }
@@ -214,7 +257,9 @@ impl SecretMaterial {
         matches!(
             (self, scope),
             (Self::ApiKey(_), SecretScope::ApiKey { .. })
+                | (Self::ApiKey(_), SecretScope::ApiKeyRules { .. })
                 | (Self::SiteLogin { .. }, SecretScope::SiteLogin { .. })
+                | (Self::SiteLogin { .. }, SecretScope::SiteLoginOrigins { .. })
         )
     }
 }
@@ -233,7 +278,11 @@ pub fn deposit_aad(
     validate_name(name)?;
     let mut out = Vec::new();
     for field in [
-        DEPOSIT_AAD_TAG,
+        if scope.is_extended() {
+            DEPOSIT_AAD_V2_TAG
+        } else {
+            DEPOSIT_AAD_TAG
+        },
         deposit_id.as_bytes(),
         member_id.as_bytes(),
         name.as_bytes(),
@@ -260,9 +309,20 @@ pub fn sealed_body(
         return Err(ValidationError::InvalidParams);
     }
     let mut out = Secret::new(Vec::new()).into_inner();
-    push_field(&mut out, SEALED_BODY_TAG);
+    push_field(
+        &mut out,
+        if scope.is_extended() {
+            SEALED_BODY_V2_TAG
+        } else {
+            SEALED_BODY_TAG
+        },
+    );
     push_field(&mut out, scope.kind().as_bytes());
-    scope.encode_fields(&mut out)?;
+    if scope.is_extended() {
+        scope.canonicalized()?.encode_fields(&mut out)?;
+    } else {
+        scope.encode_fields(&mut out)?;
+    }
     material.encode_fields(&mut out);
     Ok(Secret::new(std::mem::take(&mut *out)))
 }
@@ -323,10 +383,18 @@ pub fn open(
     )
     .map_err(|_| ValidationError::InvalidParams)?;
     let mut reader = Fields(&body);
-    reader.expect(SEALED_BODY_TAG)?;
+    reader.expect(if scope.is_extended() {
+        SEALED_BODY_V2_TAG
+    } else {
+        SEALED_BODY_TAG
+    })?;
     reader.expect(scope.kind().as_bytes())?;
     let mut expected = Vec::new();
-    scope.encode_fields(&mut expected)?;
+    if scope.is_extended() {
+        scope.canonicalized()?.encode_fields(&mut expected)?;
+    } else {
+        scope.encode_fields(&mut expected)?;
+    }
     if !reader.0.starts_with(&expected) {
         return Err(ValidationError::InvalidParams);
     }
@@ -412,3 +480,7 @@ pub fn deposit_digest(deposit_id: &str, enc: &[u8], ciphertext: &[u8], aad: &[u8
 #[cfg(test)]
 #[path = "agent_secret_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_secret_extended_tests.rs"]
+mod extended_tests;

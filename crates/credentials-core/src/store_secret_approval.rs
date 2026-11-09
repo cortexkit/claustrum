@@ -369,16 +369,7 @@ impl EncryptedStore {
                 now,
             );
         }
-        let sealed_use = match &scope {
-            agent_secret::SecretScope::ApiKey {
-                host,
-                path_prefix,
-                location,
-            } => {
-                json!({"host":host,"path_prefix":path_prefix.as_deref().unwrap_or(""),"location":location})
-            }
-            agent_secret::SecretScope::SiteLogin { origin } => json!({"origin":origin}),
-        };
+        let sealed_use = scope.use_fields();
         if statement["secret"]["kind"] != scope.kind() || statement["use"] != sealed_use {
             return Ok(false);
         }

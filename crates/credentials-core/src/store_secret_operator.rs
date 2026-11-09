@@ -332,6 +332,9 @@ impl EncryptedStore {
             let incarnation = hex_of(&random);
             let blob = agent_secret::seal(&self.key, &incarnation, &put.name, &scope, &material)
                 .map_err(|_| rusqlite_err("secret seal failed"))?;
+            if scope.is_extended() {
+                return Ok(Err(secret_validation_error(agent_secret::ValidationError::InvalidParams)));
+            }
             let (host, prefix, location, origin) = super::phone::columns(&scope);
             tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",
                 rusqlite::params![put.name,scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now_ms()])?;
@@ -349,6 +352,7 @@ impl EncryptedStore {
                     location.as_bytes(),
                 ]),
                 SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
+                SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. } => return Ok(Err(secret_validation_error(agent_secret::ValidationError::InvalidParams))),
             }
             super::phone::audit(
                 tx,

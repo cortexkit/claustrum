@@ -9,6 +9,22 @@
 # A host that changed without a reason is a finding: a refresh posts a live
 # refresh token in the body, so a wrong host RECEIVES a working credential
 # and the failure looks like an ordinary dead login.
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_001 x.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_002 x.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_003 x.test:443
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_004 a.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_005 b.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_006 c.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_007 d.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_008 e.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_009 a.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_010 b.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_011 c.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_012 d.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_013 x.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_014 x.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_015 y.test
+crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_016 x.test
 crates/credentials-core/src/catalog.rs INLINE_001 app.kiro.dev
 crates/credentials-core/src/catalog.rs INLINE_002 q.us-east-1.amazonaws.com
 crates/credentials-core/src/catalog.rs INLINE_003 z.ai
@@ -179,6 +195,15 @@ crates/credentials-core/src/refresh_adapters/xai.rs AUTHORIZE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_001 x.test
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_002 y.test:443
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_003 x.test:443
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_004 y.test
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_005 outside.test
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_006 x.test
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_007 x.test
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_008 x.test:443
+crates/credentials-core/src/store_secret_extended_tests.rs INLINE_009 x.test
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_001 example.com
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_002 example.com
 crates/credentials-core/src/store_secret_flow_approval_tests.rs INLINE_003 x.test

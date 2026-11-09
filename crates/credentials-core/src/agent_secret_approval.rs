@@ -13,6 +13,8 @@ pub const MAX_SECRET_JSON_INTEGER: u64 = (1 << 53) - 1;
 /// refuses it rather than approving a statement it does not understand.
 pub const USE_STATEMENT_V2: &str = "ck-secret-use-statement/v2";
 pub const FLOW_STATEMENT_V2: &str = "ck-secret-flow-statement/v2";
+pub const USE_STATEMENT_V3: &str = "ck-secret-use-statement/v3";
+pub const FLOW_STATEMENT_V3: &str = "ck-secret-flow-statement/v3";
 
 pub fn approval_statement(
     id: &str,
@@ -23,23 +25,18 @@ pub fn approval_statement(
     expiry: i64,
 ) -> serde_json::Value {
     use serde_json::json;
-    let use_scope = match scope {
-        super::SecretScope::ApiKey {
-            host,
-            path_prefix,
-            location,
-        } => {
-            json!({"host":host,"path_prefix":path_prefix.as_deref().unwrap_or(""),"location":location})
-        }
-        super::SecretScope::SiteLogin { origin } => json!({"origin":origin}),
+    let use_scope = scope.use_fields();
+    let tag = if scope.is_extended() {
+        USE_STATEMENT_V3
+    } else {
+        "ck-secret-use-statement/v1"
     };
-    json!({"v":"ck-secret-use-statement/v1","request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent_id":call.agent_id,"coverage":call.coverage,"secret":{"name":call.name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry})
+    json!({"v":tag,"request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent_id":call.agent_id,"coverage":call.coverage,"secret":{"name":call.name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry})
 }
 
 /// The statement for a request `asking_member` forwarded to this vault. A local
-/// request keeps the v1 object byte for byte; a forwarded one carries the v1
-/// object plus the required `asking_member_id` key under a v2 tag, encoded
-/// with the same canonical bytes as today.
+/// legacy request keeps v1 locally and adds `asking_member_id` under v2 when
+/// forwarded. Extended scopes use v3 in both cases, with the asker only when forwarded.
 pub fn approval_statement_for_asker(
     id: &str,
     member: &str,
@@ -52,7 +49,9 @@ pub fn approval_statement_for_asker(
     let mut statement = approval_statement(id, member, incarnation, call, scope, expiry);
     if !asking_member.is_empty() {
         statement["asking_member_id"] = serde_json::json!(asking_member);
-        statement["v"] = serde_json::json!(USE_STATEMENT_V2);
+        if !scope.is_extended() {
+            statement["v"] = serde_json::json!(USE_STATEMENT_V2);
+        }
     }
     statement
 }
@@ -136,38 +135,42 @@ pub fn flow_approval_statement(
     // identity exactly as it is stored; a value it cannot carry verbatim is refused rather
     // than signed in some other form.
     flow_identity_encodes_unchanged(flow)?;
-    let use_scope = match (scope, methods) {
-        (
-            super::SecretScope::ApiKey {
-                host,
-                path_prefix,
-                location,
-            },
-            Some(methods),
-        ) => {
-            json!({"host":host,"path_prefix":path_prefix.as_deref().unwrap_or(""),"location":location,"methods":sorted_flow_methods(methods)?})
+    if scope.is_extended() && flow_id_is_v3_statement_tag(&flow.flow_id) {
+        return Err(super::ValidationError::InvalidParams);
+    }
+    let mut use_scope = scope.use_fields();
+    match (scope.kind(), methods) {
+        ("agent_api_key", Some(methods)) => {
+            use_scope["methods"] = json!(sorted_flow_methods(methods)?)
         }
-        (super::SecretScope::SiteLogin { origin }, None) => json!({"origin":origin}),
+        ("site_login", None) => {}
         _ => return Err(super::ValidationError::InvalidParams),
+    }
+    let tag = if scope.is_extended() {
+        FLOW_STATEMENT_V3
+    } else {
+        "ck-secret-flow-statement/v1"
     };
     Ok(
-        json!({"v":"ck-secret-flow-statement/v1","request_id":id,"member_id":member,"flow":flow,"secret":{"name":name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":["version"],"request_expires_at_ms":expiry}),
+        json!({"v":tag,"request_id":id,"member_id":member,"flow":flow,"secret":{"name":name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":["version"],"request_expires_at_ms":expiry}),
     )
 }
 
 /// Whether `flow_id` equals a v2 statement tag. Only a forwarded flow approval
-/// refuses these: the local sender boundary stays v1-only, so a local flow
-/// approval whose flow id equals a v2 tag is still accepted and still encodes
-/// as a v1 statement.
+/// refuses these. A local flow approval whose flow id equals a v2 tag is still
+/// accepted, with v1 for a legacy scope or v3 for an extended scope.
 pub fn flow_id_is_v2_statement_tag(flow_id: &str) -> bool {
     flow_id == USE_STATEMENT_V2 || flow_id == FLOW_STATEMENT_V2
 }
 
+pub fn flow_id_is_v3_statement_tag(flow_id: &str) -> bool {
+    flow_id == USE_STATEMENT_V3 || flow_id == FLOW_STATEMENT_V3
+}
+
 /// The flow statement for a request `asking_member` forwarded to this vault.
-/// A local request keeps the v1 object byte for byte; a forwarded one carries
-/// the v1 object plus the required `asking_member_id` key under a v2 tag. A
-/// forwarded request whose flow id equals a v2 tag is refused, since that id
-/// would collide with the v2 statement's own `v` key.
+/// Legacy scopes keep v1 locally and v2 when forwarded; extended scopes keep v3.
+/// The asker is included only for forwarded requests. A forwarded request whose
+/// flow id equals a v2 tag is refused because it collides with the statement's `v` key.
 #[allow(clippy::too_many_arguments)]
 pub fn flow_approval_statement_for_asker(
     id: &str,
@@ -198,7 +201,9 @@ pub fn flow_approval_statement_for_asker(
     let mut statement =
         flow_approval_statement(id, member, incarnation, name, flow, scope, methods, expiry)?;
     statement["asking_member_id"] = serde_json::json!(asking_member);
-    statement["v"] = serde_json::json!(FLOW_STATEMENT_V2);
+    if !scope.is_extended() {
+        statement["v"] = serde_json::json!(FLOW_STATEMENT_V2);
+    }
     Ok(statement)
 }
 

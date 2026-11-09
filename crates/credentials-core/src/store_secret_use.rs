@@ -521,8 +521,9 @@ impl EncryptedStore {
         sender: SecretSender,
         target: &agent_secret::UseTarget,
     ) -> rusqlite::Result<Result<Record, Refusal>> {
-        let row = conn.query_row("SELECT incarnation,state,kind,host,path_prefix,location,origin,envelope FROM agent_secrets WHERE name=?1",[name], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Vec<u8>>(7)?))).optional()?;
-        let Some((incarnation, state, kind, host, path_prefix, location, origin, blob)) = row
+        let row = conn.query_row("SELECT incarnation,state,kind,host,path_prefix,location,origin,envelope,scope_json FROM agent_secrets WHERE name=?1",[name], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,Option<String>>(8)?))).optional()?;
+        let Some((incarnation, state, kind, host, path_prefix, location, origin, blob, scope_json)) =
+            row
         else {
             return Ok(Err(Refusal {
                 detail: "unknown_name",
@@ -538,14 +539,16 @@ impl EncryptedStore {
         if state != "active" {
             return refused("corrupt");
         }
-        let scope = match (kind.as_str(), host, location, origin) {
-            ("agent_api_key", Some(host), Some(location), None) => SecretScope::ApiKey {
-                host,
-                path_prefix,
-                location,
-            },
-            ("site_login", None, None, Some(origin)) => SecretScope::SiteLogin { origin },
-            _ => return refused("sealed_scope"),
+        let scope = match SecretScope::from_columns(
+            &kind,
+            host.as_deref(),
+            path_prefix.as_deref(),
+            location.as_deref(),
+            origin.as_deref(),
+            scope_json.as_deref(),
+        ) {
+            Ok(scope) => scope,
+            Err(_) => return refused("sealed_scope"),
         };
         let material = match agent_secret::open(&self.key, &incarnation, name, &scope, &blob) {
             Ok(material) => material,
@@ -712,11 +715,14 @@ fn write_receipt(
 
 fn release(record: &Record, now: i64) -> Result<Value, SecretError> {
     match (&record.scope, &record.material) {
-        (SecretScope::ApiKey { location, .. }, SecretMaterial::ApiKey(key)) => Ok(
+        (
+            SecretScope::ApiKey { location, .. } | SecretScope::ApiKeyRules { location, .. },
+            SecretMaterial::ApiKey(key),
+        ) => Ok(
             json!({"status":"released","kind":"agent_api_key","key_b64url":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.expose()),"location":location}),
         ),
         (
-            SecretScope::SiteLogin { .. },
+            SecretScope::SiteLogin { .. } | SecretScope::SiteLoginOrigins { .. },
             SecretMaterial::SiteLogin {
                 username,
                 password,

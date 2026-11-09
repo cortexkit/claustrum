@@ -328,6 +328,9 @@ impl EncryptedStore {
         let incarnation = hex(&random);
         let blob = agent_secret::seal(&self.key, &incarnation, &d.name, &d.scope, &material)
             .map_err(|_| rusqlite_err("secret seal failed"))?;
+        if d.scope.is_extended() {
+            return Ok(Err(SecretError::InvalidParams));
+        }
         let (host, prefix, location, origin) = columns(&d.scope);
         tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",
             rusqlite::params![d.name,d.scope.kind(),incarnation,host,prefix,location,origin,self.key_id.to_hex(),blob,now])?;
@@ -344,6 +347,9 @@ impl EncryptedStore {
                 location.as_bytes(),
             ]),
             SecretScope::SiteLogin { origin } => fields.push(origin.as_bytes()),
+            SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. } => {
+                return Ok(Err(SecretError::InvalidParams))
+            }
         }
         fields.push(d.deposit_id.as_bytes());
         audit(
@@ -421,6 +427,8 @@ pub(super) fn columns(
             location,
         } => (Some(host), path_prefix.as_deref(), Some(location), None),
         SecretScope::SiteLogin { origin } => (None, None, None, Some(origin)),
+        SecretScope::ApiKeyRules { location, .. } => (None, None, Some(location), None),
+        SecretScope::SiteLoginOrigins { .. } => (None, None, None, None),
     }
 }
 

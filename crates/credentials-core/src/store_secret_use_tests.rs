@@ -5,6 +5,9 @@ use std::sync::{Arc, Barrier};
 #[path = "store_secret_approval_tests.rs"]
 mod approval_tests;
 
+#[path = "store_secret_extended_tests.rs"]
+mod extended_tests;
+
 const MEMBER: &str = "fed-computer:22222222222222222222222222222222";
 const NOW: i64 = 1_700_000_000_000;
 fn scope() -> SecretScope {

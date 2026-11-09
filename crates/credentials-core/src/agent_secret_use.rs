@@ -30,7 +30,9 @@ impl SecretSender {
         matches!(
             (self, scope),
             (Self::Aft, SecretScope::ApiKey { .. })
+                | (Self::Aft, SecretScope::ApiKeyRules { .. })
                 | (Self::Cerebellum, SecretScope::SiteLogin { .. })
+                | (Self::Cerebellum, SecretScope::SiteLoginOrigins { .. })
                 | (Self::Basal, _)
         )
     }
@@ -144,7 +146,7 @@ impl UseTarget {
             }
         };
         // Stored secrets remain usable when the Public Suffix List changes.
-        RuleScope::decode_stored(scope.kind(), &scope.rule_fields())
+        RuleScope::decode_stored(scope.kind(), &scope.stored_rule_fields())
             .is_ok_and(|scope| scope.matches(target))
     }
 }

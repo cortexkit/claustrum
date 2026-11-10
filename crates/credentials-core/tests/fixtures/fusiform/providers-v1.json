@@ -1254,6 +1254,14 @@
       ]
     },
     {
+      "id": "kiro",
+      "name": "Kiro",
+      "doc": "https://kiro.dev/docs/",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "klokintegration",
       "name": "klokintegration.se",
       "doc": "https://klokintegration.se/docs/ai-api",
@@ -2058,6 +2066,14 @@
       ]
     },
     {
+      "id": "qianfan",
+      "name": "Baidu Qianfan",
+      "doc": "https://cloud.baidu.com/doc/qianfan/index.html",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "qihang-ai",
       "name": "QiHang",
       "doc": "https://www.qhaigc.net/docs",
@@ -2291,6 +2307,22 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "singularityapi",
+      "name": "SingularityAPI",
+      "doc": "https://docs.singularityapi.dev/get-started/quickstart",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
+      "id": "singularityapi-reserved",
+      "name": "Singularity API reserved lane",
+      "doc": "https://singularityapi.tech/how-it-works",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "snowflake-cortex",
@@ -2560,6 +2592,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "typesafe",
+      "name": "TypeSafe",
+      "doc": "https://docs.typesafe.ai/introduction",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "umans-ai",
@@ -2846,6 +2886,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "yolo-auto",
+      "name": "Yolo-Auto",
+      "doc": "https://yolo-auto.com/docs",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "zai",

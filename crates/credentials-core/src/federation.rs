@@ -184,6 +184,31 @@ impl MemberGrantSelector {
     }
 }
 
+/// Who controls a member grant's lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberGrantSource {
+    Operator,
+    SharingSwitch,
+}
+
+impl MemberGrantSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::SharingSwitch => "sharing_switch",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "operator" => Some(Self::Operator),
+            "sharing_switch" => Some(Self::SharingSwitch),
+            _ => None,
+        }
+    }
+}
+
 /// One stored member grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemberGrant {
@@ -194,6 +219,14 @@ pub struct MemberGrant {
     /// it equals the member's current pairing id.
     pub pairing_id: String,
     pub created_at_ms: i64,
+    pub source: MemberGrantSource,
+}
+
+/// A computer whose current Callosum pairing has vault sharing enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultSharingMember {
+    pub member_id: String,
+    pub pairing_id: String,
 }
 
 /// The state of a remote record as the home last reported it authoritatively.
@@ -656,6 +689,28 @@ pub fn member_grant_payload_hash(
         selector_kind: selector.kind_str(),
         selector: selector.selector_str(),
         pairing_id,
+    })
+}
+
+/// Switch grant audit payload: `{member_id, operation, selector_kind, selector,
+/// pairing_id, source}`. The actor is `vault`; the payload binds the target member.
+pub fn sharing_switch_grant_payload_hash(grant: &MemberGrant) -> String {
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        member_id: &'a str,
+        operation: &'a str,
+        selector_kind: &'a str,
+        selector: &'a str,
+        pairing_id: &'a str,
+        source: &'a str,
+    }
+    sha256_hex_of_json(&Payload {
+        member_id: &grant.member_id,
+        operation: grant.operation.as_str(),
+        selector_kind: grant.selector.kind_str(),
+        selector: grant.selector.selector_str(),
+        pairing_id: &grant.pairing_id,
+        source: grant.source.as_str(),
     })
 }
 

@@ -36,8 +36,7 @@ use credentials_core::federation::{
     valid_member_id, MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID,
 };
 use credentials_core::key::KeyId;
-use credentials_core::record::{CredentialKind, VaultRecord};
-use credentials_core::store::{EncryptedStore, GrantOperation, SelectorKind, StoreOpError};
+use credentials_core::store::{EncryptedStore, StoreOpError};
 use subc_protocol::Principal;
 
 /// Challenge TTL. Long enough for a CLI to resolve the keychain key and MAC the op;
@@ -872,37 +871,7 @@ fn init_transfer_key(
     self_member: &str,
     actor: &str,
 ) -> Result<serde_json::Value, StoreOpError> {
-    let created = match store.meta(VAULT_TRANSFER_ID) {
-        Ok(_) => false,
-        Err(StoreOpError::NotFound) => {
-            let pem = credentials_core::kem::generate_key().map_err(|e| {
-                StoreOpError::Encode(format!("transfer key generation failed: {e}"))
-            })?;
-            store.create_audited(
-                VAULT_TRANSFER_ID,
-                &VaultRecord::new_static(
-                    CredentialKind::KemKey,
-                    "operator",
-                    pem.into_bytes(),
-                    None,
-                ),
-                AuditCtx::route_admin(AuditOp::Put, actor),
-            )?;
-            true
-        }
-        Err(error) => return Err(error),
-    };
-    match store.create_read_grant_audited(
-        "reserved",
-        "callosum",
-        SelectorKind::Exact,
-        VAULT_TRANSFER_ID,
-        GrantOperation::Read,
-        AuditCtx::route_admin(AuditOp::GrantCreate, actor),
-    ) {
-        Ok(()) | Err(StoreOpError::AlreadyExists) => {}
-        Err(error) => return Err(error),
-    }
+    let created = crate::federation::transfer::ensure_transfer_key(store, actor)?;
     let changed = store.set_federation_self_member_audited(
         self_member,
         AuditCtx::route_admin(AuditOp::FederationSelfSet, actor),
@@ -1009,6 +978,9 @@ fn accept_report(report: &crate::federation::AcceptReport) -> serde_json::Value 
 /// more detail than the anonymous read surface is acceptable (the caller holds the
 /// master key), but never secret material.
 fn store_err(e: StoreOpError) -> AdminOutcome {
+    if matches!(e, StoreOpError::MemberGrantSharingSwitch { .. }) {
+        return AdminOutcome::Refused(format!("member_grant_sharing_switch/permanent: {e}"));
+    }
     // Refusals `apply` names with their own code (`<code>: <why>`) keep it in front,
     // as `<code>/permanent: <why>`, instead of reading as an encoding failure.
     if let StoreOpError::Encode(message) = &e {
@@ -1077,6 +1049,19 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_grant_refusal_keeps_its_typed_code_and_operator_remedy() {
+        let error = StoreOpError::MemberGrantSharingSwitch {
+            member_id: "fed-computer:648aa5c579fb30f38af744d97d6ec840".into(),
+        };
+        let AdminOutcome::Refused(message) = store_err(error) else {
+            panic!("expected refusal");
+        };
+        assert!(message.starts_with("member_grant_sharing_switch/permanent: Turn"));
+        assert!(message
+            .contains("ck callosum share 648aa5c579fb30f38af744d97d6ec840 claustrum/vault off"));
+    }
     use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
     use credentials_core::audit::{AuditCtx, AuditOp};
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};

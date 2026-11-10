@@ -8,7 +8,8 @@ the pins in `tests/federation/callosum_vectors.rs`.
 
 | file | source | tag | commit | sha256 |
 |---|---|---|---|---|
-| `paired-devices/cases.json` | `test-vectors/paired-devices/cases.json` | `paired-devices-vectors-v1.4` | `5cfd6d06` | `0f96177ffd63fceaacd5253f39fe5e2bc61818bf6d8f4d336655acea4e324228` |
+| `paired-devices/cases.json` | `test-vectors/paired-devices/cases.json` | `paired-devices-vectors-v1.5` | `e1dd0eb8` | `9bf5afa89ce776252e8a0e7bbadefe83799bda111da97748dce6349414f30901` |
+| `paired-devices/README.md` | `test-vectors/paired-devices/README.md` | `paired-devices-vectors-v1.5` | `e1dd0eb8` | `3e1e757f5676ec002ad5ce3cb12356d22da5c581ee7ef73c08928ae8c2743b06` |
 | `peer-keys/cases.json` | `test-vectors/peer-keys/cases.json` | `peer-keys-vectors-v1.0` | `48f2198f` | `8b23d3ab3a9827e4d83584ca441ea84201979ca61cbcbf1560be0fca320ef805` |
 
 The paired-devices fixture's own static key is `8520f009…4e6a`, and its documented

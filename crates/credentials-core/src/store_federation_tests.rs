@@ -2260,3 +2260,91 @@ fn incarnation_transfer_acceptance_creates_then_preserves_row_identity() {
         .unwrap();
     assert_eq!(empty, 0);
 }
+
+#[test]
+fn sharing_source_migration_preserves_operator_rows_and_constrains_sources() {
+    use crate::federation::MemberGrantSource;
+    let (_root, sqlite) = sqlite("sharing-source-migration", 241);
+    migrate_through_for_test(&sqlite, MEMBER_GRANT_SOURCE_SCHEMA_VERSION - 1).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([241; 32])).unwrap();
+    store
+        .create_member_grant_audited(
+            HOME,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Category("llm-provider".into()),
+            "old-pair",
+        )
+        .unwrap();
+    let before = store.list_member_grants().unwrap();
+    let audit = store.read_audit(None).unwrap();
+    EncryptedStore::migrate(&store.store).unwrap();
+    assert_eq!(store.list_member_grants().unwrap(), before);
+    assert_eq!(before[0].source, MemberGrantSource::Operator);
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+    for source in ["operator", "sharing_switch"] {
+        store
+            .with_raw_conn(|conn| conn.execute("UPDATE member_grants SET source = ?1", [source]))
+            .unwrap();
+    }
+    assert!(store
+        .with_raw_conn(|conn| conn.execute("UPDATE member_grants SET source = 'other'", []))
+        .is_err());
+    assert!(store
+        .with_raw_conn(|conn| conn.execute("UPDATE member_grants SET source = NULL", []))
+        .is_err());
+}
+
+#[test]
+fn sharing_reconcile_rolls_back_every_grant_and_audit_on_panic_or_second_audit_failure() {
+    use crate::federation::VaultSharingMember;
+    for (panic, replacing) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (_root, store) = rig(
+            if panic {
+                "sharing-crash"
+            } else {
+                "sharing-audit-failure"
+            },
+            242,
+        );
+        if replacing {
+            store
+                .reconcile_vault_sharing_audited(&[VaultSharingMember {
+                    member_id: HOME.into(),
+                    pairing_id: "old-pair".into(),
+                }])
+                .unwrap();
+        }
+        let grants_before = store.list_member_grants().unwrap();
+        let members = [VaultSharingMember {
+            member_id: HOME.into(),
+            pairing_id: "pair-one".into(),
+        }];
+        let before = store.read_audit(None).unwrap();
+        if panic {
+            let mut writes = 0;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                store.reconcile_vault_sharing_inner(&members, || {
+                    writes += 1;
+                    if writes == 1 {
+                        panic!("crash after first audited grant");
+                    }
+                })
+            }));
+            assert!(result.is_err());
+            assert_eq!(writes, 1);
+        } else {
+            let trigger = if replacing {
+                "CREATE TRIGGER fail_second_sharing_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'member_grant_revoke' AND (SELECT count(*) FROM member_grants) = 0 BEGIN SELECT RAISE(ABORT, 'second revoke audit failed'); END;"
+            } else {
+                "CREATE TRIGGER fail_second_sharing_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'member_grant_create' AND (SELECT count(*) FROM member_grants) = 2 BEGIN SELECT RAISE(ABORT, 'second grant audit failed'); END;"
+            };
+            store
+                .with_raw_conn(|conn| conn.execute_batch(trigger))
+                .unwrap();
+            assert!(store.reconcile_vault_sharing_audited(&members).is_err());
+        }
+        assert_eq!(store.list_member_grants().unwrap(), grants_before);
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+}

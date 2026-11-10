@@ -378,12 +378,13 @@ pub fn cmd_member(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
             for row in grants {
                 let selector = row.get("selector");
                 println!(
-                    "{}  {}  {} {}  pairing {}",
+                    "{}  {}  {} {}  pairing {}  source {}",
                     text(row, "member_id"),
                     text(row, "operation"),
                     selector.map_or("-", |s| text(s, "kind")),
                     selector.map_or("", |s| text(s, "selector")),
-                    text(row, "pairing_id")
+                    text(row, "pairing_id"),
+                    text(row, "source")
                 );
             }
         }

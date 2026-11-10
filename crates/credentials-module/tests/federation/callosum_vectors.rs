@@ -39,8 +39,14 @@ fn reply(file: &[u8], name: &str) -> Value {
 fn the_vendored_vectors_are_the_bytes_callosum_published() {
     assert_eq!(
         sha256_hex(PAIRED_DEVICES),
-        "0f96177ffd63fceaacd5253f39fe5e2bc61818bf6d8f4d336655acea4e324228",
+        "9bf5afa89ce776252e8a0e7bbadefe83799bda111da97748dce6349414f30901",
         "paired-devices vectors must match VENDORED.md"
+    );
+    assert_eq!(
+        sha256_hex(include_bytes!(
+            "../fixtures/callosum/paired-devices/README.md"
+        )),
+        "3e1e757f5676ec002ad5ce3cb12356d22da5c581ee7ef73c08928ae8c2743b06"
     );
     assert_eq!(
         sha256_hex(PEER_KEYS),
@@ -148,3 +154,47 @@ fn peer_keys_without_a_transfer_key_and_not_ready_are_classified() {
         Lookup::Unavailable
     );
 }
+
+macro_rules! sharing_fixture {
+    ($name:ident, $members:expr, $enabled:expr) => {
+        #[test]
+        fn $name() {
+            let body = reply(PAIRED_DEVICES, stringify!($name));
+            let body = body.get("notices").map_or(&body, |notices| &notices[0]);
+            let decoded = claustrum_module_probe::federation::sharing::decode_snapshot(body);
+            match $members {
+                Some(count) => {
+                    let decoded = decoded.expect("published snapshot must decode");
+                    assert_eq!(decoded.members.len(), count);
+                    assert_eq!(decoded.enabled, $enabled);
+                    if count != 0 {
+                        assert_eq!(
+                            decoded.members[0].member_id,
+                            "fed-computer:648aa5c579fb30f38af744d97d6ec840"
+                        );
+                        assert_eq!(
+                            decoded.members[0].pairing_id,
+                            "11111111-2222-4333-8444-555555555555:3"
+                        );
+                    }
+                }
+                None => assert!(decoded.is_none(), "refusal is not an empty snapshot"),
+            }
+        }
+    };
+}
+
+sharing_fixture!(empty, Some(0), false);
+sharing_fixture!(all_classes, Some(1), true);
+sharing_fixture!(occipital_caller, None::<usize>, false);
+sharing_fixture!(wrong_caller, None::<usize>, false);
+sharing_fixture!(nonempty_params, None::<usize>, false);
+sharing_fixture!(missing_params, None::<usize>, false);
+sharing_fixture!(watch_initial, Some(1), true);
+sharing_fixture!(watch_wrong_caller, None::<usize>, false);
+sharing_fixture!(watch_occipital, None::<usize>, false);
+sharing_fixture!(watch_missing_caller, None::<usize>, false);
+sharing_fixture!(watch_nonempty_params, None::<usize>, false);
+sharing_fixture!(watch_missing_params, None::<usize>, false);
+sharing_fixture!(watch_bad_params_before_caller, None::<usize>, false);
+sharing_fixture!(watch_not_ready, None::<usize>, false);

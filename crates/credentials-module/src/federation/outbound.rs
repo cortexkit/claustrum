@@ -34,7 +34,7 @@ use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 /// A consumer-facing forwarded call (B's remote read, B's forwarded report) must
 /// finish end to end in this long, because the Rust client gives the reply frame 3 s.
@@ -183,6 +183,7 @@ struct Link {
     id: u64,
     write: AsyncMutex<tokio::io::WriteHalf<TcpStream>>,
     waiters: std::sync::Mutex<HashMap<WaiterKey, oneshot::Sender<Result<Frame, String>>>>,
+    streams: std::sync::Mutex<HashMap<WaiterKey, StreamSender>>,
     /// Set by the reader before it fails the pending calls and stops. Nothing reads
     /// replies on a closed link, so nothing may be sent on it.
     closed: AtomicBool,
@@ -231,6 +232,65 @@ impl std::fmt::Debug for Link {
 enum WaiterKey {
     Control(u64),
     Route(u16, u64),
+}
+
+type StreamSender = mpsc::UnboundedSender<Result<Frame, String>>;
+
+/// A held routed subscription. It owns only its correlation id, never the link's reader.
+pub struct Subscription {
+    link: Arc<Link>,
+    key: WaiterKey,
+    epoch: u32,
+    replies: mpsc::UnboundedReceiver<Result<Frame, String>>,
+}
+
+impl Subscription {
+    pub async fn next(&mut self) -> Result<Option<Value>, OutboundError> {
+        match self.replies.recv().await {
+            Some(Ok(frame)) if frame.header.ty == FrameType::StreamData => {
+                let body: Value = serde_json::from_slice(&frame.body).map_err(|e| {
+                    OutboundError::Unavailable(format!("decode watch snapshot: {e}"))
+                })?;
+                Ok(Some(body.get("result").cloned().unwrap_or(body)))
+            }
+            Some(Ok(frame)) if frame.header.ty == FrameType::StreamEnd => Ok(None),
+            Some(Ok(_)) | None => Ok(None),
+            Some(Err(why)) => Err(OutboundError::Unavailable(why)),
+        }
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.link
+            .streams
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.key);
+        let WaiterKey::Route(channel, corr) = self.key else {
+            return;
+        };
+        let link = Arc::clone(&self.link);
+        let epoch = self.epoch;
+        // Cancelling a watch must not close the shared connection or block shutdown.
+        tokio::spawn(async move {
+            if let Ok(frame) = Frame::build(
+                FrameType::Cancel,
+                Flags::new(false, Priority::Interactive, false),
+                channel,
+                epoch,
+                corr,
+                Vec::new(),
+            ) {
+                let _ = tokio::time::timeout(CONNECT_DEADLINE, async {
+                    if !link.is_closed() {
+                        let _ = write_frame(&mut *link.write.lock().await, &frame).await;
+                    }
+                })
+                .await;
+            }
+        });
+    }
 }
 
 struct Inner {
@@ -428,6 +488,7 @@ impl OutboundClient {
             id: self.next_corr(),
             write: tokio::sync::Mutex::new(write_half),
             waiters: std::sync::Mutex::new(HashMap::new()),
+            streams: std::sync::Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             route_closures: std::sync::Mutex::new(HashMap::new()),
         });
@@ -480,6 +541,34 @@ impl OutboundClient {
             }
         }
 
+        let binding = self.route_binding(&link, route_key, call, budget).await?;
+        let corr = self.next_corr();
+        let request = self.route_request(&binding, corr, call)?;
+        let reply = self
+            .exchange(
+                &link,
+                request,
+                WaiterKey::Route(binding.channel, corr),
+                budget,
+                "request",
+                Some(&binding),
+            )
+            .await?;
+        if reply.header.channel == 0 && reply.header.ty == FrameType::Error {
+            return Err(failure(control_refusal(&reply.body)));
+        }
+        let body: Value = serde_json::from_slice(&reply.body)
+            .map_err(|error| OutboundError::Unavailable(format!("decode reply: {error}")))?;
+        Ok(body.get("result").cloned().unwrap_or(body))
+    }
+
+    async fn route_binding(
+        &self,
+        link: &Arc<Link>,
+        route_key: &str,
+        call: &RouteCall,
+        budget: tokio::time::Instant,
+    ) -> Result<Binding, LinkFailure> {
         // A cached binding counts only if its route is still open on this very
         // connection: one opened on a connection that has since closed, or closed by a
         // route `Goodbye`, is reopened instead of written into a route nobody serves.
@@ -498,7 +587,7 @@ impl OutboundClient {
                 let corr = self.next_corr();
                 let reply = self
                     .exchange(
-                        &link,
+                        link,
                         control_frame(corr, &self.open_body(&call.target)),
                         WaiterKey::Control(corr),
                         budget,
@@ -509,7 +598,7 @@ impl OutboundClient {
                 if reply.header.ty == FrameType::Error {
                     return Err(failure(control_refusal(&reply.body)));
                 }
-                let opened = parse_open(&reply.body, &link)?;
+                let opened = parse_open(&reply.body, link)?;
                 self.inner
                     .bindings
                     .lock()
@@ -519,8 +608,16 @@ impl OutboundClient {
             }
         };
 
-        let corr = self.next_corr();
-        let request = Frame::build(
+        Ok(binding)
+    }
+
+    fn route_request(
+        &self,
+        binding: &Binding,
+        corr: u64,
+        call: &RouteCall,
+    ) -> Result<Frame, OutboundError> {
+        Frame::build(
             FrameType::Request,
             Flags::new(false, Priority::Interactive, false),
             binding.channel,
@@ -529,27 +626,49 @@ impl OutboundClient {
             serde_json::to_vec(&call.request)
                 .map_err(|error| OutboundError::Unavailable(format!("encode request: {error}")))?,
         )
-        .map_err(|error| OutboundError::Unavailable(format!("build request frame: {error}")))?;
-        let reply = self
-            .exchange(
-                &link,
-                request,
-                WaiterKey::Route(binding.channel, corr),
-                budget,
-                "request",
-                Some(&binding),
-            )
-            .await?;
-        if reply.header.channel == 0 && reply.header.ty == FrameType::Error {
-            return Err(failure(control_refusal(&reply.body)));
+        .map_err(|error| OutboundError::Unavailable(format!("build request frame: {error}")))
+    }
+
+    /// Open a held subscription without occupying the single-reply waiter table.
+    /// Setup is bounded; the subscription itself ends on cancellation, route close or EOF.
+    pub async fn subscribe(
+        &self,
+        route_key: &str,
+        call: RouteCall,
+        deadline: Duration,
+    ) -> Result<Subscription, OutboundError> {
+        let budget = tokio::time::Instant::now() + deadline;
+        let link = self.link(budget).await?;
+        let binding = self
+            .route_binding(&link, route_key, &call, budget)
+            .await
+            .map_err(|error| error.error)?;
+        let corr = self.next_corr();
+        let key = WaiterKey::Route(binding.channel, corr);
+        let (send, replies) = mpsc::unbounded_channel();
+        link.streams
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, send);
+        let subscription = Subscription {
+            link: Arc::clone(&link),
+            key,
+            epoch: binding.epoch,
+            replies,
+        };
+        if !link.holds(&binding) {
+            return Err(OutboundError::Unavailable(
+                "watch route closed before subscription".into(),
+            ));
         }
-        let body: Value = serde_json::from_slice(&reply.body)
-            .map_err(|error| OutboundError::Unavailable(format!("decode reply: {error}")))?;
-        // `call` hands back the reply's `result` member, whatever the channel: one
-        // shape for every reply, the same shape the daemon's control commands use. A
-        // body without that member is passed through unchanged, so a target that
-        // answers with a bare object is still readable.
-        Ok(body.get("result").cloned().unwrap_or(body))
+        self.write(
+            &link,
+            &self.route_request(&binding, corr, &call)?,
+            budget,
+            "watch",
+        )
+        .await?;
+        Ok(subscription)
     }
 
     /// Send one frame and wait for the reply matched by `key`, all inside `budget`.
@@ -718,6 +837,26 @@ where
                 } else {
                     WaiterKey::Route(frame.header.channel, frame.header.corr)
                 };
+                {
+                    let mut streams = link.streams.lock().unwrap_or_else(|p| p.into_inner());
+                    let stream_key = if streams.contains_key(&key) {
+                        Some(key)
+                    } else if frame.header.channel == 0 && frame.header.ty == FrameType::Error {
+                        streams.keys().copied().find(|key| matches!(key, WaiterKey::Route(_, corr) if *corr == frame.header.corr))
+                    } else {
+                        None
+                    };
+                    if let Some(key) = stream_key {
+                        let terminal = frame.header.ty != FrameType::StreamData;
+                        if let Some(stream) = streams.get(&key) {
+                            let _ = stream.send(Ok(frame));
+                        }
+                        if terminal {
+                            streams.remove(&key);
+                        }
+                        continue;
+                    }
+                }
                 let mut waiters = link
                     .waiters
                     .lock()
@@ -793,6 +932,17 @@ fn close_route(link: &Link, channel: u16) {
     for waiter in pending {
         let _ = waiter.send(Err("the daemon closed the route".to_string()));
     }
+    link.streams
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|key, sender| {
+            if matches!(key, WaiterKey::Route(on, _) if *on == channel) {
+                let _ = sender.send(Err("the daemon closed the route".into()));
+                false
+            } else {
+                true
+            }
+        });
 }
 
 /// Fail every pending call on a dead connection, so no caller waits out its whole
@@ -807,6 +957,14 @@ fn fail_all(link: &Link, why: &str) {
         .collect();
     for waiter in pending {
         let _ = waiter.send(Err(why.to_string()));
+    }
+    for (_, sender) in link
+        .streams
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .drain()
+    {
+        let _ = sender.send(Err(why.to_string()));
     }
 }
 

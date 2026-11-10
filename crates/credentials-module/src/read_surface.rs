@@ -1342,6 +1342,10 @@ impl<'a> From<PublicKeyAuthorization<'a>> for KeyAddress<'a> {
 }
 
 impl ReadSurface {
+    pub(crate) fn store(&self) -> &Arc<credentials_core::store::EncryptedStore> {
+        self.engine.store()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_incarnation_hook(
         &self,

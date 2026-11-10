@@ -80,6 +80,9 @@ pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
 
+/// The migration that distinguishes operator grants from Callosum sharing switches.
+pub const MEMBER_GRANT_SOURCE_SCHEMA_VERSION: u32 = 38;
+
 /// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
 /// the selector vocabulary, and added the enrollment and grant-generation tables.
 ///
@@ -1050,6 +1053,11 @@ const MIGRATIONS: &[Migration] = &[
                          created_at_ms INTEGER NOT NULL\
                      );",
     },
+    Migration {
+        version: MEMBER_GRANT_SOURCE_SCHEMA_VERSION,
+        statements: "ALTER TABLE member_grants ADD COLUMN source TEXT NOT NULL \
+                     DEFAULT 'operator' CHECK (source IN ('operator', 'sharing_switch'));",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1539,6 +1547,8 @@ pub enum StoreOpError {
     CredentialIdIsLocal,
     /// A member id is not `fed-computer:` followed by 32 lowercase hex characters.
     InvalidMemberId,
+    /// Callosum owns this grant; a manual revoke would be undone by reconciliation.
+    MemberGrantSharingSwitch { member_id: String },
     /// A grant would reach the vault transfer key (`kem:vault-transfer:*`) with
     /// anything but the one announce read, or a handle was requested for it. The
     /// transfer key signs the federation seals, so the only thing it may be granted is
@@ -1713,6 +1723,11 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidMemberId => f.write_str(
                 "invalid_member_id: expected fed-computer: followed by 32 lowercase hex characters",
             ),
+            StoreOpError::MemberGrantSharingSwitch { member_id } => write!(
+                f,
+                "Turn the vault-sharing switch off with `ck callosum share {} claustrum/vault off`; otherwise the vault would recreate this grant.",
+                member_id.trim_start_matches("fed-computer:")
+            ),
             StoreOpError::TransferKeyReserved => f.write_str(
                 "transfer_key_reserved: the vault transfer key admits one grant only, read to reserved:callosum for the public-key announce; it cannot be opened, sealed, signed or listed, and no other credential may take its id",
             ),
@@ -1756,6 +1771,7 @@ impl StoreOpError {
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
             StoreOpError::InvalidMemberId => Some("invalid_member_id"),
+            StoreOpError::MemberGrantSharingSwitch { .. } => Some("member_grant_sharing_switch"),
             StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
@@ -13548,7 +13564,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            37,
+            38,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

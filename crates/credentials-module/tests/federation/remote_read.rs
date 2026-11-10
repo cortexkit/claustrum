@@ -741,7 +741,7 @@ async fn a_consumer_on_b_reads_an_anthropic_token_homed_on_a_and_b_matches_a() {
         .find(|row| row.id == TOKEN_ID)
         .expect("A lists it");
     rig.grant_b_module(TOKEN_ID);
-    assert_eq!(rig.b_row(TOKEN_ID), a_row);
+    assert_eq!(same_but_incarnation(rig.b_row(TOKEN_ID), &a_row), a_row);
 
     // B's status is A's local status plus the two remote fields.
     assert_eq!(
@@ -863,8 +863,23 @@ async fn antigravity_and_chatgpt_projections_match_the_homes_local_get_and_list(
         .rows;
     for id in ["antigravity:google", "oauth:openai:claim"] {
         let a_row = a_rows.iter().find(|row| row.id == id).expect("A row");
-        assert_eq!(&rig.b_row(id), a_row, "{id}: B's row equals A's");
+        assert_eq!(
+            &same_but_incarnation(rig.b_row(id), a_row),
+            a_row,
+            "{id}: B's row equals A's"
+        );
     }
+}
+
+/// B's row with A's incarnation, for comparing the rest field by field. Each vault
+/// mints its own incarnation for the row it stores, so B's remote registration and A's
+/// local record never share one; B's must still be a well-formed identity of its own.
+fn same_but_incarnation(mut b_row: ScopedListRow, a_row: &ScopedListRow) -> ScopedListRow {
+    assert_eq!(b_row.incarnation.len(), 32, "{}", b_row.id);
+    assert!(b_row.incarnation.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(b_row.incarnation, a_row.incarnation, "{}", b_row.id);
+    b_row.incarnation = a_row.incarnation.clone();
+    b_row
 }
 
 // ---------------------------------------------------------------------------------

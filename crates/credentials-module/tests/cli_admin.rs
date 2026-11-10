@@ -5766,11 +5766,12 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
-    // budget for verbs. It includes the operator signing verb and the four
-    // federation verbs (transfer, remote, member, federation), and secret controls.
+    // budget for verbs. It includes the operator signing verb, the four
+    // federation verbs (transfer, remote, member, federation), secret controls
+    // and provider-report.
     assert_eq!(
         verbs.len(),
-        38,
+        39,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -7006,7 +7007,7 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
     let put = vault.run(&[
         "put",
         "--id",
-        "apikey:zai",
+        "apikey:kiro",
         "--payload-file",
         &payload_file("secret"),
     ]);
@@ -7025,7 +7026,7 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
     ]);
     assert!(kimi.status.success());
     assert!(!String::from_utf8_lossy(&kimi.stderr).contains("ck auth set-providers"));
-    let set = vault.run(&["set-providers", "--id", "apikey:zai", "--set", "bb", "aa"]);
+    let set = vault.run(&["set-providers", "--id", "apikey:kiro", "--set", "bb", "aa"]);
     assert!(
         set.status.success(),
         "{}",
@@ -7033,12 +7034,12 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
     );
     assert_eq!(
         String::from_utf8_lossy(&set.stdout).trim(),
-        "apikey:zai  aa,bb"
+        "apikey:kiro  aa,bb"
     );
     let replace = vault.run(&[
         "put",
         "--id",
-        "apikey:zai",
+        "apikey:kiro",
         "--payload-file",
         &payload_file("rotated"),
         "--replace",
@@ -7059,18 +7060,18 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
         assert!(text.contains("CATEGORIES  PROVIDERS"), "{text}");
         assert!(
             text.lines()
-                .any(|line| line.contains("apikey:zai") && line.contains("aa,bb,cc,dd")),
+                .any(|line| line.contains("apikey:kiro") && line.contains("aa,bb,cc,dd")),
             "{text}"
         );
     }
-    let remove = vault.run(&["set-providers", "--id", "apikey:zai", "--remove", "bb"]);
+    let remove = vault.run(&["set-providers", "--id", "apikey:kiro", "--remove", "bb"]);
     assert!(remove.status.success());
     assert!(String::from_utf8_lossy(&remove.stdout).contains("aa,cc,dd"));
-    let clear = vault.run(&["set-providers", "--id", "apikey:zai", "--set"]);
+    let clear = vault.run(&["set-providers", "--id", "apikey:kiro", "--set"]);
     assert!(clear.status.success());
     assert_eq!(
         String::from_utf8_lossy(&clear.stdout).trim(),
-        "apikey:zai  -"
+        "apikey:kiro  -"
     );
     for flags in [
         vec![],
@@ -7078,7 +7079,7 @@ fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
         vec!["--add"],
         vec!["--remove"],
     ] {
-        let mut args = vec!["set-providers", "--id", "apikey:zai"];
+        let mut args = vec!["set-providers", "--id", "apikey:kiro"];
         args.extend(flags);
         assert!(!vault.run(&args).status.success());
     }
@@ -9095,10 +9096,10 @@ fn provider_catalog_put_defaults_explicit_override_and_replace_preserve_stored_i
 }
 
 #[test]
-fn provider_catalog_openai_put_stores_both_model_and_media_groups() {
-    let vault = GrantCliVault::new("catalog-openai-media");
+fn provider_catalog_labelled_put_stores_the_rows_groups_and_rotation_keeps_a_stored_set() {
+    let vault = GrantCliVault::new("catalog-labelled-groups");
     vault.bootstrap();
-    let id = "apikey:openai:media";
+    let id = "apikey:deepseek:work";
     let payload = payload_file("catalog-test-key");
     let out = vault.run(&["put", "--id", id, "--payload-file", &payload]);
     assert!(
@@ -9113,7 +9114,7 @@ fn provider_catalog_openai_put_stores_both_model_and_media_groups() {
     };
     assert_eq!(
         rows()["categories"],
-        serde_json::json!(["llm-provider", "media-provider"])
+        serde_json::json!(["llm-provider", "web-search"])
     );
     // A deliberate stored classification is not re-derived on rotation or reads.
     assert!(vault

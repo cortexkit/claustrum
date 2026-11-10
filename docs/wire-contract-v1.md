@@ -503,9 +503,9 @@ replacement preserves an existing set. Existing records are never automatically
 remapped. The vault never derives these ids at read time from the credential id,
 catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
 current table without changing any record, taking no writer lease.
-Only OpenAI and Google API-key rows default to both `llm-provider` and
-`media-provider`; no other row gets the media group. These category defaults apply
-to creation, not existing records or replacements with stored categories.
+No catalog row defaults to `media-provider`: media keys are stamped by hand until
+routing stops choosing an unfunded key for speech jobs. Category defaults apply to
+creation, not existing records or replacements with stored categories.
 Consumers join on exact provider-id equality, with no fallback. `serves` answers which
 model vendors are reachable; `provider_ids` answers which catalog providers the operator
 assigned to this credential. They are not interchangeable.
@@ -518,6 +518,8 @@ Three additive fields are present on every current row:
   row is `null`. Never derive it by splitting the credential id.
 - `incarnation`: the stored random per-row identity. Replacement and refresh keep
   it; removal followed by re-creation changes it, even when other metadata is equal.
+  A row this vault reads from its home vault carries this vault's own registration
+  of it, so `ck auth remote remove` followed by `ck auth remote add` changes it.
 - `plan_tier_observed_at_ms`: the first proven observation of the effective current
   `plan_tier`, in Unix milliseconds, or `null` when unknown. Detection uses the
   detection instant. A Claude profile fetched after token renewal waits in a durable

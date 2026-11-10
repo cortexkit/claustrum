@@ -1,0 +1,175 @@
+# Provider key evidence
+
+The catalog records observations from deliberately bogus API keys, not rules that the
+vault evaluates. Requests used the existing login check, with redirects disabled, on a
+network-enabled Linux build server on 2026-11-10. Cloudflare Workers AI used the dummy
+account id `00000000000000000000000000000000`. No real provider key was used.
+
+A dash means that no string-valued error code was observed. Numeric codes are not
+coerced to strings. Where an API uses an error type or structured reason as its code,
+the pointer identifies that exact string. Only provider authentication refusals go
+in the evidence table. Other observed replies are listed below and leave the row's
+`invalid_key` as `None`. The existing check assignments and response classification
+are unchanged.
+
+| row | url | date | status | error_code | code field |
+| --- | --- | --- | --- | --- | --- |
+| abliteration | https://api.abliteration.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| aiand | https://api.aiand.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| anthropic | https://api.anthropic.com/v1/models | 2026-11-10 | 401 | authentication_error | /error/type |
+| baseten | https://inference.baseten.co/v1/models | 2026-11-10 | 401 | - | - |
+| charm-hyper | https://hyper.charm.land/v1/credits | 2026-11-10 | 401 | authentication_error | /error/type |
+| cloudflare-workers-ai | https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/models/search?per_page=1 | 2026-11-10 | 400 | - | - |
+| deepinfra | https://api.deepinfra.com/v1/openai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| deepseek | https://api.deepseek.com/chat/completions | 2026-11-10 | 401 | invalid_request_error | /error/code |
+| firecrawl | https://api.firecrawl.dev/v2/team/credit-usage | 2026-11-10 | 401 | - | - |
+| fireworks-ai | https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1 | 2026-11-10 | 401 | UNAUTHORIZED | /error/code |
+| google | https://generativelanguage.googleapis.com/v1beta/models | 2026-11-10 | 400 | API_KEY_INVALID | /error/details/0/reason |
+| huggingface | https://huggingface.co/api/whoami-v2 | 2026-11-10 | 401 | - | - |
+| inception | https://api.inceptionlabs.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| kiro | https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR | 2026-11-10 | 403 | - | - |
+| meta | https://api.meta.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| minimax-code | https://api.minimax.io/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
+| minimax-code-cn | https://api.minimax.cn/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
+| mistral | https://api.mistral.ai/v1/models | 2026-11-10 | 401 | - | - |
+| moonshot | https://api.moonshot.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_authentication_error | /error/type |
+| openai | https://api.openai.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| openrouter | https://openrouter.ai/api/v1/auth/key | 2026-11-10 | 401 | - | - |
+| perplexity | https://api.perplexity.ai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| qwen-portal | https://portal.qwen.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| siliconflow | https://api.siliconflow.com/v1/models | 2026-11-10 | 401 | - | - |
+| siliconflow-cn | https://api.siliconflow.cn/v1/models | 2026-11-10 | 401 | - | - |
+| singularityapi-dev | https://api.singularityapi.dev/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| singularityapi-tech | https://api.singularityapi.tech/v1/models | 2026-11-10 | 401 | 401 | /error/code |
+| stepfun | https://api.stepfun.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| umans | https://api.code.umans.ai/v1/messages | 2026-11-10 | 401 | authentication_error | /error/type |
+| venice | https://api.venice.ai/api/v1/chat/completions | 2026-11-10 | 401 | - | - |
+| wafer-serverless | https://pass.wafer.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| xai | https://api.x.ai/v1/models | 2026-11-10 | 400 | invalid-argument | /code |
+| xiaomi-token-plan-ams | https://token-plan-ams.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| xiaomi-token-plan-cn | https://token-plan-cn.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| xiaomi-token-plan-sgp | https://token-plan-sgp.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zai | https://api.z.ai/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zhipu-coding-plan | https://open.bigmodel.cn/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+
+## Probes without a response
+
+All 50 existing rows with a check were probed; 37 supplied authentication-refusal
+evidence. `tinyfish` received no HTTP response:
+DNS lookup of `api.tinyfish.ai` failed with "No address associated with hostname".
+Its `invalid_key` stays `None`. The 16 existing `Unvalidated` rows were not probed
+and also keep `invalid_key: None`.
+
+## Checks to replace
+
+These responses were obtained on 2026-11-10, but are not invalid-key evidence.
+Each of these rows keeps `invalid_key: None`. Their checks are not changed here.
+
+- `nanogpt`: <https://nano-gpt.com/api/v1/models> returned 200, a public model
+  list. Its login check accepts a bogus key, so the check proves nothing.
+- `synthetic`: <https://api.synthetic.new/openai/v1/models> returned 200, a public
+  model list. Its login check accepts a bogus key, so the check proves nothing.
+- `zenmux`: <https://zenmux.ai/api/v1/models> returned 200, a public model list.
+  Its login check accepts a bogus key, so the check proves nothing.
+- `nvidia`: <https://integrate.api.nvidia.com/v1/chat/completions> returned 410,
+  stating that the probe model had reached end of life.
+- `firepass`: <https://api.fireworks.ai/inference/v1/chat/completions> returned
+  404, "Model not found, inaccessible, and/or not deployed".
+- `cerebras`: <https://api.cerebras.ai/v1/chat/completions> returned a bot-block
+  403, plain-text "error code: 1010".
+- `gmi-cloud`: <https://api.gmi-serving.com/v1/models> returned the same bot-block
+  403, plain-text "error code: 1010".
+- `groq`: <https://api.groq.com/openai/v1/models> returned the same bot-block 403.
+- `novita`: <https://api.novita.ai/openai/v1/chat/completions> returned the same
+  bot-block 403.
+- `together`: <https://api.together.xyz/v1/models> returned the same bot-block 403.
+- `yolo-auto`: <https://yolo-auto.com/v1/models> returned the same bot-block 403.
+- `sakana`: <https://api.sakana.ai/v1/models> returned an HTML 403 Forbidden,
+  not a provider authentication error.
+- `tinyfish`: <https://api.tinyfish.ai/v1/wallet> did not resolve in DNS.
+
+## No-descriptor rows
+
+- `searxng`: self-hosted instances have no fixed receiving hosts or universal client
+  key header. See <https://docs.searxng.org/dev/search_api.html>.
+- `typesafe`: a key can belong to a deployment at a custom base URL. The public
+  service's Bearer API does not describe those deployments; see
+  <https://docs.typesafe.ai/introduction/quickstart>.
+- `kagi` (added to the no-descriptor list): the API portal documents
+  `Authorization: Bot <key>`, which is neither supported scheme. See
+  <https://help.kagi.com/kagi/api/api-portal.html>. The search page now also shows
+  Bearer for the same route, so the conflicting documentation is not a reason to
+  silently change the existing integration's presentation.
+
+No scheme was added: the descriptor supports only Bearer and raw header values.
+
+## Hosts without provider documentation
+
+These existing check hosts are retained because login already sends the key there.
+The closest official page is recorded in `hosts_doc`; it is not evidence for a
+host that the page does not document. Searches below were made on 2026-11-10.
+Documented receiving hosts are included alongside the retained aliases.
+
+- `kiro`, `q.us-east-1.amazonaws.com`: searched the official authentication/API-key
+  guide at <https://kiro.dev/docs/getting-started/authentication/>. It documents
+  `KIRO_API_KEY`, not the HTTP header or Amazon Q origin.
+- `qwen-portal`, `portal.qwen.ai`: searched
+  <https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/> and the
+  portal. Current Qwen Code documentation describes different QwenCloud hosts,
+  not this existing portal origin.
+- `sakana`, `api.sakana.ai`: searched the official <https://sakana.ai/> site and
+  likely documentation roots. No public API-key host/header reference was found.
+- `singularityapi-tech`, `api.singularityapi.tech`: searched
+  <https://singularityapi.tech/> and the available
+  <https://docs.singularityapi.dev/> quickstart. The latter documents only `.dev`.
+- `xiaomi-token-plan-ams`, `token-plan-ams.xiaomimimo.com`;
+  `xiaomi-token-plan-cn`, `token-plan-cn.xiaomimimo.com`; and
+  `xiaomi-token-plan-sgp`, `token-plan-sgp.xiaomimimo.com`: searched
+  <https://platform.xiaomimimo.com/docs> and its API, quickstart and API-reference
+  routes. They yielded no readable provider-owned host/header documentation.
+- `together`, `api.together.xyz`: searched the official quickstart,
+  authentication, OpenAI-compatibility and chat-completions reference. Current
+  pages name `api.together.ai`, `api-inference.together.ai` and `us-api.together.ai`,
+  all included in the row. The existing `.xyz` check alias was not documented.
+  See <https://docs.together.ai/docs/inference/openai-compatibility> and
+  <https://docs.together.ai/reference/chat-completions>.
+- `tinyfish`, `api.tinyfish.ai`: searched the official authentication, wallet,
+  browser, fetch and search references. The current wallet server is
+  `agent.tinyfish.ai`; the old wallet host was not found. Both hosts and the
+  documented `api.browser.tinyfish.ai`, `api.fetch.tinyfish.ai` and
+  `api.search.tinyfish.ai` endpoints are included. See
+  <https://docs.tinyfish.ai/authentication> and
+  <https://docs.tinyfish.ai/api-reference/wallet>.
+- `siliconflow-cn`, `api.siliconflow.cn`: searched
+  <https://docs.siliconflow.cn/api-reference/chat-completions/chat-completions>.
+  It documents Bearer authentication but the inspected API reference did not
+  establish the `.cn` server host.
+
+## Additional host and presentation sources
+
+Some providers document more than one API surface in separate pages. The rows
+include their fixed key-receiving hosts, not just the validation host:
+
+- Hugging Face: <https://huggingface.co/docs/huggingface_hub/en/package_reference/hf_api>
+  documents the Hub API at `huggingface.co`; the row's inference-provider guide
+  documents `router.huggingface.co` with the same HF Bearer token.
+- Jina: <https://docs.jina.ai/> documents embeddings, reader and search, including
+  `eu.r.jina.ai` and `eu.s.jina.ai` alongside the default reader/search hosts.
+- GMI Cloud: <https://docs.gmicloud.ai/inference-engine/api-reference/llm-api-reference>
+  documents `api.gmi-serving.com`; the Cloud API introduction documents key-bearing
+  API calls to `console.gmicloud.ai`, not merely its dashboard.
+- NanoGPT: <https://docs.nano-gpt.com/api-reference/miscellaneous/api-hosts>
+  documents `api.nano-gpt.com` and the `nano-gpt.com` fallback.
+- MiniMax: the international and China M Plan FAQ pages document Bearer usage
+  checks at `www.minimax.io` and `www.minimax.cn`; their companion tool guides
+  document the model-call hosts. See
+  <https://platform.minimax.io/docs/m-plan/other-tools> and
+  <https://platform.minimaxi.com/docs/m-plan/other-tools>.
+- Kimi Code: <https://www.kimi.com/code/docs/en/kimi-code/models> documents China
+  and overseas API hosts. The Codex guide configures a Bearer-key compatible
+  client; the inspected docs do not state the literal header or promise that a
+  regional key works in both regions. See
+  <https://www.kimi.com/code/docs/en/third-party-tools/codex>.
+- Fire Pass and OpenCode Go: their plan guides configure compatible clients;
+  the explicit Bearer examples are in the parent API's documentation, at
+  <https://docs.fireworks.ai/api-reference> and <https://opencode.ai/docs/zen/>.

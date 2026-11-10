@@ -64,9 +64,9 @@ pub use admin_auth::{
 pub use admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2};
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord, AuthEventKind, ReporterSource};
 pub use catalog::{
-    category_defaults, credential_type, login_provider, serves_for, ApiKeyProvider,
-    AuthHeaderScheme, CredentialCategory, DeviceKind, ExchangeWire, KeyValidation, LoginProvider,
-    ModelVendor, API_KEY_PROVIDERS, LOGIN_PROVIDERS,
+    category_defaults, credential_type, login_provider, serves_for, ApiKeyProvider, AuthDescriptor,
+    AuthScheme, CredentialCategory, DeviceKind, ExchangeWire, InvalidKeyEvidence, KeyValidation,
+    LoginProvider, ModelVendor, API_KEY_PROVIDERS, LOGIN_PROVIDERS,
 };
 pub use contract::{keychain_service_for, vault_id_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use credential_id::{

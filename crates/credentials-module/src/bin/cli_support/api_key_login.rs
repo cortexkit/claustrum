@@ -1,6 +1,4 @@
-pub use credentials_core::catalog::{
-    ApiKeyProvider, AuthHeaderScheme, KeyValidation, API_KEY_PROVIDERS,
-};
+pub use credentials_core::catalog::{ApiKeyProvider, AuthScheme, KeyValidation, API_KEY_PROVIDERS};
 use credentials_core::refresh_adapters::HttpTransport;
 
 /// Check the account id given for `row` (from `--account-id` or the login prompt).
@@ -42,7 +40,7 @@ pub async fn check_login_key(
     account_id: Option<&str>,
 ) -> Result<ValidationOutcome, String> {
     check_account_id(row, account_id)?;
-    Ok(validate_key(transport, &row.validation, key, account_id).await)
+    Ok(validate_key(transport, row, key, account_id).await)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,13 +61,13 @@ const AWS_INVALID_BEARER_MESSAGE: &str = "The bearer token included in the reque
 /// acts on, for rows with an `account_id_prompt`; every other row passes `None`.
 pub async fn validate_key(
     transport: &dyn HttpTransport,
-    validation: &KeyValidation,
+    row: &ApiKeyProvider,
     key: &str,
     account_id: Option<&str>,
 ) -> ValidationOutcome {
     // Before the test bypass below, so that a key with no probe is never reported as
     // "valid" even in a test build: that would be a claim about a check that cannot run.
-    if let KeyValidation::Unvalidated { reason } = validation {
+    if let KeyValidation::Unvalidated { reason } = &row.validation {
         return ValidationOutcome::Unchecked(reason);
     }
     // Test-only escape hatch, compiled OUT of release builds.
@@ -92,11 +90,17 @@ pub async fn validate_key(
     }
     // Only a successful probe verifies the key. Other non-auth statuses might
     // describe a missing endpoint or a proxy failure rather than key acceptance.
-    match validation {
+    let Some(auth) = row.auth else {
+        return ValidationOutcome::Warning("key check has no auth descriptor".to_string());
+    };
+    let key_value = match auth.scheme {
+        AuthScheme::Bearer => format!("Bearer {key}"),
+        AuthScheme::Raw => key.to_string(),
+    };
+    let mut headers = vec![(auth.header, key_value.as_str())];
+    match &row.validation {
         KeyValidation::OpenAiChat { base_url, model } => {
             let url = format!("{}/chat/completions", base_url);
-            let auth_header = format!("Bearer {}", key);
-            let headers = [("Authorization", auth_header.as_str())];
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "hi"}],
@@ -121,7 +125,7 @@ pub async fn validate_key(
         }
         KeyValidation::AnthropicMessages { base_url, model } => {
             let url = format!("{}/v1/messages", base_url);
-            let headers = [("x-api-key", key), ("anthropic-version", "2023-06-01")];
+            headers.push(("anthropic-version", "2023-06-01"));
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "hi"}],
@@ -150,12 +154,7 @@ pub async fn validate_key(
             // TokenType makes Amazon Q authenticate the bearer as an API key.
             // Curl with invalid keys returned 403 here but 200 with empty profiles
             // on bearer-only profile listing; the catalog records those observations.
-            let auth = format!("Bearer {}", key);
-            let headers = [
-                ("Authorization", auth.as_str()),
-                ("TokenType", "API_KEY"),
-                ("Accept", "application/json"),
-            ];
+            headers.extend([("TokenType", "API_KEY"), ("Accept", "application/json")]);
             match transport.get(url, &headers).await {
                 Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
                 // Only the refusal actually observed for a bad key counts as Invalid. AWS
@@ -175,71 +174,48 @@ pub async fn validate_key(
                 Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
             }
         }
-        KeyValidation::FirecrawlCreditUsage { url } => {
-            let auth = format!("Bearer {}", key);
-            let headers = [("Authorization", auth.as_str())];
-            match transport.get(url, &headers).await {
-                Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
-                Ok(resp)
-                    if resp.status == 401
-                        && serde_json::from_slice::<serde_json::Value>(&resp.body)
-                            .ok()
-                            .and_then(|body| {
-                                body.get("error")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                            .as_deref()
-                            == Some("Unauthorized: Invalid token") =>
-                {
-                    ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
-                }
-                Ok(resp) => {
-                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
-                }
-                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+        KeyValidation::FirecrawlCreditUsage { url } => match transport.get(url, &headers).await {
+            Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
+            Ok(resp)
+                if resp.status == 401
+                    && serde_json::from_slice::<serde_json::Value>(&resp.body)
+                        .ok()
+                        .and_then(|body| {
+                            body.get("error")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some("Unauthorized: Invalid token") =>
+            {
+                ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
             }
-        }
-        KeyValidation::TinyFishWallet { url } => {
-            let headers = [("X-API-Key", key)];
-            match transport.get(url, &headers).await {
-                Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
-                Ok(resp)
-                    if resp.status == 401
-                        && serde_json::from_slice::<serde_json::Value>(&resp.body)
-                            .ok()
-                            .and_then(|body| {
-                                body.get("error")
-                                    .and_then(|error| error.get("code"))
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                            .as_deref()
-                            == Some("INVALID_API_KEY") =>
-                {
-                    ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
-                }
-                Ok(resp) => {
-                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
-                }
-                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+            Ok(resp) => ValidationOutcome::Warning(format!("unexpected status {}", resp.status)),
+            Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+        },
+        KeyValidation::TinyFishWallet { url } => match transport.get(url, &headers).await {
+            Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
+            Ok(resp)
+                if resp.status == 401
+                    && serde_json::from_slice::<serde_json::Value>(&resp.body)
+                        .ok()
+                        .and_then(|body| {
+                            body.get("error")
+                                .and_then(|error| error.get("code"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some("INVALID_API_KEY") =>
+            {
+                ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
             }
-        }
-        KeyValidation::GetEndpoint { url, auth_header } => {
-            let headers = match auth_header {
-                AuthHeaderScheme::Bearer => vec![("Authorization", format!("Bearer {}", key))],
-                AuthHeaderScheme::XGoogApiKey => vec![("x-goog-api-key", key.to_string())],
-                AuthHeaderScheme::BraveSubscriptionToken => {
-                    vec![("X-Subscription-Token", key.to_string())]
-                }
-                AuthHeaderScheme::AnthropicApiKey => vec![
-                    ("x-api-key", key.to_string()),
-                    ("anthropic-version", "2023-06-01".to_string()),
-                ],
-            };
-            let headers_ref: Vec<(&str, &str)> =
-                headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            match transport.get(url, &headers_ref).await {
+            Ok(resp) => ValidationOutcome::Warning(format!("unexpected status {}", resp.status)),
+            Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+        },
+        KeyValidation::GetEndpoint { url, extra_headers } => {
+            headers.extend_from_slice(extra_headers);
+            match transport.get(url, &headers).await {
                 Ok(resp) => {
                     if resp.status == 401 || resp.status == 403 {
                         ValidationOutcome::Invalid(format!("unauthorized (status {})", resp.status))
@@ -262,8 +238,6 @@ pub async fn validate_key(
                 );
             };
             let url = format!("{api_base}/accounts/{account_id}/ai/models/search?per_page=1");
-            let auth = format!("Bearer {key}");
-            let headers = [("Authorization", auth.as_str())];
             match transport.get(&url, &headers).await {
                 Ok(resp) => classify_cloudflare_workers_ai(resp.status, &resp.body, account_id),
                 Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
@@ -341,6 +315,25 @@ mod tests {
     use credentials_core::credential_id::parse_credential_id;
     use credentials_core::refresh_adapters::HttpResponse;
     use credentials_core::refresh_adapters::RefreshError;
+    use credentials_core::AuthDescriptor;
+
+    fn probe_row(validation: KeyValidation) -> ApiKeyProvider {
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.auth = Some(AuthDescriptor {
+            header: if matches!(validation, KeyValidation::AnthropicMessages { .. }) {
+                "x-api-key"
+            } else {
+                "authorization"
+            },
+            scheme: if matches!(validation, KeyValidation::AnthropicMessages { .. }) {
+                AuthScheme::Raw
+            } else {
+                AuthScheme::Bearer
+            },
+        });
+        row.validation = validation;
+        row
+    }
 
     #[derive(Debug, Clone)]
     pub struct RecordedRequest {
@@ -445,6 +438,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_check_variant_sends_exact_headers_from_the_row_descriptor() {
+        let mut variants = std::collections::BTreeSet::new();
+        for original in API_KEY_PROVIDERS {
+            if matches!(original.validation, KeyValidation::Unvalidated { .. }) {
+                let transport = FixtureTransport::new(Vec::new());
+                assert!(matches!(
+                    validate_key(&transport, original, "fixture-key", None).await,
+                    ValidationOutcome::Unchecked(_)
+                ));
+                assert!(transport.requests().is_empty(), "{}", original.key);
+                variants.insert("unvalidated");
+                continue;
+            }
+            for (scheme, value) in [
+                (AuthScheme::Raw, "fixture-key"),
+                (AuthScheme::Bearer, "Bearer fixture-key"),
+            ] {
+                let mut row = original.clone();
+                row.auth = Some(AuthDescriptor {
+                    header: "x-fixture-key",
+                    scheme,
+                });
+                let mut expected = vec![("x-fixture-key", value)];
+                let variant = match row.validation {
+                    KeyValidation::OpenAiChat { .. } => "openai",
+                    KeyValidation::AnthropicMessages { .. } => {
+                        expected.push(("anthropic-version", "2023-06-01"));
+                        "anthropic"
+                    }
+                    KeyValidation::AwsApiKeyGet { .. } => {
+                        expected.extend([("TokenType", "API_KEY"), ("Accept", "application/json")]);
+                        "aws"
+                    }
+                    KeyValidation::FirecrawlCreditUsage { .. } => "firecrawl",
+                    KeyValidation::TinyFishWallet { .. } => "tinyfish",
+                    KeyValidation::GetEndpoint { .. } => {
+                        // A check's non-key headers must survive a different key descriptor.
+                        row.validation = KeyValidation::GetEndpoint {
+                            url: "https://api.example.com/models",
+                            extra_headers: &[("x-check-mode", "fixture")],
+                        };
+                        expected.push(("x-check-mode", "fixture"));
+                        "get"
+                    }
+                    KeyValidation::CloudflareWorkersAiModels { .. } => "cloudflare",
+                    KeyValidation::Unvalidated { .. } => unreachable!(),
+                };
+                variants.insert(variant);
+                let transport = FixtureTransport::ok(200, "{}");
+                assert_eq!(
+                    validate_key(&transport, &row, "fixture-key", Some(CLOUDFLARE_ACCOUNT)).await,
+                    ValidationOutcome::Valid,
+                    "{}",
+                    row.key
+                );
+                let requests = transport.requests();
+                assert_eq!(requests.len(), 1, "{}", row.key);
+                assert_eq!(
+                    requests[0].headers,
+                    expected
+                        .into_iter()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect::<Vec<_>>(),
+                    "{}",
+                    row.key
+                );
+            }
+        }
+        assert_eq!(
+            variants,
+            [
+                "openai",
+                "anthropic",
+                "aws",
+                "firecrawl",
+                "tinyfish",
+                "get",
+                "cloudflare",
+                "unvalidated"
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn every_anthropic_messages_row_keeps_the_version_header() {
+        let mut checked = 0;
+        for row in API_KEY_PROVIDERS
+            .iter()
+            .filter(|row| matches!(row.validation, KeyValidation::AnthropicMessages { .. }))
+        {
+            let transport = FixtureTransport::ok(200, "{}");
+            assert_eq!(
+                validate_key(&transport, row, "fixture-key", None).await,
+                ValidationOutcome::Valid
+            );
+            assert_eq!(
+                transport.requests()[0].headers,
+                vec![
+                    ("x-api-key".to_string(), "fixture-key".to_string()),
+                    ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                ],
+                "{}",
+                row.key
+            );
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
+
+    #[tokio::test]
+    async fn a_checked_row_without_auth_sends_no_request_and_warns() {
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.auth = None;
+        let transport = FixtureTransport::new(Vec::new());
+        assert_eq!(
+            validate_key(&transport, &row, "fixture-key", None).await,
+            ValidationOutcome::Warning("key check has no auth descriptor".to_string())
+        );
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn firecrawl_credit_usage_classifies_only_the_documented_invalid_token() {
         let provider = API_KEY_PROVIDERS
             .iter()
@@ -453,7 +570,7 @@ mod tests {
         let transport =
             FixtureTransport::ok(200, r#"{"success":true,"data":{"remainingCredits":1}}"#);
         assert_eq!(
-            validate_key(&transport, &provider.validation, "fc_fixture", None).await,
+            validate_key(&transport, provider, "fc_fixture", None).await,
             ValidationOutcome::Valid
         );
         assert_eq!(
@@ -462,7 +579,7 @@ mod tests {
         );
         assert_eq!(
             transport.requests()[0].headers,
-            vec![("Authorization".to_string(), "Bearer fc_fixture".to_string())]
+            vec![("authorization".to_string(), "Bearer fc_fixture".to_string())]
         );
 
         for (status, body, expected) in [
@@ -484,7 +601,7 @@ mod tests {
         ] {
             let transport = FixtureTransport::ok(status, body);
             assert_eq!(
-                validate_key(&transport, &provider.validation, "fc_fixture", None).await,
+                validate_key(&transport, provider, "fc_fixture", None).await,
                 expected
             );
         }
@@ -498,7 +615,7 @@ mod tests {
             .unwrap();
         let transport = FixtureTransport::ok(200, r#"{"balance":0}"#);
         assert_eq!(
-            validate_key(&transport, &provider.validation, "tf_fixture", None).await,
+            validate_key(&transport, provider, "tf_fixture", None).await,
             ValidationOutcome::Valid
         );
         assert_eq!(
@@ -507,7 +624,7 @@ mod tests {
         );
         assert_eq!(
             transport.requests()[0].headers,
-            vec![("X-API-Key".to_string(), "tf_fixture".to_string())]
+            vec![("x-api-key".to_string(), "tf_fixture".to_string())]
         );
 
         for (status, body, expected) in [
@@ -529,7 +646,7 @@ mod tests {
         ] {
             let transport = FixtureTransport::ok(status, body);
             assert_eq!(
-                validate_key(&transport, &provider.validation, "tf_fixture", None).await,
+                validate_key(&transport, provider, "tf_fixture", None).await,
                 expected
             );
         }
@@ -540,7 +657,7 @@ mod tests {
         let provider = API_KEY_PROVIDERS.iter().find(|p| p.key == "kiro").unwrap();
         let transport = FixtureTransport::ok(200, r#"{"models":[{"modelId":"test"}]}"#);
         assert_eq!(
-            validate_key(&transport, &provider.validation, "ksk_test_fixture", None).await,
+            validate_key(&transport, provider, "ksk_test_fixture", None).await,
             ValidationOutcome::Valid
         );
         let reqs = transport.requests();
@@ -553,7 +670,7 @@ mod tests {
             reqs[0].headers,
             vec![
                 (
-                    "Authorization".to_string(),
+                    "authorization".to_string(),
                     "Bearer ksk_test_fixture".to_string()
                 ),
                 ("TokenType".to_string(), "API_KEY".to_string()),
@@ -566,9 +683,9 @@ mod tests {
 
     #[tokio::test]
     async fn aws_api_key_get_classifies_observed_auth_refusal() {
-        let validation = KeyValidation::AwsApiKeyGet {
+        let validation = probe_row(KeyValidation::AwsApiKeyGet {
             url: "https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR",
-        };
+        });
         for status in [200, 299, 400, 401, 403, 429, 500] {
             let transport = FixtureTransport::ok(
                 status,
@@ -605,10 +722,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_openai_chat() {
-        let validation = KeyValidation::OpenAiChat {
+        let validation = probe_row(KeyValidation::OpenAiChat {
             base_url: "https://api.openai.com/v1",
             model: "gpt-4",
-        };
+        });
 
         // 1. Valid response (200)
         let transport = FixtureTransport::ok(200, "{}");
@@ -620,7 +737,7 @@ mod tests {
         assert_eq!(reqs[0].content_type, "application/json");
         assert_eq!(
             reqs[0].headers,
-            vec![("Authorization".to_string(), "Bearer test-key".to_string())]
+            vec![("authorization".to_string(), "Bearer test-key".to_string())]
         );
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["model"], "gpt-4");
@@ -665,7 +782,7 @@ mod tests {
         assert_eq!(row.key, "anthropic");
 
         let transport = FixtureTransport::ok(200, "{}");
-        let outcome = validate_key(&transport, &row.validation, "sk-ant-test", None).await;
+        let outcome = validate_key(&transport, row, "sk-ant-test", None).await;
         assert_eq!(outcome, ValidationOutcome::Valid);
         let reqs = transport.requests();
         assert_eq!(reqs.len(), 1);
@@ -679,16 +796,16 @@ mod tests {
         );
 
         let transport = FixtureTransport::ok(401, "{}");
-        let outcome = validate_key(&transport, &row.validation, "sk-ant-test", None).await;
+        let outcome = validate_key(&transport, row, "sk-ant-test", None).await;
         assert!(matches!(outcome, ValidationOutcome::Invalid(_)));
     }
 
     #[tokio::test]
     async fn test_validation_anthropic_messages() {
-        let validation = KeyValidation::AnthropicMessages {
+        let validation = probe_row(KeyValidation::AnthropicMessages {
             base_url: "https://api.anthropic.com",
             model: "claude-3",
-        };
+        });
 
         // 1. Valid response (200)
         let transport = FixtureTransport::ok(200, "{}");
@@ -740,10 +857,10 @@ mod tests {
     #[tokio::test]
     async fn test_validation_get_endpoint() {
         // 1. Bearer scheme
-        let validation_bearer = KeyValidation::GetEndpoint {
+        let validation_bearer = probe_row(KeyValidation::GetEndpoint {
             url: "https://api.example.com/user",
-            auth_header: AuthHeaderScheme::Bearer,
-        };
+            extra_headers: &[],
+        });
         let transport = FixtureTransport::ok(200, "{}");
         let outcome = validate_key(&transport, &validation_bearer, "test-key", None).await;
         assert_eq!(outcome, ValidationOutcome::Valid);
@@ -752,14 +869,15 @@ mod tests {
         assert_eq!(reqs[0].url, "https://api.example.com/user");
         assert_eq!(
             reqs[0].headers,
-            vec![("Authorization".to_string(), "Bearer test-key".to_string())]
+            vec![("authorization".to_string(), "Bearer test-key".to_string())]
         );
 
-        // 2. XGoogApiKey scheme
-        let validation_goog = KeyValidation::GetEndpoint {
-            url: "https://api.example.com/user",
-            auth_header: AuthHeaderScheme::XGoogApiKey,
-        };
+        // Raw Google key header.
+        let mut validation_goog = validation_bearer.clone();
+        validation_goog.auth = Some(AuthDescriptor {
+            header: "x-goog-api-key",
+            scheme: AuthScheme::Raw,
+        });
         let transport = FixtureTransport::ok(200, "{}");
         let outcome = validate_key(&transport, &validation_goog, "test-key", None).await;
         assert_eq!(outcome, ValidationOutcome::Valid);
@@ -771,10 +889,11 @@ mod tests {
             vec![("x-goog-api-key".to_string(), "test-key".to_string())]
         );
 
-        let validation_brave = KeyValidation::GetEndpoint {
-            url: "https://api.example.com/user",
-            auth_header: AuthHeaderScheme::BraveSubscriptionToken,
-        };
+        let mut validation_brave = validation_bearer.clone();
+        validation_brave.auth = Some(AuthDescriptor {
+            header: "x-subscription-token",
+            scheme: AuthScheme::Raw,
+        });
         let transport = FixtureTransport::ok(200, "{}");
         assert_eq!(
             validate_key(&transport, &validation_brave, "test-key", None).await,
@@ -782,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             transport.requests()[0].headers,
-            vec![("X-Subscription-Token".to_string(), "test-key".to_string())]
+            vec![("x-subscription-token".to_string(), "test-key".to_string())]
         );
 
         // 3. Invalid response (401)
@@ -840,7 +959,7 @@ mod tests {
         );
         assert_eq!(
             requests[0].headers,
-            vec![("Authorization".to_string(), "Bearer cf-token".to_string())]
+            vec![("authorization".to_string(), "Bearer cf-token".to_string())]
         );
     }
 
@@ -851,7 +970,7 @@ mod tests {
             let transport = FixtureTransport::ok(status, body);
             validate_key(
                 &transport,
-                &cloudflare_row().validation,
+                cloudflare_row(),
                 token,
                 Some(CLOUDFLARE_ACCOUNT),
             )
@@ -907,7 +1026,7 @@ mod tests {
         ))]);
         let network = validate_key(
             &transport,
-            &cloudflare_row().validation,
+            cloudflare_row(),
             token,
             Some(CLOUDFLARE_ACCOUNT),
         )
@@ -982,9 +1101,9 @@ mod tests {
     /// back as Unchecked, never Valid, so login does not print "API key is valid."
     #[tokio::test]
     async fn an_unvalidated_provider_is_reported_unchecked_without_a_request() {
-        let validation = KeyValidation::Unvalidated {
+        let validation = probe_row(KeyValidation::Unvalidated {
             reason: "no probe exists",
-        };
+        });
         let transport = FixtureTransport::new(Vec::new());
         assert_eq!(
             validate_key(&transport, &validation, "test-key", None).await,
@@ -1006,13 +1125,14 @@ mod tests {
             },
             KeyValidation::GetEndpoint {
                 url: "https://api.example.com/models",
-                auth_header: AuthHeaderScheme::Bearer,
+                extra_headers: &[],
             },
         ];
         for probe in probes {
+            let row = probe_row(probe);
             for status in [200, 299, 302, 400, 401, 403, 404, 405, 407, 429, 500] {
                 let transport = FixtureTransport::ok(status, "{}");
-                let outcome = validate_key(&transport, &probe, "test-key", None).await;
+                let outcome = validate_key(&transport, &row, "test-key", None).await;
                 match status {
                     200 | 299 => assert_eq!(outcome, ValidationOutcome::Valid),
                     401 | 403 => assert!(matches!(outcome, ValidationOutcome::Invalid(_))),

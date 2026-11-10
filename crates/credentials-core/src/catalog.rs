@@ -221,6 +221,9 @@ pub struct AccountIdPrompt {
 #[derive(Debug, Clone)]
 pub struct ApiKeyProvider {
     pub key: &'static str,
+    /// Published Fusiform provider id for joining display facts, independent of routing ids.
+    /// `None` only for a row in `PENDING_FUSIFORM_PROVIDER_IDS`.
+    pub fusiform_provider_id: Option<&'static str>,
     pub default_provider_ids: &'static [&'static str],
     pub display_name: &'static str,
     pub default_id: &'static str,
@@ -240,6 +243,20 @@ pub struct ApiKeyProvider {
     pub account_id_prompt: Option<AccountIdPrompt>,
 }
 
+/// Rows without a published Fusiform identity pending an upstream or search-service ruling.
+/// Remove a row from this list when assigning its published id; mapped rows cannot stay here.
+pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[
+    ("tavily", "search_service_pending_ruling"),
+    ("kagi", "search_service_pending_ruling"),
+    ("exa", "search_service_pending_ruling"),
+    ("parallel", "search_service_pending_ruling"),
+    ("brave", "search_service_pending_ruling"),
+    ("firecrawl", "search_service_pending_ruling"),
+    ("jina", "search_service_pending_ruling"),
+    ("tinyfish", "search_service_pending_ruling"),
+    ("searxng", "search_service_pending_ruling"),
+];
+
 use ModelVendor::{
     Anthropic, DeepSeek, Google, Inception, Meta, MiniMax, Mistral, Moonshot, Nvidia, OpenAI,
     Perplexity, Qwen, StepFun, Xiaomi, Zhipu, XAI,
@@ -248,6 +265,7 @@ use ModelVendor::{
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     ApiKeyProvider {
         key: "kiro",
+        fusiform_provider_id: Some("kiro"),
         auth: Some(BEARER_AUTH),
         hosts: &["q.us-east-1.amazonaws.com"],
         hosts_doc: "https://kiro.dev/docs/getting-started/authentication/",
@@ -269,6 +287,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "zai",
+        fusiform_provider_id: Some("zai-coding-plan"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.z.ai"],
         hosts_doc: "https://docs.z.ai/devpack/quick-start",
@@ -288,6 +307,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openrouter",
+        fusiform_provider_id: Some("openrouter"),
         auth: Some(BEARER_AUTH),
         hosts: &["openrouter.ai"],
         hosts_doc: "https://openrouter.ai/docs/api-reference/authentication",
@@ -307,6 +327,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "deepseek",
+        fusiform_provider_id: Some("deepseek"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.deepseek.com"],
         hosts_doc: "https://api-docs.deepseek.com/quick_start",
@@ -326,6 +347,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "cerebras",
+        fusiform_provider_id: Some("cerebras"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.cerebras.ai"],
         hosts_doc: "https://inference-docs.cerebras.ai/quickstart",
@@ -345,6 +367,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "fireworks-ai",
+        fusiform_provider_id: Some("fireworks-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.fireworks.ai"],
         hosts_doc: "https://docs.fireworks.ai/api-reference",
@@ -373,6 +396,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "groq",
+        fusiform_provider_id: Some("groq"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.groq.com"],
         hosts_doc: "https://console.groq.com/docs/api-reference",
@@ -392,6 +416,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "mistral",
+        fusiform_provider_id: Some("mistral"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.mistral.ai"],
         hosts_doc: "https://docs.mistral.ai/api/",
@@ -411,6 +436,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "together",
+        fusiform_provider_id: Some("togetherai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api-inference.together.ai", "api.together.ai", "api.together.xyz", "us-api.together.ai"],
         hosts_doc: "https://docs.together.ai/docs/inference/openai-compatibility",
@@ -430,6 +456,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "perplexity",
+        fusiform_provider_id: Some("perplexity"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.perplexity.ai"],
         hosts_doc: "https://docs.perplexity.ai/getting-started/quickstart",
@@ -449,6 +476,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "moonshot",
+        fusiform_provider_id: Some("moonshotai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.moonshot.ai"],
         hosts_doc: "https://platform.moonshot.ai/docs/guide/quickstart",
@@ -468,6 +496,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "huggingface",
+        fusiform_provider_id: Some("huggingface"),
         auth: Some(BEARER_AUTH),
         hosts: &["huggingface.co", "router.huggingface.co"],
         hosts_doc: "https://huggingface.co/docs/inference-providers/main/en/index",
@@ -487,6 +516,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "nvidia",
+        fusiform_provider_id: Some("nvidia"),
         auth: Some(BEARER_AUTH),
         hosts: &["integrate.api.nvidia.com"],
         hosts_doc: "https://docs.api.nvidia.com/nim/reference/nvidia-llama-3_3-nemotron-super-49b-v1-infer",
@@ -506,6 +536,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "xai",
+        fusiform_provider_id: Some("xai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.x.ai"],
         hosts_doc: "https://docs.x.ai/docs/overview",
@@ -525,6 +556,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openai",
+        fusiform_provider_id: Some("openai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.openai.com"],
         hosts_doc: "https://developers.openai.com/api/reference/overview",
@@ -544,6 +576,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "google",
+        fusiform_provider_id: Some("google"),
         auth: Some(AuthDescriptor { header: "x-goog-api-key", scheme: AuthScheme::Raw }),
         hosts: &["generativelanguage.googleapis.com"],
         hosts_doc: "https://ai.google.dev/api",
@@ -567,6 +600,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `anthropic-native`, which stays the subscription accounts' family.
     ApiKeyProvider {
         key: "anthropic",
+        fusiform_provider_id: Some("anthropic"),
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.anthropic.com"],
         hosts_doc: "https://platform.claude.com/docs/en/api/overview",
@@ -591,6 +625,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // prefix is undocumented, so the placeholder is generic.
     ApiKeyProvider {
         key: "inception",
+        fusiform_provider_id: Some("inception"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.inceptionlabs.ai"],
         hosts_doc: "https://docs.inceptionlabs.ai/get-started.md",
@@ -623,6 +658,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // token, so it would not work here anyway.
     ApiKeyProvider {
         key: "cloudflare-workers-ai",
+        fusiform_provider_id: Some("cloudflare-workers-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.cloudflare.com"],
         hosts_doc: "https://developers.cloudflare.com/workers-ai/get-started/rest-api/",
@@ -660,6 +696,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/abliteration.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "abliteration",
+        fusiform_provider_id: Some("abliteration-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.abliteration.ai"],
         hosts_doc: "https://docs.abliteration.ai/api/introduction.md",
@@ -680,6 +717,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "aiand",
+        fusiform_provider_id: Some("aiand"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.aiand.com"],
         hosts_doc: "https://docs.aiand.com",
@@ -700,6 +738,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "baseten",
+        fusiform_provider_id: Some("baseten"),
         auth: Some(BEARER_AUTH),
         hosts: &["inference.baseten.co"],
         hosts_doc: "https://docs.baseten.co/reference/inference-api/chat-completions",
@@ -724,6 +763,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/charm-hyper.kdl names: GLM (default model), Kimi and Gemma.
     ApiKeyProvider {
         key: "charm-hyper",
+        fusiform_provider_id: Some("hyper"),
         auth: Some(BEARER_AUTH),
         hosts: &["hyper.charm.land"],
         hosts_doc: "https://hyper.charm.land/docs",
@@ -744,6 +784,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "cline-pass",
+        fusiform_provider_id: Some("cline-pass"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.cline.bot"],
         hosts_doc: "https://docs.cline.bot/getting-started/clinepass",
@@ -763,6 +804,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "commandcode",
+        fusiform_provider_id: Some("commandcode"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.commandcode.ai"],
         hosts_doc: "https://commandcode.ai/docs/provider",
@@ -784,6 +826,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // endpoint is public and would accept any string as a key.
     ApiKeyProvider {
         key: "deepinfra",
+        fusiform_provider_id: Some("deepinfra"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.deepinfra.com"],
         hosts_doc: "https://docs.deepinfra.com/api-reference/introduction",
@@ -806,6 +849,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `/v1/models`, so the probe is a chat request to a router model.
     ApiKeyProvider {
         key: "firepass",
+        fusiform_provider_id: Some("fireworks-fire-pass"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.fireworks.ai"],
         hosts_doc: "https://docs.fireworks.ai/firepass/",
@@ -826,6 +870,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "gmi-cloud",
+        fusiform_provider_id: Some("gmicloud"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.gmi-serving.com", "console.gmicloud.ai"],
         hosts_doc: "https://docs.gmicloud.ai/api-reference/introduction",
@@ -846,6 +891,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/meta.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "meta",
+        fusiform_provider_id: Some("meta"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.meta.ai"],
         hosts_doc: "https://dev.meta.ai/docs/api-reference",
@@ -866,6 +912,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code",
+        fusiform_provider_id: Some("minimax-coding-plan"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.minimax.io", "www.minimax.io"],
         hosts_doc: "https://platform.minimax.io/docs/m-plan/faq",
@@ -886,6 +933,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code-cn",
+        fusiform_provider_id: Some("minimax-cn-coding-plan"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.minimax.cn", "www.minimax.cn"],
         hosts_doc: "https://platform.minimaxi.com/docs/m-plan/faq",
@@ -907,6 +955,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "nanogpt",
+        fusiform_provider_id: Some("nano-gpt"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.nano-gpt.com", "nano-gpt.com"],
         hosts_doc: "https://docs.nano-gpt.com/api-reference/miscellaneous/api-hosts",
@@ -929,6 +978,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Balance permission some team roles lack, which rejected their valid keys.
     ApiKeyProvider {
         key: "novita",
+        fusiform_provider_id: Some("novita-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.novita.ai"],
         hosts_doc: "https://novita.ai/docs/api-reference",
@@ -949,6 +999,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "ollama-cloud",
+        fusiform_provider_id: Some("ollama-cloud"),
         auth: Some(BEARER_AUTH),
         hosts: &["ollama.com"],
         hosts_doc: "https://docs.ollama.com/api/authentication",
@@ -968,6 +1019,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-go",
+        fusiform_provider_id: Some("opencode-go"),
         auth: Some(BEARER_AUTH),
         hosts: &["opencode.ai"],
         hosts_doc: "https://opencode.ai/docs/console/go/",
@@ -987,6 +1039,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-zen",
+        fusiform_provider_id: Some("opencode"),
         auth: Some(BEARER_AUTH),
         hosts: &["opencode.ai"],
         hosts_doc: "https://opencode.ai/docs/zen/",
@@ -1009,6 +1062,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // chat probe here treats every 401 as a bad key, so it would refuse valid keys.
     ApiKeyProvider {
         key: "qianfan",
+        fusiform_provider_id: Some("qianfan"),
         auth: Some(BEARER_AUTH),
         hosts: &["qianfan.baidubce.com"],
         hosts_doc: "https://cloud.baidu.com/doc/qianfan/s/rmh4stn9m",
@@ -1030,6 +1084,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // the operator's own vendor rather than read off model ids.
     ApiKeyProvider {
         key: "qwen-portal",
+        fusiform_provider_id: Some("qwen-portal"),
         auth: Some(BEARER_AUTH),
         hosts: &["portal.qwen.ai"],
         hosts_doc: "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/",
@@ -1051,6 +1106,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves Sakana's own models only, and Sakana is not a vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "sakana",
+        fusiform_provider_id: Some("sakana"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.sakana.ai"],
         hosts_doc: "https://sakana.ai/",
@@ -1073,6 +1129,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/siliconflow.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow",
+        fusiform_provider_id: Some("siliconflow"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.siliconflow.com"],
         hosts_doc: "https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions",
@@ -1095,6 +1152,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // in oh-my-pi's providers/siliconflow-cn.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow-cn",
+        fusiform_provider_id: Some("siliconflow-cn"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.siliconflow.cn"],
         hosts_doc: "https://docs.siliconflow.cn/api-reference/chat-completions/chat-completions",
@@ -1117,6 +1175,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // providers/singularityapi-dev.kdl names (DeepSeek, Kimi, GLM), not the full catalog.
     ApiKeyProvider {
         key: "singularityapi-dev",
+        fusiform_provider_id: Some("singularityapi"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.singularityapi.dev"],
         hosts_doc: "https://docs.singularityapi.dev/",
@@ -1139,6 +1198,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // deployment routes requests only to DeepSeek models.
     ApiKeyProvider {
         key: "singularityapi-tech",
+        fusiform_provider_id: Some("singularityapi-reserved"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.singularityapi.tech"],
         hosts_doc: "https://singularityapi.tech/",
@@ -1159,11 +1219,12 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "stepfun",
+        fusiform_provider_id: Some("stepfun-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.stepfun.ai"],
         hosts_doc: "https://platform.stepfun.ai/docs/en/quickstart/overview",
         invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/type") }),
-        default_provider_ids: &["stepfun"],
+        default_provider_ids: &["stepfun-ai"],
         display_name: "StepFun",
         default_id: "apikey:stepfun",
         dashboard_url: "https://platform.stepfun.ai/interface-key",
@@ -1179,6 +1240,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "synthetic",
+        fusiform_provider_id: Some("synthetic"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.synthetic.new"],
         hosts_doc: "https://dev.synthetic.new/docs/api/overview",
@@ -1200,6 +1262,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves TypeSafe's own judgment models only, which match no vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "typesafe",
+        fusiform_provider_id: Some("typesafe"),
         auth: None,
         hosts: &[],
         hosts_doc: "https://docs.typesafe.ai/introduction/quickstart",
@@ -1219,6 +1282,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/umans.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "umans",
+        fusiform_provider_id: Some("umans-ai-coding-plan"),
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.code.umans.ai"],
         hosts_doc: "https://app.umans.ai/offers/code/docs",
@@ -1239,6 +1303,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/venice.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "venice",
+        fusiform_provider_id: Some("venice"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.venice.ai"],
         hosts_doc: "https://docs.venice.ai/api-reference",
@@ -1260,6 +1325,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "vercel-ai-gateway",
+        fusiform_provider_id: Some("vercel"),
         auth: Some(BEARER_AUTH),
         hosts: &["ai-gateway.vercel.sh"],
         hosts_doc: "https://vercel.com/docs/ai-gateway/authentication-and-byok",
@@ -1279,6 +1345,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "wafer-serverless",
+        fusiform_provider_id: Some("wafer.ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["pass.wafer.ai"],
         hosts_doc: "https://docs.wafer.ai",
@@ -1299,6 +1366,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-ams",
+        fusiform_provider_id: Some("xiaomi-token-plan-ams"),
         auth: Some(BEARER_AUTH),
         hosts: &["token-plan-ams.xiaomimimo.com"],
         hosts_doc: "https://platform.xiaomimimo.com/docs",
@@ -1319,6 +1387,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-cn",
+        fusiform_provider_id: Some("xiaomi-token-plan-cn"),
         auth: Some(BEARER_AUTH),
         hosts: &["token-plan-cn.xiaomimimo.com"],
         hosts_doc: "https://platform.xiaomimimo.com/docs",
@@ -1339,6 +1408,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-sgp",
+        fusiform_provider_id: Some("xiaomi-token-plan-sgp"),
         auth: Some(BEARER_AUTH),
         hosts: &["token-plan-sgp.xiaomimimo.com"],
         hosts_doc: "https://platform.xiaomimimo.com/docs",
@@ -1359,6 +1429,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "yolo-auto",
+        fusiform_provider_id: Some("yolo-auto"),
         auth: Some(BEARER_AUTH),
         hosts: &["yolo-auto.com"],
         hosts_doc: "https://yolo-auto.com/docs/api",
@@ -1379,6 +1450,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zenmux",
+        fusiform_provider_id: Some("zenmux"),
         auth: Some(BEARER_AUTH),
         hosts: &["zenmux.ai"],
         hosts_doc: "https://docs.zenmux.ai/docs/guide/quickstart.html",
@@ -1399,6 +1471,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zhipu-coding-plan",
+        fusiform_provider_id: Some("zhipuai-coding-plan"),
         auth: Some(BEARER_AUTH),
         hosts: &["open.bigmodel.cn"],
         hosts_doc: "https://docs.bigmodel.cn/cn/coding-plan/quick-start",
@@ -1419,6 +1492,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kimi-for-coding",
+        fusiform_provider_id: Some("kimi-code-plan-global"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.kimi.ai", "api.kimi.com"],
         hosts_doc: "https://www.kimi.com/code/docs/en",
@@ -1437,6 +1511,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "tavily",
+        fusiform_provider_id: None,
         auth: Some(BEARER_AUTH),
         hosts: &["api.tavily.com"],
         hosts_doc: "https://docs.tavily.com/documentation/api-reference/endpoint/search",
@@ -1456,6 +1531,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kagi",
+        fusiform_provider_id: None,
         auth: None,
         hosts: &["kagi.com"],
         hosts_doc: "https://help.kagi.com/kagi/api/api-portal.html",
@@ -1475,6 +1551,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "exa",
+        fusiform_provider_id: None,
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.exa.ai"],
         hosts_doc: "https://docs.exa.ai/reference/search",
@@ -1494,6 +1571,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "parallel",
+        fusiform_provider_id: None,
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.parallel.ai"],
         hosts_doc: "https://docs.parallel.ai/api-reference/search",
@@ -1516,6 +1594,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://api-dashboard.search.brave.com/api-reference/web/search/get
     ApiKeyProvider {
         key: "brave",
+        fusiform_provider_id: None,
         auth: Some(AuthDescriptor { header: "x-subscription-token", scheme: AuthScheme::Raw }),
         hosts: &["api.search.brave.com"],
         hosts_doc: "https://api-dashboard.search.brave.com/documentation/guides/authentication",
@@ -1538,6 +1617,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.firecrawl.dev/api-reference/errors
     ApiKeyProvider {
         key: "firecrawl",
+        fusiform_provider_id: None,
         auth: Some(BEARER_AUTH),
         hosts: &["api.firecrawl.dev"],
         hosts_doc: "https://docs.firecrawl.dev/api-reference/introduction",
@@ -1559,6 +1639,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.jina.ai/embedding-api
     ApiKeyProvider {
         key: "jina",
+        fusiform_provider_id: None,
         auth: Some(BEARER_AUTH),
         hosts: &["api.jina.ai", "eu.r.jina.ai", "eu.s.jina.ai", "r.jina.ai", "s.jina.ai"],
         hosts_doc: "https://docs.jina.ai/embedding-api",
@@ -1581,6 +1662,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.tinyfish.ai/error-codes
     ApiKeyProvider {
         key: "tinyfish",
+        fusiform_provider_id: None,
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["agent.tinyfish.ai", "api.browser.tinyfish.ai", "api.fetch.tinyfish.ai", "api.search.tinyfish.ai", "api.tinyfish.ai"],
         hosts_doc: "https://docs.tinyfish.ai/authentication",
@@ -1600,6 +1682,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
     ApiKeyProvider {
         key: "searxng",
+        fusiform_provider_id: None,
         auth: None,
         hosts: &[],
         hosts_doc: "https://docs.searxng.org/dev/search_api.html",
@@ -2136,6 +2219,203 @@ pub fn valid_category_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn assert_published_fusiform_ids(rows: &[ApiKeyProvider], pending: &[(&str, &str)]) {
+        let published_ids: std::collections::BTreeSet<_> =
+            crate::fusiform_providers::fusiform_providers()
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect();
+        let mut pending_keys = std::collections::BTreeSet::new();
+        for &(key, reason) in pending {
+            assert!(pending_keys.insert(key), "duplicate pending row: {key}");
+            assert!(
+                matches!(
+                    reason,
+                    "pending_fusiform_decision" | "search_service_pending_ruling"
+                ),
+                "{key} has an unknown Fusiform pending reason: {reason}"
+            );
+            let Some(row) = rows.iter().find(|row| row.key == key) else {
+                panic!("pending Fusiform row is not in the catalog: {key}");
+            };
+            assert!(
+                row.fusiform_provider_id.is_none(),
+                "pending Fusiform row already has an id: {key}"
+            );
+        }
+        for row in rows {
+            match row.fusiform_provider_id {
+                Some(id) => assert!(
+                    published_ids.contains(id),
+                    "{} names an unknown Fusiform provider id: {id}",
+                    row.key
+                ),
+                None => assert!(
+                    pending_keys.contains(row.key),
+                    "{} has no Fusiform provider id and is not pending",
+                    row.key
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn api_key_rows_reference_published_fusiform_providers() {
+        assert_published_fusiform_ids(API_KEY_PROVIDERS, PENDING_FUSIFORM_PROVIDER_IDS);
+    }
+
+    #[test]
+    #[should_panic(expected = "names an unknown Fusiform provider id")]
+    fn api_key_rows_reject_unknown_fusiform_provider_ids() {
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.fusiform_provider_id = Some("not-a-published-fusiform-provider");
+        assert_published_fusiform_ids(&[row], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no Fusiform provider id and is not pending")]
+    fn api_key_rows_reject_missing_fusiform_ids_unless_pending() {
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.fusiform_provider_id = None;
+        assert_published_fusiform_ids(&[row], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "pending Fusiform row already has an id")]
+    fn api_key_rows_reject_mapped_fusiform_ids_in_pending_list() {
+        assert_published_fusiform_ids(
+            std::slice::from_ref(&API_KEY_PROVIDERS[0]),
+            &[("kiro", "pending_fusiform_decision")],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "pending Fusiform row is not in the catalog")]
+    fn api_key_rows_reject_unknown_keys_in_fusiform_pending_list() {
+        assert_published_fusiform_ids(
+            API_KEY_PROVIDERS,
+            &[("not-a-catalog-key", "pending_fusiform_decision")],
+        );
+    }
+
+    #[test]
+    fn api_key_fusiform_ids_preserve_product_and_shared_provider_identities() {
+        for (key, fusiform_id) in [
+            ("zai", "zai-coding-plan"),
+            ("together", "togetherai"),
+            ("moonshot", "moonshotai"),
+            ("anthropic", "anthropic"),
+            ("abliteration", "abliteration-ai"),
+            ("charm-hyper", "hyper"),
+            ("cline-pass", "cline-pass"),
+            ("firepass", "fireworks-fire-pass"),
+            ("fireworks-ai", "fireworks-ai"),
+            ("gmi-cloud", "gmicloud"),
+            ("meta", "meta"),
+            ("minimax-code", "minimax-coding-plan"),
+            ("minimax-code-cn", "minimax-cn-coding-plan"),
+            ("nanogpt", "nano-gpt"),
+            ("novita", "novita-ai"),
+            ("opencode-zen", "opencode"),
+            ("umans", "umans-ai-coding-plan"),
+            ("vercel-ai-gateway", "vercel"),
+            ("wafer-serverless", "wafer.ai"),
+            ("zhipu-coding-plan", "zhipuai-coding-plan"),
+            ("kimi-for-coding", "kimi-code-plan-global"),
+            ("kiro", "kiro"),
+            ("qianfan", "qianfan"),
+            ("qwen-portal", "qwen-portal"),
+            ("typesafe", "typesafe"),
+            ("yolo-auto", "yolo-auto"),
+            ("singularityapi-dev", "singularityapi"),
+            ("singularityapi-tech", "singularityapi-reserved"),
+        ] {
+            let Some(row) = api_key_provider(key) else {
+                panic!("missing catalog row: {key}");
+            };
+            match row.fusiform_provider_id {
+                Some(id) => assert_eq!(id, fusiform_id, "{key}"),
+                None => panic!("{key} has no published Fusiform id"),
+            }
+        }
+    }
+
+    #[test]
+    fn api_key_fusiform_ids_match_offering_host_domains() {
+        fn provider_domain(host: &str) -> &str {
+            let Some(subdomains) = host.rsplitn(3, '.').nth(2) else {
+                return host;
+            };
+            &host[subdomains.len() + 1..]
+        }
+
+        const EXEMPTIONS: &[(&str, &str)] = &[
+            ("kiro", "Kiro keys are sent to Amazon Q endpoints"),
+            ("google", "AI Studio uses Google's separate API domain"),
+            (
+                "qianfan",
+                "Baidu hosts Qianfan APIs on baidubce.com, not baidu.com",
+            ),
+            (
+                "qwen-portal",
+                "Qwen documents the portal on qwenlm.github.io; keys go to portal.qwen.ai",
+            ),
+            (
+                "siliconflow-cn",
+                "China API and provider documentation use different domains",
+            ),
+            (
+                "minimax-code-cn",
+                "China plan documentation and API use different MiniMax domains",
+            ),
+            (
+                "vercel-ai-gateway",
+                "Fusiform links GitHub documentation; gateway requests use vercel.sh",
+            ),
+            ("typesafe", "TypeSafe has no fixed receiving hosts yet"),
+        ];
+        let mut unchecked_exemptions = std::collections::BTreeSet::new();
+        for &(key, reason) in EXEMPTIONS {
+            assert!(
+                !reason.is_empty(),
+                "{key} needs an offering-domain exemption reason"
+            );
+            assert!(
+                unchecked_exemptions.insert(key),
+                "duplicate offering-domain exemption: {key}"
+            );
+        }
+
+        let providers = crate::fusiform_providers::fusiform_providers();
+        for row in API_KEY_PROVIDERS {
+            let Some(id) = row.fusiform_provider_id else {
+                continue;
+            };
+            let Some(provider) = providers.iter().find(|provider| provider.id == id) else {
+                panic!("{} names an unknown Fusiform provider: {id}", row.key);
+            };
+            let Ok(doc) = url::Url::parse(&provider.doc) else {
+                panic!("{id} has an invalid documentation URL: {}", provider.doc);
+            };
+            let Some(doc_host) = doc.domain() else {
+                panic!("{id} has no documentation domain: {}", provider.doc);
+            };
+            if unchecked_exemptions.remove(row.key) {
+                continue;
+            }
+            assert!(
+                row.hosts.iter().any(|host| provider_domain(host) == provider_domain(doc_host)),
+                "{} maps to {id} with documentation host {doc_host}, outside its receiving host domains: {:?}",
+                row.key,
+                row.hosts
+            );
+        }
+        assert!(
+            unchecked_exemptions.is_empty(),
+            "offering-domain exemptions must name mapped catalog rows: {unchecked_exemptions:?}"
+        );
+    }
+
     const NO_DESCRIPTORS: &[(&str, &str)] = &[
         (
             "kagi",
@@ -2639,7 +2919,7 @@ mod tests {
             ("siliconflow-cn", &["siliconflow-cn"]),
             ("singularityapi-dev", &[]),
             ("singularityapi-tech", &[]),
-            ("stepfun", &["stepfun"]),
+            ("stepfun", &["stepfun-ai"]),
             ("synthetic", &["synthetic"]),
             ("typesafe", &["typesafe"]),
             ("umans", &["umans-ai-coding-plan"]),

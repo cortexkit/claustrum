@@ -768,7 +768,9 @@
       "doc": "https://elevenlabs.io/docs/overview/intro",
       "source": "hand_kept",
       "env": [],
-      "output_modalities": []
+      "output_modalities": [
+        "audio"
+      ]
     },
     {
       "id": "empiriolabs",
@@ -832,6 +834,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "fireworks-fire-pass",
+      "name": "Fire Pass",
+      "doc": "https://docs.fireworks.ai/firepass",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "freemodel",
@@ -1252,6 +1262,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "kiro",
+      "name": "Kiro",
+      "doc": "https://kiro.dev/docs/",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "klokintegration",
@@ -2058,6 +2076,14 @@
       ]
     },
     {
+      "id": "qianfan",
+      "name": "Baidu Qianfan",
+      "doc": "https://cloud.baidu.com/doc/qianfan/index.html",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "qihang-ai",
       "name": "QiHang",
       "doc": "https://www.qhaigc.net/docs",
@@ -2094,6 +2120,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "qwen-portal",
+      "name": "Qwen OAuth",
+      "doc": "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "reflection",
@@ -2291,6 +2325,22 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "singularityapi",
+      "name": "SingularityAPI",
+      "doc": "https://docs.singularityapi.dev/get-started/quickstart",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
+      "id": "singularityapi-reserved",
+      "name": "Singularity API reserved lane",
+      "doc": "https://singularityapi.tech/how-it-works",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "snowflake-cortex",
@@ -2560,6 +2610,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "typesafe",
+      "name": "TypeSafe",
+      "doc": "https://docs.typesafe.ai/introduction",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "umans-ai",
@@ -2846,6 +2904,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "yolo-auto",
+      "name": "Yolo-Auto",
+      "doc": "https://yolo-auto.com/docs",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "zai",

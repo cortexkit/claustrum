@@ -109,6 +109,29 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     Ok(())
 }
 
+/// One `ck auth remote list` line. `source` says who keeps the copy: `operator` for one
+/// added with `remote add`, `home_watch` for one the home computer's sharing list keeps
+/// in step. `pairing` appears only on watched copies, because they are tied to the
+/// pairing that created them and go away when it is replaced.
+fn remote_record_line(row: &Value) -> String {
+    let mut line = format!(
+        "{}  home {}  source {}  incarnation {}  home version {}  state {}  last fetch {}",
+        text(row, "credential_id").escape_debug(),
+        text(row, "home").escape_debug(),
+        text(row, "source").escape_debug(),
+        text(row, "incarnation").escape_debug(),
+        row.get("last_home_version")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        text(row, "last_home_state").escape_debug(),
+        text(row, "last_fetch_outcome").escape_debug()
+    );
+    if let Some(pairing) = row.get("home_pairing_id").and_then(Value::as_str) {
+        line.push_str(&format!("  pairing {}", pairing.escape_debug()));
+    }
+    line
+}
+
 fn pending_transfer_line(row: &Value) -> String {
     format!(
         "{}  from {}  {}  {}",
@@ -293,17 +316,7 @@ pub fn cmd_remote(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
                 println!("no remote records");
             }
             for row in records {
-                println!(
-                    "{}  home {}  incarnation {}  home version {}  state {}  last fetch {}",
-                    text(row, "credential_id"),
-                    text(row, "home"),
-                    text(row, "incarnation"),
-                    row.get("last_home_version")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default(),
-                    text(row, "last_home_state"),
-                    text(row, "last_fetch_outcome")
-                );
+                println!("{}", remote_record_line(row));
             }
         }
         _ => {}
@@ -612,6 +625,33 @@ mod tests {
         assert_eq!(
             pending_transfer_line(&row),
             "0011  from member  apikey:example\\u{1b}[2J\\nforged row  api_key"
+        );
+    }
+
+    #[test]
+    fn remote_list_lines_say_who_keeps_each_copy() {
+        let operator = serde_json::json!({
+            "credential_id": "oauth:xai",
+            "home": "fed-computer:aa",
+            "source": "operator",
+            "home_pairing_id": null,
+            "incarnation": "i1",
+            "last_home_version": 420,
+            "last_home_state": "active",
+            "last_fetch_outcome": null,
+        });
+        assert_eq!(
+            remote_record_line(&operator),
+            "oauth:xai  home fed-computer:aa  source operator  incarnation i1  \
+             home version 420  state active  last fetch -"
+        );
+        let mut watched = operator.clone();
+        watched["source"] = "home_watch".into();
+        watched["home_pairing_id"] = "pair-1".into();
+        assert_eq!(
+            remote_record_line(&watched),
+            "oauth:xai  home fed-computer:aa  source home_watch  incarnation i1  \
+             home version 420  state active  last fetch -  pairing pair-1"
         );
     }
 

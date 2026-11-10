@@ -1208,6 +1208,26 @@ pub struct RecordMeta {
 pub type DetectedPlanListing =
     std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan, Option<i64>)>;
 
+/// Non-secret metadata opened for the home-watch projection. Decrypted credential
+/// material stays inside the store read, including for logins needing reauthentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeWatchCandidate {
+    pub credential_id: String,
+    pub state: RecordState,
+    pub record_version: u64,
+    pub kind: CredentialKind,
+    pub refresh_adapter: Option<String>,
+    pub identity: RecordIdentity,
+    pub detected_plan: Option<crate::plan_detection::DetectedPlan>,
+    is_refreshable: bool,
+}
+
+impl HomeWatchCandidate {
+    pub fn is_refreshable(&self) -> bool {
+        self.is_refreshable
+    }
+}
+
 /// The operation a principal-scoped credential-prefix grant permits.
 ///
 /// Each operation authorizes only its own surfaces; none implies another. `List` is the
@@ -4292,6 +4312,14 @@ impl EncryptedStore {
     pub fn detected_plans(&self) -> Result<DetectedPlanListing, StoreOpError> {
         self.store
             .with_conn(|conn| detected_plans_from_conn(conn, &self.key))
+            .map_err(StoreOpError::from)
+    }
+
+    /// Open active and needs-reauth metadata without refreshing, quarantining, or
+    /// recording use. Unreadable envelopes are omitted; database errors fail the read.
+    pub fn home_watch_candidates(&self) -> Result<Vec<HomeWatchCandidate>, StoreOpError> {
+        self.store
+            .with_conn(|conn| home_watch_candidates_from_conn(conn, &self.key))
             .map_err(StoreOpError::from)
     }
 
@@ -7734,6 +7762,52 @@ fn detected_plans_from_conn(
     Ok(plans)
 }
 
+fn home_watch_candidates_from_conn(
+    conn: &rusqlite::Connection,
+    key: &MasterKey,
+) -> rusqlite::Result<Vec<HomeWatchCandidate>> {
+    let mut stmt = conn.prepare(
+        "SELECT credential_id, state, record_version, envelope FROM credentials \
+         WHERE state IN ('active', 'needs_reauth') ORDER BY credential_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? as u64,
+            row.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (id, state, version, envelope) = row?;
+        let Some(record) = envelope::open(
+            key,
+            &envelope,
+            &RecordBinding {
+                credential_id: &id,
+                record_version: version,
+            },
+        )
+        .ok()
+        .and_then(|plain| VaultRecord::decode(&plain).ok()) else {
+            continue;
+        };
+        let is_refreshable = record.is_refreshable();
+        candidates.push(HomeWatchCandidate {
+            credential_id: id,
+            state: RecordState::from_str(&state),
+            record_version: version,
+            kind: record.kind,
+            refresh_adapter: record.refresh_adapter,
+            identity: record.identity,
+            detected_plan: record.detected_plan,
+            is_refreshable,
+        });
+    }
+    Ok(candidates)
+}
+
 /// Read one credential's `auth_method` without a lease, for `ck auth list --json`.
 ///
 /// The value comes from the same closed table `credential.list_scoped` reports
@@ -10288,6 +10362,147 @@ mod tests {
             },
             b"payload-bytes".to_vec(),
         )
+    }
+
+    #[test]
+    fn home_watch_candidates_open_active_and_needs_reauth_without_returning_secrets() {
+        let (_root, store) = tmp_store(193);
+        let mut record = oauth_record().with_identity(RecordIdentity {
+            account_id: Some("account".into()),
+            email: None,
+            org_name: Some("workspace".into()),
+        });
+        let oauth = record.oauth.as_mut().unwrap();
+        oauth.access_token = "home-watch-private-access".to_string().into();
+        oauth.refresh_token = "home-watch-private-refresh".to_string().into();
+        record.detected_plan = Some(crate::plan_detection::DetectedPlan {
+            tier: Some("pro".into()),
+            raw: Some("provider-pro".into()),
+            observed_at_ms: 42,
+        });
+        for id in ["active", "needs", "retired", "corrupt"] {
+            store.create(id, &record).unwrap();
+        }
+        store
+            .invalidate_and_revoke_all_audited("needs", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        store
+            .retire_and_revoke_all_audited("retired", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        store.quarantine("corrupt").unwrap();
+        store
+            .create(
+                "static",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"static-key".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+
+        let rows = store.home_watch_candidates().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.credential_id.as_str())
+                .collect::<Vec<_>>(),
+            ["active", "needs", "static"]
+        );
+        for (row, state) in rows
+            .iter()
+            .take(2)
+            .zip([RecordState::Active, RecordState::NeedsReauth])
+        {
+            assert_eq!(row.state, state);
+            assert_eq!(row.record_version, 1);
+            assert_eq!(row.kind, CredentialKind::Oauth);
+            assert_eq!(row.refresh_adapter.as_deref(), Some("anthropic"));
+            assert_eq!(row.identity, record.identity);
+            assert_eq!(row.detected_plan, record.detected_plan);
+            assert!(row.is_refreshable());
+        }
+        assert!(!rows[2].is_refreshable());
+        let debug = format!("{rows:?}");
+        for secret in [
+            "payload-bytes",
+            "home-watch-private-access",
+            "home-watch-private-refresh",
+            "static-key",
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "candidate Debug exposed credential material"
+            );
+        }
+        assert!(!debug.contains("expires_at"));
+    }
+
+    #[test]
+    fn home_watch_candidates_skip_bad_envelopes_and_decodes_without_writing() {
+        let (_root, store) = tmp_store(194);
+        for id in ["good", "bad-envelope", "bad-record"] {
+            store.create(id, &oauth_record()).unwrap();
+        }
+        let bad_record = envelope::seal(
+            &store.key,
+            b"not a record",
+            &RecordBinding {
+                credential_id: "bad-record",
+                record_version: 1,
+            },
+        )
+        .unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute(
+                    "UPDATE credentials SET envelope = X'00' WHERE credential_id = 'bad-envelope'",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE credentials SET envelope = ?1 WHERE credential_id = 'bad-record'",
+                    [&bad_record],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before = store
+            .with_raw_conn(|conn| Ok(conn.total_changes()))
+            .unwrap();
+        let tip = store.audit_tip().unwrap();
+        let mut writes = store.subscribe_writes();
+        let rows = store.home_watch_candidates().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].credential_id, "good");
+        assert_eq!(
+            store.meta("bad-envelope").unwrap().state,
+            RecordState::Active
+        );
+        assert_eq!(store.meta("bad-record").unwrap().state, RecordState::Active);
+        assert_eq!(
+            store
+                .with_raw_conn(|conn| Ok(conn.total_changes()))
+                .unwrap(),
+            before
+        );
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        assert!(!writes.has_changed().unwrap());
+        assert!(store.recent_auth_events(10).unwrap().is_empty());
+        // Prove the receiver is connected to real commits, not an inert test signal.
+        store.create("later", &oauth_record()).unwrap();
+        assert!(writes.has_changed().unwrap());
+        writes.borrow_and_update();
+    }
+
+    #[test]
+    fn home_watch_candidates_fail_on_query_errors() {
+        let (_root, store) = tmp_store(195);
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch("ALTER TABLE credentials RENAME COLUMN envelope TO unavailable")
+            })
+            .unwrap();
+        assert!(store.home_watch_candidates().is_err());
     }
 
     fn held_plan_rows(store: &EncryptedStore) -> usize {

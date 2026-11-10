@@ -38,15 +38,15 @@ use credentials_core::agent_secret::SecretSender;
 use credentials_core::audit::{AuditCtx, AuditOp, AuthEventKind, ReporterSource};
 use credentials_core::engine::{EngineError, GetWithRefreshStatus, RefreshEngine};
 use credentials_core::federation::{
-    is_vault_transfer_id, valid_member_id, MemberGrantOperation, MemberGrantSelector,
-    MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
+    is_vault_transfer_id, valid_member_id, MemberGrant, MemberGrantOperation, MemberGrantSelector,
+    RemoteHomeState, RemoteWatchRow, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
+use credentials_core::record::{CredentialKind, RecordIdentity, RecordState, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, AuthObservation, GrantOperation, ReleaseRequest, SealedRelease,
-    SecretHomeRole, StoreOpError,
+    AuthEventPrincipal, AuthObservation, EncryptedStore, GrantOperation, ReleaseRequest,
+    SealedRelease, SecretHomeRole, StoreOpError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -697,6 +697,80 @@ struct TokenReply<'a> {
     refresh_adapter: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detected_plan: Option<&'a DetectedPlan>,
+}
+
+/// Serialize only the published watch-row fields, reusing the token reply's identity
+/// and plan encodings. The optional plan is explicitly null when unknown.
+pub fn remote_watch_logins_wire(rows: &[RemoteWatchRow]) -> Vec<Value> {
+    rows.iter()
+        .map(|row| {
+            json!({
+                "credential_id": row.credential_id,
+                "state": row.state,
+                "refresh_adapter": row.refresh_adapter,
+                "identity": row.identity,
+                "categories": row.categories,
+                "detected_plan": row.detected_plan,
+                "home_version": row.home_version,
+            })
+        })
+        .collect()
+}
+
+/// Refresh-only changes must not emit inventory notices. Sent rows still carry the
+/// current version and observation time, but neither is a reason to send a row.
+pub fn remote_watch_lists_equal(left: &[RemoteWatchRow], right: &[RemoteWatchRow]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.credential_id == right.credential_id
+                && left.state == right.state
+                && left.refresh_adapter == right.refresh_adapter
+                && left.identity == right.identity
+                && left.categories == right.categories
+                && left
+                    .detected_plan
+                    .as_ref()
+                    .map(|plan| (&plan.tier, &plan.raw))
+                    == right
+                        .detected_plan
+                        .as_ref()
+                        .map(|plan| (&plan.tier, &plan.raw))
+        })
+}
+
+/// Shared remote-read authority. Category reads stay lazy so an exact grant keeps
+/// the token path's existing success/error behavior even if category lookup fails.
+fn remote_read_grant_covers(
+    store: &EncryptedStore,
+    grants: &[MemberGrant],
+    member: &str,
+    pairing_id: &str,
+    credential_id: &str,
+) -> Result<bool, StoreOpError> {
+    let current: Vec<_> = grants
+        .iter()
+        .filter(|grant| {
+            grant.member_id == member
+                && grant.operation == MemberGrantOperation::RemoteRead
+                && grant.pairing_id == pairing_id
+        })
+        .collect();
+    if current.iter().any(
+        |grant| matches!(&grant.selector, MemberGrantSelector::Exact(id) if id == credential_id),
+    ) {
+        return Ok(true);
+    }
+    if current
+        .iter()
+        .any(|grant| matches!(grant.selector, MemberGrantSelector::Category(_)))
+    {
+        let categories = store.categories(credential_id)?;
+        return Ok(current.iter().any(|grant| {
+            matches!(&grant.selector, MemberGrantSelector::Category(category)
+                if categories.contains(category))
+        }));
+    }
+    Ok(false)
 }
 
 /// Parse the received aad bytes strictly. Over the seal's aad cap is malformed too.
@@ -1489,6 +1563,50 @@ impl HomeVault {
         }
     }
 
+    /// Project only metadata a paired member's remote-read grants cover. This read
+    /// never goes through token eligibility, which refuses needs-reauth and can write
+    /// refusal diagnostics or quarantine unreadable envelopes.
+    pub fn remote_watch_projection(
+        &self,
+        member: &str,
+        pairing_id: &str,
+    ) -> Result<Vec<RemoteWatchRow>, StoreOpError> {
+        let store = self.engine.store();
+        let grants = store.list_member_grants()?;
+        let mut rows = Vec::new();
+        for candidate in store.home_watch_candidates()? {
+            if is_vault_transfer_id(&candidate.credential_id) || !candidate.is_refreshable() {
+                continue;
+            }
+            let state = match candidate.state {
+                RecordState::Active => RemoteHomeState::Active,
+                RecordState::NeedsReauth => RemoteHomeState::NeedsReauth,
+                _ => continue,
+            };
+            if !remote_read_grant_covers(
+                store,
+                &grants,
+                member,
+                pairing_id,
+                &candidate.credential_id,
+            )? {
+                continue;
+            }
+            let categories = store.categories(&candidate.credential_id)?;
+            rows.push(RemoteWatchRow {
+                credential_id: candidate.credential_id,
+                state,
+                refresh_adapter: candidate.refresh_adapter,
+                identity: candidate.identity,
+                categories,
+                detected_plan: candidate.detected_plan,
+                home_version: candidate.record_version,
+            });
+        }
+        rows.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
+        Ok(rows)
+    }
+
     /// Step 7: a `remote_read` member grant, stored under the member's CURRENT pairing
     /// id, whose exact or category selector covers `credential_id`. Grants recorded
     /// under an older pairing are ignored, so a re-pair voids every grant made before
@@ -1507,28 +1625,8 @@ impl HomeVault {
         // A store fault is transient here, not the authoritative `not_found` a
         // requester would latch as a dead grant.
         let grants = store.list_member_grants().map_err(|_| STORE_ERROR)?;
-        let current: Vec<_> = grants
-            .into_iter()
-            .filter(|grant| {
-                grant.member_id == member
-                    && grant.operation == MemberGrantOperation::RemoteRead
-                    && grant.pairing_id == pairing_id
-            })
-            .collect();
-        let mut covered = current.iter().any(
-            |grant| matches!(&grant.selector, MemberGrantSelector::Exact(id) if id == credential_id),
-        );
-        if !covered
-            && current
-                .iter()
-                .any(|grant| matches!(grant.selector, MemberGrantSelector::Category(_)))
-        {
-            let categories = store.categories(credential_id).map_err(|_| STORE_ERROR)?;
-            covered = current.iter().any(|grant| {
-                matches!(&grant.selector, MemberGrantSelector::Category(category)
-                    if categories.contains(category))
-            });
-        }
+        let covered = remote_read_grant_covers(store, &grants, member, pairing_id, credential_id)
+            .map_err(|_| STORE_ERROR)?;
         if covered {
             incarnation.map_err(|error| map_store_error(&error))
         } else {
@@ -1668,6 +1766,10 @@ impl HomeVault {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "home_watch_projection_tests.rs"]
+mod home_watch_projection_tests;
 
 #[cfg(test)]
 mod tests {

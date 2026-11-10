@@ -300,7 +300,8 @@ impl Subscription {
     }
 
     /// Read a data or terminal event. A lost route or connection is an error, not
-    /// a clean end, because it says nothing about the subscription's home state.
+    /// a clean end: it does not say whether the far side ended the subscription or
+    /// withdrew access, so a caller must not treat it as either.
     pub async fn next_event(&mut self) -> Result<SubscriptionEvent, OutboundError> {
         match self.replies.recv().await {
             Some(Ok(frame)) => match frame.header.ty {

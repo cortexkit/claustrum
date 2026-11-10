@@ -4092,8 +4092,10 @@ impl EncryptedStore {
         }
         let audit_key = self.audit_key.clone();
         self.fenced_write_or_refuse(|tx| {
-            // Operator remote categories belong to this vault; home-watch categories
-            // belong to the home and must change through its snapshots instead.
+            // Operator remote categories belong to this vault. A home-watch row's
+            // categories are whatever the home computer last listed for it, so they
+            // change only when the home changes its own record and the watch
+            // delivers the new list.
             let Some(tables) = metadata_tables_for(tx, credential_id)? else {
                 return Ok(Err(StoreOpError::NotFound));
             };

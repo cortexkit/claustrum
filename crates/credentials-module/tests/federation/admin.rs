@@ -1541,6 +1541,13 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "federation/outbound.rs",
         "federation/remote_read.rs",
         "federation/sharing.rs",
+        "federation/home_watch.rs",
+        "federation/home_watch_open_tests.rs",
+        "federation/home_watch_projection_tests.rs",
+        "federation/home_watch_route_tests.rs",
+        "federation/home_watch_stream_tests.rs",
+        "federation/member_watch.rs",
+        "federation/member_watch_removal_tests.rs",
     ];
     let mut on_disk = Vec::new();
     for dir in ["", "federation"] {

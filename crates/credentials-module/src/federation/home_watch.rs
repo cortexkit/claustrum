@@ -184,7 +184,9 @@ impl Registry {
 }
 
 impl RemoteWatchHub {
-    /// Let socket integration tests advance coalescing only after a stream wakes.
+    /// Let socket integration tests wait until a stream has woken for a change. A
+    /// woken stream then sleeps through its 250 ms coalescing window before it
+    /// re-reads, so a test advances its paused clock only after this returns.
     #[cfg(feature = "test-support")]
     pub async fn waking_for_test(&self) {
         self.waking.notified().await;

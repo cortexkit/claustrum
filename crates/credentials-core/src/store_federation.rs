@@ -616,8 +616,9 @@ impl EncryptedStore {
 
     /// Convert a row created by the specified home's watch to operator ownership
     /// without fetching from the home.
-    /// The incarnation and all metadata are retained. Source validation and the
-    /// operator-encoded RemoteAdd audit commit together under the writer fence.
+    /// The incarnation and all metadata are retained. The source check, the update and
+    /// a RemoteAdd audit row (the same row an operator `remote add` writes) commit in
+    /// one fenced transaction, so a refusal leaves nothing behind.
     pub fn remote_convert_home_watch_audited(
         &self,
         credential_id: &str,

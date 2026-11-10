@@ -235,6 +235,8 @@ mod tests {
         (
             id.to_string(),
             RecordMeta {
+                incarnation: None,
+                plan_tier_observed_at_ms: None,
                 record_version: 1,
                 key_id_hex: "deadbeef".to_string(),
                 state,

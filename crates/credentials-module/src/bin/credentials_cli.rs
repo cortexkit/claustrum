@@ -384,6 +384,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "revoke-grant" => cmd_revoke_grant(&global, &args),
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global, &args),
+        "provider-report" => cmd_provider_report(&global),
         "grants" => cmd_grants(&global),
         "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
@@ -648,6 +649,7 @@ fn usage_short() -> String {
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
+       provider-report     compare stored provider ids with catalog defaults\n\
        grants              principal-scoped grants (no secrets)\n\
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
@@ -709,6 +711,15 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "provider-report" => {
+            "ck auth provider-report\n\
+             \n\
+             NOTES\n\
+             List catalog-matched credentials whose stored routing provider ids differ\n\
+             from the table, with ID, STORED and TABLE columns (JSON arrays of ids).\n\
+             Unmapped rows with no stored ids are not differences. Unknown services\n\
+             are not compared. Read-only and lease-free: no records are changed."
+        }
         "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
             "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
@@ -778,9 +789,8 @@ fn help_verb(verb: &str) -> String {
              api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
-             Subscription logins for anthropic, openai, xai, meta and\n\
-             antigravity store a default provider id (anthropic, openai,\n\
-             xai, meta, google) when no --provider-id is given. An explicit\n\
+              Catalog API-key and subscription logins store their table's routing\n\
+              provider ids when no --provider-id is given. An explicit\n\
              --provider-id replaces the default; --replace keeps an existing\n\
              set and only fills a credential that holds none.\n\
              \n\
@@ -841,7 +851,9 @@ fn help_verb(verb: &str) -> String {
              is not a stable format; scripts must use --json. --json prints one JSON\n\
              document on stdout: {\"v\":1,\"credentials\":[...]} with rows sorted by id.\n\
              Each row carries exactly id, state, record_version, categories,\n\
-             provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
+              provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
+              Rows also carry provider (service name), incarnation and\n\
+              plan_tier_observed_at_ms (null when the tier's start is unknown).\n\
              auth_method is apikey, chatgpt, antigravity or oauth, and null when the\n\
              credential has no subscription or API plane. plan_tier and plan_tier_source\n\
              are null when unset; creator is null when none. No payloads, tokens,\n\
@@ -1076,7 +1088,9 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
-             default. A cookie:<domain> id always creates a session-cookie record.\n\
+              default. A cookie:<domain> id always creates a session-cookie record.\n\
+              Catalog ids store the table's routing provider ids by default. Explicit\n\
+              --provider-id wins; --replace keeps a stored set, as login does.\n\
              \n\
              At a terminal, omit flags to pick API key, cookie, DSN or opaque secret,\n\
              then name it and paste a hidden value. API keys use apikey:<provider>\n\
@@ -1438,27 +1452,31 @@ fn commit_login_admin(
         }
         _ => return Err(CliError::Usage("login requires a deposit op".into())),
     };
-    // A subscription login stores its catalog provider id when the operator
+    // A catalog deposit stores its default provider ids when the operator
     // passes no `--provider-id`, through the same audited admin path an explicit
     // flag takes (so the recovery below for a deposit whose provider-id write
     // fails still applies). An explicit flag always wins; a `--replace` that
     // already carries provider ids keeps
     // them, and the default lands only on a credential that holds none.
-    let ids = if explicit.is_empty() {
-        let defaults = catalog_default_provider_ids(&id);
-        if defaults.is_empty() || !stored_login_provider_ids(global, &id).is_empty() {
+    let ids = deposit_provider_ids(global, &id, explicit);
+    let result = commit_login_deposit(global, op, preflighted_key, &id, &ids)?;
+    if ids.is_empty() {
+        print_missing_provider_note(global, &id);
+    }
+    Ok(result)
+}
+
+fn deposit_provider_ids(global: &GlobalArgs, id: &str, explicit: Vec<String>) -> Vec<String> {
+    if explicit.is_empty() {
+        let defaults = catalog_default_provider_ids(id);
+        if defaults.is_empty() || !stored_login_provider_ids(global, id).is_empty() {
             Vec::new()
         } else {
             defaults.iter().map(|id| id.to_string()).collect()
         }
     } else {
         explicit
-    };
-    let result = commit_login_deposit(global, op, preflighted_key, &id, &ids)?;
-    if ids.is_empty() {
-        print_missing_provider_note(global, &id);
     }
-    Ok(result)
 }
 
 /// The provider ids already stored for `id`, without a lease or a master key.
@@ -2085,7 +2103,7 @@ fn cmd_put(
     args: &[String],
     mut options: ParsedOptions,
 ) -> Result<(), CliError> {
-    let ids = provider_id_flags(args)?;
+    let explicit_ids = provider_id_flags(args)?;
     if !put_prompt::prepare(global, &mut options)? {
         return Ok(());
     }
@@ -2292,6 +2310,7 @@ fn cmd_put(
             }
         }
     }
+    let ids = deposit_provider_ids(global, &id, explicit_ids);
     finish_provider_deposit(global, &id, &ids)?;
     Ok(())
 }
@@ -5560,6 +5579,30 @@ fn format_ts_ms(ts_ms: i64) -> String {
     format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
+fn cmd_provider_report(global: &GlobalArgs) -> Result<(), CliError> {
+    let result = request_admin_status(global)?;
+    println!("ID\tSTORED\tTABLE");
+    for (_, _, id, _, mut stored) in parse_inventory(&result)? {
+        if credentials_core::catalog::provider(&id).is_none() {
+            continue;
+        }
+        let mut defaults: Vec<_> = catalog_default_provider_ids(&id)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        stored.sort();
+        defaults.sort();
+        if stored != defaults {
+            println!(
+                "{id}\t{}\t{}",
+                serde_json::to_string(&stored).unwrap(),
+                serde_json::to_string(&defaults).unwrap()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_list(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // A discovered daemon still supplies authenticated `admin.status`; when none is
     // reachable, the same report is built from lease-free plaintext metadata readers.
@@ -5638,6 +5681,9 @@ fn inventory_json_rows(
                     "auth_method": auth_method,
                     "plan_tier": plan_tier,
                     "plan_tier_source": plan_tier_source,
+                    "provider": credentials_core::catalog::provider(id),
+                    "incarnation": entry.and_then(|row| row.get("incarnation")).cloned().unwrap_or(serde_json::Value::Null),
+                    "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,
                 })
             },

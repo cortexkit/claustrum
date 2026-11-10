@@ -3,6 +3,7 @@ mod scoped_watch {
     use credentials_core::store::{SetCategoryMode, SetProvidersMode};
     use std::time::Duration;
     use subc_protocol::{AdmissionClass, FLAG_SUBSCRIPTION};
+    include!("list_scoped_vectors_tests.rs");
 
     struct Rig {
         surface: Arc<ReadSurface>,
@@ -263,6 +264,7 @@ mod scoped_watch {
     #[tokio::test]
     async fn watch_scoped_wire_fixture_is_producer_generated() {
         let mut rig = Rig::new();
+        rig.store.force_credential_incarnation_for_test("apikey:active", "0123456789abcdef0123456789abcdef");
         rig.grant("watcher", "apikey:active");
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;

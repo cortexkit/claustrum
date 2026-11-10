@@ -83,6 +83,10 @@ fn remote_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteRec
         )
     })?;
     Ok(RemoteRecord {
+        detected_plan_tier_observed_at_ms: match row.get("detected_plan_tier_observed_at_ms") {
+            Err(rusqlite::Error::InvalidColumnName(_)) => None,
+            value => value?,
+        },
         credential_id: row.get("credential_id")?,
         home_member: row.get("home_member")?,
         incarnation: row.get("incarnation")?,
@@ -333,8 +337,8 @@ impl EncryptedStore {
                 "INSERT INTO remote_records \
                  (credential_id, home_member, incarnation, kind, refresh_adapter, detected_plan, \
                   account_id, email, org_name, last_home_version, last_home_state, \
-                  created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, 'oauth', ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10) \
+                  created_at_ms, updated_at_ms, detected_plan_tier_observed_at_ms) \
+                 VALUES (?1, ?2, ?3, 'oauth', ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10, ?11) \
                  ON CONFLICT(credential_id) DO NOTHING",
                 rusqlite::params![
                     new.credential_id,
@@ -347,6 +351,7 @@ impl EncryptedStore {
                     new.identity.org_name,
                     home_version,
                     now,
+                    new.detected_plan.as_ref().filter(|p| p.tier.is_some()).map(|p| p.observed_at_ms),
                 ],
             )?;
             if inserted == 0 {
@@ -534,6 +539,9 @@ impl EncryptedStore {
                         )
                         .optional()?;
                     out.push(RemoteInventoryRow {
+                        plan_tier_observed_at_ms: if read_schema_version(&tx)? >= 35 {
+                            tx.query_row("SELECT observed_at_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
+                        } else { None },
                         record,
                         categories,
                         provider_ids,
@@ -611,6 +619,17 @@ impl EncryptedStore {
                 return Ok(RemoteRecordWrite::StaleIncarnation);
             };
             let recreated = success.home_version < current.last_home_version;
+            let detected_observed_at_ms = success.detected_plan.as_ref().and_then(|plan| {
+                let tier = plan.tier.as_ref()?;
+                if !recreated
+                    && current.identity.account_id == success.identity.account_id
+                    && current.detected_plan.as_ref().and_then(|p| p.tier.as_ref()) == Some(tier)
+                {
+                    current.detected_plan_tier_observed_at_ms
+                } else {
+                    Some(plan.observed_at_ms)
+                }
+            });
             let reported_version = current.reported_version.filter(|reported| {
                 success.recheck_pending && !recreated && success.home_version <= *reported
             });
@@ -628,7 +647,8 @@ impl EncryptedStore {
                 "UPDATE remote_records SET \
                      refresh_adapter = ?3, detected_plan = ?4, account_id = ?5, email = ?6, \
                      org_name = ?7, last_home_version = ?8, last_home_state = 'active', \
-                     last_home_error = NULL, reported_version = ?9, updated_at_ms = ?10 \
+                     last_home_error = NULL, reported_version = ?9, updated_at_ms = ?10, \
+                     detected_plan_tier_observed_at_ms = ?11 \
                  WHERE credential_id = ?1 AND incarnation = ?2",
                 rusqlite::params![
                     credential_id,
@@ -641,6 +661,7 @@ impl EncryptedStore {
                     home_version,
                     reported_version.map(|version| version as i64),
                     now,
+                    detected_observed_at_ms,
                 ],
             )?;
             Ok(RemoteRecordWrite::Changed)

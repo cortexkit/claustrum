@@ -1888,6 +1888,9 @@ pub fn status_result(
                 "categories": m.categories,
                 "provider_ids": m.provider_ids,
                 "plan_tier": m.plan_tier,
+                "incarnation": m.incarnation,
+                "plan_tier_observed_at_ms": m.plan_tier_observed_at_ms,
+                "provider": crate::catalog::provider(id),
             })
         })
         .collect();
@@ -1943,7 +1946,7 @@ pub fn status_result(
 /// always describe the same stored record.
 pub fn attach_detected_plans(
     result: &mut serde_json::Value,
-    plans: &std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
+    plans: &crate::store::DetectedPlanListing,
 ) {
     if let Some(rows) = result["credentials"].as_array_mut() {
         for row in rows {
@@ -1951,9 +1954,13 @@ pub fn attach_detected_plans(
             let detected = row["id"]
                 .as_str()
                 .and_then(|id| plans.get(id))
-                .filter(|(version, _)| Some(*version) == row["record_version"].as_u64())
-                .map(|(_, plan)| plan);
-            let (tier, source) = crate::plan_detection::effective_plan(operator, detected);
+                .filter(|(version, _, _)| Some(*version) == row["record_version"].as_u64());
+            let (tier, source) =
+                crate::plan_detection::effective_plan(operator, detected.map(|(_, plan, _)| plan));
+            if source.as_deref() == Some("detected") {
+                row["plan_tier_observed_at_ms"] =
+                    serde_json::json!(detected.and_then(|(_, _, time)| *time));
+            }
             row["plan_tier"] = serde_json::json!(tier);
             if let Some(source) = source {
                 row["plan_tier_source"] = serde_json::json!(source);

@@ -1893,6 +1893,12 @@ impl RemoteReader {
                 detected_plan.as_ref(),
             );
             rows.push(ScopedListRow {
+                incarnation: record.incarnation.clone(),
+                plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
+                    Some("operator") => entry.plan_tier_observed_at_ms,
+                    Some("detected") => record.detected_plan_tier_observed_at_ms,
+                    _ => None,
+                },
                 id: record.credential_id.clone(),
                 categories: entry.categories,
                 state: record_state(record.last_home_state),

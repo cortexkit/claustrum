@@ -640,11 +640,17 @@ export class ClaustrumClient {
  */
 export interface ScopedInventoryRow {
   readonly id: string
+  /** Vault catalog service key, not a routing provider id. */
+  readonly provider?: string
+  readonly incarnation?: string
+  /** First observation of the effective tier; absent when unknown. */
+  readonly planTierObservedAtMs?: number
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
   /**
-   * Operator-assigned catalog ids; empty when none are set. Always present on this type.
+   * Stored routing ids, defaulted at creation or operator-assigned; empty when unset.
+   * Always present on this type.
    * A daemon older than the field omits it from the wire, and that decodes as empty,
    * which is also what an unmapped credential reports.
    */
@@ -786,6 +792,16 @@ export function decodeScopedInventory(
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
     const authMethod = row.auth_method
+    const provider = row.provider ?? undefined
+    const incarnation = row.incarnation ?? undefined
+    const planTierObservedAtMs = row.plan_tier_observed_at_ms ?? undefined
+    if (
+      !isOptionalString(provider) || !isOptionalString(incarnation) ||
+      (planTierObservedAtMs !== undefined &&
+        (typeof planTierObservedAtMs !== 'number' || !Number.isSafeInteger(planTierObservedAtMs)))
+    ) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     const planTierSource = row.plan_tier_source
     if (planTierSource !== undefined && planTierSource !== 'operator' && planTierSource !== 'detected') {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
@@ -805,6 +821,9 @@ export function decodeScopedInventory(
     }
     return {
       id: row.id,
+      provider,
+      incarnation,
+      planTierObservedAtMs,
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),

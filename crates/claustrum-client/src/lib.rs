@@ -292,13 +292,18 @@ pub struct ScopedCredentialListing {
 /// or read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListedCredential {
+    /// Catalog service key, distinct from routing provider ids.
+    pub provider: Option<String>,
+    pub incarnation: Option<String>,
+    pub plan_tier_observed_at_ms: Option<i64>,
     /// The vault credential ID, returned verbatim (for example `oauth:anthropic:yiyi`).
     pub id: String,
     pub categories: Vec<String>,
     pub credential_type: String,
     /// Model vendors, not Fusiform provider IDs. Never use these for reachability.
     pub serves: Vec<String>,
-    /// Missing on older vaults and empty until the operator maps the credential.
+    /// Stored routing ids, defaulted from the catalog at creation or operator-assigned.
+    /// Missing on older vaults; empty when the credential is unmapped.
     pub provider_ids: Vec<String>,
     pub auth_method: Option<String>,
     pub refresh_adapter: Option<String>,
@@ -1656,6 +1661,16 @@ fn decode_optional_string(row: &Value, key: &str) -> Result<Option<String>, Stri
 
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
+        provider: decode_optional_string(row, "provider")?,
+        incarnation: decode_optional_string(row, "incarnation")?,
+        plan_tier_observed_at_ms: match row.get("plan_tier_observed_at_ms") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_i64()
+                    .ok_or_else(|| "plan_tier_observed_at_ms is not an integer".to_string())?,
+            ),
+        },
         id: listing_string(row, "id")?,
         categories: listing_strings(row, "categories", false)?,
         credential_type: listing_string(row, "type")?,

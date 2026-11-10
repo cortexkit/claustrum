@@ -495,12 +495,46 @@ returned rows and tuples; changes outside the caller's visibility do not move it
 
 ### Provider metadata, plan tier and authentication method
 
-Every `credential.list_scoped` row has `provider_ids`, an array of operator-assigned
+Every `credential.list_scoped` row has `provider_ids`, an array of stored
 Fusiform catalog provider ids in ascending byte order, including `[]` when unset.
-The vault never derives them from the credential id, catalog, adapter, or `serves`.
+`ck auth put` and API-key or subscription `ck auth login` store the catalog row's
+defaults at creation when no `--provider-id` is given. Explicit ids win over defaults;
+replacement preserves an existing set. Existing records are never automatically
+remapped. The vault never derives these ids at read time from the credential id,
+catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
+current table without changing any record, taking no writer lease.
+Only OpenAI and Google API-key rows default to both `llm-provider` and
+`media-provider`; no other row gets the media group. These category defaults apply
+to creation, not existing records or replacements with stored categories.
 Consumers join on exact provider-id equality, with no fallback. `serves` answers which
 model vendors are reachable; `provider_ids` answers which catalog providers the operator
 assigned to this credential. They are not interchangeable.
+
+Three additive fields are present on every current row:
+
+- `provider`: the vault catalog's **service name**, not a routing provider id (for
+  example `zai`, `kimi-for-coding`, `ollama-cloud`). API-key and login rows use the
+  same catalog match that stamps categories, including labeled accounts; an unknown
+  row is `null`. Never derive it by splitting the credential id.
+- `incarnation`: the stored random per-row identity. Replacement and refresh keep
+  it; removal followed by re-creation changes it, even when other metadata is equal.
+- `plan_tier_observed_at_ms`: the first proven observation of the effective current
+  `plan_tier`, in Unix milliseconds, or `null` when unknown. Detection uses the
+  detection instant. A Claude profile fetched after token renewal waits in a durable
+  side table until the next token commit; its detection time, not that later commit
+  time, is the time used when its tier becomes effective.
+  Same-value refreshes do not move it. An operator tier uses its `set-plan` commit
+  time; clearing the override restores the detected value's time. Like the tier,
+  this time requires read/list coverage; sign/open-only rows carry `null`.
+
+Migration 35 adds nullable times for operator assertions and remote detections.
+Local current-value detection times are sealed beside the existing detection
+metadata. No old time is backfilled: existing records stay unknown until their
+tier next changes. Reasserting an unchanged operator value is still a no-op.
+Both clients decode these three fields as optional; omission by an older vault and
+explicit `null` both mean absent. The TypeScript names are `provider`, `incarnation`
+and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
+`ck auth list --json` includes the same fields (and nulls) in each twelve-key row.
 
 `auth_method` is derived only from the unsealed record's `(CredentialKind, refresh_adapter)`.
 It is present only on read/list-covered rows when the table below yields a value; otherwise
@@ -548,7 +582,8 @@ Provider-id and tier edits do not bump `record_version`: observers use `view`. I
 `claustrum.list_scoped.view.v1`. Inside each credential frame, immediately after the
 `org_name` optional-string frame, append a u32 provider-id count and each string-framed id
 in ascending byte order, then `auth_method` as an optional string, then `plan_tier` and `plan_tier_source` as
-optional strings. The absent optional
+optional strings, then `provider` as an optional string, `incarnation` as a string,
+and `plan_tier_observed_at_ms` as an optional decimal-string frame. The absent optional
 frame is used whenever the JSON key is omitted, never an empty string. Deployment leaves
 an empty inventory's view unchanged but changes every nonempty visible inventory's view
 once, even if all provider-id arrays are empty and all methods omitted. Subsequent edits
@@ -650,7 +685,8 @@ otherwise the detected tier. `plan_tier_source` is `operator` or `detected`, omi
 there is no tier. Both fields require `read` or `list` authority and follow **identity**,
 not `provider_ids`: sign/open-only rows omit both. Absent values are omitted, never null
 or empty. Operator edits do not bump `record_version`; detection rides token writes only.
-The scoped `view` frames the optional tier then optional source after `auth_method`.
+The scoped `view` frames the optional tier then optional source after `auth_method`,
+followed by the service, incarnation and current-value observation time above.
 Both omitted values contribute absence bytes; switching source changes the view even
 when the effective tier stays equal. Deployment changes nonempty views once; empty
 inventory views remain unchanged.
@@ -664,6 +700,16 @@ absent ids, keep it; a retained identity is compared after preservation. If the 
 envelope cannot be decoded, repair clears any tier because account equality cannot be
 established. Refresh never changes account identity and does not touch the assertion.
 Removing a credential removes its tier, even without foreign-key enforcement.
+
+`crates/credentials-module/tests/vectors/list-scoped-v2.json` pins real dispatched
+list replies for search and Kimi coding keys, lifecycle states and category-filtered
+visibility, plus the real watch opening, category-change and revoked-caller terminal
+frames. Its unknown-method case is the dispatcher's actual reply to an unsupported
+method, standing in for an older vault. Storage incarnations and detection times are
+fixed test values; only the process-local watch boot nonce is normalized to zero.
+Each case carries decoded JSON, base64url reply bytes and a reply hash; `SHA256SUMS`
+pins the file. Regenerate with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
+`list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned` test.
 
 ### `admin.set_plan`
 

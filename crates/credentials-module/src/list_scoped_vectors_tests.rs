@@ -1,0 +1,193 @@
+fn list_vector_case(label: &str, method: &str, frame: Frame) -> serde_json::Value {
+    use base64::Engine as _;
+    let mut reply: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+    // The boot nonce identifies a process, not a wire variant. All row identities
+    // are fixed in storage below; normalize only this process-local watch nonce.
+    if frame.header.ty == FrameType::StreamData {
+        reply["epoch"] = json!("00000000000000000000000000000000");
+    }
+    let bytes = serde_json::to_vec(&reply).unwrap();
+    json!({
+        "case": label,
+        "request": {"method": method, "params": {}},
+        "frame_type": format!("{:?}", frame.header.ty),
+        "reply": reply,
+        "reply_b64url": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes),
+        "reply_sha256": hex_digest(&bytes),
+    })
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[tokio::test]
+async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
+    let mut rig = Rig::new();
+    let secret = "a1".repeat(32);
+    let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+    let request = rig
+        .store
+        .propose_enrollment("catalog-watcher", &hash)
+        .unwrap();
+    rig.store
+        .approve_enrollment(&request.request_id, "catalog-watcher", "test")
+        .unwrap();
+    let credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } = rig
+        .store
+        .poll_enrollment(&request.request_id, &secret)
+        .unwrap()
+    else {
+        panic!("approved");
+    };
+    for (index, id) in [
+        "apikey:exa",
+        "apikey:kimi-for-coding",
+        "apikey:brave",
+        "apikey:tavily",
+        "apikey:hidden",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut record = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "vector",
+            b"vector-test-key".to_vec(),
+            None,
+        );
+        if *id == "apikey:kimi-for-coding" {
+            record.detected_plan = Some(credentials_core::plan_detection::DetectedPlan {
+                tier: Some("pro".into()),
+                raw: Some("pro".into()),
+                observed_at_ms: 1_700_000_000_000,
+            });
+        }
+        rig.store.create(id, &record).unwrap();
+        rig.store
+            .force_credential_incarnation_for_test(id, &format!("{:032x}", index + 1));
+    }
+    rig.store
+        .set_categories_audited(
+            "apikey:hidden",
+            SetCategoryMode::Set,
+            &["private-key".into()],
+            AuditCtx::admin(AuditOp::SetCategory),
+        )
+        .unwrap();
+    rig.store.invalidate("apikey:brave").unwrap();
+    rig.store
+        .retire_and_revoke_all_audited("apikey:tavily", AuditCtx::admin(AuditOp::Invalidate))
+        .unwrap();
+    rig.store
+        .create_read_grant_audited(
+            "enrolled",
+            "catalog-watcher",
+            SelectorKind::Category,
+            "web-search",
+            GrantOperation::List,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    rig.bind(1, reserved("ambient"));
+    let params = json!({"enrollment_token": token});
+    rig.dispatch(1, 10, FrameType::Request, OP_LIST_SCOPED, params.clone())
+        .await;
+    let listing = rig.next().await;
+    assert_eq!(listing.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&listing.body).unwrap();
+    let rows = reply["result"]["credentials"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "apikey:brave",
+            "apikey:exa",
+            "apikey:kimi-for-coding",
+            "apikey:tavily"
+        ]
+    );
+    assert_eq!(rows[0]["state"], "needs_reauth");
+    assert_eq!(rows[1]["provider"], "exa");
+    assert_eq!(rows[1]["incarnation"], "00000000000000000000000000000001");
+    assert_eq!(rows[2]["provider"], "kimi-for-coding");
+    assert_eq!(rows[2]["categories"], json!(["llm-provider", "web-search"]));
+    assert_eq!(rows[2]["plan_tier_observed_at_ms"], 1_700_000_000_000_i64);
+    assert_eq!(rows[3]["state"], "retired");
+    let mut cases = vec![list_vector_case(
+        "catalog_and_lifecycle",
+        OP_LIST_SCOPED,
+        listing,
+    )];
+    rig.open(1, 11, params.clone()).await;
+    let opening = rig.next().await;
+    let opening_json: serde_json::Value = serde_json::from_slice(&opening.body).unwrap();
+    assert_eq!(opening_json["seq"], 1);
+    cases.push(list_vector_case("watch_opening", OP_WATCH_SCOPED, opening));
+    rig.store
+        .set_categories_audited(
+            "apikey:exa",
+            SetCategoryMode::Add,
+            &["search-vector".into()],
+            AuditCtx::admin(AuditOp::SetCategory),
+        )
+        .unwrap();
+    let changed = rig.next().await;
+    let changed_json: serde_json::Value = serde_json::from_slice(&changed.body).unwrap();
+    assert_eq!(changed_json["seq"], 2);
+    assert_ne!(changed_json["view"], opening_json["view"]);
+    cases.push(list_vector_case(
+        "watch_category_changed",
+        OP_WATCH_SCOPED,
+        changed,
+    ));
+    rig.store
+        .revoke_enrollment("catalog-watcher", "test")
+        .unwrap();
+    let terminal = rig.next().await;
+    assert_eq!(terminal.header.ty, FrameType::Response);
+    assert_scoped_not_found(&serde_json::from_slice(&terminal.body).unwrap());
+    cases.push(list_vector_case("watch_revoked", OP_WATCH_SCOPED, terminal));
+    rig.dispatch(
+        1,
+        12,
+        FrameType::Request,
+        "auth.watch_scoped.unsupported",
+        json!({}),
+    )
+    .await;
+    let unknown = rig.next().await;
+    assert_eq!(unknown.header.ty, FrameType::Error);
+    let error: serde_json::Value = serde_json::from_slice(&unknown.body).unwrap();
+    assert_eq!(error["code"], "unknown_method");
+    cases.push(list_vector_case(
+        "older_vault_unknown_method",
+        "auth.watch_scoped.unsupported",
+        unknown,
+    ));
+    let emitted =
+        serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
+            .unwrap();
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    let sums = format!("{}  list-scoped-v2.json\n", hex_digest(&emitted));
+    if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1") {
+        std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
+        std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
+        println!("emitted five list-scoped v2 cases and SHA256SUMS");
+    } else {
+        assert_eq!(
+            emitted,
+            std::fs::read(directory.join("list-scoped-v2.json"))
+                .expect("pinned list-scoped vectors")
+        );
+        assert_eq!(
+            sums,
+            std::fs::read_to_string(directory.join("SHA256SUMS")).expect("pinned vector hash")
+        );
+    }
+}

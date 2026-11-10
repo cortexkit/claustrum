@@ -286,6 +286,10 @@ pub struct ListScopedParams {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListScopedCredential {
     pub id: String,
+    /// Catalog service key, never a routing id. Unknown services serialize as null.
+    pub provider: Option<String>,
+    pub incarnation: String,
+    pub plan_tier_observed_at_ms: Option<i64>,
     pub categories: Vec<String>,
     #[serde(rename = "type")]
     pub credential_type: String,
@@ -315,7 +319,7 @@ pub struct ListScopedCredential {
     /// The catalog provider ids the operator mapped to this credential, in ascending byte
     /// order. Present on EVERY row, including a sign-only row whose record stays sealed,
     /// because the ids live beside the record and reading them opens nothing. Empty when
-    /// the operator has set none; the vault never infers one.
+    /// unset. Catalog defaults are stored at creation, never inferred on read.
     pub provider_ids: Vec<String>,
     /// The subscription tier to price this account by: the operator's `set-plan` value
     /// when one is set, otherwise the tier detected from the provider. Like identity, it
@@ -1095,6 +1099,15 @@ pub(crate) fn list_scoped_view(
         push_optional_string(&mut digest_input, credential.auth_method.as_deref());
         push_optional_string(&mut digest_input, credential.plan_tier.as_deref());
         push_optional_string(&mut digest_input, credential.plan_tier_source.as_deref());
+        push_optional_string(&mut digest_input, credential.provider.as_deref());
+        push_string(&mut digest_input, &credential.incarnation);
+        push_optional_string(
+            &mut digest_input,
+            credential
+                .plan_tier_observed_at_ms
+                .map(|time| time.to_string())
+                .as_deref(),
+        );
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -1127,6 +1140,9 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
+                provider: credentials_core::catalog::provider(&row.id).map(str::to_owned),
+                incarnation: row.incarnation,
+                plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
                 credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
                 serves: credentials_core::catalog::serves_for(&row.id)
                     .iter()
@@ -4187,6 +4203,8 @@ mod list_scoped_tests {
         identity: Option<RecordIdentity>,
     ) -> ScopedListRow {
         ScopedListRow {
+            incarnation: "0123456789abcdef0123456789abcdef".into(),
+            plan_tier_observed_at_ms: None,
             id: id.into(),
             categories: categories
                 .iter()
@@ -4260,6 +4278,8 @@ mod list_scoped_tests {
 
     fn scoped_row_with_adapter(id: &str, adapter: Option<&str>) -> ScopedListRow {
         ScopedListRow {
+            incarnation: "0123456789abcdef0123456789abcdef".into(),
+            plan_tier_observed_at_ms: None,
             id: id.to_owned(),
             categories: vec!["llm-provider".to_owned()],
             state: RecordState::Active,
@@ -4404,7 +4424,7 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "XezWe7v4wKXK7EYC7td/JZiNqbw3z/e1/UUgaMaAbxE=",
+            "zzrt6oJHB/1jCqi4+TUqAol9XN3jLGea/H09sqqJW14=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -4498,6 +4518,9 @@ mod list_scoped_tests {
             out.extend_from_slice(value.as_bytes());
         }
         let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
+            provider: None,
+            incarnation: "0123456789abcdef0123456789abcdef".into(),
+            plan_tier_observed_at_ms: None,
             id: "oauth:x".into(),
             categories: vec!["llm-provider".into()],
             credential_type: "oauth".into(),
@@ -4541,6 +4564,9 @@ mod list_scoped_tests {
             }
             bytes.push(0); // plan_tier absent
             bytes.push(0); // plan_tier_source absent
+            bytes.push(0); // provider absent
+            string(&mut bytes, "0123456789abcdef0123456789abcdef");
+            bytes.push(0); // tier observation time absent
             bytes.push(2);
             u32_be(&mut bytes, 0);
             let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
@@ -4641,6 +4667,9 @@ mod list_scoped_tests {
                 }
                 None => bytes.push(0),
             }
+            bytes.push(0); // provider absent
+            string(&mut bytes, "0123456789abcdef0123456789abcdef");
+            bytes.push(0); // tier observation time absent
             bytes.push(2);
             bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
             let expected = base64::engine::general_purpose::STANDARD

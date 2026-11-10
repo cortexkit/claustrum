@@ -9055,6 +9055,172 @@ fn list_providers(vault: &GrantCliVault, id: &str) -> String {
 }
 
 #[test]
+fn provider_catalog_put_defaults_explicit_override_and_replace_preserve_stored_ids() {
+    let vault = GrantCliVault::new("catalog-put");
+    vault.bootstrap();
+    let put = |id: &str, extra: &[&str]| {
+        let payload = payload_file("catalog-test-key");
+        let mut args = vec!["put", "--id", id, "--payload-file", &payload];
+        args.extend_from_slice(extra);
+        let out = vault.run(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    put("apikey:anthropic:work", &[]);
+    assert_eq!(
+        list_providers(&vault, "apikey:anthropic:work"),
+        "anthropic-platform"
+    );
+    put("apikey:kimi-for-coding", &["--provider-id", "custom-pool"]);
+    assert_eq!(
+        list_providers(&vault, "apikey:kimi-for-coding"),
+        "custom-pool"
+    );
+    let incarnation = local_incarnation(&vault.data_dir, "apikey:kimi-for-coding");
+    put("apikey:kimi-for-coding", &["--replace"]);
+    assert_eq!(
+        list_providers(&vault, "apikey:kimi-for-coding"),
+        "custom-pool"
+    );
+    assert_eq!(
+        local_incarnation(&vault.data_dir, "apikey:kimi-for-coding"),
+        incarnation
+    );
+}
+
+#[test]
+fn provider_catalog_openai_put_stores_both_model_and_media_groups() {
+    let vault = GrantCliVault::new("catalog-openai-media");
+    vault.bootstrap();
+    let id = "apikey:openai:media";
+    let payload = payload_file("catalog-test-key");
+    let out = vault.run(&["put", "--id", id, "--payload-file", &payload]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows = || {
+        let out = vault.run(&["list", "--json"]);
+        assert!(out.status.success());
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["credentials"][0].clone()
+    };
+    assert_eq!(
+        rows()["categories"],
+        serde_json::json!(["llm-provider", "media-provider"])
+    );
+    // A deliberate stored classification is not re-derived on rotation or reads.
+    assert!(vault
+        .run(&["set-category", id, "--set", "llm-provider"])
+        .status
+        .success());
+    assert!(vault
+        .run(&["put", "--id", id, "--payload-file", &payload, "--replace"])
+        .status
+        .success());
+    assert_eq!(rows()["categories"], serde_json::json!(["llm-provider"]));
+}
+
+#[test]
+fn provider_catalog_api_key_login_applies_defaults_and_replace_preserves_stored_ids() {
+    let vault = GrantCliVault::new("catalog-key-login");
+    vault.bootstrap();
+    let payload = payload_file("catalog-test-key");
+    let login = |extra: &[&str]| {
+        let mut args = vec![
+            "login",
+            "--provider",
+            "kimi-for-coding",
+            "--payload-file",
+            &payload,
+        ];
+        args.extend_from_slice(extra);
+        let out = vault.run(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    login(&[]);
+    assert_eq!(
+        list_providers(&vault, "apikey:kimi-for-coding"),
+        "kimi-code-plan-global"
+    );
+    assert!(vault
+        .run(&[
+            "set-providers",
+            "--id",
+            "apikey:kimi-for-coding",
+            "--set",
+            "custom-pool"
+        ])
+        .status
+        .success());
+    login(&["--replace"]);
+    assert_eq!(
+        list_providers(&vault, "apikey:kimi-for-coding"),
+        "custom-pool"
+    );
+    login(&["--replace", "--provider-id", "explicit-pool"]);
+    assert_eq!(
+        list_providers(&vault, "apikey:kimi-for-coding"),
+        "custom-pool,explicit-pool"
+    );
+}
+
+#[test]
+fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() {
+    let vault = GrantCliVault::new("provider-report");
+    vault.bootstrap();
+    for id in [
+        "apikey:openai",
+        "apikey:muse",
+        "apikey:exa",
+        "apikey:unknown",
+        "apikey:zai:work",
+    ] {
+        assert!(vault
+            .run(&[
+                "put",
+                "--id",
+                id,
+                "--payload-file",
+                &payload_file("report-key")
+            ])
+            .status
+            .success());
+    }
+    for (id, ids) in [
+        ("apikey:openai", vec![]),
+        ("apikey:muse", vec!["custom-pool"]),
+        ("apikey:unknown", vec!["unknown-pool"]),
+    ] {
+        let mut args = vec!["set-providers", "--id", id, "--set"];
+        args.extend(ids);
+        assert!(vault.run(&args).status.success());
+    }
+    let before = vault.run(&["list", "--json"]).stdout;
+    let audit = vault.run(&["audit"]).stdout;
+    let _held = open_leased_store(&vault.data_dir, &vault.key_path);
+    let out = vault.run(&["provider-report"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "ID\tSTORED\tTABLE\napikey:muse\t[\"custom-pool\"]\t[]\napikey:openai\t[]\t[\"openai\"]\n"
+    );
+    assert_eq!(vault.run(&["list", "--json"]).stdout, before);
+    assert_eq!(vault.run(&["audit"]).stdout, audit);
+}
+
+#[test]
 fn login_applies_anthropic_default_provider_id() {
     if std::env::var_os(CLI_BIN_ENV).is_some() {
         eprintln!("SKIPPING login_applies_anthropic_default_provider_id: {CLI_BIN_ENV} is set");
@@ -9153,7 +9319,7 @@ fn login_without_default_leaves_no_provider_ids() {
         .args([
             "login",
             "--provider",
-            "zai",
+            "muse",
             "--payload-file",
             key_file.to_str().unwrap(),
             "--no-browser",
@@ -9167,13 +9333,13 @@ fn login_without_default_leaves_no_provider_ids() {
         .expect("run login");
     assert!(
         out.status.success(),
-        "zai login failed: {}",
+        "muse login failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("logged in and stored apikey:zai"),
+        String::from_utf8_lossy(&out.stdout).contains("logged in and stored apikey:muse"),
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
-    assert_eq!(list_providers(&vault, "apikey:zai"), "-");
+    assert_eq!(list_providers(&vault, "apikey:muse"), "-");
 }

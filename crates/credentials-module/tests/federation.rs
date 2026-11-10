@@ -41,6 +41,9 @@ mod sharing;
 #[path = "federation/home_watch_stream.rs"]
 mod home_watch_stream;
 
+#[path = "federation/member_watch.rs"]
+mod member_watch;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

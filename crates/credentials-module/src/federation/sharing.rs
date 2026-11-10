@@ -59,6 +59,7 @@ pub struct VaultSharingSnapshot {
     pub members: Vec<VaultSharingMember>,
     pub enabled: bool,
     pub devices: Vec<(String, String)>,
+    pub computers: Vec<(String, String)>,
 }
 
 pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
@@ -70,6 +71,7 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     let mut members = Vec::new();
     let mut enabled = false;
     let mut devices = Vec::new();
+    let mut computers = Vec::new();
     for device in snapshot.devices {
         if !is_lower_hex_16_bytes(&device.fingerprint)
             || device.pairing_id.is_empty()
@@ -92,12 +94,16 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
                 }
             }
         }
+        if device.class == Class::Computer {
+            computers.push((device.fingerprint.clone(), device.pairing_id.clone()));
+        }
         devices.push((device.fingerprint, device.pairing_id));
     }
     Some(VaultSharingSnapshot {
         members,
         enabled,
         devices,
+        computers,
     })
 }
 
@@ -114,11 +120,15 @@ async fn apply(
     body: Value,
     retries: &mut RetryState,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
+    member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) -> Result<(), String> {
     let snapshot =
         decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?;
     if let Some(hub) = home_watches {
         hub.paired_devices(snapshot.devices);
+    }
+    if let Some(pairings) = member_pairings {
+        pairings.send_replace(Some(snapshot.computers));
     }
     tokio::task::spawn_blocking(move || {
         if snapshot.enabled {
@@ -181,6 +191,15 @@ pub async fn run_with_home_watches(
     client: OutboundClient,
     home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
 ) {
+    run_with_reconcilers(store, client, home_watches, None).await;
+}
+
+pub async fn run_with_reconcilers(
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
+    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+) {
     let mut retries = RetryState::default();
     loop {
         let delay = match watch(
@@ -188,6 +207,7 @@ pub async fn run_with_home_watches(
             &client,
             &mut retries,
             home_watches.as_deref(),
+            member_pairings.as_ref(),
         )
         .await
         {
@@ -209,6 +229,7 @@ async fn watch(
     client: &OutboundClient,
     retries: &mut RetryState,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
+    member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) -> Result<(), String> {
     let snapshot = client
         .call(
@@ -218,7 +239,14 @@ async fn watch(
         )
         .await
         .map_err(|e| e.message().to_string())?;
-    apply(Arc::clone(&store), snapshot, retries, home_watches).await?;
+    apply(
+        Arc::clone(&store),
+        snapshot,
+        retries,
+        home_watches,
+        member_pairings,
+    )
+    .await?;
     let mut subscription = client
         .subscribe(
             "callosum",
@@ -232,7 +260,14 @@ async fn watch(
         .await
         .map_err(|e| e.message().to_string())?
     {
-        apply(Arc::clone(&store), snapshot, retries, home_watches).await?;
+        apply(
+            Arc::clone(&store),
+            snapshot,
+            retries,
+            home_watches,
+            member_pairings,
+        )
+        .await?;
     }
     Ok(())
 }

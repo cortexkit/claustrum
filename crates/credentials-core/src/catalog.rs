@@ -1350,6 +1350,10 @@ pub enum ExchangeWire {
 #[derive(Debug, Clone, Copy)]
 pub struct LoginProvider {
     pub key: &'static str,
+    /// The product name shown on a connector row, when the catalog knows it.
+    pub connector_display_name: Option<&'static str>,
+    /// A connectors-page category; group-based categories take precedence.
+    pub connector_category: Option<&'static str>,
     pub authorize_url: &'static str,
     pub token_url: &'static str,
     pub client_id: &'static str,
@@ -1383,6 +1387,8 @@ pub struct LoginProvider {
 pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     LoginProvider {
         key: "anthropic",
+        connector_display_name: Some("Claude"),
+        connector_category: Some("ai_models"),
         authorize_url: refresh_adapters::anthropic::AUTHORIZE_URL,
         token_url: refresh_adapters::anthropic::LOGIN_TOKEN_URL,
         client_id: refresh_adapters::anthropic::CLAUDE_CODE_CLIENT_ID,
@@ -1407,6 +1413,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "openai",
+        connector_display_name: Some("ChatGPT"),
+        connector_category: Some("ai_models"),
         authorize_url: refresh_adapters::openai::AUTHORIZE_URL,
         token_url: refresh_adapters::openai::TOKEN_URL,
         client_id: refresh_adapters::openai::CODEX_CLIENT_ID,
@@ -1428,6 +1436,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "xai",
+        connector_display_name: Some("xAI Grok"),
+        connector_category: Some("ai_models"),
         authorize_url: refresh_adapters::xai::AUTHORIZE_URL,
         token_url: refresh_adapters::xai::TOKEN_URL,
         client_id: refresh_adapters::xai::GROK_CLI_CLIENT_ID,
@@ -1449,6 +1459,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "github-copilot",
+        connector_display_name: Some("GitHub Copilot"),
+        connector_category: Some("ai_models"),
         authorize_url: "",
         token_url: refresh_adapters::github_copilot::DEVICE_TOKEN_URL,
         client_id: refresh_adapters::github_copilot::CLIENT_ID,
@@ -1470,6 +1482,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "kimi",
+        connector_display_name: Some("Kimi"),
+        connector_category: Some("ai_models"),
         authorize_url: "",
         token_url: refresh_adapters::kimi::TOKEN_URL,
         client_id: refresh_adapters::kimi::CLIENT_ID,
@@ -1491,6 +1505,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "meta",
+        connector_display_name: Some("Meta AI"),
+        connector_category: Some("ai_models"),
         authorize_url: "",
         token_url: refresh_adapters::meta::DEVICE_TOKEN_URL,
         client_id: refresh_adapters::meta::CLIENT_ID,
@@ -1512,6 +1528,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "google",
+        connector_display_name: Some("Gemini"),
+        connector_category: Some("ai_models"),
         authorize_url: google::AUTHORIZE_URL,
         token_url: google::TOKEN_URL,
         client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
@@ -1533,6 +1551,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "gmail",
+        connector_display_name: Some("Gmail"),
+        connector_category: Some("communication"),
         authorize_url: google::AUTHORIZE_URL,
         token_url: google::TOKEN_URL,
         client_id: "", // operator-owned Desktop client; supplied by the login flags
@@ -1554,6 +1574,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "antigravity",
+        connector_display_name: Some("Antigravity"),
+        connector_category: Some("ai_models"),
         authorize_url: google::AUTHORIZE_URL,
         token_url: google::TOKEN_URL,
         client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
@@ -1575,6 +1597,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "cursor",
+        connector_display_name: Some("Cursor"),
+        connector_category: Some("ai_models"),
         authorize_url: refresh_adapters::cursor::LOGIN_URL,
         token_url: refresh_adapters::cursor::TOKEN_URL,
         client_id: "",
@@ -1596,6 +1620,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "devin",
+        connector_display_name: Some("Devin"),
+        connector_category: None,
         authorize_url: refresh_adapters::devin::AUTHORIZE_URL,
         token_url: refresh_adapters::devin::TOKEN_URL,
         client_id: "",
@@ -1617,6 +1643,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "snowflake",
+        connector_display_name: Some("Snowflake"),
+        connector_category: None,
         authorize_url: refresh_adapters::snowflake::TOKEN_URL_BASE,
         token_url: refresh_adapters::snowflake::TOKEN_URL_BASE,
         client_id: refresh_adapters::snowflake::CLIENT_ID,
@@ -1638,6 +1666,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
     },
     LoginProvider {
         key: "digitalocean",
+        connector_display_name: Some("DigitalOcean"),
+        connector_category: None,
         authorize_url: refresh_adapters::digitalocean::AUTHORIZE_URL,
         token_url: refresh_adapters::digitalocean::AUTHORIZE_URL,
         client_id: refresh_adapters::digitalocean::CLIENT_ID,
@@ -1804,6 +1834,17 @@ pub fn provider(credential_id: &str) -> Option<&'static str> {
     match catalog_match(credential_id)? {
         CatalogEntry::ApiKey(entry) => Some(entry.key),
         CatalogEntry::Login(entry) => Some(entry.key),
+    }
+}
+
+/// Connector labels use the same boundary-aware matcher as catalog defaults.
+pub fn connector_metadata(id: &str) -> (Option<&'static str>, Option<&'static str>) {
+    match catalog_match(id) {
+        Some(CatalogEntry::ApiKey(entry)) => (Some(entry.display_name), None),
+        Some(CatalogEntry::Login(entry)) => {
+            (entry.connector_display_name, entry.connector_category)
+        }
+        None => (None, None),
     }
 }
 

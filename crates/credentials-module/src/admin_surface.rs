@@ -69,6 +69,20 @@ pub enum AdminOutcome {
     Refused(String),
 }
 
+pub enum ConnectorAdmission {
+    Allowed,
+    Development,
+    PhoneOff,
+    PhoneRefused,
+    Denied,
+}
+
+/// This admission exists so unsigned desktop builds can read connectors. Remove it
+/// in the same change that leaves only the daemon's operator-app stamp for desktop.
+fn unsigned_desktop_development_admission(principal: &Principal) -> bool {
+    matches!(principal, Principal::Direct)
+}
+
 /// A single-use challenge nonce with its issue instant (for TTL).
 struct Nonce {
     bytes: [u8; ADMIN_NONCE_LEN],
@@ -85,6 +99,8 @@ struct BindState {
     /// Lives in the same record as the principal, so a rebind or route Goodbye replaces
     /// or drops both together.
     harness: String,
+    operator_app: Option<String>,
+    federated_scope: bool,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
     nonce: Option<Nonce>,
 }
@@ -216,7 +232,20 @@ impl AdminSurface {
 
     /// Replace a channel's principal, harness and nonce on rebind. The wire epoch lets an
     /// in-flight request prove it still belongs to this binding before claiming a nonce.
+    #[allow(dead_code)] // The test-only library's route harness binds without peer metadata.
     pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal, harness: &str) {
+        self.record_connector_bind(channel, epoch, principal, harness, None, false);
+    }
+
+    pub(crate) fn record_connector_bind(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: Principal,
+        harness: &str,
+        operator_app: Option<String>,
+        federated_scope: bool,
+    ) {
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
             // Draining the replaced bind's nonce keeps the global counter honest.
@@ -230,9 +259,49 @@ impl AdminSurface {
                 epoch,
                 principal,
                 harness: harness.to_string(),
+                operator_app,
+                federated_scope,
                 nonce: None,
             },
         );
+    }
+
+    pub fn connector_admission(&self, channel: u16, epoch: u32) -> ConnectorAdmission {
+        use ConnectorAdmission as Admission;
+        let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(bound) = binds.get(&channel).filter(|bound| bound.epoch == epoch) else {
+            return Admission::Denied;
+        };
+        if crate::federation::ingress::is_callosum(&bound.principal) {
+            if bound.federated_scope {
+                return Admission::Denied;
+            }
+            let mapped = crate::federation::ingress::map_route_caller_with_phone(
+                &bound.principal,
+                &bound.harness,
+                crate::federation::MappingGate::On,
+                crate::federation::MappingGate::On,
+            );
+            if !matches!(mapped, crate::federation::RouteCaller::Phone(_)) {
+                return Admission::Denied;
+            }
+            return match self.engine.store().secret_phone_mapping_gates() {
+                Ok((true, Some(true))) => Admission::Allowed,
+                Ok((true, Some(false))) => Admission::PhoneOff,
+                _ => Admission::PhoneRefused,
+            };
+        }
+        if bound.operator_app.as_deref() == Some("alfonso-desktop")
+            || matches!(&bound.principal, Principal::Reserved { module_id } if module_id == "cingulate")
+        {
+            Admission::Allowed
+        } else if bound.operator_app.is_none()
+            && unsigned_desktop_development_admission(&bound.principal)
+        {
+            Admission::Development
+        } else {
+            Admission::Denied
+        }
     }
 
     #[cfg(test)]

@@ -21,6 +21,7 @@
 //! is never served while a crash-left refresh intent is unresolved.
 
 mod admin_surface;
+mod connectors;
 mod federation;
 mod limiter;
 mod read_surface;
@@ -1090,6 +1091,12 @@ async fn handle_frame(
             // Register subscriptions before reading the next ingress frame, so a
             // following CANCEL or route close cannot race ahead of registration.
             // Opening only spawns the SQLite work; it never waits on the reactor.
+            if serde_json::from_slice::<ReadRequest>(&frame.body)
+                .is_ok_and(|request| request.method == "connectors.watch")
+            {
+                handle_read_request(frame, &route, &surface, &admin, caller.principal()).await?;
+                return Ok(true);
+            }
             if let federation::RouteCaller::Principal(principal) = &caller {
                 if serde_json::from_slice::<ReadRequest>(&frame.body)
                     .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
@@ -1203,7 +1210,18 @@ async fn handle_control_request(
             // `fed-` harness marks a call forwarded from another computer, which the bind
             // registry then serves with no principal (see `AdminSurface::principal`).
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            admin.record_bind_at(route_channel, epoch, principal, &identity.harness);
+            let peer: subc_protocol::peer::RouteBindPeer =
+                serde_json::from_slice(&frame.body).map_err(ModuleError::Json)?;
+            admin.record_connector_bind(
+                route_channel,
+                epoch,
+                principal,
+                &identity.harness,
+                peer.operator_app.map(|app| app.app),
+                scope
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.kind == subc_protocol::scope::ScopeKind::Federated),
+            );
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1381,6 +1399,12 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if method
+        .as_ref()
+        .is_some_and(|request| connectors::is_op(&request.method))
+    {
+        return handle_read_request(frame, writer, surface, admin, caller.principal()).await;
+    }
     if let Some(request) = method
         .as_ref()
         .filter(|r| matches!(r.method.as_str(), "permissions.list" | "permissions.revoke"))
@@ -1620,6 +1644,17 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        method @ ("connectors.list" | "connectors.watch") => {
+            return connectors::serve(
+                frame.header,
+                writer,
+                surface,
+                admin,
+                method,
+                &request.params,
+            )
+            .await;
+        }
         method @ ("secret.use" | "secret.request_flow_approval" | "secret.revoke_flow_grants") => {
             match serve_secret_call(surface, admin, principal.as_ref(), method, &request.params)
                 .await
@@ -2279,6 +2314,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
         provides: vec![
             "permissions/v1".to_owned(),
+            subc_protocol::peer::OPERATOR_APP_CAPABILITY.to_owned(),
             subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
             subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
         ],
@@ -2306,7 +2342,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .operation_delivery(BTreeMap::from([(
         federation::ingress::OP_REMOTE_WATCH.to_owned(),
         OperationDelivery::WATCH,
-    )]))
+    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH)]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2480,6 +2516,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "connectors.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "connectors.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "permissions.revoke".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation {
                 name: OP_ACCOUNT_TOKEN.to_string(),
@@ -2701,6 +2739,7 @@ mod tests {
         include!("usage_report_tests.rs");
     }
     include!("watch_scoped_tests.rs");
+    include!("connectors_tests.rs");
     include!("federation/home_watch_route_tests.rs");
     include!("secret_contract_tests.rs");
     include!("credential_permissions_tests.rs");
@@ -2797,6 +2836,7 @@ mod tests {
             m.capabilities.as_ref().unwrap().provides,
             vec![
                 "permissions/v1",
+                "operator-app/v1",
                 "flow-identity-scopes/v1",
                 "bind-no-project/v1"
             ]
@@ -2939,6 +2979,16 @@ mod tests {
             Some(&subc_protocol::manifest::OperationDelivery::WATCH),
             "remote inventory snapshots must be exposed as a watch"
         );
+        for op in ["connectors.list", "connectors.watch"] {
+            assert!(declared
+                .iter()
+                .any(|(name, kind)| name == op && *kind == ManagementOperationKind::Query));
+        }
+        assert_eq!(
+            manifest.operation_delivery.get("connectors.watch"),
+            Some(&OperationDelivery::WATCH)
+        );
+        assert!(!manifest.operation_delivery.contains_key("connectors.list"));
         let sharing = manifest
             .role_declarations
             .get("peer-sharing/v1")
@@ -18137,12 +18187,14 @@ mod tests {
     ///             KIND only (never its message, which can carry a path)
     ///   warn!     permanent account exchange failure: fixed text only, never the JWT,
     ///             challenge, upstream body or signer material
+    ///   info!     unsigned desktop development admission for a connectors read:
+    ///             fixed admission name only, never request or credential fields
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the eight source files linked
+    /// the one shape every secret read must take. Covers the nine source files linked
     /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -18158,6 +18210,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connectors.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18174,7 +18227,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 5, 0),
+            (1, 2, 6, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18193,6 +18246,7 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[8], &shapes), vec![("info".into(), "target: \"connectors\", \"unsigned_desktop_development_admission admitted connectors read\"".into())]);
         assert_eq!(account_sites, vec![("warn".into(), "\"account worker exchange refused permanently; signer or contract vector may be wrong\"".into())]);
         let mut sites = 0;
         for source in sources {

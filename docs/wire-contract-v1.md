@@ -2014,24 +2014,24 @@ Rows name the route principal and, for `reserved:callosum`, the opener harness. 
 is `federation.member_mapping`; phone setting is `secret.phone_mapping`. Each is On, Off or
 Unreadable (a store read that fails), so every row below covers all nine combinations.
 
-| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get |
-|---|---|---|---|---|---|---|
-| callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) |
-| callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF |
-| callosum, `fed-phone:<32 lowercase hex>` | member Off, any phone | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF |
-| callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its six federation ops, §14) | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF |
-| callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, any other `fed-` harness | member On or Unreadable | NF | NF | POR | NF | NF |
-| `reserved:aft` | any | NF | served | POR | served | served (its grants) |
-| `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) |
-| `reserved:cingulate` | any | NF | NF | served | served | served (its grants) |
-| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) |
-| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) |
+| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get | `connectors.list`, `connectors.watch` |
+|---|---|---|---|---|---|---|---|
+| callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) | POR |
+| callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF | served, unless federated scope (POR) |
+| callosum, `fed-phone:<32 lowercase hex>` | member Off, any phone | NF | NF | POR | served (§14 gate-off residual) | NF | NF |
+| callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF | PAO only for member On, phone Off; otherwise NF |
+| callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its six federation ops, §14) | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF | POR |
+| callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, any other `fed-` harness | member On or Unreadable | NF | NF | POR | NF | NF | POR |
+| `reserved:aft` | any | NF | served | POR | served | served (its grants) | POR |
+| `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) | POR |
+| `reserved:cingulate` | any | NF | NF | served | served | served (its grants) | served |
+| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) | served (development admission) |
+| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) | served (development admission) |
 
 Gates are read only on `reserved:callosum` routes; every other principal's harness is
 ignored. On a phone channel, bearer params (`handle`, `enrollment_token`) are IP even on
@@ -2039,8 +2039,15 @@ a method the channel otherwise refuses, except `permissions.list` and
 `permissions.revoke`, which are POR for every caller other than `reserved:cingulate`
 whatever their params. `secret.use` is NF for every caller other than the two senders,
 before its params are read, so a non-sender cannot learn the grammar.
-`secret_caller_gate_and_op_matrix_matches_the_wire_contract` drives every row,
-gate combination and column above through the real route dispatcher.
+`secret_caller_gate_and_op_matrix_matches_the_wire_contract` drives the existing secret,
+permission and credential columns through the real route dispatcher. The connectors
+column is driven by `connectors_admission_matrix_uses_real_binds_and_route_dispatch`.
+**PAO** is a `Response` with
+`{"result":{"error":{"code":"phone_access_off","class":"permanent"}}}`.
+For connectors, a federated scope on a phone bind is always POR, before gates.
+An `operator_app` stamp with `app: "alfonso-desktop"` admits the desktop to connectors
+only; a different app stamp or an absent/unverified principal without a stamp is POR.
+The development admission requires plain `direct` with no app stamp.
 
 The operator uses the existing `admin.challenge` / `admin.op` MAC transcript for
 permissions operations: the authenticated `op_body` is
@@ -3316,3 +3323,112 @@ Implementation of extended-scope vault readers and writers waits until an
 Existing published samples
 outside `multi-host/` stay unchanged. New numeric count boundaries require tests
 on both sides and registration in `docs/threshold-controls.txt` when implemented.
+
+## 16. Vault connectors (`connectors.list`, `connectors.watch`)
+
+Both management operations are queries. `connectors.watch` additionally declares
+`delivery: "watch"`, so Callosum relays its held subscription. Parameters for both
+are the closed empty object `{}`; admitted callers with other parameters receive
+`invalid_params` on the Error lane. Admission precedes parameter decoding.
+
+The vault provides `operator-app/v1` and reads `RouteBindPeer.operator_app` beside
+the control-plane bind. It admits the `alfonso-desktop` stamp, `reserved:cingulate`,
+and the phone route in the matrix above. The one temporary
+`unsigned_desktop_development_admission` also admits plain `direct` so unsigned
+builds work; it must be removed in the change that leaves only the desktop stamp.
+Each call using it writes one fixed, secret-free daemon log line naming that
+admission. No other operation acquires this admission or its log line.
+
+A phone bind must be `reserved:callosum`, have exactly `fed-phone:` plus 32 lowercase
+hex digits as its harness, and carry no `ScopeKind::Federated` stamp. It uses the
+same live member-mapping and phone-setting snapshot as the seven phone operations.
+With member mapping On and the phone setting Off it receives `phone_access_off`
+(permanent); other gate failures receive the phone operations' uniform NF. Every
+other non-admitted caller receives exactly the permissions-list POR refusal.
+
+### Listing
+
+`connectors.list {}` returns this envelope inside the usual `result` wrapper:
+
+```json
+{
+  "version": "<64 lowercase hex SHA-256>",
+  "watch": true,
+  "computer": "fed-computer:<32 lowercase hex>",
+  "rows": []
+}
+```
+
+`computer` is the vault's recorded federation self member, read as by `ck auth`,
+and is omitted when none is recorded. `version` hashes only the canonical rows:
+sort rows by `id`, serialize compact UTF-8 JSON with lexicographically ordered object
+keys and no whitespace, then lowercase-hex encode SHA-256 of those bytes. Token
+bytes, refresh timestamps and record versions do not enter the projection.
+
+One row is emitted for each refresh-adapter OAuth login (except `github_app`),
+cookie, static API key, and local `remote_records` login copy. Classification uses
+the decoded record's kind and adapter, never its id. Vault-held signing and KEM
+keys, opaque values, DSNs, GitHub App records, and the `module-runtime` group are
+excluded; the runtime-group filter and credential permission ids share the
+permissions-list implementation. An undecryptable quarantined record isn't listed,
+because its kind can't be read, and the operator still sees it in `ck auth list`
+and the vault's health counts.
+
+| Field | Value |
+|---|---|
+| `id`, `incarnation` | The credential id and its current incarnation. |
+| `kind` | `account` or `api_key`. |
+| `name` | Catalog display name using the existing boundary-aware id matcher, otherwise the credential id; capped at 80 characters. |
+| `category?` | `llm-provider` or `media-provider` → `ai_models`; otherwise `web-search` → `search`; otherwise `cloud-infrastructure` → `infrastructure`. Otherwise the optional login catalog category (Gmail: `communication`, model logins: `ai_models`). Unknown is absent. |
+| `status` | `{state, reason?}` as below. |
+| `setup` | Computer-only steps as below. |
+| `permissions` | Sorted `cg_…` ids of the visible permissions/v1 credential grants that reach the row by exact id or group; audience grants never reach credentials. |
+| `identity?` | Account email, otherwise organization name, as plain text; omitted above 254 UTF-8 bytes. |
+| `plan?` | `{tier, source}` from the existing effective plan, with `source` `operator` or `detected`; absent when unknown. |
+
+Status maps `active` to `ok`, `needs_reauth` to `needs_sign_in` for accounts and
+`key_refused` for API keys, `retired` to `signed_out`, and `corrupt` to `damaged`.
+Copies map their last home state the same way. Only non-`ok` rows may carry
+`reason`: the newest existing authentication-event reason code, verbatim. No
+reason is invented when there is no recorded reason.
+
+Accounts have one setup step `{step:"sign_in", state:"done"|"needed",
+where:"computer"}`, with `remedy:"sign_in_again"` only when needed. Keys use
+`step:"key"` and `remedy:"replace_key"`. The step is done exactly when status is
+`ok`. Copies also have `{step:"home", state:"done"|"needed"|"unknown",
+where:"computer"}`: unknown when never fetched, done for the last successful
+fetch (`ok`), needed otherwise. Unknown never means done.
+
+Rows carry no `description`, `can`, `usedBy`, `settings`, `counts`, payload, token,
+handle, key material or masked fragment. Reading computes stored metadata only:
+no refresh, network call, OS permission prompt or background timer is started.
+A store failure is `result.error {code:"store_error", class:"transient"}`.
+
+### Watching
+
+`connectors.watch {}` uses the same held watch registry, 64-subscription budget,
+blocking-snapshot budget, 250 ms commit-burst coalescing, cancellation, replacement,
+route teardown and drain/shutdown behavior as `auth.watch_scoped`. The first
+`StreamData` notice has `seq:1`; subsequent notices increment `seq` only if the
+projected version changes:
+
+```json
+{"kind":"changed","epoch":"<process epoch>","seq":1,"version":"<rows hash>"}
+```
+
+Notices never carry rows: read again after a changed version. Refreshes that only
+replace token bytes produce no notice; logout changes status/setup and therefore
+the version. Notices may be dropped under load. Process epochs are random and reset
+on restart.
+Drain finishes the held request with `StreamEnd`; route teardown/shutdown cancels
+publication as for `auth.watch_scoped`. Capacity/draining refusal is the same NF.
+Admission is rechecked before each watch snapshot; changing the phone setting Off
+ends an existing phone watch with the same `phone_access_off` refusal.
+
+Generated samples and their `SHA256SUMS` are in
+`crates/credentials-module/tests/vectors/connectors-v1/`. `inventory.json` includes
+an account with identity and plan, a refused key and its reason, signed-out and
+damaged accounts, a home copy, and the omission of a seeded signing key.
+`empty.json`, `watch.json`, and `phone-access-off.json` cover the other shapes.
+`CK_EMIT_CONNECTOR_VECTORS=1` regenerates them through the real route handler;
+only the random watch epoch is normalized to the sample's fixed value.

@@ -39,6 +39,8 @@ struct Registry {
 pub(crate) struct WatchHub {
     entries: Arc<Mutex<Registry>>,
     snapshots: Arc<Semaphore>,
+    #[cfg(test)]
+    pub(crate) completed: watch::Sender<u64>,
 }
 
 impl Default for WatchHub {
@@ -47,6 +49,8 @@ impl Default for WatchHub {
         Self {
             entries: Arc::default(),
             snapshots: Arc::new(Semaphore::new(MAX_WATCHES)),
+            #[cfg(test)]
+            completed: watch::channel(0).0,
         }
     }
 }
@@ -68,6 +72,15 @@ fn process_epoch() -> &'static str {
 }
 
 impl WatchHub {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, channel: u16) -> bool {
+        self.entries
+            .lock()
+            .expect("watches")
+            .entries
+            .contains_key(&channel)
+    }
+
     pub(crate) fn close_all(&self) {
         for (_, entry) in self.entries.lock().expect("watches").entries.drain() {
             entry.stop.send_replace(Stop::Silent);
@@ -133,6 +146,28 @@ impl WatchHub {
         principal: Option<Principal>,
         params: ListScopedParams,
     ) -> bool {
+        self.open_inventory(surface, writer, header, principal, Some(params), None)
+    }
+
+    pub(crate) fn open_connectors(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+        admin: Arc<crate::admin_surface::AdminSurface>,
+    ) -> bool {
+        self.open_inventory(surface, writer, header, None, None, Some(admin))
+    }
+
+    fn open_inventory(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+        principal: Option<Principal>,
+        params: Option<ListScopedParams>,
+        connector_admin: Option<Arc<crate::admin_surface::AdminSurface>>,
+    ) -> bool {
         let (stop, stopped) = watch::channel(Stop::Running);
         let (finished, done) = oneshot::channel();
         {
@@ -159,16 +194,21 @@ impl WatchHub {
         let writes = surface.subscribe_writes();
         let entries = Arc::clone(&self.entries);
         let snapshots = Arc::clone(&self.snapshots);
+        #[cfg(test)]
+        let completed = self.completed.clone();
         tokio::spawn(async move {
             let mut subscription = Subscription {
                 surface,
                 writer,
                 header,
                 principal,
-                params: Arc::new(params),
+                params: params.map(Arc::new),
+                connector_admin,
                 stopped,
                 writes,
                 snapshots,
+                #[cfg(test)]
+                completed,
             };
             let _ = subscription.run().await;
             let mut entries = entries.lock().expect("watches");
@@ -233,10 +273,13 @@ struct Subscription {
     writer: mpsc::Sender<Frame>,
     header: subc_protocol::EnvelopeHeader,
     principal: Option<Principal>,
-    params: Arc<ListScopedParams>,
+    params: Option<Arc<ListScopedParams>>,
+    connector_admin: Option<Arc<crate::admin_surface::AdminSurface>>,
     stopped: watch::Receiver<Stop>,
     writes: watch::Receiver<()>,
     snapshots: Arc<Semaphore>,
+    #[cfg(test)]
+    completed: watch::Sender<u64>,
 }
 
 async fn snapshot<T: Send + 'static>(
@@ -269,18 +312,33 @@ impl Subscription {
             let writer = self.writer.clone();
             let header = self.header;
             let principal = self.principal.clone();
-            let params = Arc::clone(&self.params);
+            let params = self.params.clone();
+            let connectors = params.is_none();
             let snapshots = Arc::clone(&self.snapshots);
+            let connector_admin = self.connector_admin.clone();
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
                 result = async {
-                    let snapshot = snapshot(snapshots, move || surface.watch_scoped(principal.as_ref(), &params)).await;
+                    if let Some(admin) = connector_admin {
+                        if !crate::connectors::admit(header, &writer, &admin, false).await? {
+                            return Ok(false);
+                        }
+                    }
+                    let snapshot = snapshot(snapshots, move || match params {
+                        Some(params) => surface.watch_scoped(principal.as_ref(), &params),
+                        None => crate::connectors::list(surface.store()).map(|reply| (reply["version"].as_str().expect("version").to_owned(), String::new())),
+                    }).await;
                     match snapshot {
                         Ok(values) => {
                             if last.as_ref() != Some(&values) {
                                 seq += 1;
-                                let body = serde_json::to_vec(&json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "view":values.0, "keys":values.1})).map_err(ModuleError::Json)?;
+                                let notice = if connectors {
+                                    json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "version":values.0})
+                                } else {
+                                    json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "view":values.0, "keys":values.1})
+                                };
+                                let body = serde_json::to_vec(&notice).map_err(ModuleError::Json)?;
                                 emit(&writer, header, FrameType::StreamData, body).await?;
                                 last = Some(values);
                             }
@@ -298,6 +356,8 @@ impl Subscription {
                     }
                 } => { if !result? { return Ok(()); } }
             }
+            #[cfg(test)]
+            self.completed.send_modify(|count| *count += 1);
             tokio::select! {
                 biased;
                 _ = self.stopped.changed() => break,

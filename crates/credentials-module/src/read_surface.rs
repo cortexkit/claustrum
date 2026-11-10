@@ -135,6 +135,12 @@ pub struct EnrollProposeParams {
         deserialize_with = "credentials_core::display_name::deserialize_optional_display_name"
     )]
     pub display_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "credentials_core::enrollment::deserialize_optional_requested_grants"
+    )]
+    pub requested_grants: Option<Vec<credentials_core::enrollment::RequestedGrant>>,
 }
 
 /// Exact parameters for `auth.enroll_poll`. The request secret is the only resumption
@@ -1430,12 +1436,15 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &EnrollProposeParams,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.engine.store().propose_enrollment_with_display_name_by(
-            Self::observed_principal(principal),
-            &params.proposed_name,
-            &params.request_secret_hash,
-            params.display_name.as_deref(),
-        )
+        self.engine
+            .store()
+            .propose_enrollment_with_requested_grants_by(
+                Self::observed_principal(principal),
+                &params.proposed_name,
+                &params.request_secret_hash,
+                params.display_name.as_deref(),
+                params.requested_grants.as_deref(),
+            )
     }
 
     pub fn enroll_poll(

@@ -524,3 +524,38 @@ async fn permissions_credential_grants_reach_changes_without_changing_identity_o
     expected["scope_label"] = json!("can read the secrets of 2 credentials in this group");
     assert_eq!(row(&after), expected);
 }
+
+#[tokio::test]
+async fn enrollment_requested_grants_appear_as_ordinary_enrolled_permission_rows() {
+    let (surface, admin, store) = cp_rig(151);
+    let grants = serde_json::from_value::<Vec<credentials_core::enrollment::RequestedGrant>>(json!([
+        {"selector":{"exact":CP_LONG_ID},"operation":"read"},
+        {"selector":{"category":"llm-provider"},"operation":"list"}
+    ])).unwrap();
+    let request = store
+        .propose_enrollment_with_requested_grants_by(
+            None, "one-step-plugin", &"a".repeat(64), None, Some(&grants),
+        )
+        .unwrap();
+    store
+        .approve_enrollment_with_requested_grants(
+            &request.request_id, "one-step-plugin", false, None, true, "operator",
+        )
+        .unwrap();
+    let reply = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+    let body: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    let rows: Vec<_> = body["result"]["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["holder"]["name"] == "one-step-plugin")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for grant in grants {
+        let (kind, selector) = grant.selector.parts();
+        let id = cp_id("enrolled", "one-step-plugin", kind, selector, grant.operation);
+        let row = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["holder"], json!({"kind":"enrolled","name":"one-step-plugin"}));
+        assert_eq!(row["scope"], grant.operation.as_str());
+    }
+}

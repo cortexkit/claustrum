@@ -108,6 +108,9 @@ pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
 /// The migration that records proposed and approved enrollment display names.
 pub const ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION: u32 = 34;
 
+/// The migration that records the immutable permissions proposed for enrollment.
+pub const ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION: u32 = 40;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -1068,6 +1071,10 @@ const MIGRATIONS: &[Migration] = &[
                      DEFAULT 'operator' CHECK (source IN ('operator', 'home_watch')); \
                      ALTER TABLE remote_records ADD COLUMN home_pairing_id TEXT \
                      CHECK ((source = 'home_watch') = (home_pairing_id IS NOT NULL));",
+    },
+    Migration {
+        version: ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION,
+        statements: "ALTER TABLE pending_enrollments ADD COLUMN requested_grants_json TEXT;",
     },
 ];
 
@@ -2653,12 +2660,31 @@ impl EncryptedStore {
         request_secret_hash: &str,
         display_name: Option<&str>,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.propose_enrollment_with_requested_grants_by(
+            principal,
+            proposed_name,
+            request_secret_hash,
+            display_name,
+            None,
+        )
+    }
+
+    /// The first proposal fixes the permissions the operator will review, even on retry.
+    pub fn propose_enrollment_with_requested_grants_by(
+        &self,
+        principal: Option<AuthEventPrincipal<'_>>,
+        proposed_name: &str,
+        request_secret_hash: &str,
+        display_name: Option<&str>,
+        requested_grants: Option<&[crate::enrollment::RequestedGrant]>,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
         self.propose_enrollment_inner(
             proposed_name,
             request_secret_hash,
             now_ms(),
             principal,
             display_name,
+            requested_grants,
         )
     }
 
@@ -2671,7 +2697,14 @@ impl EncryptedStore {
         proposed_name: &str,
         request_secret_hash: &str,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), None, None)
+        self.propose_enrollment_inner(
+            proposed_name,
+            request_secret_hash,
+            now_ms(),
+            None,
+            None,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -2681,7 +2714,7 @@ impl EncryptedStore {
         request_secret_hash: &str,
         now: i64,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_inner(proposed_name, request_secret_hash, now, None, None)
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now, None, None, None)
     }
 
     fn propose_enrollment_inner(
@@ -2691,7 +2724,16 @@ impl EncryptedStore {
         now: i64,
         principal: Option<AuthEventPrincipal<'_>>,
         display_name: Option<&str>,
+        requested_grants: Option<&[crate::enrollment::RequestedGrant]>,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
+        if let Some(grants) = requested_grants {
+            validate_requested_grants(grants)
+                .map_err(|_| EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
+        }
+        let requested_grants_json = requested_grants
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StoreOpError::Store(error.to_string()))?;
         let display_name = display_name
             .map(crate::display_name::validate_display_name)
             .transpose()
@@ -2787,8 +2829,8 @@ impl EncryptedStore {
                     "INSERT INTO pending_enrollments \
                  (request_id, proposed_name, final_name, enrollment_id, request_secret_hash, \
                   state, approved_by, approved_at_ms, created_at_ms, expires_at_ms, \
-                  proposer_kind, proposer_id, display_name) \
-                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5, ?6, ?7, ?8)",
+                   proposer_kind, proposer_id, display_name, requested_grants_json) \
+                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9)",
                     rusqlite::params![
                         request_id,
                         proposed_name,
@@ -2798,6 +2840,7 @@ impl EncryptedStore {
                         principal.map(AuthEventPrincipal::kind),
                         principal.and_then(AuthEventPrincipal::id),
                         display_name,
+                        requested_grants_json,
                     ],
                 )?;
                 append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now, principal)?;
@@ -3233,6 +3276,26 @@ impl EncryptedStore {
         display_name: Option<&str>,
         actor: &str,
     ) -> Result<(String, Option<String>), StoreOpError> {
+        self.approve_enrollment_with_requested_grants(
+            request_id,
+            final_name,
+            keep_grants,
+            display_name,
+            false,
+            actor,
+        )
+    }
+
+    /// Approve and, only on explicit operator consent, apply the stored permissions.
+    pub fn approve_enrollment_with_requested_grants(
+        &self,
+        request_id: &str,
+        final_name: &str,
+        keep_grants: bool,
+        display_name: Option<&str>,
+        grant_requested: bool,
+        actor: &str,
+    ) -> Result<(String, Option<String>), StoreOpError> {
         let display_name = display_name
             .map(crate::display_name::validate_display_name)
             .transpose()
@@ -3246,12 +3309,12 @@ impl EncryptedStore {
         self.fenced_write(|tx| {
             let state = tx
                 .query_row(
-                    "SELECT state, expires_at_ms, display_name FROM pending_enrollments WHERE request_id = ?1",
+                    "SELECT state, expires_at_ms, display_name, requested_grants_json FROM pending_enrollments WHERE request_id = ?1",
                     [request_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),
                 )
                 .optional()?;
-            let Some((state, expires_at_ms, proposed_display_name)) = state else {
+            let Some((state, expires_at_ms, proposed_display_name, requested_grants_json)) = state else {
                 return Ok(Ok(None));
             };
             if state != "pending" || expires_at_ms <= now {
@@ -3287,6 +3350,11 @@ impl EncryptedStore {
                     name: final_name.to_string(),
                 }));
             }
+            let grants = if grant_requested {
+                requested_grants_json.as_deref().map(decode_requested_grants).transpose()?
+            } else {
+                None
+            };
             let approved_display_name = display_name.clone().or(proposed_display_name);
             tx.execute(
                 "INSERT INTO enrolled_consumers \
@@ -3311,6 +3379,13 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
+            for grant in grants.iter().flatten() {
+                let (kind, selector) = grant.selector.parts();
+                create_read_grant_audited_tx(
+                    tx, &audit_key, "enrolled", final_name, kind, selector, grant.operation, now,
+                    AuditCtx::route_admin(AuditOp::GrantCreate, actor),
+                )?;
+            }
             Ok(Ok(Some((enrollment_id.clone(), approved_display_name))))
         })
         .map_err(StoreOpError::from)??
@@ -3576,84 +3651,26 @@ impl EncryptedStore {
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        selector_kind
-            .validate_operation(operation)
-            .map_err(StoreOpError::Store)?;
-        // The transfer key's one admissible grant is checked before every other grant
-        // rule, so an id under its prefix is refused by that name rather than by
-        // whichever unrelated rule it happens to trip first.
-        if matches!(selector_kind, SelectorKind::Exact) {
-            if crate::agent_secret::is_deposit_key(selector) {
-                return Err(StoreOpError::NotFound);
-            }
-            crate::federation::transfer_key_admits_grant(
-                selector,
-                &format!("{principal_kind}:{principal_id}"),
-                operation,
-            )
-            .map_err(|_| StoreOpError::TransferKeyReserved)?;
-        }
-        // An enrolled name outside the approval grammar could never be held, so a grant
-        // to it is unusable. Only creation checks this: revocation keeps the wider rule
-        // so grants created before this check can still be removed.
-        if !matches!(principal_kind, "reserved" | "enrolled")
-            || principal_id.is_empty()
-            || principal_id.contains('|')
-            || (principal_kind == "enrolled"
-                && !crate::enrollment::valid_enrollment_name(principal_id))
-        {
-            return Err(StoreOpError::InvalidPrincipal);
-        }
-        if operation == GrantOperation::Deposit
-            && (principal_kind != "reserved"
-                || selector_kind != SelectorKind::Category
-                || selector != "browser-session")
-        {
-            return Err(StoreOpError::InvalidDepositGrant);
-        }
-        if selector.is_empty() {
-            return Err(StoreOpError::InvalidCategoryName);
-        }
-        if selector_kind == SelectorKind::Category && !crate::catalog::valid_category_name(selector)
-        {
-            return Err(StoreOpError::InvalidCategoryName);
-        }
+        validate_read_grant(
+            principal_kind,
+            principal_id,
+            selector_kind,
+            selector,
+            operation,
+        )?;
         let now = now_ms();
-        let audit_key = self.audit_key.clone();
-        let audit_target = format!(
-            "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
-            operation.as_str(),
-            selector_kind.as_str()
-        );
         let changed = self.fenced_write(|tx| {
-            let changed = tx.execute(
-                "INSERT INTO read_grants \
-                 (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
-                rusqlite::params![
-                    principal_kind,
-                    principal_id,
-                    selector_kind.as_str(),
-                    selector,
-                    operation.as_str(),
-                    now
-                ],
-            )?;
-            if changed > 0 {
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: ctx.op,
-                        credential_id: Some(audit_target.clone()),
-                        payload_hash: None,
-                        actor: ctx.actor.to_string(),
-                        alarm: ctx.alarm,
-                    },
-                )?;
-                bump_grants_generation_tx(tx)?;
-            }
-            Ok(changed)
+            create_read_grant_audited_tx(
+                tx,
+                &self.audit_key,
+                principal_kind,
+                principal_id,
+                selector_kind,
+                selector,
+                operation,
+                now,
+                ctx,
+            )
         })?;
         if changed == 0 {
             return Err(StoreOpError::AlreadyExists);
@@ -7933,6 +7950,136 @@ fn read_schema_version(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
     Ok(version.unwrap_or(0).max(0) as u32)
 }
 
+fn validate_read_grant(
+    principal_kind: &str,
+    principal_id: &str,
+    selector_kind: SelectorKind,
+    selector: &str,
+    operation: GrantOperation,
+) -> Result<(), StoreOpError> {
+    selector_kind
+        .validate_operation(operation)
+        .map_err(StoreOpError::Store)?;
+    // The transfer key's one admissible grant is checked before every other grant
+    // rule, so an id under its prefix is refused by that name rather than by
+    // whichever unrelated rule it happens to trip first.
+    if selector_kind == SelectorKind::Exact {
+        if crate::agent_secret::is_deposit_key(selector) {
+            return Err(StoreOpError::NotFound);
+        }
+        crate::federation::transfer_key_admits_grant(
+            selector,
+            &format!("{principal_kind}:{principal_id}"),
+            operation,
+        )
+        .map_err(|_| StoreOpError::TransferKeyReserved)?;
+    }
+    // An enrolled name outside the approval grammar could never be held, so a grant
+    // to it is unusable. Only creation checks this: revocation keeps the wider rule
+    // so grants created before this check can still be removed.
+    if !matches!(principal_kind, "reserved" | "enrolled")
+        || principal_id.is_empty()
+        || principal_id.contains('|')
+        || (principal_kind == "enrolled" && !valid_enrollment_name(principal_id))
+    {
+        return Err(StoreOpError::InvalidPrincipal);
+    }
+    if operation == GrantOperation::Deposit
+        && (principal_kind != "reserved"
+            || selector_kind != SelectorKind::Category
+            || selector != "browser-session")
+    {
+        return Err(StoreOpError::InvalidDepositGrant);
+    }
+    if selector.is_empty()
+        || (selector_kind == SelectorKind::Category
+            && !crate::catalog::valid_category_name(selector))
+    {
+        return Err(StoreOpError::InvalidCategoryName);
+    }
+    Ok(())
+}
+
+fn decode_requested_grants(json: &str) -> rusqlite::Result<Vec<crate::enrollment::RequestedGrant>> {
+    let grants: Vec<crate::enrollment::RequestedGrant> =
+        serde_json::from_str(json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    validate_requested_grants(&grants).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(grants)
+}
+
+fn validate_requested_grants(
+    grants: &[crate::enrollment::RequestedGrant],
+) -> Result<(), StoreOpError> {
+    if grants.is_empty()
+        || grants.len() > crate::enrollment::REQUESTED_GRANTS_LIMIT
+        || grants.iter().collect::<BTreeSet<_>>().len() != grants.len()
+    {
+        return Err(StoreOpError::InvalidCategoryName);
+    }
+    for grant in grants {
+        if !matches!(grant.operation, GrantOperation::Read | GrantOperation::List) {
+            return Err(StoreOpError::InvalidCategoryName);
+        }
+        let (kind, selector) = grant.selector.parts();
+        validate_read_grant("enrolled", "proposal", kind, selector, grant.operation)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_read_grant_audited_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    principal_kind: &str,
+    principal_id: &str,
+    selector_kind: SelectorKind,
+    selector: &str,
+    operation: GrantOperation,
+    now: i64,
+    ctx: AuditCtx<'_>,
+) -> rusqlite::Result<usize> {
+    let changed = tx.execute(
+        "INSERT INTO read_grants \
+         (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+        rusqlite::params![
+            principal_kind,
+            principal_id,
+            selector_kind.as_str(),
+            selector,
+            operation.as_str(),
+            now
+        ],
+    )?;
+    if changed > 0 {
+        append_audit_tx(
+            tx,
+            audit_key,
+            &AuditRecord {
+                op: ctx.op,
+                credential_id: Some(format!(
+                    "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
+                    operation.as_str(),
+                    selector_kind.as_str()
+                )),
+                payload_hash: None,
+                actor: ctx.actor.to_string(),
+                alarm: ctx.alarm,
+            },
+        )?;
+        bump_grants_generation_tx(tx)?;
+    }
+    Ok(changed)
+}
+
 /// Advance the store-wide grant generation inside the caller's own transaction.
 ///
 /// Grant and category mutations change what a principal reaches, and a consumer
@@ -8306,6 +8453,8 @@ pub struct EnrollmentRow {
     pub name: String,
     /// Proposed on a pending request, approved on a live enrollment; absent before migration 34.
     pub display_name: Option<String>,
+    /// Immutable proposal-time permissions; absent on live rows and before migration 40.
+    pub requested_grants: Option<Vec<crate::enrollment::RequestedGrant>>,
     pub state: String,
     pub created_at_ms: i64,
     pub token_generation: i64,
@@ -8368,9 +8517,14 @@ pub fn list_enrollments_read_only_with_schema(
     } else {
         "NULL"
     };
+    let requested_grants_column = if schema_version >= ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION {
+        "requested_grants_json"
+    } else {
+        "NULL"
+    };
     let mut pending = conn
         .prepare(&format!(
-            "SELECT request_id, proposed_name, state, created_at_ms, {proposer_columns}, {display_name_column} \
+            "SELECT request_id, proposed_name, state, created_at_ms, {proposer_columns}, {display_name_column}, {requested_grants_column} \
              FROM pending_enrollments WHERE state = 'pending' ORDER BY created_at_ms"
         ))
         .map_err(map)?;
@@ -8385,6 +8539,11 @@ pub fn list_enrollments_read_only_with_schema(
                 proposer_kind: row.get(4)?,
                 proposer_id: row.get(5)?,
                 display_name: row.get(6)?,
+                requested_grants: row
+                    .get::<_, Option<String>>(7)?
+                    .as_deref()
+                    .map(decode_requested_grants)
+                    .transpose()?,
             })
         })
         .map_err(map)?;
@@ -8417,6 +8576,7 @@ pub fn list_enrollments_read_only_with_schema(
                 proposer_kind: None,
                 proposer_id: None,
                 display_name: row.get(4)?,
+                requested_grants: None,
             })
         })
         .map_err(map)?;

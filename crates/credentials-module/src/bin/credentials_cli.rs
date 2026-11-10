@@ -563,7 +563,12 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
-        "enroll" => &["--keep-grants", "--clear"],
+        "enroll" => &[
+            "--keep-grants",
+            "--clear",
+            "--grant-requested",
+            "--no-grants",
+        ],
         _ => &[],
     };
     let mut options = ParsedOptions::default();
@@ -972,6 +977,7 @@ fn help_verb(verb: &str) -> String {
         "enroll" => {
             "ck auth enroll list\n\
              \x20             approve --request-id <id> [--name <name>] [--keep-grants]\n\
+             \x20                     [--grant-requested | --no-grants]\n\
              \x20                     [--display-name <text>]\n\
              \x20             label --name <name> (--display-name <text> | --clear)\n\
              \x20             deny --request-id <id>\n\
@@ -983,6 +989,8 @@ fn help_verb(verb: &str) -> String {
              \x20 --display-name <text>         set or replace the display name\n\
              \x20 --clear                       clear an approved label (label only)\n\
              \x20 --keep-grants                 explicitly inherit existing name grants\n\
+             \x20 --grant-requested             approve with the stored requested grants\n\
+             \x20 --no-grants                   approve without the requested grants\n\
              \n\
              NOTES\n\
              The operator half of consumer enrollment. A consumer proposes a name over the\n\
@@ -5936,6 +5944,11 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "--keep-grants is only valid for enroll approve".into(),
         ));
     }
+    if sub != "approve" && (has_flag(rest, "--grant-requested") || has_flag(rest, "--no-grants")) {
+        return Err(CliError::Usage(
+            "--grant-requested and --no-grants are only valid for enroll approve".into(),
+        ));
+    }
     if sub != "approve" && sub != "label" && optional(rest, "--display-name").is_some() {
         return Err(CliError::Usage(
             "--display-name is only valid for enroll approve or label".into(),
@@ -5985,6 +5998,13 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "approve" => {
+            let grant_requested = has_flag(rest, "--grant-requested");
+            let no_grants = has_flag(rest, "--no-grants");
+            if grant_requested && no_grants {
+                return Err(CliError::Usage(
+                    "--grant-requested and --no-grants are mutually exclusive".into(),
+                ));
+            }
             let request_id = required(rest, "--request-id")?;
             let display_name = optional(rest, "--display-name")
                 .map(|name| {
@@ -5999,6 +6019,39 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             let keep_grants = has_flag(rest, "--keep-grants");
             let rows = credentials_core::store::list_enrollments_read_only(&store_path(global))
                 .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+            let requested = rows
+                .iter()
+                .find(|row| row.key == request_id && row.state == "pending")
+                .and_then(|row| row.requested_grants.as_deref());
+            let grant_requested = if let Some(grants) = requested {
+                print_requested_grants(global, &request_id, grants)?;
+                if grant_requested || no_grants {
+                    grant_requested
+                } else {
+                    use std::io::IsTerminal;
+                    if !std::io::stdin().is_terminal() {
+                        return Err(CliError::Usage(
+                            "this request carries grants; pass --grant-requested or --no-grants"
+                                .into(),
+                        ));
+                    }
+                    eprint!("Approve and grant these? [y/N] ");
+                    std::io::Write::flush(&mut std::io::stderr())
+                        .map_err(|error| CliError::Usage(error.to_string()))?;
+                    let mut answer = String::new();
+                    std::io::stdin()
+                        .read_line(&mut answer)
+                        .map_err(|error| CliError::Usage(error.to_string()))?;
+                    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                        return Err(CliError::Usage(
+                            "approval cancelled; nothing changed".into(),
+                        ));
+                    }
+                    true
+                }
+            } else {
+                false
+            };
             if !live_enrollment_named(&rows, &final_name) {
                 let grants =
                     credentials_core::store::list_read_grants_read_only(&store_path(global))
@@ -6032,6 +6085,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                     final_name: final_name.clone(),
                     keep_grants,
                     display_name,
+                    grant_requested,
                 },
             )?;
             println!("approved {request_id} as enrolled:{final_name}");
@@ -6132,7 +6186,38 @@ fn cmd_enroll_list(global: &GlobalArgs) -> Result<(), CliError> {
     for line in render_enroll_list(&rows) {
         println!("{line}");
     }
+    for row in &rows {
+        if let Some(grants) = &row.requested_grants {
+            print_requested_grants(global, &row.key, grants)?;
+        }
+    }
     print_enroll_store_behind_note(schema);
+    Ok(())
+}
+
+fn print_requested_grants(
+    global: &GlobalArgs,
+    request_id: &str,
+    grants: &[credentials_core::enrollment::RequestedGrant],
+) -> Result<(), CliError> {
+    let (status, _) = request_admin_status_with_schema(global)?;
+    println!("requested grants for {request_id}:");
+    for grant in grants {
+        let (kind, selector) = grant.selector.parts();
+        println!(
+            "  {} {}:{}",
+            grant.operation.as_str(),
+            kind.as_str(),
+            selector.escape_debug()
+        );
+        let report = render_grant_reach(&status, kind, selector, grant.operation);
+        for line in report.stdout {
+            println!("{line}");
+        }
+        for line in report.stderr {
+            eprintln!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -7365,6 +7450,7 @@ mod tests {
             key: key.to_string(),
             name: name.to_string(),
             display_name: None,
+            requested_grants: None,
             state: state.to_string(),
             created_at_ms: 0,
             token_generation: generation,

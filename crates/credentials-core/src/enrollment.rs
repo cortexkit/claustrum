@@ -106,6 +106,41 @@ pub struct EnrollmentProposal {
     pub request_id: String,
 }
 
+/// An inert permission request. Only operator approval can turn it into a grant.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestedGrant {
+    pub selector: RequestedGrantSelector,
+    pub operation: crate::store::GrantOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestedGrantSelector {
+    Category(String),
+    Exact(String),
+}
+
+impl RequestedGrantSelector {
+    pub fn parts(&self) -> (crate::store::SelectorKind, &str) {
+        match self {
+            Self::Category(value) => (crate::store::SelectorKind::Category, value),
+            Self::Exact(value) => (crate::store::SelectorKind::Exact, value),
+        }
+    }
+}
+
+pub const REQUESTED_GRANTS_LIMIT: usize = 4;
+
+pub fn deserialize_optional_requested_grants<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<RequestedGrant>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Vec<RequestedGrant> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 /// A successful poll is one of the three states a consumer may continue from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]

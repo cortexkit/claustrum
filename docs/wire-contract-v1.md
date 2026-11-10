@@ -347,6 +347,17 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
    bidi controls (U+061C, U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), and
    zero-width characters (U+200B–U+200D, U+FEFF), with `invalid_params`; it never
    truncates. An older vault refuses this field as `invalid_params`.
+   Optional `requested_grants` is a nonempty array of at most four entries, each
+   `{"selector":{"category":"llm-provider"},"operation":"read"}` or
+   `{"selector":{"exact":"apikey:zai"},"operation":"list"}`. Only `read`
+   and `list` are accepted; selectors use the ordinary store grant validation.
+   An empty array, duplicates (same selector and operation), more than four entries,
+   any other operation, malformed selectors, unknown entry fields, or a non-array
+   (including null) refuses as `invalid_params` / `permanent`, with no stored request.
+   Omission retains the original enrollment-only ceremony. Older vaults refuse the
+   field as `invalid_params`; clients must explicitly choose whether to retry without
+   it, since that refusal also identifies malformed grants. A resumed proposal keeps
+   the first request's list and display name; it cannot widen or remove either.
 2. **Wait.** An operator approves with the master key (`ck auth enroll approve`).
    `ck auth enroll list` shows the proposed display name. Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
    a name it does not hold from collecting a token even if approval is granted by mistake.
@@ -372,6 +383,29 @@ Without an override, approval keeps the proposed label. Without either, it store
 no label. The CLI prints the approved label. Only an approved label is stored on
 the enrollment; token rotation preserves it, revocation removes it, and reusing
 the enrollment name does not inherit it.
+
+Optional `grant_requested:true` on `admin.enroll_approve` applies **only the list
+stored with the pending request** to `enrolled:<final_name>`. It defaults to false
+when omitted, preserving older CLI behavior; the approve body never accepts a new
+grant list. Enrollment, ordinary grants, grant-generation changes, and the same
+audit rows as `ck auth grant` commit in one transaction, checked against the store's
+current writer lease so a superseded writer cannot approve. The grant-generation
+counter tells permission readers that grants changed. A grant or audit failure rolls
+all of them back. `keep_grants` remains independent consent
+to inherit any existing name-bound grants. Created grants appear normally in
+`ck auth grants` and `permissions.list` with an enrolled holder.
+
+`ck auth enroll list` and approval show the stored requested grants and their current
+reach (the number of matching credentials) before consent, including exact credential
+ids. A zero-reach warning means no credential matches now, not that approval is invalid. With
+requested grants, interactive approval asks `Approve and grant these? [y/N]` unless
+an explicit choice is supplied. Non-terminal approval requires `--grant-requested`
+or `--no-grants`; combining them refuses. `--no-grants` approves only the enrollment.
+Without a requested list, approval behaves as before. Additive proposal and approve
+request bytes are pinned by `enrollment_requested_grants_wire_golden`; malformed
+grant refusals and the four/five-entry boundary are exercised by
+`enrollment_requested_grants_validates_shapes_and_four_entry_boundary` against the
+same `invalid_params` envelope pinned in the enrollment wire fixture.
 
 **Operator labeling.** The master-key-authenticated `admin.op` body
 `{"op":"admin.enroll_label","v":2,"name":"consumer","display_name":"My plugin"}`

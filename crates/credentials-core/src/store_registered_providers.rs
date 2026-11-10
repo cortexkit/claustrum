@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(store.list_meta().unwrap(), meta);
         assert_eq!(store.read_audit(None).unwrap(), audit);
         assert!(store.registered_providers().unwrap().is_empty());
-        assert_eq!(newest_migration_version(), 39);
+        assert_eq!(newest_migration_version(), 40);
     }
 
     #[test]

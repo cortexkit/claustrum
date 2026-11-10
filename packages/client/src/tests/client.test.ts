@@ -142,6 +142,37 @@ describe('ClaustrumClient', () => {
     } finally { client.close() }
   })
 
+  test('enrollPropose sends requested_grants only when requestedGrants is given', async () => {
+    const daemon = new FakeDaemon(Array.from({ length: 3 }, () => ({ result: { request_id: 'request-id' } })))
+    const client = await ClaustrumClient.connect({ connector: async () => daemon as never })
+    try {
+      const input = { name: 'consumer', requestSecretHash: 'a'.repeat(64) }
+      const requestedGrants = [
+        { selector: { category: 'llm-provider' }, operation: 'read' as const },
+        { selector: { exact: 'apikey:zai' }, operation: 'list' as const },
+      ]
+      await client.enrollPropose(input)
+      await client.enrollPropose({ ...input, requestedGrants: undefined })
+      await client.enrollPropose({ ...input, requestedGrants, displayName: 'Pi' })
+      const legacy = { proposed_name: 'consumer', request_secret_hash: 'a'.repeat(64) }
+      expect(daemon.calls.map(call => call.params)).toEqual([
+        legacy, legacy, { ...legacy, display_name: 'Pi', requested_grants: requestedGrants },
+      ])
+    } finally { client.close() }
+  })
+
+  test('an older vault refusing requested_grants surfaces invalid_params without retry', async () => {
+    const daemon = new FakeDaemon([{ result: { error: { code: 'invalid_params', class: 'permanent' } } }])
+    const client = await ClaustrumClient.connect({ connector: async () => daemon as never })
+    try {
+      expect(await rejectionOf(client.enrollPropose({
+        name: 'consumer', requestSecretHash: 'a'.repeat(64),
+        requestedGrants: [{ selector: { category: 'llm-provider' }, operation: 'read' }],
+      }))).toMatchObject({ code: 'invalid_params', class: 'permanent' })
+      expect(daemon.calls).toHaveLength(1)
+    } finally { client.close() }
+  })
+
   test('SUBC_CONNECTION_FILE is exclusive even when missing', async () => {
     const runtimeFile = await tempPath('subc-connection.json')
     await writeFile(runtimeFile, '{}')

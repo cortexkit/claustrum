@@ -9361,6 +9361,7 @@ mod tests {
                 proposed_name: "consumer".into(),
                 request_secret_hash: "0".repeat(64),
                 display_name: None,
+                requested_grants: None,
             })
             .unwrap(),
             operation(OP_ENROLL_PROPOSE)["request"]
@@ -10431,6 +10432,7 @@ mod tests {
             proposed_name: "consumer".into(),
             request_secret_hash: "a".repeat(64),
             display_name: Some("Claude sign-in for Pi".into()),
+            requested_grants: None,
         };
         let proposed = enrollment_route_frame(
             &surface,
@@ -10448,6 +10450,7 @@ mod tests {
             final_name: "consumer".into(),
             display_name: Some("Approved Pi label".into()),
             keep_grants: false,
+            grant_requested: false,
         };
         let approval_bytes = String::from_utf8(op.to_bytes().unwrap()).unwrap();
         if let AdminOpBody::EnrollApprove { request_id: id, .. } = &mut op {
@@ -10652,6 +10655,149 @@ mod tests {
         .await;
         assert_enrollment_refusal(&old_token, "not_found", "permanent");
         assert_eq!(old_token.body, unknown.body);
+    }
+
+    #[tokio::test]
+    async fn enrollment_requested_grants_validates_shapes_and_four_entry_boundary() {
+        let (surface, admin, store) = deposit_cookie_rig(116);
+        let valid = json!([
+            {"selector":{"category":"llm-provider"},"operation":"read"},
+            {"selector":{"category":"llm-provider"},"operation":"list"},
+            {"selector":{"exact":"apikey:zai"},"operation":"read"},
+            {"selector":{"exact":"apikey:zai"},"operation":"list"}
+        ]);
+        let mut too_many = valid.as_array().unwrap().clone();
+        too_many.push(json!({"selector":{"exact":"apikey:other"},"operation":"read"}));
+        for invalid in [
+            json!([]),
+            json!(null),
+            json!({}),
+            json!(too_many),
+            json!([valid[0].clone(), valid[0].clone()]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"sign"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"open"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"deposit"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"seal"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"account_token"}]),
+            json!([{"selector":{"category":"bad category"},"operation":"read"}]),
+            json!([{"selector":{"exact":""},"operation":"read"}]),
+            json!([{"selector":{"audience":"provider"},"operation":"read"}]),
+            json!([{"selector":{"category":"llm-provider","exact":"apikey:zai"},"operation":"read"}]),
+            json!([{"selector":{},"operation":"read"}]),
+            json!([{"selector":{"exact":7},"operation":"read"}]),
+            json!([{"selector":{"exact":"apikey:zai"},"operation":"read","extra":true}]),
+        ] {
+            let before = store.audit_tip().unwrap();
+            let frame = enrollment_route_frame(&surface, &admin, OP_ENROLL_PROPOSE, json!({
+                "proposed_name":"consumer", "request_secret_hash":"a".repeat(64), "requested_grants":invalid,
+            })).await;
+            assert_enrollment_refusal(&frame, "invalid_params", "permanent");
+            assert_eq!(store.audit_tip().unwrap(), before);
+            assert_eq!(
+                store
+                    .with_raw_conn(|conn| conn.query_row(
+                        "SELECT COUNT(*) FROM pending_enrollments",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    ))
+                    .unwrap(),
+                0
+            );
+        }
+        let params: EnrollProposeParams = serde_json::from_value(json!({
+            "proposed_name":"consumer", "request_secret_hash":"a".repeat(64), "requested_grants":valid,
+        })).unwrap();
+        let frame = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            serde_json::to_value(&params).unwrap(),
+        )
+        .await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let body: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        assert!(body["result"]["request_id"].is_string(), "{body}");
+        let stored: String = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT requested_grants_json FROM pending_enrollments",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+            valid
+        );
+    }
+
+    #[tokio::test]
+    async fn enrollment_requested_grants_wire_golden() {
+        use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (surface, admin, _store) = scoped_rig(116);
+        let params: EnrollProposeParams = serde_json::from_value(json!({
+            "proposed_name":"consumer", "request_secret_hash":"a".repeat(64),
+            "requested_grants":[{"selector":{"category":"llm-provider"},"operation":"read"}],
+        }))
+        .unwrap();
+        let frame = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            serde_json::to_value(&params).unwrap(),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        assert!(body["result"]["request_id"].is_string(), "{body}");
+        let op = AdminOpBody::EnrollApprove {
+            v: ADMIN_OP_SCHEMA_V2,
+            request_id: "request-id".into(),
+            final_name: "consumer".into(),
+            display_name: None,
+            keep_grants: false,
+            grant_requested: true,
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/enrollment_wire_contract.json");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (operation, actual) in [
+            (OP_ENROLL_PROPOSE, serde_json::to_string(&params).unwrap()),
+            (
+                "admin.enroll_approve",
+                String::from_utf8(op.to_bytes().unwrap()).unwrap(),
+            ),
+        ] {
+            let key = "requested_grants_request";
+            let row = fixture["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["op"] == operation)
+                .unwrap();
+            if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+                let replacement = format!("      \"{key}\": {},", json!(actual));
+                if let Some(old) = row.get(key) {
+                    let old_line = format!("      \"{key}\": {old},");
+                    assert_eq!(text.matches(&old_line).count(), 1);
+                    text = text.replacen(&old_line, &replacement, 1);
+                } else {
+                    let anchor = format!("      \"op\": \"{operation}\",");
+                    let start = text.find("\"operations\":").unwrap();
+                    let offset = start + text[start..].find(&anchor).unwrap() + anchor.len();
+                    text.insert_str(offset, &format!("\n{replacement}"));
+                }
+            } else {
+                assert_eq!(
+                    row[key], actual,
+                    "regenerate with UPDATE_ENROLLMENT_WIRE_FIXTURE=1"
+                );
+            }
+        }
+        if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+            std::fs::write(path, text).unwrap();
+        }
     }
 
     #[test]
@@ -17824,6 +17970,7 @@ mod tests {
                     proposed_name: "attributed-consumer".into(),
                     request_secret_hash: secret_hash,
                     display_name: None,
+                    requested_grants: None,
                 },
             )
             .expect("propose");

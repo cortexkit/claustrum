@@ -403,6 +403,9 @@ pub enum Reply {
     /// target of a route (callosum answering `paired_devices_read`, say) refuses a
     /// request it received.
     RouteRefusal(String),
+    /// Send a subscription error on its route or on channel zero, retaining the
+    /// supplied body so tests can check structured terminal details.
+    SubscriptionError { channel_zero: bool, body: Value },
     /// Compute the reply from the request's params, on a task of its own. This is how
     /// a test puts a real home vault behind the stand-in: the handler calls the home
     /// and returns what it answered, so the requester's fetch crosses a real route.
@@ -1308,6 +1311,22 @@ async fn serve_one(
                     frame.header.corr,
                     &code,
                 );
+                let _ = write_frame(&mut *writer.lock().await, &reply).await;
+            }
+            Reply::SubscriptionError { channel_zero, body } => {
+                let reply = Frame::build(
+                    FrameType::Error,
+                    Flags::new(false, Priority::Interactive, false),
+                    if channel_zero {
+                        0
+                    } else {
+                        frame.header.channel
+                    },
+                    if channel_zero { 0 } else { frame.header.epoch },
+                    frame.header.corr,
+                    serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap();
                 let _ = write_frame(&mut *writer.lock().await, &reply).await;
             }
             Reply::Stall => {

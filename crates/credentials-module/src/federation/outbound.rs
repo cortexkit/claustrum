@@ -236,6 +236,20 @@ enum WaiterKey {
 
 type StreamSender = mpsc::UnboundedSender<Result<Frame, String>>;
 
+/// One frame delivered to a held subscription, keeping terminal replies distinct
+/// from a clean stream end so callers can decide whether to retry or reconcile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionEvent {
+    Data(Value),
+    End,
+    Response(Value),
+    Error {
+        code: String,
+        message: String,
+        detail: Option<Value>,
+    },
+}
+
 /// A held routed subscription. It owns only its correlation id, never the link's reader.
 pub struct Subscription {
     link: Arc<Link>,
@@ -246,15 +260,51 @@ pub struct Subscription {
 
 impl Subscription {
     pub async fn next(&mut self) -> Result<Option<Value>, OutboundError> {
+        match self.next_event().await? {
+            SubscriptionEvent::Data(body) => Ok(Some(body)),
+            SubscriptionEvent::End
+            | SubscriptionEvent::Response(_)
+            | SubscriptionEvent::Error { .. } => Ok(None),
+        }
+    }
+
+    /// Read a data or terminal event. A lost route or connection is an error, not
+    /// a clean end, because it says nothing about the subscription's home state.
+    pub async fn next_event(&mut self) -> Result<SubscriptionEvent, OutboundError> {
         match self.replies.recv().await {
-            Some(Ok(frame)) if frame.header.ty == FrameType::StreamData => {
-                let body: Value = serde_json::from_slice(&frame.body).map_err(|e| {
-                    OutboundError::Unavailable(format!("decode watch snapshot: {e}"))
-                })?;
-                Ok(Some(body.get("result").cloned().unwrap_or(body)))
-            }
-            Some(Ok(frame)) if frame.header.ty == FrameType::StreamEnd => Ok(None),
-            Some(Ok(_)) | None => Ok(None),
+            Some(Ok(frame)) => match frame.header.ty {
+                FrameType::StreamData | FrameType::Response => {
+                    let body: Value = serde_json::from_slice(&frame.body).map_err(|e| {
+                        OutboundError::Unavailable(format!("decode subscription body: {e}"))
+                    })?;
+                    let body = body.get("result").cloned().unwrap_or(body);
+                    Ok(if frame.header.ty == FrameType::StreamData {
+                        SubscriptionEvent::Data(body)
+                    } else {
+                        SubscriptionEvent::Response(body)
+                    })
+                }
+                FrameType::StreamEnd => Ok(SubscriptionEvent::End),
+                FrameType::Error => {
+                    let body = serde_json::from_slice::<Value>(&frame.body).ok();
+                    Ok(SubscriptionEvent::Error {
+                        code: body
+                            .as_ref()
+                            .and_then(|value| value.get("code"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("unrecognised")
+                            .to_string(),
+                        message: error_reason(&frame.body),
+                        detail: body.and_then(|value| value.get("detail").cloned()),
+                    })
+                }
+                ty => Err(OutboundError::Unavailable(format!(
+                    "unexpected subscription frame: {ty:?}"
+                ))),
+            },
+            None => Err(OutboundError::Unavailable(
+                "the subscription channel closed".into(),
+            )),
             Some(Err(why)) => Err(OutboundError::Unavailable(why)),
         }
     }

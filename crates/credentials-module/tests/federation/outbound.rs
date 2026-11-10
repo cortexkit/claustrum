@@ -41,6 +41,243 @@ async fn call(
 }
 
 #[tokio::test]
+async fn subscription_events_distinguish_data_and_clean_end() {
+    use fed::outbound::SubscriptionEvent;
+
+    let root = crate::support::temp_root("outbound-subscription-data");
+    let vaults = TwoVaults::new(&root).await;
+    let snapshot = json!({ "kind": "snapshot", "seq": 1, "logins": [] });
+    vaults.callosum.answer(
+        "claustrum",
+        "federation.remote_watch",
+        Reply::Watch(json!({ "result": snapshot })),
+    );
+    let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+        "subscription-data",
+        route(
+            "claustrum",
+            json!({ "method": "federation.remote_watch", "params": {} }),
+        ),
+        fed::HOME_OP_DEADLINE,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        wait_for_signal(subscription.next_event()).await.unwrap(),
+        SubscriptionEvent::Data(snapshot.clone())
+    );
+    assert_eq!(
+        vaults.callosum.watch_snapshot(Some(snapshot.clone())).await,
+        1
+    );
+    assert_eq!(
+        wait_for_signal(subscription.next_event()).await.unwrap(),
+        SubscriptionEvent::Data(snapshot)
+    );
+    assert_eq!(vaults.callosum.watch_snapshot(None).await, 1);
+    assert_eq!(
+        wait_for_signal(subscription.next_event()).await.unwrap(),
+        SubscriptionEvent::End
+    );
+    assert!(matches!(
+        wait_for_signal(subscription.next_event()).await,
+        Err(fed::OutboundError::Unavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn subscription_events_unwrap_the_homes_response_result() {
+    use fed::outbound::SubscriptionEvent;
+
+    let root = crate::support::temp_root("outbound-subscription-response");
+    let vaults = TwoVaults::new(&root).await;
+    let refusal = json!({ "error": { "code": "not_found", "class": "permanent" } });
+    vaults.callosum.answer(
+        "claustrum",
+        "federation.remote_watch",
+        Reply::Ok(refusal.clone()),
+    );
+    let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+        "subscription-response",
+        route(
+            "claustrum",
+            json!({ "method": "federation.remote_watch", "params": {} }),
+        ),
+        fed::HOME_OP_DEADLINE,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        wait_for_signal(subscription.next_event()).await.unwrap(),
+        SubscriptionEvent::Response(refusal)
+    );
+}
+
+#[tokio::test]
+async fn subscription_events_keep_error_details_on_routes_and_channel_zero() {
+    use fed::outbound::SubscriptionEvent;
+
+    let root = crate::support::temp_root("outbound-subscription-error");
+    let vaults = TwoVaults::new(&root).await;
+    vaults.callosum.answer(
+        "claustrum",
+        "healthy-watch",
+        Reply::Watch(json!({ "seq": 1 })),
+    );
+    let mut healthy = wait_for_signal(vaults.b.outbound.subscribe(
+        "healthy-subscription",
+        route("claustrum", json!({ "method": "healthy-watch" })),
+        fed::HOME_OP_DEADLINE,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        wait_for_signal(healthy.next_event()).await.unwrap(),
+        SubscriptionEvent::Data(json!({ "seq": 1 }))
+    );
+    for channel_zero in [false, true] {
+        for (body, expected) in [
+            (
+                json!({ "code": "fed_subscription_ended", "message": "ended", "detail": { "reason": "revoked" } }),
+                SubscriptionEvent::Error {
+                    code: "fed_subscription_ended".into(),
+                    message: "ended".into(),
+                    detail: Some(json!({ "reason": "revoked" })),
+                },
+            ),
+            (
+                json!({ "code": "module_error", "detail": "home refused" }),
+                SubscriptionEvent::Error {
+                    code: "module_error".into(),
+                    message: "home refused".into(),
+                    detail: Some(json!("home refused")),
+                },
+            ),
+            (
+                json!({ "code": "fed_not_exposed" }),
+                SubscriptionEvent::Error {
+                    code: "fed_not_exposed".into(),
+                    message: "fed_not_exposed".into(),
+                    detail: None,
+                },
+            ),
+            (
+                json!({}),
+                SubscriptionEvent::Error {
+                    code: "unrecognised".into(),
+                    message: "the daemon refused the operation".into(),
+                    detail: None,
+                },
+            ),
+        ] {
+            vaults.callosum.answer(
+                "claustrum",
+                "federation.remote_watch",
+                Reply::SubscriptionError { channel_zero, body },
+            );
+            vaults
+                .callosum
+                .stray_error_before("federation.remote_watch", "unrelated-error");
+            let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+                "subscription-error",
+                route(
+                    "claustrum",
+                    json!({ "method": "federation.remote_watch", "params": {} }),
+                ),
+                fed::HOME_OP_DEADLINE,
+            ))
+            .await
+            .unwrap();
+            assert_eq!(
+                wait_for_signal(subscription.next_event()).await.unwrap(),
+                expected
+            );
+            assert_eq!(
+                vaults
+                    .callosum
+                    .watch_snapshot(Some(json!({ "seq": 2 })))
+                    .await,
+                1
+            );
+            assert_eq!(
+                wait_for_signal(healthy.next_event()).await.unwrap(),
+                SubscriptionEvent::Data(json!({ "seq": 2 }))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn subscription_events_report_dropped_links_and_routes_as_errors() {
+    let root = crate::support::temp_root("outbound-subscription-dropped");
+    let vaults = TwoVaults::new(&root).await;
+    for (key, reply) in [
+        ("dropped-link", Reply::Drop),
+        ("dropped-route", Reply::Watch(json!({}))),
+    ] {
+        vaults
+            .callosum
+            .answer("claustrum", "federation.remote_watch", reply);
+        let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+            key,
+            route(
+                "claustrum",
+                json!({ "method": "federation.remote_watch", "params": {} }),
+            ),
+            fed::HOME_OP_DEADLINE,
+        ))
+        .await
+        .unwrap();
+        if key == "dropped-route" {
+            assert!(matches!(
+                wait_for_signal(subscription.next_event()).await.unwrap(),
+                fed::outbound::SubscriptionEvent::Data(_)
+            ));
+            assert_eq!(vaults.callosum.goodbye_routes("claustrum").await, 1);
+        }
+        assert!(matches!(
+            wait_for_signal(subscription.next_event()).await,
+            Err(fed::OutboundError::Unavailable(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn subscription_next_keeps_the_data_and_terminal_mapping() {
+    let root = crate::support::temp_root("outbound-subscription-next");
+    let vaults = TwoVaults::new(&root).await;
+    for reply in [
+        Reply::Watch(json!({ "result": { "seq": 1 } })),
+        Reply::Ok(json!({ "error": { "code": "not_found" } })),
+        Reply::RouteRefusal("module_error".into()),
+        Reply::Permanent("fed_not_exposed".into()),
+    ] {
+        let data = matches!(reply, Reply::Watch(_));
+        vaults
+            .callosum
+            .answer("claustrum", "federation.remote_watch", reply);
+        let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+            "subscription-next",
+            route(
+                "claustrum",
+                json!({ "method": "federation.remote_watch", "params": {} }),
+            ),
+            fed::HOME_OP_DEADLINE,
+        ))
+        .await
+        .unwrap();
+        if data {
+            assert_eq!(
+                wait_for_signal(subscription.next()).await.unwrap(),
+                Some(json!({ "seq": 1 }))
+            );
+            assert_eq!(vaults.callosum.watch_snapshot(None).await, 1);
+        }
+        assert_eq!(wait_for_signal(subscription.next()).await.unwrap(), None);
+    }
+}
+
+#[tokio::test]
 async fn cancelled_pairing_lookup_withdraws_its_waiter_on_the_shared_link() {
     let root = crate::support::temp_root("outbound-cancelled-pairing");
     let vaults = TwoVaults::new(&root).await;

@@ -1487,6 +1487,10 @@ pub enum StoreOpError {
     InvalidCredentialId,
     /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
     InvalidCategoryName,
+    /// An API-key service cannot be named by the interactive put flow.
+    InvalidServiceName { service: String },
+    /// The fixed API-key catalog already owns this service's defaults.
+    ServiceInProviderCatalog { service: String },
     /// A tier is not a lowercase ASCII identifier of 1–32 characters.
     InvalidPlanTier,
     /// An enrollment display name failed the shared person-facing label validation.
@@ -1655,6 +1659,8 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
+            StoreOpError::InvalidServiceName { service } => write!(f, "Provider service {service:?} is invalid; use a non-empty name without colons, whitespace, control characters or '|'."),
+            StoreOpError::ServiceInProviderCatalog { service } => write!(f, "Provider service {service:?} is in the fixed provider catalog and cannot be registered."),
             StoreOpError::InvalidDisplayName => f.write_str("invalid_params/permanent: invalid display_name"),
             StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31}"),
             // Labelled fields, so a value that happens to spell a rule token (`count`)
@@ -1740,6 +1746,8 @@ impl StoreOpError {
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
+            StoreOpError::InvalidServiceName { .. } => Some("invalid_service_name"),
+            StoreOpError::ServiceInProviderCatalog { .. } => Some("service_in_provider_catalog"),
             StoreOpError::InvalidDisplayName => Some("invalid_params"),
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
@@ -17955,7 +17963,8 @@ mod store_agent_secrets;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
 pub use registered_providers::{
-    api_key_service, registered_providers_read_only, RegisteredProvider,
+    api_key_service, registered_providers_read_only, validate_registered_provider_service,
+    RegisteredProvider,
 };
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{

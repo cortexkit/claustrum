@@ -24,10 +24,12 @@ fn prompt_error(error: dialoguer::Error) -> CliError {
 
 fn api_key_id(name: &str) -> Result<String, String> {
     let provider = name.split(':').next().unwrap_or_default();
+    let label = name.split_once(':').map(|(_, label)| label);
     let id = format!("apikey:{name}");
-    if provider.is_empty()
-        || name.contains(char::is_whitespace)
-        || name.contains(char::is_control)
+    if !credentials_core::credential_id::valid_api_key_service_name(provider)
+        || label.is_some_and(|label| {
+            label.contains(char::is_whitespace) || label.contains(char::is_control)
+        })
         || !login_id_is_valid(&format!("apikey:{provider}"), &id)
     {
         return Err(
@@ -260,6 +262,9 @@ mod tests {
     fn api_key_names_follow_the_existing_login_id_shape() {
         assert_eq!(api_key_id("daytona").unwrap(), "apikey:daytona");
         assert_eq!(api_key_id("probe:one").unwrap(), "apikey:probe:one");
+        for service in ["CUSTOM", "custom.vendor", "éclair"] {
+            assert_eq!(api_key_id(service).unwrap(), format!("apikey:{service}"));
+        }
         for bad in [
             "",
             ":work",
@@ -267,6 +272,8 @@ mod tests {
             "probe:one:two",
             "probe one",
             "probe|one",
+            "probe\nline",
+            "probe\u{1b}control",
         ] {
             assert!(api_key_id(bad).is_err(), "{bad}");
         }

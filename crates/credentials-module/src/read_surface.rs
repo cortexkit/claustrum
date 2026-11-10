@@ -4137,6 +4137,12 @@ mod error_class_tests {
         let store_errors = [
             StoreOpError::InvalidCredentialId,
             StoreOpError::InvalidCategoryName,
+            StoreOpError::InvalidServiceName {
+                service: String::new(),
+            },
+            StoreOpError::ServiceInProviderCatalog {
+                service: String::new(),
+            },
             StoreOpError::InvalidPlanTier,
             StoreOpError::InvalidProviderId {
                 rule,

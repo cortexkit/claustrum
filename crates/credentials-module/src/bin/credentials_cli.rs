@@ -2238,6 +2238,8 @@ fn cmd_provider(
         }
         Some("set") => {
             let service = options.required("--service")?;
+            credentials_core::store::validate_registered_provider_service(&service)
+                .map_err(CliError::Store)?;
             let provider_ids = provider_id_flags(args)?;
             commit_admin(
                 global,

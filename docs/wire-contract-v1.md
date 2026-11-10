@@ -63,6 +63,8 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `vault_locked` | transient | the master key could not be resolved |
 | `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
+| `invalid_service_name` | permanent | an API-key service is empty or contains a colon, whitespace, control character or `\|` |
+| `service_in_provider_catalog` | permanent | a provider registration names a service already owned by the fixed API-key catalog |
 | `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
@@ -80,6 +82,7 @@ refresh token to be sent again, even if its access token is still fresh. Reconci
 or an operator replacement must resolve that intent before the credential is served.
 
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
+`invalid_service_name`, `service_in_provider_catalog`,
 `invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`
 and `enrollment_name_has_grants` are store-taxonomy
 refusals (`StoreOpError::wire_code` in `credentials-core/src/store.rs`). A read never

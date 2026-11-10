@@ -642,6 +642,39 @@ fn registered_provider_catalog_services_are_refused_without_audit() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("fixed provider catalog"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Provider service \"groq\""), "{stderr}");
+    assert!(!stderr.contains("storage error"), "{stderr}");
+    let store = fixture.store();
+    assert!(store.registered_providers().unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn registered_provider_invalid_services_are_plain_refusals_without_audit() {
+    let fixture = Fixture::new();
+    let before = fixture.store().audit_tip().unwrap();
+    for service in [
+        "",
+        "has space",
+        "has:label",
+        "has|separator",
+        "has\nnewline",
+        "has\u{1b}control",
+    ] {
+        let output = fixture
+            .command(&["provider", "set", "--service", service])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("Provider service {service:?} is invalid")),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("storage error"), "{stderr}");
+    }
     let store = fixture.store();
     assert!(store.registered_providers().unwrap().is_empty());
     assert_eq!(store.audit_tip().unwrap(), before);

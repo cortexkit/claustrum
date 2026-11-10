@@ -133,6 +133,14 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
     }
 }
 
+/// The service segment accepted by the interactive API-key naming prompt.
+/// The prompt checks the optional `:<account>` credential-id suffix separately.
+/// Case, non-ASCII letters and punctuation other than `:` and `|` remain valid.
+pub fn valid_api_key_service_name(service: &str) -> bool {
+    !service.is_empty()
+        && !service.contains(|c: char| c == ':' || c == '|' || c.is_whitespace() || c.is_control())
+}
+
 /// The refresh-adapter name to STORE for a credential, given its method and provider,
 /// or `None` for a static api-key, cookie, or signing-key record (no adapter, no refresh).
 ///
@@ -191,6 +199,24 @@ pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_key_service_names_preserve_the_put_prompt_syntax() {
+        for service in ["custom", "CUSTOM", "custom.vendor", "éclair", "under_score"] {
+            assert!(valid_api_key_service_name(service), "{service}");
+        }
+        for service in [
+            "",
+            "two words",
+            "tab\t",
+            "line\nbreak",
+            "control\u{1b}",
+            "has|separator",
+            "has:label",
+        ] {
+            assert!(!valid_api_key_service_name(service), "{service:?}");
+        }
+    }
 
     #[test]
     fn parses_new_scheme_methods() {

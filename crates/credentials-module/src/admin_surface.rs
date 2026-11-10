@@ -1847,6 +1847,32 @@ mod tests {
             .expect("seed provider ids");
     }
 
+    #[tokio::test]
+    async fn registered_provider_service_refusals_are_typed_and_permanent() {
+        let r = rig(30);
+        r.admin.record_bind(5, Principal::Direct);
+        let before = r.store.audit_tip().unwrap();
+        for (service, expected) in [
+            ("", "invalid_service_name/permanent"),
+            ("has:label", "invalid_service_name/permanent"),
+            ("groq", "service_in_provider_catalog/permanent"),
+        ] {
+            let op = AdminOpBody::ProviderSet {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                service: service.into(),
+                categories: Vec::new(),
+                provider_ids: Vec::new(),
+            };
+            let body = String::from_utf8(op.to_bytes().unwrap()).unwrap();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            assert!(
+                matches!(r.admin.execute(5, body.as_bytes(), &tag).await, AdminOutcome::Refused(message) if message == expected)
+            );
+        }
+        assert!(r.store.registered_providers().unwrap().is_empty());
+        assert_eq!(r.store.audit_tip().unwrap(), before);
+    }
+
     /// `admin.set_providers` is an admin op like any other: signed with a master key
     /// other than this vault's, it is refused by the master-key MAC check (Gate 2) and
     /// neither the provider-id table nor the audit log moves. The same body signed with

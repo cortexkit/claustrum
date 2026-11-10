@@ -33,6 +33,21 @@ pub fn api_key_service(id: &str) -> Option<&str> {
         .filter(|service| !service.is_empty())
 }
 
+/// Validate before either CLI preflight or a store write, so both routes refuse alike.
+pub fn validate_registered_provider_service(service: &str) -> Result<(), StoreOpError> {
+    if !crate::credential_id::valid_api_key_service_name(service) {
+        return Err(StoreOpError::InvalidServiceName {
+            service: service.to_owned(),
+        });
+    }
+    if crate::catalog::api_key_provider(service).is_some() {
+        return Err(StoreOpError::ServiceInProviderCatalog {
+            service: service.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<RegisteredProvider>> {
     if read_schema_version(conn)? < REGISTERED_PROVIDERS_SCHEMA_VERSION {
         return Ok(Vec::new());
@@ -106,19 +121,7 @@ impl EncryptedStore {
         provider_ids: &[String],
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
-        if service.is_empty()
-            || service
-                .contains(|c: char| c == ':' || c == '|' || c.is_whitespace() || c.is_control())
-        {
-            return Err(StoreOpError::Store(
-                "use a non-empty service name without colons or spaces".into(),
-            ));
-        }
-        if crate::catalog::api_key_provider(service).is_some() {
-            return Err(StoreOpError::Store(format!(
-                "{service} is in the fixed provider catalog"
-            )));
-        }
+        validate_registered_provider_service(service)?;
         if categories.iter().any(|category| {
             !crate::catalog::CredentialCategory::ALL
                 .iter()
@@ -274,16 +277,43 @@ mod tests {
             )
         };
         let before = store.audit_tip().unwrap();
-        for service in ["", "has space", "has:colon", "has|separator"] {
-            assert!(set(service, &[], &[]).is_err());
+        for service in [
+            "",
+            "has space",
+            "has:colon",
+            "has|separator",
+            "has\nnewline",
+            "has\u{1b}control",
+        ] {
+            let error = set(service, &[], &[]).unwrap_err();
+            assert!(
+                matches!(&error, StoreOpError::InvalidServiceName { service: invalid } if invalid == service)
+            );
+            assert_eq!(error.wire_code(), Some("invalid_service_name"));
+            assert_eq!(error.wire_class(), Some("permanent"));
+            assert!(error.to_string().contains(&format!("{service:?}")));
+            assert!(!error.to_string().contains("storage error"));
         }
         for row in crate::catalog::API_KEY_PROVIDERS {
-            assert!(set(row.key, &[], &[]).is_err());
+            let error = set(row.key, &[], &[]).unwrap_err();
+            assert!(
+                matches!(&error, StoreOpError::ServiceInProviderCatalog { service } if service == row.key)
+            );
+            assert_eq!(error.wire_code(), Some("service_in_provider_catalog"));
+            assert_eq!(error.wire_class(), Some("permanent"));
+            assert!(error.to_string().contains(row.key));
+            assert!(!error.to_string().contains("storage error"));
         }
         assert!(set("custom", &["unknown-group".into()], &[]).is_err());
         assert!(set("custom", &[], &["BAD".into()]).is_err());
         assert!(store.registered_providers().unwrap().is_empty());
         assert_eq!(store.audit_tip().unwrap(), before);
+        for service in ["CUSTOM", "custom.vendor", "éclair"] {
+            assert!(set(service, &[], &[]).unwrap());
+            let id = format!("apikey:{service}");
+            store.create(&id, &taxonomy_tests::api_record()).unwrap();
+            assert!(store.meta(&id).is_ok());
+        }
         assert!(set("custom", &["web-search".into(), "llm-provider".into()], &[]).unwrap());
         let tip = store.audit_tip().unwrap();
         assert!(!set("custom", &["llm-provider".into(), "web-search".into()], &[]).unwrap());

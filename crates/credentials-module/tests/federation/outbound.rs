@@ -86,7 +86,7 @@ async fn subscription_events_distinguish_data_and_clean_end() {
 }
 
 #[tokio::test]
-async fn subscription_events_unwrap_the_homes_response_result() {
+async fn subscription_events_keep_direct_responses_but_federation_relays_them_as_clean_end() {
     use fed::outbound::SubscriptionEvent;
 
     let root = crate::support::temp_root("outbound-subscription-response");
@@ -97,20 +97,28 @@ async fn subscription_events_unwrap_the_homes_response_result() {
         "federation.remote_watch",
         Reply::Ok(refusal.clone()),
     );
-    let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
-        "subscription-response",
-        route(
-            "claustrum",
-            json!({ "method": "federation.remote_watch", "params": {} }),
+    for (target, expected) in [
+        ("claustrum", SubscriptionEvent::Response(refusal)),
+        (
+            "fed:aa11bb22cc33dd44ee55ff6600112233:claustrum",
+            SubscriptionEvent::End,
         ),
-        fed::HOME_OP_DEADLINE,
-    ))
-    .await
-    .unwrap();
-    assert_eq!(
-        wait_for_signal(subscription.next_event()).await.unwrap(),
-        SubscriptionEvent::Response(refusal)
-    );
+    ] {
+        let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
+            target,
+            route(
+                target,
+                json!({ "method": "federation.remote_watch", "params": {} }),
+            ),
+            fed::HOME_OP_DEADLINE,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            wait_for_signal(subscription.next_event()).await.unwrap(),
+            expected
+        );
+    }
 }
 
 #[tokio::test]
@@ -146,9 +154,9 @@ async fn subscription_events_keep_error_details_on_routes_and_channel_zero() {
                 },
             ),
             (
-                json!({ "code": "module_error", "detail": "home refused" }),
+                json!({ "code": "denied", "detail": "home refused" }),
                 SubscriptionEvent::Error {
-                    code: "module_error".into(),
+                    code: "denied".into(),
                     message: "home refused".into(),
                     detail: Some(json!("home refused")),
                 },

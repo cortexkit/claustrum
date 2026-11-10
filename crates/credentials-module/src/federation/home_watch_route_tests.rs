@@ -114,10 +114,10 @@ mod home_watch_routes {
             release.notify_one();
             rig.1.home().remote_watches.completed.notified().await;
             let answer = rx.try_recv().expect("draining open refusal");
-            assert_eq!(answer.header.ty, FrameType::Response);
+            assert_eq!(answer.header.ty, FrameType::Error);
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&answer.body).unwrap(),
-                json!({"result":{"error":{"code":"home_unavailable","class":"transient"}}})
+                json!({"code":"home_unavailable","message":"home unavailable","detail":{"class":"transient"}})
             );
             assert_eq!(rig.1.home().remote_watches.entry_count(), 0);
             if ty == FrameType::Push {
@@ -130,9 +130,8 @@ mod home_watch_routes {
     }
 
     fn body_code(answer: &Frame) -> String {
-        assert_eq!(answer.header.ty, FrameType::Response);
-        serde_json::from_slice::<serde_json::Value>(&answer.body).unwrap()["result"]["error"]
-            ["code"]
+        assert_eq!(answer.header.ty, FrameType::Error);
+        serde_json::from_slice::<serde_json::Value>(&answer.body).unwrap()["code"]
             .as_str()
             .unwrap()
             .to_owned()

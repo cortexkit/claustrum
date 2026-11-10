@@ -8,17 +8,13 @@ use credentials_core::federation::RemoteWatchRow;
 use credentials_core::store::EncryptedStore;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{json, Value};
-use subc_protocol::{EnvelopeHeader, ErrorBody, Flags, Frame, FrameType, Priority};
+use subc_protocol::{EnvelopeHeader, Flags, Frame, FrameType, Priority};
 use tokio::sync::{mpsc, watch, Semaphore};
 
 use super::ingress::{remote_watch_lists_equal, remote_watch_logins_wire, HomeAnswer, HomeVault};
 
 const COALESCE: Duration = Duration::from_millis(250);
 const RECHECK: Duration = Duration::from_secs(60);
-
-fn wrap_result(value: Value) -> Value {
-    json!({"result": value})
-}
 
 async fn send(writer: &mpsc::Sender<Frame>, frame: Frame) -> Result<(), String> {
     writer
@@ -153,18 +149,30 @@ fn frame(header: EnvelopeHeader, ty: FrameType, body: Vec<u8>) -> Result<Frame, 
     .map_err(|error| error.to_string())
 }
 
-fn refusal(header: EnvelopeHeader, answer: HomeAnswer) -> Result<Frame, String> {
-    let (ty, body) = match answer {
-        HomeAnswer::Reply(reply) => (FrameType::Response, serde_json::to_vec(&wrap_result(reply))),
-        HomeAnswer::InvalidParams(detail) => (
-            FrameType::Error,
-            serde_json::to_vec(&ErrorBody::new(
-                "invalid_params",
-                format!("params not decodable: {detail}"),
-            )),
-        ),
+pub(crate) fn refusal(header: EnvelopeHeader, answer: HomeAnswer) -> Result<Frame, String> {
+    let mut detail = match answer {
+        HomeAnswer::Reply(reply) => reply
+            .get("error")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| "watch refusal missing error".to_owned())?,
+        HomeAnswer::InvalidParams(_) => serde_json::Map::from_iter([
+            ("code".into(), json!("invalid_params")),
+            ("class".into(), json!("permanent")),
+        ]),
     };
-    frame(header, ty, body.map_err(|error| error.to_string())?)
+    let code = detail
+        .remove("code")
+        .and_then(|code| code.as_str().map(str::to_owned))
+        .ok_or_else(|| "watch refusal missing code".to_owned())?;
+    // Callosum drops the body of a watch Response as a clean completion. Only an
+    // Error carries the home's refusal back to the subscribing member.
+    let body = json!({"code": code, "message": code.replace('_', " "), "detail": detail});
+    frame(
+        header,
+        FrameType::Error,
+        serde_json::to_vec(&body).map_err(|error| error.to_string())?,
+    )
 }
 
 impl Registry {

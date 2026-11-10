@@ -71,11 +71,11 @@ pub(super) fn body(frame: Frame, ty: FrameType) -> Value {
 }
 
 fn error(code: &str, class: &str) -> Value {
-    json!({"result":{"error":{"code":code,"class":class}}})
+    json!({"code":code,"message":code.replace('_', " "),"detail":{"class":class}})
 }
 
 #[tokio::test]
-async fn remote_watch_open_checks_pairing_before_strict_params_and_matches_token_refusals() {
+async fn remote_watch_open_checks_pairing_before_strict_params_and_preserves_token_refusal_codes() {
     let (_root, home, _conn) = rig();
     let home = home.with_callosum_stub(Arc::new(|_| Some(json!({"devices":[]}))));
     let (writer, mut rx) = mpsc::channel(8);
@@ -90,22 +90,22 @@ async fn remote_watch_open_checks_pairing_before_strict_params_and_matches_token
         let HomeAnswer::Reply(token) = home.serve(MEMBER, OP_REMOTE_TOKEN, &params).await else {
             panic!("pairing precedes parse");
         };
-        assert_eq!(answer.header.ty, FrameType::Response);
-        assert_eq!(
-            answer.body,
-            serde_json::to_vec(&json!({"result":token})).unwrap()
-        );
+        assert_eq!(answer.header.ty, FrameType::Error);
+        let wire: Value = serde_json::from_slice(&answer.body).unwrap();
+        assert_eq!(wire["code"], token["error"]["code"]);
+        assert_eq!(wire["detail"]["class"], token["error"]["class"]);
+        assert_eq!(wire["message"], "not found");
         assert_eq!(home.remote_watches.entry_count(), 0);
     }
     let params = json!({"handle":"test-bearer"});
     open(&home, &writer, 1, 1, MEMBER, params.clone()).await;
     let wire = body(rx.try_recv().unwrap(), FrameType::Error);
-    let HomeAnswer::InvalidParams(detail) = home.serve(MEMBER, OP_REMOTE_TOKEN, &params).await
-    else {
+    let HomeAnswer::InvalidParams(_) = home.serve(MEMBER, OP_REMOTE_TOKEN, &params).await else {
         panic!("bearer refusal must come first");
     };
     assert_eq!(wire["code"], "invalid_params");
-    assert_eq!(wire["message"], format!("params not decodable: {detail}"));
+    assert_eq!(wire["message"], "invalid params");
+    assert_eq!(wire["detail"]["class"], "permanent");
 }
 
 #[tokio::test]
@@ -130,7 +130,7 @@ async fn remote_watch_open_rejects_every_nonempty_or_nonobject_params_before_set
     }
     open(&home, &writer, 1, 1, MEMBER, json!({})).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
+        body(rx.try_recv().unwrap(), FrameType::Error),
         error("remote_setup_incomplete", "permanent")
     );
 }
@@ -146,12 +146,12 @@ async fn remote_watch_open_setup_key_and_pairing_unavailability_keep_their_answe
         .unwrap();
     open(&home, &writer, 1, 1, MEMBER, json!({})).await;
     let mut expected = error("remote_setup_incomplete", "permanent");
-    expected["result"]["error"]["remedy_member"] = json!(HOME);
-    assert_eq!(body(rx.try_recv().unwrap(), FrameType::Response), expected);
+    expected["detail"]["remedy_member"] = json!(HOME);
+    assert_eq!(body(rx.try_recv().unwrap(), FrameType::Error), expected);
     conn.execute("DROP TABLE settings", []).unwrap();
     open(&home, &writer, 1, 1, MEMBER, json!({})).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
+        body(rx.try_recv().unwrap(), FrameType::Error),
         error("store_error", "transient")
     );
     for lookup in [None, Some(json!({"code":"fed_not_ready"}))] {
@@ -159,7 +159,7 @@ async fn remote_watch_open_setup_key_and_pairing_unavailability_keep_their_answe
         let home = home.with_callosum_stub(Arc::new(move |_| lookup.clone()));
         open(&home, &writer, 1, 1, MEMBER, json!({"bad":true})).await;
         assert_eq!(
-            body(rx.try_recv().unwrap(), FrameType::Response),
+            body(rx.try_recv().unwrap(), FrameType::Error),
             error("home_unavailable", "transient")
         );
     }
@@ -248,7 +248,7 @@ async fn remote_watch_four_streams_and_fifth_evicts_oldest_only_after_success() 
         .unwrap();
     open(&home, &writer, 1, 5, MEMBER, json!({})).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
+        body(rx.try_recv().unwrap(), FrameType::Error),
         error("store_error", "transient")
     );
     assert_eq!(home.remote_watches.entry_count(), 5);
@@ -297,7 +297,7 @@ async fn remote_watch_correlation_cancel_route_close_and_drain_preserve_other_en
     assert_eq!(home.remote_watches.entry_count(), 0);
     open(&home, &writer, 1, 3, MEMBER, json!({"bad":true})).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
+        body(rx.try_recv().unwrap(), FrameType::Error),
         error("home_unavailable", "transient")
     );
 }
@@ -414,7 +414,7 @@ async fn remote_watch_budget_overrun_never_admits_or_evicts_a_stream() {
     home.op_deadline = Duration::ZERO;
     open(&home, &writer, 1, 5, MEMBER, json!({})).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
+        body(rx.try_recv().unwrap(), FrameType::Error),
         error("home_unavailable", "transient")
     );
     assert_eq!(home.remote_watches.entry_count(), 4);

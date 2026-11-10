@@ -8,8 +8,8 @@ use std::{
 
 use credentials_core::{
     federation::{
-        is_lower_hex_16_bytes, validate_remote_watch_row, RemoteHomeState, RemoteWatchApplyMode,
-        RemoteWatchRow,
+        is_lower_hex_16_bytes, validate_remote_watch_row, RemoteHomeState, RemoteRecordSource,
+        RemoteWatchApplyMode, RemoteWatchRow,
     },
     plan_detection::DetectedPlan,
     record::RecordIdentity,
@@ -17,7 +17,10 @@ use credentials_core::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    time::Instant,
+};
 
 use super::outbound::{
     management_surface, OutboundClient, OutboundError, RouteCall, SubscriptionEvent,
@@ -70,6 +73,13 @@ struct Worker {
     pairing: String,
     stop: watch::Receiver<bool>,
     wakes: watch::Receiver<()>,
+    replays: watch::Receiver<()>,
+    pairings: watch::Receiver<PairedComputers>,
+    generation: u64,
+    backoff: Backoff,
+    retained: Option<Snapshot>,
+    skipped: BTreeSet<String>,
+    pending_apply: bool,
     events: mpsc::UnboundedSender<HomeEvent>,
     logged: Arc<Logged>,
     #[cfg(test)]
@@ -77,43 +87,70 @@ struct Worker {
 }
 
 impl Worker {
-    async fn retry(&mut self, backoff: &mut Backoff) -> bool {
+    fn current(&self) -> bool {
+        !*self.stop.borrow()
+            && self.pairings.borrow().as_ref().is_some_and(|pairs| {
+                pairs
+                    .iter()
+                    .any(|(fp, p)| fp == &self.fingerprint && p == &self.pairing)
+            })
+    }
+
+    async fn retry(&mut self, retry_at: Instant) -> bool {
         if *self.stop.borrow() {
             return false;
         }
-        tokio::select! {
-            biased;
-            _ = self.stop.changed() => false,
-            _ = self.wakes.changed() => true,
-            _ = tokio::time::sleep(backoff.next_delay()) => true,
+        let delay = tokio::time::sleep_until(retry_at);
+        tokio::pin!(delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.stop.changed() => return false,
+                _ = self.replays.changed() => self.replay().await,
+                _ = self.wakes.changed() => return true,
+                _ = &mut delay => return true,
+            }
         }
     }
 
-    async fn apply(&mut self, home: &str, snapshot: &Snapshot) -> bool {
+    async fn apply(&mut self, mode: RemoteWatchApplyMode) -> bool {
+        if !self.current() {
+            return false;
+        }
+        let Some(snapshot) = &self.retained else {
+            return true;
+        };
         let store = Arc::clone(&self.store);
-        let home_owned = home.to_string();
+        let home = format!("fed-computer:{}", self.fingerprint);
+        let home_owned = home.clone();
         let pairing = self.pairing.clone();
-        let snapshot = snapshot.clone();
+        let rows: Vec<_> = snapshot
+            .rows
+            .iter()
+            .filter(|row| {
+                mode == RemoteWatchApplyMode::Full || self.skipped.contains(&row.credential_id)
+            })
+            .cloned()
+            .collect();
+        let retained_ids = snapshot.retained_ids.clone();
         // Do not select cancellation against this join: stop() must also fence any
         // already-running blocking transaction before the next pairing can write.
         let result = tokio::task::spawn_blocking(move || {
-            store.remote_watch_apply_audited(
-                &home_owned,
-                &pairing,
-                &snapshot.rows,
-                RemoteWatchApplyMode::Full,
-                &snapshot.retained_ids,
-            )
+            store.remote_watch_apply_audited(&home_owned, &pairing, &rows, mode, &retained_ids)
         })
         .await;
         #[cfg(test)]
         self.attempted.notify_one();
         match result {
             Ok(Ok(result)) => {
-                for id in result.skipped {
-                    if self.logged.first(home, &id) {
+                self.skipped = result.skipped.into_iter().collect();
+                for id in &self.skipped {
+                    if self.logged.first(&home, id) {
                         tracing::warn!(target: "federation", home, %id, "home watch id already held; existing holder wins");
                     }
+                }
+                if result.removed > 0 {
+                    self.report(HomeEventKind::Removed);
                 }
                 true
             }
@@ -124,24 +161,27 @@ impl Worker {
         }
     }
 
-    async fn apply_snapshot(
-        &mut self,
-        home: &str,
-        snapshot: &Snapshot,
-        backoff: &mut Backoff,
-    ) -> bool {
-        loop {
-            self.wakes.borrow_and_update();
-            if *self.stop.borrow() {
-                return false;
-            }
-            if self.apply(home, snapshot).await {
-                return true;
-            }
-            if !self.retry(backoff).await {
-                return false;
-            }
+    async fn replay(&mut self) {
+        // Only collisions may be retried from an old projection. In particular,
+        // replay must not overwrite status metadata written by the token read path.
+        if !self.pending_apply && !self.skipped.is_empty() {
+            self.apply(RemoteWatchApplyMode::InsertOnly).await;
         }
+    }
+
+    async fn apply_latest(&mut self) -> bool {
+        if self.pending_apply && self.apply(RemoteWatchApplyMode::Full).await {
+            self.pending_apply = false;
+        }
+        !self.pending_apply
+    }
+
+    fn report(&self, kind: HomeEventKind) {
+        let _ = self.events.send(HomeEvent {
+            fingerprint: self.fingerprint.clone(),
+            generation: self.generation,
+            kind,
+        });
     }
 
     async fn session(&mut self, home: &str, backoff: &mut Backoff) -> Option<SessionEnd> {
@@ -163,21 +203,39 @@ impl Worker {
             Err(error) => return Some(SessionEnd::Dropped(error)),
         };
         let mut applied = false;
+        let mut retry_at = Instant::now();
+        if self.pending_apply {
+            retry_at += backoff.next_delay();
+        }
         loop {
             let event = tokio::select! {
                 biased;
                 _ = self.stop.changed() => return None,
                 event = subscription.next_event() => event,
+                _ = self.replays.changed() => { self.replay().await; continue; },
+                _ = self.wakes.changed(), if self.pending_apply => {
+                    applied |= self.apply_latest().await;
+                    if self.pending_apply { retry_at = Instant::now() + backoff.next_delay(); }
+                    continue;
+                },
+                _ = tokio::time::sleep_until(retry_at), if self.pending_apply => {
+                    applied |= self.apply_latest().await;
+                    if self.pending_apply { retry_at = Instant::now() + backoff.next_delay(); }
+                    continue;
+                },
             };
             match event {
                 Ok(SubscriptionEvent::Data(body)) => {
                     let Some(snapshot) = decode_notice(home, body, &self.logged) else {
                         return Some(SessionEnd::Undecodable);
                     };
-                    if !self.apply_snapshot(home, &snapshot, backoff).await {
-                        return None;
+                    self.retained = Some(snapshot);
+                    self.skipped.clear();
+                    self.pending_apply = true;
+                    applied |= self.apply_latest().await;
+                    if self.pending_apply {
+                        retry_at = Instant::now() + backoff.next_delay();
                     }
-                    applied = true;
                 }
                 Ok(terminal) => {
                     backoff.completed(applied, &terminal);
@@ -190,21 +248,29 @@ impl Worker {
 
     async fn run(mut self) {
         let home = format!("fed-computer:{}", self.fingerprint);
-        let mut backoff = Backoff::default();
+        let mut backoff = std::mem::take(&mut self.backoff);
         loop {
             self.wakes.borrow_and_update();
             if *self.stop.borrow() {
                 return;
             }
+            self.apply_latest().await;
             let Some(ending) = self.session(&home, &mut backoff).await else {
                 return;
             };
-            let _ = self.events.send(HomeEvent {
-                fingerprint: self.fingerprint.clone(),
-                pairing: self.pairing.clone(),
-                ending,
-            });
-            if !self.retry(&mut backoff).await {
+            let retry_at = Instant::now() + backoff.next_delay();
+            if ending.removes_home() {
+                // A refusal invalidates even a failed apply. Nothing retained from
+                // this stream may recreate rows after the removal commits.
+                self.retained = None;
+                self.skipped.clear();
+                self.pending_apply = false;
+                self.report(HomeEventKind::Remove(RetryStart { backoff, retry_at }));
+                return;
+            } else {
+                tracing::debug!(target: "federation", ?ending, "home watch ended; inventory retained");
+            }
+            if !self.retry(retry_at).await {
                 return;
             }
         }
@@ -281,16 +347,44 @@ enum SessionEnd {
     Undecodable,
 }
 
+impl SessionEnd {
+    fn removes_home(&self) -> bool {
+        match self {
+            Self::Terminal(SubscriptionEvent::Error { code, detail, .. }) => {
+                let detail = detail.as_ref();
+                code == "not_found"
+                    || (code == "fed_subscription_ended"
+                        && detail
+                            .and_then(|d| d.get("reason"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|reason| matches!(reason, "revoked" | "not_exposed")))
+            }
+            Self::Dropped(error) => {
+                tracing::debug!(target: "federation", ?error, "home watch disconnected");
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+enum HomeEventKind {
+    Removed,
+    Remove(RetryStart),
+}
+
 struct HomeEvent {
     fingerprint: String,
-    pairing: String,
-    ending: SessionEnd,
+    generation: u64,
+    kind: HomeEventKind,
 }
 
 struct HomeTask {
     pairing: String,
+    generation: u64,
     stopped: watch::Sender<bool>,
     wake: watch::Sender<()>,
+    replay: watch::Sender<()>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -310,85 +404,287 @@ impl Drop for HomeTask {
     }
 }
 
+struct PendingRemoval {
+    keep_pairing: Option<String>,
+    backoff: Backoff,
+    retry_at: Instant,
+}
+
+impl PendingRemoval {
+    fn new(keep_pairing: Option<String>) -> Self {
+        Self {
+            keep_pairing,
+            backoff: Backoff::default(),
+            retry_at: Instant::now(),
+        }
+    }
+}
+
+struct RetryStart {
+    backoff: Backoff,
+    retry_at: Instant,
+}
+
+struct Reconciler {
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    tasks: BTreeMap<String, HomeTask>,
+    pending: BTreeMap<String, PendingRemoval>,
+    retrying: BTreeMap<String, RetryStart>,
+    current: BTreeMap<String, String>,
+    events: mpsc::UnboundedSender<HomeEvent>,
+    logged: Arc<Logged>,
+    generation: u64,
+    #[cfg(test)]
+    removal_attempted: Arc<tokio::sync::Notify>,
+}
+
+impl Reconciler {
+    fn replay_others(&self, removed: &str) {
+        for (fp, task) in &self.tasks {
+            if fp != removed
+                && !self.pending.contains_key(fp)
+                && self.current.get(fp) == Some(&task.pairing)
+            {
+                task.replay.send_replace(());
+            }
+        }
+    }
+
+    async fn retry_removals(&mut self, force: bool) {
+        let due: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, removal)| force || removal.retry_at <= Instant::now())
+            .map(|(fp, removal)| (fp.clone(), removal.keep_pairing.clone()))
+            .collect();
+        for (fp, keep) in due {
+            let store = Arc::clone(&self.store);
+            let home = format!("fed-computer:{fp}");
+            let result = tokio::task::spawn_blocking(move || {
+                store.remote_watch_remove_audited(&home, keep.as_deref())
+            })
+            .await;
+            match result {
+                Ok(Ok(_)) => {
+                    self.pending.remove(&fp).expect("pending removal");
+                    self.replay_others(&fp);
+                }
+                error => {
+                    tracing::warn!(target: "federation", ?error, home = %fp, "home watch removal failed; retaining removal for retry");
+                    let removal = self.pending.get_mut(&fp).expect("pending removal");
+                    removal.retry_at = Instant::now() + removal.backoff.next_delay();
+                }
+            }
+            #[cfg(test)]
+            self.removal_attempted.notify_one();
+        }
+    }
+
+    async fn inventory(&mut self, inventory: Vec<(String, String)>) {
+        let previous = std::mem::replace(&mut self.current, inventory.into_iter().collect());
+        let lost: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|(fp, task)| self.current.get(*fp) != Some(&task.pairing))
+            .map(|(fp, _)| fp.clone())
+            .collect();
+        for fp in &lost {
+            self.tasks.remove(fp).expect("listed task").stop().await;
+            self.pending.insert(
+                fp.clone(),
+                PendingRemoval::new(self.current.get(fp).cloned()),
+            );
+        }
+        // Scan persisted rows even on the first inventory after startup. There may
+        // be no old task to tell us that the home re-paired while we were stopped.
+        match self.store.list_remote_records() {
+            Ok(records) => {
+                for row in records {
+                    if row.source != RemoteRecordSource::HomeWatch {
+                        continue;
+                    }
+                    let Some(fp) = row.home_member.strip_prefix("fed-computer:") else {
+                        continue;
+                    };
+                    let keep = self.current.get(fp).cloned();
+                    if row.home_pairing_id != keep {
+                        // Do not replace an already pending all-pairings removal with
+                        // a weaker cleanup of the same obsolete pairing.
+                        self.pending
+                            .entry(fp.into())
+                            .or_insert_with(|| PendingRemoval::new(keep));
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "federation", %error, "home watch startup inventory unavailable")
+            }
+        }
+        // A newer pairing supersedes an older pending removal, even when the old
+        // task was already joined during an earlier failed removal.
+        for (fp, removal) in &mut self.pending {
+            if previous.get(fp) != self.current.get(fp) {
+                *removal = PendingRemoval::new(self.current.get(fp).cloned());
+            }
+        }
+        self.retrying.retain(|fp, retry| {
+            retry.retry_at = Instant::now();
+            previous.get(fp) == self.current.get(fp)
+        });
+        self.retry_removals(true).await;
+        for task in self.tasks.values() {
+            task.wake.send_replace(());
+        }
+    }
+
+    fn start_tasks(&mut self, pairings: &watch::Receiver<PairedComputers>) {
+        for (fingerprint, pairing) in &self.current {
+            if !pairings.borrow().as_ref().is_some_and(|pairs| {
+                pairs
+                    .iter()
+                    .any(|(fp, p)| fp == fingerprint && p == pairing)
+            }) {
+                continue;
+            }
+            if self.tasks.contains_key(fingerprint) || self.pending.contains_key(fingerprint) {
+                continue;
+            }
+            if self
+                .retrying
+                .get(fingerprint)
+                .is_some_and(|retry| retry.retry_at > Instant::now())
+            {
+                continue;
+            }
+            let backoff = self
+                .retrying
+                .remove(fingerprint)
+                .map(|retry| retry.backoff)
+                .unwrap_or_default();
+            self.generation += 1;
+            let (stopped, stop) = watch::channel(false);
+            let (wake, wakes) = watch::channel(());
+            let (replay, replays) = watch::channel(());
+            let worker = Worker {
+                store: Arc::clone(&self.store),
+                client: self.client.clone(),
+                fingerprint: fingerprint.clone(),
+                pairing: pairing.clone(),
+                stop,
+                wakes,
+                replays,
+                pairings: pairings.clone(),
+                generation: self.generation,
+                backoff,
+                retained: None,
+                skipped: BTreeSet::new(),
+                pending_apply: false,
+                events: self.events.clone(),
+                logged: Arc::clone(&self.logged),
+                #[cfg(test)]
+                attempted: Arc::new(tokio::sync::Notify::new()),
+            };
+            self.tasks.insert(
+                fingerprint.clone(),
+                HomeTask {
+                    pairing: pairing.clone(),
+                    generation: self.generation,
+                    stopped,
+                    wake,
+                    replay,
+                    join: Some(tokio::spawn(worker.run())),
+                },
+            );
+        }
+    }
+}
+
 /// Consume only validated inventories published by the existing sharing watch.
 pub async fn run(
     store: Arc<EncryptedStore>,
     client: OutboundClient,
-    mut pairings: watch::Receiver<PairedComputers>,
+    pairings: watch::Receiver<PairedComputers>,
 ) {
-    let mut tasks: BTreeMap<String, HomeTask> = BTreeMap::new();
     let (events, mut endings) = mpsc::unbounded_channel::<HomeEvent>();
-    let logged = Arc::new(Logged::default());
+    let reconciler = Reconciler {
+        store,
+        client,
+        tasks: BTreeMap::new(),
+        pending: BTreeMap::new(),
+        retrying: BTreeMap::new(),
+        current: BTreeMap::new(),
+        events,
+        logged: Arc::new(Logged::default()),
+        generation: 0,
+        #[cfg(test)]
+        removal_attempted: Arc::new(tokio::sync::Notify::new()),
+    };
+    supervise(reconciler, pairings, &mut endings).await;
+}
+
+async fn supervise(
+    mut reconciler: Reconciler,
+    mut pairings: watch::Receiver<PairedComputers>,
+    endings: &mut mpsc::UnboundedReceiver<HomeEvent>,
+) {
+    let mut inventory_changed = true;
     loop {
-        let inventory = pairings.borrow_and_update().clone();
-        if let Some(inventory) = inventory {
-            let current: BTreeMap<_, _> = inventory.into_iter().collect();
-            let lost: Vec<_> = tasks
-                .iter()
-                .filter(|(fp, task)| current.get(*fp) != Some(&task.pairing))
-                .map(|(fp, _)| fp.clone())
-                .collect();
-            for fp in lost {
-                tasks.remove(&fp).expect("listed task").stop().await;
-                // Authoritative removal belongs here, after the old writer is joined
-                // and before a replacement pairing may start. Without a removal
-                // handler, retain stored rows rather than risking an unsafe deletion.
+        if inventory_changed {
+            let inventory = pairings.borrow_and_update().clone();
+            if let Some(inventory) = inventory {
+                reconciler.inventory(inventory).await;
             }
-            for (fingerprint, pairing) in current {
-                if let Some(task) = tasks.get(&fingerprint) {
-                    task.wake.send_replace(());
-                    continue;
-                }
-                let (stopped, stop) = watch::channel(false);
-                let (wake, wakes) = watch::channel(());
-                let worker = Worker {
-                    store: Arc::clone(&store),
-                    client: client.clone(),
-                    fingerprint: fingerprint.clone(),
-                    pairing: pairing.clone(),
-                    stop,
-                    wakes,
-                    events: events.clone(),
-                    logged: Arc::clone(&logged),
-                    #[cfg(test)]
-                    attempted: Arc::new(tokio::sync::Notify::new()),
-                };
-                let join = tokio::spawn(worker.run());
-                tasks.insert(
-                    fingerprint,
-                    HomeTask {
-                        pairing,
-                        stopped,
-                        wake,
-                        join: Some(join),
-                    },
-                );
-            }
+            inventory_changed = false;
         }
-        loop {
-            tokio::select! {
-                changed = pairings.changed() => {
-                    if changed.is_err() {
-                        for (_, task) in tasks { task.stop().await; }
-                        return;
-                    }
-                    break;
+        reconciler.start_tasks(&pairings);
+        let next_removal = reconciler
+            .pending
+            .values()
+            .map(|r| r.retry_at)
+            .chain(
+                reconciler
+                    .retrying
+                    .iter()
+                    .filter(|(fp, _)| !reconciler.pending.contains_key(*fp))
+                    .map(|(_, retry)| retry.retry_at),
+            )
+            .min();
+        tokio::select! {
+            biased;
+            changed = pairings.changed() => {
+                if changed.is_err() {
+                    for (_, task) in reconciler.tasks { task.stop().await; }
+                    return;
                 }
-                Some(event) = endings.recv() => {
-                    if tasks.get(&event.fingerprint).is_some_and(|task| task.pairing == event.pairing) {
-                        // Keep the typed terminal for authoritative removal handling;
-                        // a dropped link or an undecodable notice must never remove rows.
-                        match event.ending {
-                            SessionEnd::Terminal(terminal) => tracing::debug!(target: "federation", ?terminal, "home watch ended; inventory retained"),
-                            SessionEnd::Dropped(error) => tracing::debug!(target: "federation", ?error, "home watch disconnected; inventory retained"),
-                            SessionEnd::Undecodable => tracing::warn!(target: "federation", "home watch notice rejected; inventory retained"),
+                inventory_changed = true;
+            }
+            Some(event) = endings.recv() => {
+                if reconciler.tasks.get(&event.fingerprint).is_some_and(|task| task.generation == event.generation) {
+                    match event.kind {
+                        HomeEventKind::Removed => reconciler.replay_others(&event.fingerprint),
+                        HomeEventKind::Remove(retry) => {
+                            reconciler.tasks.remove(&event.fingerprint).expect("current task").stop().await;
+                            reconciler.retrying.insert(event.fingerprint.clone(), retry);
+                            reconciler.pending.insert(event.fingerprint, PendingRemoval::new(None));
+                            reconciler.retry_removals(false).await;
                         }
                     }
                 }
             }
+            _ = async {
+                match next_removal {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => reconciler.retry_removals(false).await,
         }
     }
 }
+
+#[cfg(test)]
+#[path = "member_watch_removal_tests.rs"]
+mod removal_tests;
 
 #[cfg(test)]
 mod tests {
@@ -519,6 +815,11 @@ mod tests {
         sql.execute_batch("CREATE TRIGGER fail_watch_apply BEFORE INSERT ON audit_log WHEN NEW.op = 'remote_add' BEGIN SELECT RAISE(ABORT, 'apply unavailable'); END;").unwrap();
         let (stopped, stop) = watch::channel(false);
         let (_wake, wakes) = watch::channel(());
+        let (_replay, replays) = watch::channel(());
+        let (_pairs, pairings) = watch::channel(Some(vec![(
+            "aa11bb22cc33dd44ee55ff6600112233".into(),
+            "pair".into(),
+        )]));
         let (events, _endings) = mpsc::unbounded_channel();
         let attempted = Arc::new(tokio::sync::Notify::new());
         let mut worker = Worker {
@@ -528,15 +829,27 @@ mod tests {
             pairing: "pair".into(),
             stop,
             wakes,
+            replays,
+            pairings,
+            generation: 1,
+            backoff: Backoff::default(),
+            retained: None,
+            skipped: BTreeSet::new(),
+            pending_apply: true,
             events,
             logged: Arc::new(Logged::default()),
             attempted: Arc::clone(&attempted),
         };
         let snapshot = decode_notice(HOME, notice(), &worker.logged).unwrap();
+        worker.retained = Some(snapshot);
         let mut call = tokio::spawn(async move {
-            worker
-                .apply_snapshot(HOME, &snapshot, &mut Backoff::default())
-                .await
+            let mut backoff = Backoff::default();
+            while !worker.apply_latest().await {
+                if !worker.retry(Instant::now() + backoff.next_delay()).await {
+                    return false;
+                }
+            }
+            true
         });
         attempted.notified().await;
         assert!(

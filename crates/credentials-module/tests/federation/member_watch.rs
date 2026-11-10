@@ -1,8 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use claustrum_module_probe::federation::{member_watch, sharing};
-use credentials_core::federation::{NewRemoteRecord, RemoteHomeState, RemoteRecordSource};
+use credentials_core::federation::{
+    NewRemoteRecord, RemoteHomeState, RemoteRecordSource, RemoteWatchApplyMode, RemoteWatchRow,
+};
 use serde_json::{json, Value};
+use subc_protocol::FrameType;
 use tokio::sync::watch;
 
 use crate::support::{wait_for_signal, wait_until, HomeStore, Reply, TwoVaults};
@@ -25,6 +28,27 @@ fn notice(rows: Vec<Value>) -> Value {
 
 fn paired() -> member_watch::PairedComputers {
     Some(vec![(FP.into(), "pair-a".into())])
+}
+
+fn seed(rig: &Rig, home: &str, pairing: &str, id: &str) {
+    rig.home
+        .store
+        .remote_watch_apply_audited(
+            home,
+            pairing,
+            &[RemoteWatchRow {
+                credential_id: id.into(),
+                state: RemoteHomeState::NeedsReauth,
+                refresh_adapter: Some("openai".into()),
+                identity: Default::default(),
+                categories: vec!["llm-provider".into()],
+                detected_plan: None,
+                home_version: 1,
+            }],
+            RemoteWatchApplyMode::Full,
+            &[],
+        )
+        .unwrap();
 }
 
 struct Rig {
@@ -316,18 +340,274 @@ async fn member_watch_owns_one_task_per_pair_and_routes_homes_independently() {
     );
     rig.pairings.send_replace(Some(vec![]));
     wait_until(|| rig.vaults.callosum.cancelled_watches() >= 2).await;
-    assert_eq!(
-        rig.home.store.remote_record("oauth:x").unwrap().unwrap(),
-        before,
-        "lost pairing keeps rows until authoritative removal is implemented"
-    );
+    wait_until(|| rig.home.store.remote_record("oauth:x").unwrap().is_none()).await;
     rig.pairings
         .send_replace(Some(vec![(FP.into(), "pair-new".into())]));
     wait_until(|| rig.requests() == 2).await;
+    rig.row("oauth:x").await;
+    let after = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
+    assert_eq!(after.home_pairing_id.as_deref(), Some("pair-new"));
+    assert_ne!(after.incarnation, before.incarnation);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn member_watch_first_inventory_cleans_persisted_pairings_before_open() {
+    let rig = Rig::new(
+        "member-startup-cleanup",
+        Reply::Watch(notice(vec![login("oauth:x")])),
+    )
+    .await;
+    seed(&rig, HOME, "old-pair", "oauth:x");
+    let before = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
+    let absent = "fed-computer:11223344556677889900112233445566";
+    seed(&rig, absent, "absent-pair", "oauth:absent");
+    rig.home
+        .store
+        .remote_add_audited(&NewRemoteRecord {
+            credential_id: "oauth:operator".into(),
+            home_member: HOME.into(),
+            refresh_adapter: None,
+            identity: Default::default(),
+            categories: vec![],
+            detected_plan: None,
+            home_version: 1,
+        })
+        .unwrap();
+    let operator = rig
+        .home
+        .store
+        .remote_record("oauth:operator")
+        .unwrap()
+        .unwrap();
+    rig.pairings.send_replace(paired());
+    wait_until(|| {
+        rig.home
+            .store
+            .remote_record("oauth:x")
+            .unwrap()
+            .is_some_and(|r| r.home_pairing_id.as_deref() == Some("pair-a"))
+    })
+    .await;
+    let after = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
+    assert_ne!(after.incarnation, before.incarnation);
+    assert!(rig
+        .home
+        .store
+        .remote_record("oauth:absent")
+        .unwrap()
+        .is_none());
     assert_eq!(
-        rig.home.store.remote_record("oauth:x").unwrap().unwrap(),
-        before,
-        "old pairing rows are not overwritten by the new task"
+        rig.home
+            .store
+            .remote_record("oauth:operator")
+            .unwrap()
+            .unwrap(),
+        operator
     );
+    assert_eq!(rig.requests(), 1);
+    rig.stop().await;
+}
+
+fn authoritative_endings() -> Vec<(FrameType, Value)> {
+    vec![
+        (
+            FrameType::Error,
+            json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}}),
+        ),
+        (
+            FrameType::Error,
+            json!({"code": "fed_subscription_ended", "detail": {"reason": "revoked"}}),
+        ),
+        (
+            FrameType::Error,
+            json!({"code": "fed_subscription_ended", "detail": {"reason": "not_exposed"}, "message": "remote subscription ended"}),
+        ),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_watch_authoritative_open_refusals_remove_and_recover_without_inventory_event() {
+    for (index, (_, body)) in authoritative_endings().into_iter().enumerate() {
+        let reply = Reply::SubscriptionError {
+            channel_zero: index == 2,
+            body,
+        };
+        let rig = Rig::new(&format!("member-open-removal-{index}"), reply).await;
+        seed(&rig, HOME, "pair-a", "oauth:old");
+        rig.pairings.send_replace(paired());
+        wait_until(|| rig.home.store.remote_record("oauth:old").unwrap().is_none()).await;
+        rig.vaults.callosum.answer(
+            "claustrum",
+            OP,
+            Reply::Watch(notice(vec![login("oauth:recovered")])),
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        rig.row("oauth:recovered").await;
+        assert_eq!(rig.requests(), 2, "one timed retry after removal");
+        rig.stop().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_watch_authoritative_terminal_drops_failed_apply_until_a_new_stream_snapshot() {
+    for (index, (kind, body)) in authoritative_endings().into_iter().enumerate() {
+        let rig = Rig::new(
+            &format!("member-terminal-removal-{index}"),
+            Reply::Watch(notice(vec![login("oauth:old")])),
+        )
+        .await;
+        rig.pairings.send_replace(paired());
+        rig.row("oauth:old").await;
+        let sql = rusqlite::Connection::open(rig.vaults.b.store_path()).unwrap();
+        sql.execute_batch("CREATE TRIGGER fail_member_apply BEFORE INSERT ON audit_log WHEN NEW.op = 'remote_add' BEGIN SELECT RAISE(ABORT, 'apply unavailable'); END;").unwrap();
+        assert_eq!(
+            rig.vaults
+                .callosum
+                .watch_frame(
+                    TARGET,
+                    FrameType::StreamData,
+                    notice(vec![login("oauth:failed")])
+                )
+                .await,
+            1
+        );
+        rig.vaults.callosum.answer("claustrum", OP, Reply::Stall);
+        assert_eq!(rig.vaults.callosum.watch_frame(TARGET, kind, body).await, 1);
+        wait_until(|| rig.home.store.remote_record("oauth:old").unwrap().is_none()).await;
+        sql.execute_batch("DROP TRIGGER fail_member_apply").unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        wait_until(|| rig.requests() == 2).await;
+        assert!(
+            rig.home
+                .store
+                .remote_record("oauth:failed")
+                .unwrap()
+                .is_none(),
+            "the failed snapshot was discarded, not retried after removal"
+        );
+        rig.vaults.callosum.answer(
+            "claustrum",
+            OP,
+            Reply::Watch(notice(vec![login("oauth:failed")])),
+        );
+        wait_for_signal(rig.vaults.callosum.goodbye_routes(TARGET)).await;
+        rig.pairings.send_replace(paired());
+        rig.row("oauth:failed").await;
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn member_watch_collision_replay_inserts_only_skipped_rows_and_fences_repair() {
+    let c = "11223344556677889900112233445566";
+    let home_c = format!("fed-computer:{c}");
+    let target_c = format!("fed:{c}:claustrum");
+    let mut c_snapshot = notice(vec![login("oauth:x")]);
+    c_snapshot["home"] = json!(home_c);
+    let rig = Rig::new("member-collision-replay", Reply::Watch(c_snapshot.clone())).await;
+    rig.pairings
+        .send_replace(Some(vec![(c.into(), "pair-c".into())]));
+    rig.row("oauth:x").await;
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP,
+        Reply::Watch(notice(vec![login("oauth:x"), login("oauth:y")])),
+    );
+    rig.pairings.send_replace(Some(vec![
+        (c.into(), "pair-c".into()),
+        (FP.into(), "pair-a".into()),
+    ]));
+    rig.row("oauth:y").await;
+    let y = rig.home.store.remote_record("oauth:y").unwrap().unwrap();
+    // The read path owns this status after insert; replaying Full would overwrite
+    // its status with the older needs_reauth snapshot.
+    rig.home
+        .store
+        .remote_record_apply_home_state(
+            "oauth:y",
+            &y.incarnation,
+            RemoteHomeState::Corrupt,
+            "corrupt",
+        )
+        .unwrap();
+    let y = rig.home.store.remote_record("oauth:y").unwrap().unwrap();
+    c_snapshot["logins"] = json!([]);
+    assert_eq!(
+        rig.vaults
+            .callosum
+            .watch_frame(&target_c, FrameType::StreamData, c_snapshot)
+            .await,
+        1
+    );
+    wait_until(|| {
+        rig.home
+            .store
+            .remote_record("oauth:x")
+            .unwrap()
+            .is_some_and(|r| r.home_member == HOME)
+    })
+    .await;
+    assert_eq!(
+        rig.home.store.remote_record("oauth:y").unwrap().unwrap(),
+        y,
+        "InsertOnly never updates an installed row"
+    );
+
+    // C now skips X. The empty snapshot sent to TARGET frees X and wakes C
+    // while C changes pairing.
+    let mut c_snapshot = notice(vec![login("oauth:x"), login("oauth:z")]);
+    c_snapshot["home"] = json!(home_c);
+    rig.vaults
+        .callosum
+        .watch_frame(&target_c, FrameType::StreamData, c_snapshot.clone())
+        .await;
+    rig.row("oauth:z").await;
+    let z = rig.home.store.remote_record("oauth:z").unwrap().unwrap();
+    rig.vaults
+        .callosum
+        .answer("claustrum", OP, Reply::Watch(c_snapshot));
+    rig.vaults
+        .callosum
+        .watch_frame(TARGET, FrameType::StreamData, notice(vec![]))
+        .await;
+    rig.pairings.send_replace(Some(vec![
+        (c.into(), "pair-c-new".into()),
+        (FP.into(), "pair-a".into()),
+    ]));
+    wait_until(|| {
+        rig.home
+            .store
+            .remote_record("oauth:x")
+            .unwrap()
+            .is_some_and(|r| {
+                r.home_member == home_c && r.home_pairing_id.as_deref() == Some("pair-c-new")
+            })
+    })
+    .await;
+    wait_until(|| {
+        rig.home
+            .store
+            .remote_record("oauth:z")
+            .unwrap()
+            .is_some_and(|r| r.home_pairing_id.as_deref() == Some("pair-c-new"))
+    })
+    .await;
+    assert_ne!(
+        rig.home
+            .store
+            .remote_record("oauth:z")
+            .unwrap()
+            .unwrap()
+            .incarnation,
+        z.incarnation
+    );
+    assert!(rig
+        .home
+        .store
+        .list_remote_records()
+        .unwrap()
+        .iter()
+        .all(|r| r.home_member != home_c || r.home_pairing_id.as_deref() == Some("pair-c-new")));
     rig.stop().await;
 }

@@ -1411,6 +1411,23 @@ async fn dispatch_route_request(
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
+    if method
+        .as_ref()
+        .is_some_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
+        && !matches!(caller, federation::RouteCaller::Member(_))
+    {
+        let refusal = federation::home_watch::refusal(
+            header,
+            federation::HomeAnswer::Reply(
+                json!({"error":{"code":"not_found","class":"permanent"}}),
+            ),
+        )
+        .map_err(ModuleError::Message)?;
+        return writer
+            .send(refusal)
+            .await
+            .map_err(|_| ModuleError::Message("egress channel closed".into()));
+    }
     match caller {
         federation::RouteCaller::Principal(principal) => {
             if method.as_ref().is_some_and(|request| {
@@ -7374,13 +7391,17 @@ mod tests {
         );
     }
 
-    /// The federation ops answer the uniform not_found on every channel that is not a
-    /// federation channel, whatever the principal holds.
+    /// The federation ops answer the uniform not_found code and class on every
+    /// non-federation channel. Watches use Error so Callosum relays the refusal.
     #[tokio::test]
     async fn the_federation_ops_are_not_found_everywhere_else() {
         let (surface, admin, store, routes) = granted_scoped_rig(193, "callosum");
         let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
         let ops = federation::ingress::FEDERATION_OPS;
+        let watch_not_found = serde_json::to_vec(
+            &json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}}),
+        )
+        .unwrap();
         // Gate off: callosum's own route, a forwarded route, another module, direct.
         bind_reserved_route(
             &surface,
@@ -7397,8 +7418,13 @@ mod tests {
         admin.record_bind_at(94, 1, subc_protocol::Principal::Direct, "");
         for channel in [91, 92, 93, 94] {
             for op in ops {
-                let (_, body) = routed_reply(&surface, &admin, channel, op, json!({})).await;
-                assert_eq!(body, not_found, "gate off, channel {channel}, {op}");
+                let reply = routed_reply(&surface, &admin, channel, op, json!({})).await;
+                let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+                    (FrameType::Error, watch_not_found.clone())
+                } else {
+                    (FrameType::Response, not_found.clone())
+                };
+                assert_eq!(reply, expected, "gate off, channel {channel}, {op}");
             }
         }
         // Gate on: callosum-self, holding read grants covering the id, still gets
@@ -7406,8 +7432,13 @@ mod tests {
         set_member_mapping(&store, true);
         for op in ops {
             let params = json!({ "credential_id": FORWARDED_TEST_ID });
-            let (_, body) = routed_reply(&surface, &admin, 91, op, params).await;
-            assert_eq!(body, not_found, "gate on, callosum-self, {op}");
+            let reply = routed_reply(&surface, &admin, 91, op, params).await;
+            let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+                (FrameType::Error, watch_not_found.clone())
+            } else {
+                (FrameType::Response, not_found.clone())
+            };
+            assert_eq!(reply, expected, "gate on, callosum-self, {op}");
         }
     }
 
@@ -7436,7 +7467,16 @@ mod tests {
                     let watch =
                         routed_reply(&surface, &admin, channel, "federation.remote_watch", params)
                             .await;
-                    assert_eq!(watch, token, "mapping {mapping_on}, channel {channel}");
+                    assert_eq!(
+                        watch.0,
+                        FrameType::Error,
+                        "mapping {mapping_on}, channel {channel}"
+                    );
+                    let body: serde_json::Value = serde_json::from_slice(&watch.1).unwrap();
+                    assert_eq!(
+                        body,
+                        json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
+                    );
                 }
             }
         }

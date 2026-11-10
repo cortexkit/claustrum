@@ -155,8 +155,8 @@ async fn remote_watch_stream_grant_narrowing_is_empty_snapshot_but_gate_off_is_t
         .unwrap();
     cycle(&home).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response),
-        json!({"result":{"error":{"code":"not_found","class":"permanent"}}})
+        body(rx.try_recv().unwrap(), FrameType::Error),
+        json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
     );
     assert_eq!(home.remote_watches.entry_count(), 0);
 }
@@ -220,8 +220,8 @@ async fn remote_watch_stream_pairing_snapshot_ends_without_a_store_write() {
         home.remote_watches.paired_devices(devices);
         cycle(&home).await;
         assert_eq!(
-            body(rx.try_recv().unwrap(), FrameType::Response),
-            json!({"result":{"error":{"code":"not_found","class":"permanent"}}})
+            body(rx.try_recv().unwrap(), FrameType::Error),
+            json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
         );
         assert!(tokio::time::Instant::now() - decoded_at <= Duration::from_secs(1));
         assert!(!writes.has_changed().unwrap());
@@ -301,7 +301,7 @@ async fn remote_watch_stream_repair_interrupts_a_pending_projection() {
     home.remote_watches.paired_devices(vec![]);
     cycle(&home).await;
     assert_eq!(
-        body(rx.try_recv().unwrap(), FrameType::Response)["result"]["error"]["code"],
+        body(rx.try_recv().unwrap(), FrameType::Error)["code"],
         "not_found"
     );
     assert!(tokio::time::Instant::now() - decoded_at <= Duration::from_secs(1));

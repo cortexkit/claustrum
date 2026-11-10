@@ -575,6 +575,12 @@ struct StandInState {
 /// What a test asks a live connection to do, outside any request it sent.
 #[derive(Debug)]
 enum Command {
+    WatchFrame {
+        target: String,
+        kind: FrameType,
+        body: Value,
+        sent: tokio::sync::oneshot::Sender<usize>,
+    },
     WatchSnapshot {
         body: Option<Value>,
         sent: tokio::sync::oneshot::Sender<usize>,
@@ -599,6 +605,26 @@ enum Command {
 const COMMAND_HANG_GUARD: Duration = Duration::from_secs(10);
 
 impl SharedCallosumStandIn {
+    /// Send data or a terminal reply to the held watches on one home's routes.
+    pub async fn watch_frame(&self, target: &str, kind: FrameType, body: Value) -> usize {
+        let mut count = 0;
+        for connection in self.live_connections() {
+            let (sent, reply) = tokio::sync::oneshot::channel();
+            if connection
+                .send(Command::WatchFrame {
+                    target: target.into(),
+                    kind,
+                    body: body.clone(),
+                    sent,
+                })
+                .is_ok()
+            {
+                count += wait_for_signal(reply).await.unwrap_or(0);
+            }
+        }
+        count
+    }
+
     /// Publish a full snapshot on held watches, or close them with StreamEnd.
     pub async fn watch_snapshot(&self, body: Option<Value>) -> usize {
         let mut count = 0;
@@ -1048,6 +1074,23 @@ async fn serve_one(
             },
             Some(command) = commands.recv() => {
                 match command {
+                    Command::WatchFrame { target, kind, body, sent } => {
+                        let selected: Vec<_> = watches.iter().filter(|((channel, _), _)| {
+                            open_routes.get(channel).is_some_and(|(on, _, _)| on == &target)
+                        }).map(|(key, epoch)| (*key, *epoch)).collect();
+                        let mut count = 0;
+                        for ((channel, corr), epoch) in selected {
+                            let frame = if kind == FrameType::Response && target.starts_with("fed:") {
+                                watch_frame(channel, epoch, corr, None)
+                            } else {
+                                Frame::build(kind, Flags::new(false, Priority::Interactive, false),
+                                    channel, epoch, corr, serde_json::to_vec(&body).unwrap()).unwrap()
+                            };
+                            if write_frame(&mut *writer.lock().await, &frame).await.is_ok() { count += 1; }
+                            if kind != FrameType::StreamData { watches.remove(&(channel, corr)); }
+                        }
+                        let _ = sent.send(count);
+                    }
                     Command::WatchSnapshot { body, sent } => {
                         let mut count = 0;
                         for (&(channel, corr), &epoch) in &watches {
@@ -1278,12 +1321,24 @@ async fn serve_one(
             }
             Reply::Ok(body) => {
                 note.record(&body);
-                let reply = response_on_channel(
-                    frame.header.channel,
-                    frame.header.epoch,
-                    frame.header.corr,
-                    body,
-                );
+                // Callosum treats a home watch Response as clean completion and
+                // drops its body instead of forwarding it to the origin.
+                let reply =
+                    if method == "federation.remote_watch" && ledger_target.starts_with("fed:") {
+                        watch_frame(
+                            frame.header.channel,
+                            frame.header.epoch,
+                            frame.header.corr,
+                            None,
+                        )
+                    } else {
+                        response_on_channel(
+                            frame.header.channel,
+                            frame.header.epoch,
+                            frame.header.corr,
+                            body,
+                        )
+                    };
                 let _ = write_frame(&mut *writer.lock().await, &reply).await;
             }
             Reply::Permanent(code) | Reply::RetrySafe(code) => {

@@ -272,12 +272,40 @@ pub struct NewRemoteRecord {
     pub categories: Vec<String>,
 }
 
+/// Who controls a remote record's lifetime: the operator or the subscription that
+/// keeps it in sync with its home vault's login list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRecordSource {
+    Operator,
+    HomeWatch,
+}
+
+impl RemoteRecordSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::HomeWatch => "home_watch",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "operator" => Some(Self::Operator),
+            "home_watch" => Some(Self::HomeWatch),
+            _ => None,
+        }
+    }
+}
+
 /// One `remote_records` row. Nothing in it is secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRecord {
     pub detected_plan_tier_observed_at_ms: Option<i64>,
     pub credential_id: String,
     pub home_member: String,
+    pub source: RemoteRecordSource,
+    pub home_pairing_id: Option<String>,
     /// 32 lowercase hex, new on every `remote add`.
     pub incarnation: String,
     pub refresh_adapter: Option<String>,

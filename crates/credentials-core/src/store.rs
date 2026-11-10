@@ -83,6 +83,10 @@ pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
 /// The migration that distinguishes operator grants from Callosum sharing switches.
 pub const MEMBER_GRANT_SOURCE_SCHEMA_VERSION: u32 = 38;
 
+/// The migration that distinguishes manually added remote records from records
+/// kept in sync by a subscription to their home vault's login list.
+pub const REMOTE_RECORD_SOURCE_SCHEMA_VERSION: u32 = 39;
+
 /// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
 /// the selector vocabulary, and added the enrollment and grant-generation tables.
 ///
@@ -1057,6 +1061,13 @@ const MIGRATIONS: &[Migration] = &[
         version: MEMBER_GRANT_SOURCE_SCHEMA_VERSION,
         statements: "ALTER TABLE member_grants ADD COLUMN source TEXT NOT NULL \
                      DEFAULT 'operator' CHECK (source IN ('operator', 'sharing_switch'));",
+    },
+    Migration {
+        version: REMOTE_RECORD_SOURCE_SCHEMA_VERSION,
+        statements: "ALTER TABLE remote_records ADD COLUMN source TEXT NOT NULL \
+                     DEFAULT 'operator' CHECK (source IN ('operator', 'home_watch')); \
+                     ALTER TABLE remote_records ADD COLUMN home_pairing_id TEXT \
+                     CHECK ((source = 'home_watch') = (home_pairing_id IS NOT NULL));",
     },
 ];
 
@@ -13564,7 +13575,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            38,
+            39,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

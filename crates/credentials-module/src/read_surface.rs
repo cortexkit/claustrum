@@ -1140,7 +1140,7 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
-                provider: credentials_core::catalog::provider(&row.id).map(str::to_owned),
+                provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
                 credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
@@ -4203,6 +4203,7 @@ mod list_scoped_tests {
         identity: Option<RecordIdentity>,
     ) -> ScopedListRow {
         ScopedListRow {
+            provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
             id: id.into(),
@@ -4278,6 +4279,7 @@ mod list_scoped_tests {
 
     fn scoped_row_with_adapter(id: &str, adapter: Option<&str>) -> ScopedListRow {
         ScopedListRow {
+            provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
             id: id.to_owned(),

@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 
 use credentials_core::deposit_cookie::valid_deposit_cookie_id;
 use credentials_core::store::validate_deposit_credential_id;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Password, Select};
 
 use super::{
     api_key_login, login_id_is_valid, parse_inventory, request_admin_status, CliError, GlobalArgs,
@@ -175,6 +175,80 @@ pub(super) fn payload() -> Result<Vec<u8>, CliError> {
             return Ok(value.as_bytes().to_vec());
         }
         eprintln!("Value must not be empty.");
+    }
+}
+
+/// Resolve an unknown API-key service before reading any secret bytes.
+pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> {
+    use credentials_core::store::{
+        api_key_service, registered_providers_read_only, RegisteredProvider,
+    };
+
+    let Some(service) = api_key_service(id) else {
+        return Ok(true);
+    };
+    if credentials_core::catalog::provider(id).is_some() {
+        return Ok(true);
+    }
+    let registered =
+        registered_providers_read_only(&super::store_path(global)).map_err(CliError::Store)?;
+    if RegisteredProvider::for_id(&registered, id).is_some() {
+        return Ok(true);
+    }
+    if !is_terminal() {
+        eprintln!("Unknown provider {service}; use ck auth provider set --service {service} to choose defaults for future keys.");
+        return Ok(true);
+    }
+    let theme = ColorfulTheme::default();
+    eprintln!("Provider {service} is unknown. Its keys reach only modules granted the groups you choose now.");
+    let groups: Vec<_> = credentials_core::catalog::CredentialCategory::ALL
+        .iter()
+        .map(|category| category.as_str())
+        .collect();
+    let selected = MultiSelect::with_theme(&theme)
+        .with_prompt("Groups for this provider (space to select, enter to finish)")
+        .items(&groups)
+        .interact()
+        .map_err(prompt_error)?;
+    let categories = selected
+        .into_iter()
+        .map(|index| groups[index].to_string())
+        .collect();
+    eprintln!("Routing provider ids tell routing which models the key may serve. A wrong id sends work to a key that refuses it; empty is the safe answer.");
+    let raw: String = Input::with_theme(&theme)
+        .with_prompt("Routing provider ids (comma-separated, empty for none)")
+        .allow_empty(true)
+        .validate_with(|value: &String| {
+            let ids = routing_ids(value);
+            super::check_cli_provider_ids(&ids, true).map_err(|error| error.to_string())
+        })
+        .interact_text()
+        .map_err(prompt_error)?;
+    if !Confirm::with_theme(&theme)
+        .with_prompt("Save these provider defaults and continue?")
+        .default(false)
+        .interact()
+        .map_err(prompt_error)?
+    {
+        return Ok(false);
+    }
+    super::commit_admin(
+        global,
+        credentials_core::admin_ops::AdminOpBody::ProviderSet {
+            v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+            service: service.to_string(),
+            categories,
+            provider_ids: routing_ids(&raw),
+        },
+    )?;
+    Ok(true)
+}
+
+fn routing_ids(raw: &str) -> Vec<String> {
+    if raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        raw.split(',').map(|id| id.trim().to_string()).collect()
     }
 }
 

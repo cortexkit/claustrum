@@ -9229,6 +9229,7 @@ mod tests {
             plan_tier_source: Option<&'a str>,
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
+            provider: credentials_core::catalog::provider(stored.id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
             id: stored.id.into(),

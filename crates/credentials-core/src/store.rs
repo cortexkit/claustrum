@@ -77,6 +77,9 @@ const SCHEMA_NAMESPACE: &str = "credentials";
 /// version.
 pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 
+/// Operator defaults for API-key services absent from the fixed catalog.
+pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
+
 /// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
 /// the selector vocabulary, and added the enrollment and grant-generation tables.
 ///
@@ -1038,6 +1041,15 @@ const MIGRATIONS: &[Migration] = &[
                      ALTER TABLE remote_record_plan_tiers ADD COLUMN observed_at_ms INTEGER; \
                      ALTER TABLE remote_records ADD COLUMN detected_plan_tier_observed_at_ms INTEGER;",
     },
+    Migration {
+        version: REGISTERED_PROVIDERS_SCHEMA_VERSION,
+        statements: "CREATE TABLE registered_providers (\
+                         service TEXT PRIMARY KEY, \
+                         categories_json TEXT NOT NULL, \
+                         provider_ids_json TEXT NOT NULL, \
+                         created_at_ms INTEGER NOT NULL\
+                     );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1361,6 +1373,7 @@ pub struct ScopedCoverage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedListRow {
+    pub provider: Option<String>,
     pub incarnation: String,
     pub plan_tier_observed_at_ms: Option<i64>,
     pub id: String,
@@ -3822,6 +3835,7 @@ impl EncryptedStore {
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
                 let schema_version = read_schema_version(&tx)?;
+                let registered_providers = registered_providers::from_conn(&tx)?;
                 let mut grants = read_grants_from_conn(
                     &tx,
                     Some(principal_kind),
@@ -3942,6 +3956,7 @@ impl EncryptedStore {
                         identity.as_ref().and(plan_tier), detected_plan.as_ref(),
                     );
                     rows.push(ScopedListRow {
+                        provider: RegisteredProvider::service_for_id(&registered_providers, &id).map(str::to_owned),
                         incarnation,
                         plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
                             Some("operator") => operator_observed_at_ms,
@@ -4539,7 +4554,7 @@ impl EncryptedStore {
             // reachable writer goes through. Three visible copies under three contracts
             // beat one helper hiding which contract it is serving.
             if n > 0 {
-                for category in crate::catalog::category_defaults(credential_id) {
+                for category in registered_providers::category_defaults(tx, credential_id)? {
                     tx.execute(
                         "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
                         rusqlite::params![credential_id, category],
@@ -13525,7 +13540,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            36,
+            37,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -17936,6 +17951,12 @@ mod transfer_key_fence_tests;
 
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
+
+#[path = "store_registered_providers.rs"]
+mod registered_providers;
+pub use registered_providers::{
+    api_key_service, registered_providers_read_only, RegisteredProvider,
+};
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{
     list_agent_secret_grants_read_only, list_agent_secrets_read_only, OperatorFlowGrantRow,

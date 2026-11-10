@@ -5771,7 +5771,7 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // and provider-report.
     assert_eq!(
         verbs.len(),
-        39,
+        40,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

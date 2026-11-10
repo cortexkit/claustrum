@@ -512,10 +512,12 @@ assigned to this credential. They are not interchangeable.
 
 Three additive fields are present on every current row:
 
-- `provider`: the vault catalog's **service name**, not a routing provider id (for
+- `provider`: the vault's **service name**, not a routing provider id (for
   example `zai`, `kimi-for-coding`, `ollama-cloud`). API-key and login rows use the
-  same catalog match that stamps categories, including labeled accounts; an unknown
-  row is `null`. Never derive it by splitting the credential id.
+  same catalog match that stamps categories, including labeled accounts. API-key
+  services registered by the operator with `ck auth provider set` are also named,
+  including labeled keys; the fixed catalog always wins. An unregistered unknown
+  row is `null`. Consumers must use this field, not split the credential id.
 - `incarnation`: the stored random per-row identity. Replacement and refresh keep
   it; removal followed by re-creation changes it, even when other metadata is equal.
   A row this vault reads from its home vault carries this vault's own registration

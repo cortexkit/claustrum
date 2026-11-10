@@ -1857,6 +1857,7 @@ impl RemoteReader {
     /// version and `state` the last authoritative home state.
     pub fn scoped_rows(&self, grants: &[ReadGrant]) -> Result<Vec<ScopedListRow>, StoreOpError> {
         let mut rows = Vec::new();
+        let providers = self.store.registered_providers()?;
         for entry in self.store.remote_inventory()? {
             let record = entry.record;
             let operations: BTreeSet<GrantOperation> = grants
@@ -1893,6 +1894,11 @@ impl RemoteReader {
                 detected_plan.as_ref(),
             );
             rows.push(ScopedListRow {
+                provider: credentials_core::store::RegisteredProvider::service_for_id(
+                    &providers,
+                    &record.credential_id,
+                )
+                .map(str::to_owned),
                 incarnation: record.incarnation.clone(),
                 plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
                     Some("operator") => entry.plan_tier_observed_at_ms,

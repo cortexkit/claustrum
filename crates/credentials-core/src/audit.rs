@@ -125,6 +125,9 @@ pub enum AuditOp {
     SetCategory,
     /// A credential's operator-assigned catalog provider ids changed.
     SetProviders,
+    /// Defaults for future keys of an operator-registered API-key service changed.
+    ProviderSet,
+    ProviderRemove,
     /// An operator assertion of a subscription tier changed or was cleared.
     SetPlan,
     /// Migration 10 assigned a category while converting schema-9 selectors.
@@ -234,6 +237,8 @@ impl AuditOp {
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
             AuditOp::SetProviders => "set_providers",
+            AuditOp::ProviderSet => "provider_set",
+            AuditOp::ProviderRemove => "provider_remove",
             AuditOp::SetPlan => "set_plan",
             AuditOp::EnrollApprove => "enroll.approve",
             AuditOp::EnrollLabel => "enroll.label",
@@ -784,6 +789,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
                 AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
+                AuditOp::ProviderSet => AuditOp::ProviderSet.as_str(),
+                AuditOp::ProviderRemove => AuditOp::ProviderRemove.as_str(),
                 AuditOp::SetPlan => AuditOp::SetPlan.as_str(),
                 AuditOp::EnrollApprove => AuditOp::EnrollApprove.as_str(),
                 AuditOp::EnrollLabel => AuditOp::EnrollLabel.as_str(),

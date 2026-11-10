@@ -1749,6 +1749,86 @@ mod tests {
         String::from_utf8(op.to_bytes().expect("encode op")).expect("UTF-8 JSON")
     }
 
+    #[tokio::test]
+    async fn registered_provider_admin_ops_serve_the_service_on_scoped_lists() {
+        use credentials_core::store::{GrantOperation, SelectorKind};
+        let r = rig(29);
+        r.admin.record_bind(5, Principal::Direct);
+        for op in [
+            AdminOpBody::ProviderSet {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                service: "customservice".into(),
+                categories: vec!["web-search".into()],
+                provider_ids: Vec::new(),
+            },
+            AdminOpBody::ProviderSet {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                service: "customservice".into(),
+                categories: vec!["web-search".into()],
+                provider_ids: Vec::new(),
+            },
+        ] {
+            let body = String::from_utf8(op.to_bytes().unwrap()).unwrap();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            assert!(matches!(
+                r.admin.execute(5, body.as_bytes(), &tag).await,
+                AdminOutcome::Ok(_)
+            ));
+        }
+        let audit = r.store.read_audit(None).unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|row| row.op == AuditOp::ProviderSet.as_str())
+                .count(),
+            1
+        );
+        r.store
+            .create(
+                "apikey:customservice:work",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .unwrap();
+        r.store
+            .create_read_grant_audited(
+                "reserved",
+                "plexus",
+                SelectorKind::Category,
+                "web-search",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let snapshot = r.store.list_scoped_snapshot("reserved", "plexus").unwrap();
+        let result = crate::read_surface::project_list_scoped(snapshot);
+        assert_eq!(result.credentials.len(), 1);
+        assert_eq!(
+            result.credentials[0].provider.as_deref(),
+            Some("customservice")
+        );
+        assert_eq!(result.credentials[0].id, "apikey:customservice:work");
+        let body = String::from_utf8(
+            AdminOpBody::ProviderRemove {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                service: "customservice".into(),
+            }
+            .to_bytes()
+            .unwrap(),
+        )
+        .unwrap();
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Ok(_)
+        ));
+        assert!(r.store.registered_providers().unwrap().is_empty());
+        assert_eq!(
+            r.store.categories("apikey:customservice:work").unwrap(),
+            ["web-search"]
+        );
+        assert_eq!(r.store.verify_audit_chain().unwrap(), None);
+    }
+
     fn seed_provider_ids(r: &Rig, id: &str, provider_ids: &[&str]) {
         r.store
             .create(

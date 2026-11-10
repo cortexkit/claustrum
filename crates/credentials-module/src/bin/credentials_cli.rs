@@ -328,13 +328,30 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     if command == "help" || command == "--help" || command == "-h" {
         // `help <verb>` → the verb's page; bare `help` → the short table.
         match args.first() {
+            Some(verb)
+                if verb == "provider"
+                    && args
+                        .get(1)
+                        .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")) =>
+            {
+                println!("{}", help_verb(&args[..2].join(" ")))
+            }
             Some(verb) => println!("{}", help_verb(verb)),
             None => println!("{}", usage_short()),
         }
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{}", help_verb(&command));
+        let page = if command == "provider"
+            && args
+                .first()
+                .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove"))
+        {
+            format!("provider {}", args[0])
+        } else {
+            command.clone()
+        };
+        println!("{}", help_verb(&page));
         return Ok(());
     }
 
@@ -368,6 +385,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "set-identity" => cmd_set_identity(&global, &args),
         "set-category" => cmd_set_category(&global, &args),
         "set-providers" => cmd_set_providers(&global, &args),
+        "provider" => cmd_provider(&global, &args, options),
         "set-plan" => cmd_set_plan(&global, &args),
         "reclassify" => cmd_reclassify(&global, &args),
         "login" => cmd_login(&global, &args),
@@ -479,6 +497,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "--client-id",
             "--provider-id",
         ],
+        "provider" => &["--service", "--category", "--provider-id"],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
         "import" => &[
@@ -570,6 +589,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "transfer" => &["init", "send", "receive", "accept", "reject"],
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
+            "provider" => &["list", "set", "remove"],
             "federation" => &["self", "mapping"],
             // Every secret verb name and its one positional action, so none is eaten
             // here. `secret`'s FLAGS are checked by `secret_cli::guard_args` instead: this
@@ -651,6 +671,7 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        provider-report     compare stored provider ids with catalog defaults\n\
+       provider            list, set or remove operator provider defaults\n\
        grants              principal-scoped grants (no secrets)\n\
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
@@ -712,6 +733,55 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "provider" => {
+            "ck auth provider list\n\
+             ck auth provider set --service <name> [--category <c>]...\n\
+             \x20                    [--provider-id <id>]...\n\
+             ck auth provider remove --service <name>\n\
+             \n\
+             \x20 --service <name>    API-key service name (set and remove)\n\
+             \x20 --category <c>      default group for future keys (set; repeatable)\n\
+             \x20 --provider-id <id>  default routing id (set; repeatable)\n\
+             \n\
+             NOTES\n\
+             list is read-only and lease-free: service, groups and routing ids.\n\
+             set remembers defaults for future apikey:<service>[:<label>] keys.\n\
+             Choose groups from ck auth categories; no groups or routing ids is valid.\n\
+             A fixed catalog service cannot be registered. Repeating a set is a no-op.\n\
+             set and remove never change existing keys. Use set-category or\n\
+             set-providers to edit those. Routing ids tell routing which models a key\n\
+             may serve; a wrong id sends work to a key that refuses it. Empty is safe."
+        }
+        "provider list" => {
+            "ck auth provider list\n\
+             \n\
+             NOTES\n\
+             List registered service names, groups and routing provider ids.\n\
+             Read-only and lease-free; no master key is needed."
+        }
+        "provider set" => {
+            "ck auth provider set --service <name> [--category <c>]...\n\
+             \x20                    [--provider-id <id>]...\n\
+             \n\
+             \x20 --service <name>    API-key service absent from the fixed catalog\n\
+             \x20 --category <c>      default group for future keys (repeatable)\n\
+             \x20 --provider-id <id>  default routing id (repeatable)\n\
+             \n\
+             NOTES\n\
+             No groups or routing ids is valid. Groups are from ck auth categories.\n\
+             Existing records are never changed; an identical set writes nothing.\n\
+             Routing ids tell routing which models a key may serve. A wrong id sends\n\
+             work to a key that refuses it; empty is the safe answer."
+        }
+        "provider remove" => {
+            "ck auth provider remove --service <name>\n\
+             \n\
+             \x20 --service <name>    registered API-key service to forget\n\
+             \n\
+             NOTES\n\
+             Remove future defaults only; existing records keep their groups and ids.\n\
+             The next interactive put for this service asks again."
+        }
         "provider-report" => {
             "ck auth provider-report\n\
              \n\
@@ -1092,6 +1162,11 @@ fn help_verb(verb: &str) -> String {
               default. A cookie:<domain> id always creates a session-cookie record.\n\
               Catalog ids store the table's routing provider ids by default. Explicit\n\
               --provider-id wins; --replace keeps a stored set, as login does.\n\
+              Unknown API-key providers ask once for groups and routing ids before\n\
+              reading the value. No groups or routing ids is valid; confirmation\n\
+              defaults to No. Later keys reuse the answer. Without a terminal, put\n\
+              stores the key and names ck auth provider set for future defaults.\n\
+              Use ck auth set-category to change one key's groups afterwards.\n\
              \n\
              At a terminal, omit flags to pick API key, cookie, DSN or opaque secret,\n\
              then name it and paste a hidden value. API keys use apikey:<provider>\n\
@@ -1469,11 +1544,22 @@ fn commit_login_admin(
 
 fn deposit_provider_ids(global: &GlobalArgs, id: &str, explicit: Vec<String>) -> Vec<String> {
     if explicit.is_empty() {
-        let defaults = catalog_default_provider_ids(id);
+        let registered =
+            credentials_core::store::registered_providers_read_only(&store_path(global))
+                .unwrap_or_default();
+        let defaults: Vec<String> =
+            credentials_core::store::RegisteredProvider::for_id(&registered, id)
+                .map(|row| row.provider_ids.clone())
+                .unwrap_or_else(|| {
+                    catalog_default_provider_ids(id)
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect()
+                });
         if defaults.is_empty() || !stored_login_provider_ids(global, id).is_empty() {
             Vec::new()
         } else {
-            defaults.iter().map(|id| id.to_string()).collect()
+            defaults
         }
     } else {
         explicit
@@ -2099,6 +2185,87 @@ fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
     pem
 }
 
+fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
+    args[1..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+fn cmd_provider(
+    global: &GlobalArgs,
+    args: &[String],
+    options: ParsedOptions,
+) -> Result<(), CliError> {
+    let action = args.first().map(String::as_str);
+    let service_flags = ["--service"];
+    let flags: &[&str] = match action {
+        Some("list") if args.len() == 1 => &[],
+        Some("set") => &["--service", "--category", "--provider-id"],
+        Some("remove") => &service_flags,
+        _ => return Err(CliError::Usage(help_verb("provider"))),
+    };
+    let (pairs, remainder) = args[1..].as_chunks::<2>();
+    if !remainder.is_empty()
+        || !pairs
+            .iter()
+            .all(|pair| flags.contains(&pair[0].as_str()) && !pair[1].starts_with("--"))
+        || (action != Some("list")
+            && args
+                .iter()
+                .filter(|arg| arg.as_str() == "--service")
+                .count()
+                != 1)
+    {
+        return Err(CliError::Usage(help_verb("provider")));
+    }
+    match args.first().map(String::as_str) {
+        Some("list") if args.len() == 1 => {
+            let rows = credentials_core::store::registered_providers_read_only(&store_path(global))
+                .map_err(CliError::Store)?;
+            println!("SERVICE\tGROUPS\tPROVIDER IDS");
+            for row in rows {
+                println!(
+                    "{}\t{}\t{}",
+                    row.service,
+                    serde_json::to_string(&row.categories).unwrap(),
+                    serde_json::to_string(&row.provider_ids).unwrap()
+                );
+            }
+        }
+        Some("set") => {
+            let service = options.required("--service")?;
+            let provider_ids = provider_id_flags(args)?;
+            commit_admin(
+                global,
+                AdminOpBody::ProviderSet {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    service: service.clone(),
+                    categories: repeated_values(args, "--category"),
+                    provider_ids,
+                },
+            )?;
+            println!("set provider {service}");
+        }
+        Some("remove") if args.len() == 3 && args[1] == "--service" => {
+            let service = options.required("--service")?;
+            commit_admin(
+                global,
+                AdminOpBody::ProviderRemove {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    service: service.clone(),
+                },
+            )?;
+            println!("removed provider {service}");
+        }
+        _ => return Err(CliError::Usage(help_verb("provider"))),
+    }
+    Ok(())
+}
+
 fn cmd_put(
     global: &GlobalArgs,
     args: &[String],
@@ -2109,6 +2276,13 @@ fn cmd_put(
         return Ok(());
     }
     let id = options.required("--id")?;
+    if options
+        .optional("--kind")
+        .is_none_or(|kind| kind == "api_key")
+        && !put_prompt::provider(global, &id)?
+    {
+        return Ok(());
+    }
     let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
@@ -5645,6 +5819,8 @@ fn inventory_json_rows(
     global: &GlobalArgs,
 ) -> Result<Vec<serde_json::Value>, CliError> {
     let rows = parse_inventory(result)?;
+    let registered = credentials_core::store::registered_providers_read_only(&store_path(global))
+        .map_err(CliError::Store)?;
     let methods = if rows.is_empty() {
         std::collections::BTreeMap::new()
     } else {
@@ -5682,7 +5858,7 @@ fn inventory_json_rows(
                     "auth_method": auth_method,
                     "plan_tier": plan_tier,
                     "plan_tier_source": plan_tier_source,
-                    "provider": credentials_core::catalog::provider(id),
+                    "provider": credentials_core::store::RegisteredProvider::service_for_id(&registered, id),
                     "incarnation": entry.and_then(|row| row.get("incarnation")).cloned().unwrap_or(serde_json::Value::Null),
                     "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,

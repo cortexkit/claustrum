@@ -48,6 +48,15 @@ where
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum AdminOpBody {
+    #[serde(rename = "admin.provider_set")]
+    ProviderSet {
+        v: u32,
+        service: String,
+        categories: Vec<String>,
+        provider_ids: Vec<String>,
+    },
+    #[serde(rename = "admin.provider_remove")]
+    ProviderRemove { v: u32, service: String },
     /// Sign with an explicitly opted-in key, after committing signature history.
     #[serde(rename = "admin.operator_sign")]
     OperatorSign {
@@ -434,6 +443,23 @@ pub enum AdminOpBody {
 impl std::fmt::Debug for AdminOpBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AdminOpBody::ProviderSet {
+                v,
+                service,
+                categories,
+                provider_ids,
+            } => f
+                .debug_struct("ProviderSet")
+                .field("v", v)
+                .field("service", service)
+                .field("categories", categories)
+                .field("provider_ids", provider_ids)
+                .finish(),
+            AdminOpBody::ProviderRemove { v, service } => f
+                .debug_struct("ProviderRemove")
+                .field("v", v)
+                .field("service", service)
+                .finish(),
             AdminOpBody::OperatorSign { v, id, .. } => f
                 .debug_struct("OperatorSign")
                 .field("v", v)
@@ -827,6 +853,8 @@ impl AdminOpBody {
     pub fn schema_version(&self) -> u32 {
         match self {
             AdminOpBody::Store { v, .. }
+            | AdminOpBody::ProviderSet { v, .. }
+            | AdminOpBody::ProviderRemove { v, .. }
             | AdminOpBody::OperatorSign { v, .. }
             | AdminOpBody::StoreWithIdentityPolicy { v, .. }
             | AdminOpBody::SetIdentity { v, .. }
@@ -882,6 +910,8 @@ impl AdminOpBody {
     pub const fn required_schema_version(&self) -> u32 {
         match self {
             AdminOpBody::GrantCreateV2 { .. }
+            | AdminOpBody::ProviderSet { .. }
+            | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
             | AdminOpBody::SetProviders { .. }
@@ -983,6 +1013,8 @@ impl AdminOpBody {
                 Some(crate::federation::VAULT_TRANSFER_ID)
             }
             AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::ProviderSet { .. }
+            | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::RevokeHandleByHash { .. }
             | AdminOpBody::GrantCreate { .. }
             | AdminOpBody::GrantRevoke { .. }
@@ -1038,6 +1070,8 @@ impl AdminOpBody {
     pub fn op_name(&self) -> &'static str {
         match self {
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
+            AdminOpBody::ProviderSet { .. } => "admin.provider_set",
+            AdminOpBody::ProviderRemove { .. } => "admin.provider_remove",
             AdminOpBody::Store { .. } => "admin.store",
             AdminOpBody::StoreWithIdentityPolicy { .. } => "admin.store_with_identity_policy",
             AdminOpBody::SetIdentity { .. } => "admin.set_identity",
@@ -1099,6 +1133,8 @@ impl AdminOpBody {
     pub const fn requires_daemon(&self) -> bool {
         match self {
             AdminOpBody::Store { .. }
+            | AdminOpBody::ProviderSet { .. }
+            | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
@@ -1252,6 +1288,27 @@ pub fn apply(
         return Err(requires_daemon_refusal(&op));
     }
     match op {
+        AdminOpBody::ProviderSet {
+            service,
+            categories,
+            provider_ids,
+            ..
+        } => {
+            let changed = store.set_registered_provider_audited(
+                &service,
+                &categories,
+                &provider_ids,
+                AuditCtx::route_admin(AuditOp::ProviderSet, actor),
+            )?;
+            Ok(serde_json::json!({"changed": changed}))
+        }
+        AdminOpBody::ProviderRemove { service, .. } => {
+            let changed = store.remove_registered_provider_audited(
+                &service,
+                AuditCtx::route_admin(AuditOp::ProviderRemove, actor),
+            )?;
+            Ok(serde_json::json!({"changed": changed}))
+        }
         AdminOpBody::OperatorSign {
             id, payload_b64, ..
         } => {

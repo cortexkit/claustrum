@@ -1560,6 +1560,12 @@ pub enum StoreOpError {
     InvalidMemberId,
     /// Callosum owns this grant; a manual revoke would be undone by reconciliation.
     MemberGrantSharingSwitch { member_id: String },
+    /// The home controls this row and its categories until an operator converts it
+    /// with a remote add for the same home.
+    RemoteRecordHomeWatch {
+        credential_id: String,
+        home_member: String,
+    },
     /// A grant would reach the vault transfer key (`kem:vault-transfer:*`) with
     /// anything but the one announce read, or a handle was requested for it. The
     /// transfer key signs the federation seals, so the only thing it may be granted is
@@ -1739,6 +1745,10 @@ impl std::fmt::Display for StoreOpError {
                 "Turn the vault-sharing switch off with `ck callosum share {} claustrum/vault off`; otherwise the vault would recreate this grant.",
                 member_id.trim_start_matches("fed-computer:")
             ),
+            StoreOpError::RemoteRecordHomeWatch { credential_id, home_member } => write!(
+                f,
+                "remote_record_home_watch/permanent: {credential_id} is kept by {home_member}'s vault-sharing switch"
+            ),
             StoreOpError::TransferKeyReserved => f.write_str(
                 "transfer_key_reserved: the vault transfer key admits one grant only, read to reserved:callosum for the public-key announce; it cannot be opened, sealed, signed or listed, and no other credential may take its id",
             ),
@@ -1783,6 +1793,7 @@ impl StoreOpError {
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
             StoreOpError::InvalidMemberId => Some("invalid_member_id"),
             StoreOpError::MemberGrantSharingSwitch { .. } => Some("member_grant_sharing_switch"),
+            StoreOpError::RemoteRecordHomeWatch { .. } => Some("remote_record_home_watch"),
             StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
@@ -4060,12 +4071,25 @@ impl EncryptedStore {
             requested.insert(category.clone());
         }
         let audit_key = self.audit_key.clone();
-        let outcome = self.fenced_write(|tx| {
-            // A remote record's categories belong to this vault and live in the remote
-            // tables, so the same verb writes whichever family holds the id.
+        self.fenced_write_or_refuse(|tx| {
+            // Operator remote categories belong to this vault; home-watch categories
+            // belong to the home and must change through its snapshots instead.
             let Some(tables) = metadata_tables_for(tx, credential_id)? else {
-                return Ok(None);
+                return Ok(Err(StoreOpError::NotFound));
             };
+            if let MetadataTables::Remote = tables {
+                let home_member = tx.query_row(
+                    "SELECT home_member FROM remote_records WHERE credential_id = ?1 AND source = 'home_watch'",
+                    [credential_id],
+                    |row| row.get::<_, String>(0),
+                ).optional()?;
+                if let Some(home_member) = home_member {
+                    return Ok(Err(StoreOpError::RemoteRecordHomeWatch {
+                        credential_id: credential_id.to_string(),
+                        home_member,
+                    }));
+                }
+            }
             let mut stmt = tx.prepare(&format!(
                 "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
                 tables.categories()
@@ -4082,7 +4106,7 @@ impl EncryptedStore {
                 SetCategoryMode::Remove => current.difference(&requested).cloned().collect(),
             };
             if resulting == current {
-                return Ok(Some(false));
+                return Ok(Ok(false));
             }
             tx.execute(
                 &format!(
@@ -4117,9 +4141,8 @@ impl EncryptedStore {
             // An assignment changes what every category grant naming it reaches, so it
             // advances the same counter a grant mutation does.
             bump_grants_generation_tx(tx)?;
-            Ok(Some(true))
-        })?;
-        outcome.ok_or(StoreOpError::NotFound)
+            Ok(Ok(true))
+        })
     }
 
     /// One credential's provider ids in ascending byte order.

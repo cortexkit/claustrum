@@ -33,7 +33,8 @@ use credentials_core::admin_ops::{AdminOpBody, SecretHomeTarget};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::federation::{
-    valid_member_id, MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID,
+    valid_member_id, MemberGrantOperation, MemberGrantSelector, RemoteRecord, RemoteRecordSource,
+    VAULT_TRANSFER_ID,
 };
 use credentials_core::key::KeyId;
 use credentials_core::store::{EncryptedStore, StoreOpError};
@@ -684,7 +685,25 @@ impl AdminSurface {
                 }
                 match store.remote_record(&credential_id) {
                     Ok(None) => {}
-                    Ok(Some(_)) => return store_err(StoreOpError::AlreadyExists),
+                    Ok(Some(record)) if record.source == RemoteRecordSource::Operator => {
+                        return store_err(StoreOpError::AlreadyExists);
+                    }
+                    Ok(Some(_)) => {
+                        // Taking ownership uses the stored description, even when the
+                        // home cannot serve tokens or cannot be reached at all.
+                        return match self
+                            .locked(&credential_id, budget, |store| {
+                                let record = store
+                                    .remote_convert_home_watch_audited(&credential_id, &home)?;
+                                let categories = store.categories(&credential_id)?;
+                                Ok((record, categories))
+                            })
+                            .await
+                        {
+                            Ok((record, categories)) => remote_add_reply(record, categories),
+                            Err(refusal) => refusal,
+                        };
+                    }
                     Err(error) => return store_err(error),
                 }
                 let Some(reader) = self.remote.get() else {
@@ -706,14 +725,7 @@ impl AdminSurface {
                     })
                     .await
                 {
-                    Ok(record) => AdminOutcome::Ok(serde_json::json!({
-                        "credential_id": record.credential_id,
-                        "home": record.home_member,
-                        "incarnation": record.incarnation,
-                        "last_home_version": record.last_home_version,
-                        "refresh_adapter": record.refresh_adapter,
-                        "categories": new.categories,
-                    })),
+                    Ok(record) => remote_add_reply(record, new.categories),
                     Err(refusal) => refusal,
                 }
             }
@@ -974,12 +986,26 @@ fn accept_report(report: &crate::federation::AcceptReport) -> serde_json::Value 
     }
 }
 
+fn remote_add_reply(record: RemoteRecord, categories: Vec<String>) -> AdminOutcome {
+    AdminOutcome::Ok(serde_json::json!({
+        "credential_id": record.credential_id,
+        "home": record.home_member,
+        "incarnation": record.incarnation,
+        "last_home_version": record.last_home_version,
+        "refresh_adapter": record.refresh_adapter,
+        "categories": categories,
+    }))
+}
+
 /// Map a store error to a non-secret refusal. Admin ops are authenticated, so a bit
 /// more detail than the anonymous read surface is acceptable (the caller holds the
 /// master key), but never secret material.
 fn store_err(e: StoreOpError) -> AdminOutcome {
     if matches!(e, StoreOpError::MemberGrantSharingSwitch { .. }) {
         return AdminOutcome::Refused(format!("member_grant_sharing_switch/permanent: {e}"));
+    }
+    if matches!(e, StoreOpError::RemoteRecordHomeWatch { .. }) {
+        return AdminOutcome::Refused(e.to_string());
     }
     // Refusals `apply` names with their own code (`<code>: <why>`) keep it in front,
     // as `<code>/permanent: <why>`, instead of reading as an encoding failure.

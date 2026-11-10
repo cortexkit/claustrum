@@ -73,6 +73,183 @@ mod remote_watch {
     }
 
     #[test]
+    fn operator_commands_refuse_home_watch_removal_and_category_edits_without_writes() {
+        let (_root, store) = rig("watch-operator-refusals", 253);
+        let input = row("oauth:watch");
+        full(&store, std::slice::from_ref(&input));
+        let inventory = store.remote_inventory().unwrap();
+        let audits = store.read_audit(None).unwrap();
+        let generation = store.grants_generation().unwrap();
+        let writes = store.subscribe_writes();
+        let assert_refused = |error: StoreOpError| {
+            assert_eq!(error.wire_code(), Some("remote_record_home_watch"));
+            assert_eq!(error.wire_class(), Some("permanent"));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                "remote_record_home_watch/permanent: {} is kept by {HOME}'s vault-sharing switch",
+                input.credential_id,
+            )
+            );
+            assert!(matches!(error, StoreOpError::RemoteRecordHomeWatch {
+                credential_id, home_member
+            } if credential_id == input.credential_id && home_member == HOME));
+        };
+        assert_refused(
+            store
+                .remote_remove_audited(&input.credential_id)
+                .unwrap_err(),
+        );
+        assert_refused(
+            apply(
+                &store,
+                AdminOpBody::RemoteRemove {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    credential_id: input.credential_id.clone(),
+                },
+                ACTOR,
+            )
+            .unwrap_err(),
+        );
+        for mode in [
+            SetCategoryMode::Set,
+            SetCategoryMode::Add,
+            SetCategoryMode::Remove,
+        ] {
+            assert_refused(
+                store
+                    .set_categories_audited(
+                        &input.credential_id,
+                        mode,
+                        &["custom-team".into()],
+                        AuditCtx::admin(AuditOp::SetCategory),
+                    )
+                    .unwrap_err(),
+            );
+        }
+        // Even a category no-op cannot claim local ownership of the home's set.
+        assert_refused(
+            store
+                .set_categories_audited(
+                    &input.credential_id,
+                    SetCategoryMode::Set,
+                    &input.categories,
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap_err(),
+        );
+        assert_refused(
+            store
+                .remote_convert_home_watch_audited(&input.credential_id, OTHER)
+                .unwrap_err(),
+        );
+        assert_eq!(store.remote_inventory().unwrap(), inventory);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        assert!(!writes.has_changed().unwrap());
+    }
+
+    #[test]
+    fn operator_commands_convert_needs_reauth_in_place_with_operator_audit() {
+        use sha2::{Digest, Sha256};
+        let (_root, store) = rig("watch-operator-convert", 254);
+        let input = row("oauth:watch");
+        full(&store, std::slice::from_ref(&input));
+        store
+            .set_providers_audited(
+                &input.credential_id,
+                SetProvidersMode::Set,
+                &["anthropic".into()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .unwrap();
+        store
+            .set_plan_audited(
+                &input.credential_id,
+                Some("max_5x"),
+                AuditCtx::admin(AuditOp::SetPlan),
+            )
+            .unwrap();
+        let mut expected = store.remote_inventory().unwrap();
+        expected[0].record.source = RemoteRecordSource::Operator;
+        expected[0].record.home_pairing_id = None;
+        let generation = store.grants_generation().unwrap();
+        let audit_count = store.read_audit(None).unwrap().len();
+        let writes = store.subscribe_writes();
+        let converted = store
+            .remote_convert_home_watch_audited(&input.credential_id, HOME)
+            .unwrap();
+        assert_eq!(converted, expected[0].record);
+        assert_eq!(converted.last_home_state, RemoteHomeState::NeedsReauth);
+        assert_eq!(store.remote_inventory().unwrap(), expected);
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        assert!(writes.has_changed().unwrap());
+        let audits = store.read_audit(None).unwrap();
+        assert_eq!(audits.len(), audit_count + 1);
+        let entry = audits.last().unwrap();
+        assert_eq!(entry.op, "remote_add");
+        assert_eq!(
+            entry.credential_id.as_deref(),
+            Some(input.credential_id.as_str())
+        );
+        assert_eq!(entry.actor, HOME);
+        assert!(entry.alarm);
+        assert_eq!(entry.alarm_reason.as_deref(), Some("admin_write"));
+        let payload = format!("{{\"incarnation\":\"{}\"}}", converted.incarnation);
+        let expected_hash = Sha256::digest(payload.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(entry.payload_hash.as_ref(), Some(&expected_hash));
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+
+        assert!(store
+            .remote_watch_remove_audited(HOME, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(full(&store, &[]), RemoteWatchApplyResult::default());
+        assert_eq!(store.remote_inventory().unwrap(), expected);
+        assert!(matches!(
+            store.remote_convert_home_watch_audited(&input.credential_id, HOME),
+            Err(StoreOpError::AlreadyExists)
+        ));
+        store
+            .set_categories_audited(
+                &input.credential_id,
+                SetCategoryMode::Add,
+                &["custom-team".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        store.remote_remove_audited(&input.credential_id).unwrap();
+    }
+
+    #[test]
+    fn operator_commands_conversion_rolls_back_when_its_audit_fails() {
+        let (_root, store) = rig("watch-operator-atomic", 255);
+        full(&store, &[row("oauth:watch")]);
+        let inventory = store.remote_inventory().unwrap();
+        let audits = store.read_audit(None).unwrap();
+        let generation = store.grants_generation().unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_operator_add BEFORE INSERT ON audit_log \
+             WHEN NEW.op = 'remote_add' BEGIN SELECT RAISE(ABORT, 'add audit failed'); END;",
+                )
+            })
+            .unwrap();
+        let writes = store.subscribe_writes();
+        assert!(store
+            .remote_convert_home_watch_audited("oauth:watch", HOME)
+            .is_err());
+        assert_eq!(store.remote_inventory().unwrap(), inventory);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        assert!(!writes.has_changed().unwrap());
+    }
+
+    #[test]
     fn seeds_snapshot_metadata_and_audits_as_vault() {
         let (_root, store) = rig("watch-seed", 243);
         let input = row("oauth:watch");

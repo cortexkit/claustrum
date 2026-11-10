@@ -22,7 +22,8 @@ use credentials_core::admin_ops::{
 use credentials_core::agent_secret::{deposit_plaintext, SecretMaterial, SecretPut, SecretScope};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::federation::{
-    member_grant_payload_hash, MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID,
+    member_grant_payload_hash, MemberGrantOperation, MemberGrantSelector, RemoteHomeState,
+    RemoteRecord, RemoteRecordSource, RemoteWatchApplyMode, RemoteWatchRow, VAULT_TRANSFER_ID,
 };
 use credentials_core::key::MasterKey;
 use credentials_core::oauth::OAuthCredential;
@@ -1215,6 +1216,129 @@ fn reader(b: &Vault, fixture: &VaultFixture, adapters: &[&str]) -> Arc<RemoteRea
     );
     assert!(reader.attach_outbound(fixture.outbound.clone()));
     Arc::new(reader)
+}
+
+fn seed_home_watch(b: &Vault, home: &str, state: RemoteHomeState) -> RemoteRecord {
+    b.store()
+        .remote_watch_apply_audited(
+            home,
+            PAIRING,
+            &[RemoteWatchRow {
+                credential_id: LOGIN_ID.into(),
+                state,
+                refresh_adapter: Some("anthropic".into()),
+                identity: Default::default(),
+                categories: vec![CATEGORY.into()],
+                detected_plan: None,
+                home_version: 17,
+            }],
+            RemoteWatchApplyMode::Full,
+            &[],
+        )
+        .unwrap();
+    b.store().remote_record(LOGIN_ID).unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn home_watch_operator_commands_refuse_remove_category_and_different_home_without_writes() {
+    let root = crate::support::temp_root("admin-watch-refuse");
+    let vaults = TwoVaults::new(&root).await;
+    let b = Vault::open(&vaults.b, None);
+    let home = vaults.home_member();
+    seed_home_watch(&b, home, RemoteHomeState::Active);
+    let inventory = b.store().remote_inventory().unwrap();
+    let audits = b.store().read_audit(None).unwrap();
+    let generation = b.store().grants_generation().unwrap();
+    let writes = b.store().subscribe_writes();
+    let calls = vaults.callosum.methods(TARGET_MODULE);
+    let expected = format!(
+        "remote_record_home_watch/permanent: {LOGIN_ID} is kept by {home}'s vault-sharing switch"
+    );
+    for op in [
+        AdminOpBody::RemoteRemove {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: LOGIN_ID.into(),
+        },
+        AdminOpBody::SetCategory {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: LOGIN_ID.into(),
+            mode: SetCategoryMode::Set,
+            categories: vec!["custom-team".into()],
+        },
+        AdminOpBody::RemoteAdd {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: LOGIN_ID.into(),
+            home: b.member.clone(),
+        },
+    ] {
+        assert_eq!(refusal(b.run(&op).await), expected);
+        assert_eq!(b.store().remote_inventory().unwrap(), inventory);
+        assert_eq!(b.store().read_audit(None).unwrap(), audits);
+        assert_eq!(b.store().grants_generation().unwrap(), generation);
+        assert!(!writes.has_changed().unwrap());
+    }
+    assert_eq!(vaults.callosum.methods(TARGET_MODULE), calls);
+}
+
+#[tokio::test]
+async fn home_watch_operator_add_converts_needs_reauth_without_fetch_and_keeps_add_reply() {
+    let root = crate::support::temp_root("admin-watch-convert");
+    let vaults = TwoVaults::new(&root).await;
+    let b = Vault::open(&vaults.b, None);
+    // No home route or transfer setup exists. An attempted fetch cannot succeed.
+    assert!(b
+        .admin
+        .attach_remote_reader(reader(&b, &vaults.b, &FAKE_ADAPTERS)));
+    let home = vaults.home_member();
+    let before = seed_home_watch(&b, home, RemoteHomeState::NeedsReauth);
+    let calls = vaults.callosum.methods(TARGET_MODULE);
+    let added = ok(b
+        .run(&AdminOpBody::RemoteAdd {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: LOGIN_ID.into(),
+            home: home.into(),
+        })
+        .await);
+    assert_eq!(
+        added,
+        json!({
+            "credential_id": LOGIN_ID,
+            "home": home,
+            "incarnation": before.incarnation,
+            "last_home_version": 17,
+            "refresh_adapter": "anthropic",
+            "categories": [CATEGORY],
+        })
+    );
+    let mut expected = before;
+    expected.source = RemoteRecordSource::Operator;
+    expected.home_pairing_id = None;
+    assert_eq!(
+        b.store().remote_record(LOGIN_ID).unwrap().unwrap(),
+        expected
+    );
+    assert_eq!(vaults.callosum.methods(TARGET_MODULE), calls);
+    let audits = b.store().read_audit(None).unwrap();
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[1].op, "remote_add");
+    assert_eq!(audits[1].actor, home);
+    assert_eq!(audits[1].alarm_reason.as_deref(), Some("admin_write"));
+    assert_eq!(b.store().verify_audit_chain().unwrap(), None);
+    for home in [home, b.member.as_str()] {
+        assert_eq!(
+            refusal(
+                b.run(&AdminOpBody::RemoteAdd {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    credential_id: LOGIN_ID.into(),
+                    home: home.into(),
+                })
+                .await
+            ),
+            "credential already exists"
+        );
+    }
+    assert_eq!(vaults.callosum.methods(TARGET_MODULE), calls);
+    assert_eq!(b.store().read_audit(None).unwrap(), audits);
 }
 
 /// `remote add` fetches once from the home and stores only its description, through

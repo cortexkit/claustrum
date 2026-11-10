@@ -614,7 +614,63 @@ impl EncryptedStore {
             .ok_or(StoreOpError::NotFound)
     }
 
-    /// Remove a remote record and every row this vault keeps for it.
+    /// Convert a row created by the specified home's watch to operator ownership
+    /// without fetching from the home.
+    /// The incarnation and all metadata are retained. Source validation and the
+    /// operator-encoded RemoteAdd audit commit together under the writer fence.
+    pub fn remote_convert_home_watch_audited(
+        &self,
+        credential_id: &str,
+        home_member: &str,
+    ) -> Result<RemoteRecord, StoreOpError> {
+        check_member_id(home_member)?;
+        self.fenced_write_or_refuse(|tx| {
+            let Some(mut record) = tx
+                .query_row(
+                    "SELECT * FROM remote_records WHERE credential_id = ?1",
+                    [credential_id],
+                    remote_record_from_row,
+                )
+                .optional()?
+            else {
+                return Ok(Err(StoreOpError::NotFound));
+            };
+            if record.source == RemoteRecordSource::Operator {
+                return Ok(Err(StoreOpError::AlreadyExists));
+            }
+            if record.home_member != home_member {
+                return Ok(Err(StoreOpError::RemoteRecordHomeWatch {
+                    credential_id: credential_id.to_string(),
+                    home_member: record.home_member,
+                }));
+            }
+            let payload_hash = remote_membership_payload_hash(&record.incarnation)
+                .map_err(|e| bad_column(e.to_string()))?;
+            tx.execute(
+                "UPDATE remote_records SET source = 'operator', home_pairing_id = NULL \
+                 WHERE credential_id = ?1 AND home_member = ?2 AND source = 'home_watch'",
+                rusqlite::params![credential_id, home_member],
+            )?;
+            append_audit_tx(
+                tx,
+                &self.audit_key,
+                &AuditRecord {
+                    op: AuditOp::RemoteAdd,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: Some(payload_hash),
+                    actor: home_member.to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            record.source = RemoteRecordSource::Operator;
+            record.home_pairing_id = None;
+            Ok(Ok(record))
+        })
+    }
+
+    /// Remove an operator remote record and every row this vault keeps for it.
+    /// Rows created by a home watch refuse removal until converted with a remote add
+    /// for that same home.
     ///
     /// The category, provider-id and plan-tier rows are deleted explicitly rather than
     /// by the foreign-key cascade, because SQLite enforces foreign keys per connection
@@ -624,7 +680,7 @@ impl EncryptedStore {
     /// `payload_hash` over the removed `{incarnation}`.
     pub fn remote_remove_audited(&self, credential_id: &str) -> Result<RemoteRecord, StoreOpError> {
         let audit_key = self.audit_key.clone();
-        let removed = self.fenced_write(|tx| {
+        self.fenced_write_or_refuse(|tx| {
             let Some(record) = tx
                 .query_row(
                     "SELECT * FROM remote_records WHERE credential_id = ?1",
@@ -633,8 +689,14 @@ impl EncryptedStore {
                 )
                 .optional()?
             else {
-                return Ok(None);
+                return Ok(Err(StoreOpError::NotFound));
             };
+            if record.source == RemoteRecordSource::HomeWatch {
+                return Ok(Err(StoreOpError::RemoteRecordHomeWatch {
+                    credential_id: credential_id.to_string(),
+                    home_member: record.home_member,
+                }));
+            }
             let payload_hash =
                 remote_membership_payload_hash(&record.incarnation).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -677,9 +739,8 @@ impl EncryptedStore {
                     alarm: Some(AlarmReason::AdminWrite),
                 },
             )?;
-            Ok(Some(record))
-        })?;
-        removed.ok_or(StoreOpError::NotFound)
+            Ok(Ok(record))
+        })
     }
 
     /// Apply a home's snapshot without touching operator, local or other homes'
@@ -1488,7 +1549,7 @@ fn transferable_record(record: &VaultRecord) -> bool {
 impl EncryptedStore {
     /// [`Self::fenced_write`] where the work may refuse with a typed error. A refusal
     /// rolls the whole transaction back and is returned as itself.
-    fn fenced_write_or_refuse<T>(
+    pub(super) fn fenced_write_or_refuse<T>(
         &self,
         work: impl FnOnce(&rusqlite::Transaction) -> InTx<T>,
     ) -> Result<T, StoreOpError> {

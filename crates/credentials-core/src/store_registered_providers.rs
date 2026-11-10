@@ -8,6 +8,86 @@ pub struct RegisteredProvider {
     pub categories: Vec<String>,
     pub provider_ids: Vec<String>,
     pub created_at_ms: i64,
+    pub hosts: Vec<String>,
+    pub auth_header: Option<String>,
+    pub auth_scheme: Option<String>,
+    pub fusiform_provider_id: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RegisteredProviderSettings {
+    pub hosts: Vec<String>,
+    pub auth_header: Option<String>,
+    pub auth_scheme: Option<String>,
+    pub fusiform_provider_id: Option<String>,
+}
+
+pub const MAX_REGISTERED_PROVIDER_HOSTS: usize = 8;
+
+/// Shared by CLI preflight and store writes; the store never repairs signed input.
+pub fn validate_registered_provider_settings(
+    settings: &RegisteredProviderSettings,
+) -> Result<(), StoreOpError> {
+    let invalid = |field: &str, value: String| {
+        StoreOpError::Encode(format!("invalid provider {field}: {value}"))
+    };
+    let hosts = &settings.hosts;
+    if hosts.len() > MAX_REGISTERED_PROVIDER_HOSTS {
+        return Err(invalid("hosts (at most 8)", format!("{hosts:?}")));
+    }
+    for host in hosts {
+        if host.is_empty()
+            || !host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && label.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+        {
+            return Err(invalid("host", format!("{host:?}")));
+        }
+    }
+    if !hosts.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(invalid(
+            "hosts (must be sorted and unique)",
+            format!("{hosts:?}"),
+        ));
+    }
+    match (
+        hosts.is_empty(),
+        &settings.auth_header,
+        &settings.auth_scheme,
+    ) {
+        (true, None, None) => {}
+        (false, Some(header), Some(scheme)) => {
+            if header.is_empty()
+                || !header.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
+                })
+            {
+                return Err(invalid("auth_header", format!("{header:?}")));
+            }
+            if !matches!(scheme.as_str(), "bearer" | "raw") {
+                return Err(invalid("auth_scheme", format!("{scheme:?}")));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "hosts/auth (must be given together)",
+                format!("{settings:?}"),
+            ))
+        }
+    }
+    // Until the embedded provider list is available, no id can be verified.
+    if let Some(id) = &settings.fusiform_provider_id {
+        return Err(invalid(
+            "fusiform_provider_id (provider list unavailable)",
+            format!("{id:?}"),
+        ));
+    }
+    Ok(())
 }
 
 impl RegisteredProvider {
@@ -52,10 +132,16 @@ pub(super) fn from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Reg
     if read_schema_version(conn)? < REGISTERED_PROVIDERS_SCHEMA_VERSION {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare(
-        "SELECT service, categories_json, provider_ids_json, created_at_ms \
+    let descriptor_columns =
+        if read_schema_version(conn)? >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION {
+            "hosts_json, auth_header, auth_scheme, fusiform_provider_id"
+        } else {
+            "'[]', NULL, NULL, NULL"
+        };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT service, categories_json, provider_ids_json, created_at_ms, {descriptor_columns} \
          FROM registered_providers ORDER BY service",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |row| {
         let decode = |column| -> rusqlite::Result<Vec<String>> {
             serde_json::from_str(&row.get::<_, String>(column)?).map_err(|error| {
@@ -71,6 +157,10 @@ pub(super) fn from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Reg
             categories: decode(1)?,
             provider_ids: decode(2)?,
             created_at_ms: row.get(3)?,
+            hosts: decode(4)?,
+            auth_header: row.get(5)?,
+            auth_scheme: row.get(6)?,
+            fusiform_provider_id: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -112,8 +202,7 @@ impl EncryptedStore {
         self.store.with_conn(from_conn).map_err(StoreOpError::from)
     }
 
-    /// Change defaults for future keys, never the categories or routes of existing keys.
-    /// The answer and its audit entry commit together, and identical sets are a no-op.
+    /// Change category and routing defaults for future keys, preserving the descriptor.
     pub fn set_registered_provider_audited(
         &self,
         service: &str,
@@ -121,7 +210,24 @@ impl EncryptedStore {
         provider_ids: &[String],
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
+        self.set_registered_provider_settings_audited(service, categories, provider_ids, None, ctx)
+    }
+
+    /// Categories and routes are defaults for future keys only. Hosts, auth and the
+    /// Fusiform id describe the provider for all its keys, projected at read time.
+    /// Absent settings preserve the descriptor for legacy callers; present settings
+    /// replace it completely. The registration and audit entry commit together.
+    pub fn set_registered_provider_settings_audited(
+        &self,
+        service: &str,
+        categories: &[String],
+        provider_ids: &[String],
+        settings: Option<&RegisteredProviderSettings>,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
         validate_registered_provider_service(service)?;
+        let empty = RegisteredProviderSettings::default();
+        validate_registered_provider_settings(settings.unwrap_or(&empty))?;
         if categories.iter().any(|category| {
             !crate::catalog::CredentialCategory::ALL
                 .iter()
@@ -152,18 +258,35 @@ impl EncryptedStore {
             .map_err(|error| StoreOpError::Encode(error.to_string()))?;
         let provider_ids_json = serde_json::to_string(&provider_ids)
             .map_err(|error| StoreOpError::Encode(error.to_string()))?;
+        let replacement = settings.unwrap_or(&empty);
+        let hosts_json = serde_json::to_string(&replacement.hosts)
+            .map_err(|error| StoreOpError::Encode(error.to_string()))?;
         self.fenced_write(|tx| {
             let changed = tx.execute(
-                "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(service) DO UPDATE SET \
-                 categories_json = excluded.categories_json, provider_ids_json = excluded.provider_ids_json \
-                 WHERE categories_json != excluded.categories_json OR provider_ids_json != excluded.provider_ids_json",
-                rusqlite::params![service, categories_json, provider_ids_json, now_ms()],
+                "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms, hosts_json, auth_header, auth_scheme, fusiform_provider_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(service) DO UPDATE SET \
+                 categories_json = excluded.categories_json, provider_ids_json = excluded.provider_ids_json, \
+                 hosts_json = CASE WHEN ?9 THEN excluded.hosts_json ELSE hosts_json END, \
+                 auth_header = CASE WHEN ?9 THEN excluded.auth_header ELSE auth_header END, \
+                 auth_scheme = CASE WHEN ?9 THEN excluded.auth_scheme ELSE auth_scheme END, \
+                 fusiform_provider_id = CASE WHEN ?9 THEN excluded.fusiform_provider_id ELSE fusiform_provider_id END \
+                 WHERE categories_json != excluded.categories_json OR provider_ids_json != excluded.provider_ids_json \
+                 OR (?9 AND (hosts_json != excluded.hosts_json OR auth_header IS NOT excluded.auth_header \
+                     OR auth_scheme IS NOT excluded.auth_scheme OR fusiform_provider_id IS NOT excluded.fusiform_provider_id))",
+                rusqlite::params![service, categories_json, provider_ids_json, now_ms(), hosts_json,
+                    replacement.auth_header, replacement.auth_scheme, replacement.fusiform_provider_id, settings.is_some()],
             )?;
             if changed > 0 {
+                let (hosts, header, scheme, fusiform): (String, Option<String>, Option<String>, Option<String>) = tx.query_row(
+                    "SELECT hosts_json, auth_header, auth_scheme, fusiform_provider_id FROM registered_providers WHERE service = ?1",
+                    [service], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let hosts: Vec<String> = serde_json::from_str(&hosts).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+                })?;
                 append_audit_tx(tx, &self.audit_key, &AuditRecord {
                     op: ctx.op,
-                    credential_id: Some(format!("provider:{service}|{}|{}", categories.join(","), provider_ids.join(","))),
+                    credential_id: Some(format!("provider:{service}|{}|{}|{}|{}|{}|{}", categories.join(","), provider_ids.join(","), hosts.join(","), header.unwrap_or_default(), scheme.unwrap_or_default(), fusiform.unwrap_or_default())),
                     payload_hash: None,
                     actor: ctx.actor.to_owned(),
                     alarm: ctx.alarm,
@@ -206,6 +329,312 @@ impl EncryptedStore {
 mod tests {
     use super::*;
 
+    fn descriptor() -> RegisteredProviderSettings {
+        RegisteredProviderSettings {
+            hosts: vec!["api.example.com".into()],
+            auth_header: Some("authorization".into()),
+            auth_scheme: Some("bearer".into()),
+            fusiform_provider_id: None,
+        }
+    }
+
+    #[test]
+    fn registered_provider_descriptor_migration_upgrades_existing_rows() {
+        let (root, sqlite) = taxonomy_tests::sqlite("registered-descriptor-migration", 194);
+        migrate_through_for_test(&sqlite, REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION - 1)
+            .unwrap();
+        sqlite.with_conn(|conn| conn.execute(
+            "INSERT INTO registered_providers VALUES ('custom', '[\"web-search\"]', '[\"custom\"]', 123)", [],
+        )).unwrap();
+        let path = root.join("store.db");
+        let before = registered_providers_read_only(&path).unwrap();
+        assert_eq!(before.len(), 1);
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([194; 32])).unwrap();
+        EncryptedStore::migrate(&store.store).unwrap();
+        let after = store.registered_providers().unwrap();
+        assert_eq!(after, before);
+        assert_eq!(after[0].categories, ["web-search"]);
+        assert_eq!(after[0].provider_ids, ["custom"]);
+        assert_eq!(after[0].created_at_ms, 123);
+        assert!(after[0].hosts.is_empty());
+        assert_eq!(after[0].auth_header, None);
+        assert_eq!(after[0].auth_scheme, None);
+        assert_eq!(after[0].fusiform_provider_id, None);
+        assert_eq!(registered_providers_read_only(&path).unwrap(), after);
+        let columns = store
+            .store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare("PRAGMA table_info(registered_providers)")?;
+                let columns = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, bool>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(columns)
+            })
+            .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                ("service".into(), "TEXT".into(), false, None),
+                ("categories_json".into(), "TEXT".into(), true, None),
+                ("provider_ids_json".into(), "TEXT".into(), true, None),
+                ("created_at_ms".into(), "INTEGER".into(), true, None),
+                (
+                    "hosts_json".into(),
+                    "TEXT".into(),
+                    true,
+                    Some("'[]'".into())
+                ),
+                (
+                    "auth_header".into(),
+                    "TEXT".into(),
+                    false,
+                    Some("NULL".into())
+                ),
+                (
+                    "auth_scheme".into(),
+                    "TEXT".into(),
+                    false,
+                    Some("NULL".into())
+                ),
+                (
+                    "fusiform_provider_id".into(),
+                    "TEXT".into(),
+                    false,
+                    Some("NULL".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn registered_provider_descriptor_changes_write_and_audit_every_column() {
+        let (_root, store) = taxonomy_tests::rig("registered-descriptor-audit", 195);
+        let mut settings = descriptor();
+        let set = |settings: &RegisteredProviderSettings, categories: &[String], ids: &[String]| {
+            store
+                .set_registered_provider_settings_audited(
+                    "custom",
+                    categories,
+                    ids,
+                    Some(settings),
+                    AuditCtx::admin(AuditOp::ProviderSet),
+                )
+                .unwrap()
+        };
+        assert!(set(&settings, &["web-search".into()], &["custom".into()]));
+        settings.hosts = vec!["other.example.com".into()];
+        assert!(set(&settings, &["web-search".into()], &["custom".into()]));
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .last()
+                .unwrap()
+                .credential_id
+                .as_deref(),
+            Some("provider:custom|web-search|custom|other.example.com|authorization|bearer|")
+        );
+        let tip = store.audit_tip().unwrap();
+        assert!(!set(&settings, &["web-search".into()], &["custom".into()]));
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        settings.auth_header = Some("x-api-key".into());
+        assert!(set(&settings, &["web-search".into()], &["custom".into()]));
+        settings.auth_scheme = Some("raw".into());
+        assert!(set(&settings, &["web-search".into()], &["custom".into()]));
+        assert!(set(
+            &settings,
+            &["media-provider".into()],
+            &["custom".into()]
+        ));
+        assert!(set(
+            &settings,
+            &["media-provider".into()],
+            &["other".into()]
+        ));
+        // A future binary may have stored an id; the legacy path must keep it,
+        // and a complete replacement must be able to clear it.
+        store
+            .store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE registered_providers SET fusiform_provider_id = 'future'",
+                    [],
+                )
+            })
+            .unwrap();
+        store
+            .set_registered_provider_audited(
+                "custom",
+                &[],
+                &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        assert_eq!(
+            store.registered_providers().unwrap()[0]
+                .fusiform_provider_id
+                .as_deref(),
+            Some("future")
+        );
+        assert!(set(&settings, &[], &[]));
+        assert_eq!(
+            store.registered_providers().unwrap()[0].fusiform_provider_id,
+            None
+        );
+        assert!(set(&RegisteredProviderSettings::default(), &[], &[]));
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .last()
+                .unwrap()
+                .credential_id
+                .as_deref(),
+            Some("provider:custom||||||")
+        );
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn registered_provider_hosts_accept_eight_and_refuse_nine() {
+        let (_root, store) = taxonomy_tests::rig("registered-host-cap", 196);
+        let mut settings = descriptor();
+        settings.hosts = (0..8).map(|i| format!("h{i}.example.com")).collect();
+        let set = |s: &RegisteredProviderSettings| {
+            store.set_registered_provider_settings_audited(
+                "custom",
+                &[],
+                &[],
+                Some(s),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+        };
+        assert!(set(&settings).unwrap());
+        let before = store.registered_providers().unwrap();
+        let tip = store.audit_tip().unwrap();
+        settings.hosts.push("h8.example.com".into());
+        assert!(set(&settings)
+            .unwrap_err()
+            .to_string()
+            .contains("h8.example.com"));
+        assert_eq!(store.registered_providers().unwrap(), before);
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+
+    #[test]
+    fn registered_provider_descriptor_refusals_name_values_and_do_not_write() {
+        let (_root, store) = taxonomy_tests::rig("registered-descriptor-invalid", 197);
+        let set = |s: &RegisteredProviderSettings| {
+            store.set_registered_provider_settings_audited(
+                "custom",
+                &[],
+                &[],
+                Some(s),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+        };
+        let mut bad = Vec::new();
+        for host in [
+            "",
+            "API.example.com",
+            "https://api.example.com",
+            "api.example.com:443",
+            "api.example.com/path",
+            "*.example.com",
+            "api.example.com.",
+            "api..example.com",
+            "-api.example.com",
+            "api-.example.com",
+            "é.example.com",
+        ] {
+            let mut s = descriptor();
+            s.hosts = vec![host.into()];
+            bad.push((s, format!("{host:?}")));
+        }
+        for hosts in [
+            vec!["b.example.com", "a.example.com"],
+            vec!["a.example.com", "a.example.com"],
+        ] {
+            let mut s = descriptor();
+            s.hosts = hosts.into_iter().map(str::to_owned).collect();
+            bad.push((s, "a.example.com".into()));
+        }
+        for header in [
+            "",
+            "Authorization",
+            "x api key",
+            "x-api-key:",
+            "x-api-key\n",
+        ] {
+            let mut s = descriptor();
+            s.auth_header = Some(header.into());
+            bad.push((s, format!("{header:?}")));
+        }
+        for scheme in ["", "Bearer", "basic"] {
+            let mut s = descriptor();
+            s.auth_scheme = Some(scheme.into());
+            bad.push((s, format!("{scheme:?}")));
+        }
+        for missing in 0..4 {
+            let mut s = descriptor();
+            match missing {
+                0 => s.hosts.clear(),
+                1 => s.auth_header = None,
+                2 => s.auth_scheme = None,
+                _ => {
+                    s.auth_header = None;
+                    s.auth_scheme = None;
+                }
+            }
+            bad.push((
+                s,
+                if missing == 0 {
+                    "authorization"
+                } else {
+                    "api.example.com"
+                }
+                .into(),
+            ));
+        }
+        let tip = store.audit_tip().unwrap();
+        for (s, value) in bad {
+            let preflight = validate_registered_provider_settings(&s)
+                .unwrap_err()
+                .to_string();
+            assert!(preflight.contains(&value), "{preflight} must name {value}");
+            assert_eq!(set(&s).unwrap_err().to_string(), preflight);
+        }
+        assert!(store.registered_providers().unwrap().is_empty());
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+
+    #[test]
+    fn registered_provider_non_null_fusiform_id_is_refused_until_list_ships() {
+        let (_root, store) = taxonomy_tests::rig("registered-fusiform-unavailable", 198);
+        let mut settings = descriptor();
+        settings.fusiform_provider_id = Some("unavailable-provider".into());
+        let tip = store.audit_tip().unwrap();
+        let error = store
+            .set_registered_provider_settings_audited(
+                "custom",
+                &[],
+                &[],
+                Some(&settings),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable-provider"));
+        assert!(store.registered_providers().unwrap().is_empty());
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+
     #[test]
     fn registered_provider_migration_preserves_records_and_behind_readers_are_lease_free() {
         let (root, sqlite) = taxonomy_tests::sqlite("registered-migration", 191);
@@ -222,7 +651,10 @@ mod tests {
         assert_eq!(store.list_meta().unwrap(), meta);
         assert_eq!(store.read_audit(None).unwrap(), audit);
         assert!(store.registered_providers().unwrap().is_empty());
-        assert_eq!(newest_migration_version(), 39);
+        assert_eq!(
+            newest_migration_version(),
+            REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION
+        );
     }
 
     #[test]

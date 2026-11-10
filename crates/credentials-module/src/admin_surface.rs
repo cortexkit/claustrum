@@ -502,13 +502,13 @@ impl AdminSurface {
     }
 
     async fn dispatch(&self, op: AdminOpBody) -> AdminOutcome {
-        // Every op carries a schema version `v`; this module speaks exactly v1. An
+        // Every op carries a schema version `v` paired with its variant. An
         // unknown version is refused (never best-effort-parsed) so a future field
         // addition can't be silently dropped by an old module — the caller learns
         // the module is too old rather than getting a partial write.
         if !op.has_valid_schema_version() {
             return AdminOutcome::Refused(format!(
-                "unsupported admin op schema version/variant pairing {} (module accepts v1 and v2 only for their declared variants)",
+                "unsupported admin op schema version/variant pairing {} (module accepts v1 and v2 for their declared variants; ProviderSet accepts v2 and v3)",
                 op.schema_version()
             ));
         }
@@ -1771,12 +1771,20 @@ mod tests {
                 service: "customservice".into(),
                 categories: vec!["web-search".into()],
                 provider_ids: Vec::new(),
+                hosts: None,
+                auth_header: None,
+                auth_scheme: None,
+                fusiform_provider_id: None,
             },
             AdminOpBody::ProviderSet {
                 v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
                 service: "customservice".into(),
                 categories: vec!["web-search".into()],
                 provider_ids: Vec::new(),
+                hosts: None,
+                auth_header: None,
+                auth_scheme: None,
+                fusiform_provider_id: None,
             },
         ] {
             let body = String::from_utf8(op.to_bytes().unwrap()).unwrap();
@@ -1873,6 +1881,10 @@ mod tests {
                 service: service.into(),
                 categories: Vec::new(),
                 provider_ids: Vec::new(),
+                hosts: None,
+                auth_header: None,
+                auth_scheme: None,
+                fusiform_provider_id: None,
             };
             let body = String::from_utf8(op.to_bytes().unwrap()).unwrap();
             let (tag, _) = challenge_and_sign(&r, 5, &body);
@@ -1994,6 +2006,146 @@ mod tests {
             matches!(out, AdminOutcome::Refused(ref m) if m.contains("schema version")),
             "v=2 must be refused, not best-effort parsed"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_set_is_the_only_variant_admitted_at_v3() {
+        use serde_json::{json, Value};
+        let r = rig(31);
+        r.admin.record_bind(5, Principal::Direct);
+        let base = json!({
+            "v":3, "service":"custom", "categories":[], "provider_ids":[],
+            "id":"id", "credential_id":"id", "record": VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            "audit_op":"put", "mode":{"kind":"create"}, "clear_identity":false,
+            "identity":{}, "payload_b64":"", "handle":"", "handle_hash":"", "principal_id":"p",
+            "credential_prefix":"apikey:", "operation":"read", "principal_kind":"reserved", "selector_kind":"exact", "selector":"id",
+            "request_id":"request", "final_name":"name", "name":"name", "display_name":"label",
+            "force":false, "artifact_sha256":"00", "approver":"operator", "enabled":true,
+            "kind":"agent_api_key", "material_b64url":"", "grant_id":"grant", "home":"self", "member":"member",
+            "self_member":"member", "to":"member", "from":"member", "transfer_id":"id", "replace":false
+        });
+        let ops = [
+            "provider_remove",
+            "operator_sign",
+            "store",
+            "store_with_identity_policy",
+            "set_identity",
+            "invalidate",
+            "logout",
+            "reactivate",
+            "remove",
+            "mint_handle",
+            "revoke_handle",
+            "revoke_handle_by_hash",
+            "revoke_all_handles",
+            "grant_create",
+            "grant_revoke",
+            "grant_create_v2",
+            "grant_revoke_v2",
+            "enroll_approve",
+            "enroll_label",
+            "enroll_deny",
+            "enroll_revoke",
+            "enroll_reissue",
+            "set_category",
+            "set_providers",
+            "set_plan",
+            "reclassify",
+            "approval",
+            "status",
+            "federation_gate_set",
+            "secret_phone_gate_set",
+            "secret_multi_host_set",
+            "secret_put",
+            "secret_delete",
+            "secret_revoke_grant",
+            "secret_home_set",
+            "federation_self_set",
+            "transfer_init",
+            "transfer_recover",
+            "transfer_send",
+            "transfer_resume",
+            "transfer_receive",
+            "transfer_accept",
+            "transfer_reject",
+            "remote_add",
+            "remote_remove",
+            "remote_list",
+            "member_grant",
+            "member_revoke",
+            "member_list",
+        ];
+        let tip = r.store.audit_tip().unwrap();
+        for op in ops {
+            let mut body = base.clone();
+            body["op"] = json!(format!("admin.{op}"));
+            if matches!(op, "set_category" | "set_providers") {
+                body["mode"] = json!("set");
+            }
+            if matches!(op, "member_grant" | "member_revoke") {
+                body["operation"] = json!("transfer_deliver");
+                body["selector"] = json!({"kind":"none"});
+            }
+            let parsed: AdminOpBody = serde_json::from_value(body.clone())
+                .unwrap_or_else(|error| panic!("{op}: {error}"));
+            assert!(!parsed.has_valid_schema_version(), "{op}");
+            let body = body.to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let AdminOutcome::Refused(message) = r.admin.execute(5, body.as_bytes(), &tag).await
+            else {
+                panic!("accepted {op}")
+            };
+            assert_eq!(message, "unsupported admin op schema version/variant pairing 3 (module accepts v1 and v2 for their declared variants; ProviderSet accepts v2 and v3)");
+        }
+        let provider = json!({"op":"admin.provider_set", "v":3, "service":"custom", "categories":[], "provider_ids":[]});
+        for version in [0, 1, 4, u32::MAX] {
+            let mut body = provider.clone();
+            body["v"] = json!(version);
+            let body = body.to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            assert!(
+                matches!(r.admin.execute(5, body.as_bytes(), &tag).await, AdminOutcome::Refused(message) if message.contains("ProviderSet accepts v2 and v3"))
+            );
+        }
+        for key in [
+            "hosts",
+            "auth_header",
+            "auth_scheme",
+            "fusiform_provider_id",
+        ] {
+            for value in [Value::Null, json!("new-value")] {
+                let mut body = provider.clone();
+                body["v"] = json!(2);
+                body[key] = value;
+                let body = body.to_string();
+                let (tag, _) = challenge_and_sign(&r, 5, &body);
+                assert!(
+                    matches!(r.admin.execute(5, body.as_bytes(), &tag).await, AdminOutcome::Refused(message) if message.contains("schema version/variant pairing 2"))
+                );
+            }
+        }
+        for key in [
+            "hosts",
+            "auth_header",
+            "auth_scheme",
+            "fusiform_provider_id",
+        ] {
+            let mut body = provider.clone();
+            body[key] = json!({"malformed":true});
+            let body = body.to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            assert!(
+                matches!(r.admin.execute(5, body.as_bytes(), &tag).await, AdminOutcome::Refused(message) if message.contains("malformed"))
+            );
+        }
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
+        assert!(r.store.registered_providers().unwrap().is_empty());
+        let body = provider.to_string();
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Ok(_)
+        ));
     }
 
     #[tokio::test]

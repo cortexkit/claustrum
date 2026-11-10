@@ -241,6 +241,10 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
             service: service.to_string(),
             categories,
             provider_ids: routing_ids(&raw),
+            hosts: None,
+            auth_header: None,
+            auth_scheme: None,
+            fusiform_provider_id: None,
         },
     )?;
     Ok(true)

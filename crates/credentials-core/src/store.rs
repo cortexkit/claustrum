@@ -87,6 +87,9 @@ pub const MEMBER_GRANT_SOURCE_SCHEMA_VERSION: u32 = 38;
 /// kept in sync by a subscription to their home vault's login list.
 pub const REMOTE_RECORD_SOURCE_SCHEMA_VERSION: u32 = 39;
 
+/// Read-time host and authentication descriptors for registered providers.
+pub const REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION: u32 = 40;
+
 /// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
 /// the selector vocabulary, and added the enrollment and grant-generation tables.
 ///
@@ -1068,6 +1071,13 @@ const MIGRATIONS: &[Migration] = &[
                      DEFAULT 'operator' CHECK (source IN ('operator', 'home_watch')); \
                      ALTER TABLE remote_records ADD COLUMN home_pairing_id TEXT \
                      CHECK ((source = 'home_watch') = (home_pairing_id IS NOT NULL));",
+    },
+    Migration {
+        version: REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION,
+        statements: "ALTER TABLE registered_providers ADD COLUMN hosts_json TEXT NOT NULL DEFAULT '[]'; \
+                     ALTER TABLE registered_providers ADD COLUMN auth_header TEXT DEFAULT NULL; \
+                     ALTER TABLE registered_providers ADD COLUMN auth_scheme TEXT DEFAULT NULL; \
+                     ALTER TABLE registered_providers ADD COLUMN fusiform_provider_id TEXT DEFAULT NULL;",
     },
 ];
 
@@ -13815,7 +13825,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            39,
+            40,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -18231,7 +18241,8 @@ mod store_agent_secrets;
 mod registered_providers;
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, validate_registered_provider_service,
-    RegisteredProvider,
+    validate_registered_provider_settings, RegisteredProvider, RegisteredProviderSettings,
+    MAX_REGISTERED_PROVIDER_HOSTS,
 };
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{

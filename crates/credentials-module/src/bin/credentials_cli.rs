@@ -2241,6 +2241,10 @@ fn cmd_provider(
             credentials_core::store::validate_registered_provider_service(&service)
                 .map_err(CliError::Store)?;
             let provider_ids = provider_id_flags(args)?;
+            credentials_core::store::validate_registered_provider_settings(
+                &credentials_core::store::RegisteredProviderSettings::default(),
+            )
+            .map_err(CliError::Store)?;
             commit_admin(
                 global,
                 AdminOpBody::ProviderSet {
@@ -2248,6 +2252,10 @@ fn cmd_provider(
                     service: service.clone(),
                     categories: repeated_values(args, "--category"),
                     provider_ids,
+                    hosts: None,
+                    auth_header: None,
+                    auth_scheme: None,
+                    fusiform_provider_id: None,
                 },
             )?;
             println!("set provider {service}");

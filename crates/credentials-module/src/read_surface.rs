@@ -656,7 +656,7 @@ pub struct GetResult {
     /// limits from), when captured at login. NON-secret display metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
-    /// Read-time catalog metadata, populated only by `credential.get_scoped`.
+    /// Read-time catalog or registry metadata, only for `credential.get_scoped`.
     /// Grouping the fields keeps an absent descriptor distinct from absent evidence.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub scoped_descriptor: Option<Box<ScopedKeyDescriptor>>,
@@ -664,27 +664,60 @@ pub struct GetResult {
 
 #[derive(Debug, Serialize)]
 pub struct ScopedKeyDescriptor {
-    auth: credentials_core::catalog::AuthDescriptor,
-    hosts: &'static [&'static str],
+    auth: ScopedKeyAuth,
+    hosts: Vec<String>,
     // A descriptor with no observed bogus-key refusal still emits explicit null.
     invalid_key: Option<credentials_core::catalog::InvalidKeyEvidence>,
 }
 
+#[derive(Debug, Serialize)]
+struct ScopedKeyAuth {
+    header: String,
+    scheme: String,
+}
+
 impl GetResult {
-    fn with_scoped_descriptor(mut self, credential_id: &str) -> Self {
-        self.scoped_descriptor = credentials_core::catalog::api_key_provider_for_credential(
-            credential_id,
-        )
-        .and_then(|row| {
-            if row.hosts.is_empty() {
-                return None;
-            }
-            Some(Box::new(ScopedKeyDescriptor {
-                auth: row.auth?,
-                hosts: row.hosts,
-                invalid_key: row.invalid_key,
-            }))
-        });
+    fn with_scoped_descriptor(
+        mut self,
+        credential_id: &str,
+        providers: &[credentials_core::store::RegisteredProvider],
+    ) -> Self {
+        self.scoped_descriptor =
+            credentials_core::catalog::api_key_provider_for_credential(credential_id)
+                .and_then(|row| {
+                    if row.hosts.is_empty() {
+                        return None;
+                    }
+                    Some(Box::new(ScopedKeyDescriptor {
+                        auth: ScopedKeyAuth {
+                            header: row.auth?.header.into(),
+                            scheme: match row.auth?.scheme {
+                                credentials_core::catalog::AuthScheme::Bearer => "bearer",
+                                credentials_core::catalog::AuthScheme::Raw => "raw",
+                            }
+                            .into(),
+                        },
+                        hosts: row.hosts.iter().map(|host| (*host).into()).collect(),
+                        invalid_key: row.invalid_key,
+                    }))
+                })
+                .or_else(|| {
+                    let row = credentials_core::store::RegisteredProvider::for_id(
+                        providers,
+                        credential_id,
+                    )?;
+                    if row.hosts.is_empty() {
+                        return None;
+                    }
+                    Some(Box::new(ScopedKeyDescriptor {
+                        auth: ScopedKeyAuth {
+                            header: row.auth_header.clone()?,
+                            scheme: row.auth_scheme.clone()?,
+                        },
+                        hosts: row.hosts.clone(),
+                        invalid_key: None,
+                    }))
+                });
         self
     }
 }
@@ -722,6 +755,10 @@ mod get_scoped_tests {
         reply
     }
 
+    fn registered_descriptor() -> Value {
+        json!({"auth": {"header": "x-api-key", "scheme": "raw"}, "hosts": ["api.example.com"], "invalid_key": null})
+    }
+
     #[tokio::test]
     async fn get_scoped_descriptor_golden_cases() {
         let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(214);
@@ -730,6 +767,20 @@ mod get_scoped_tests {
                 "customservice",
                 &["llm-provider".into()],
                 &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        store
+            .set_registered_provider_settings_audited(
+                "customdescriptor",
+                &[],
+                &[],
+                Some(&credentials_core::store::RegisteredProviderSettings {
+                    hosts: vec!["api.example.com".into()],
+                    auth_header: Some("x-api-key".into()),
+                    auth_scheme: Some("raw".into()),
+                    fusiform_provider_id: None,
+                }),
                 AuditCtx::admin(AuditOp::ProviderSet),
             )
             .unwrap();
@@ -746,6 +797,8 @@ mod get_scoped_tests {
             ("apikey:typesafe", json!({})),
             ("apikey:kagi", json!({})),
             ("apikey:customservice:work", json!({})),
+            ("apikey:customdescriptor", registered_descriptor()),
+            ("apikey:customdescriptor:work", registered_descriptor()),
             ("apikey:openaiish", json!({})),
             ("cookie:openai", json!({})),
             ("manual:openai", json!({})),
@@ -848,11 +901,152 @@ mod get_scoped_tests {
                 email: None,
                 org_name: None,
             }),
+            &[],
         );
         assert_eq!(
             serde_json::to_value(outcome).unwrap(),
             golden_reply("apikey:openai:remote", 7, openai_descriptor())
         );
+    }
+
+    #[tokio::test]
+    async fn registered_provider_v2_v3_sequence_projects_current_descriptor_for_every_key() {
+        use credentials_core::admin_ops::{apply, AdminOpBody};
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(215);
+        let id = "apikey:custom:existing";
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "descriptor-reader",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        let base = json!({"op":"admin.provider_set", "v":3, "service":"custom", "categories":[], "provider_ids":[]});
+        let run = |body: Value| {
+            apply(
+                &store,
+                serde_json::from_value::<AdminOpBody>(body).unwrap(),
+                "operator",
+            )
+        };
+        let mut with_descriptor = base.clone();
+        with_descriptor["hosts"] = json!(["api.example.com"]);
+        with_descriptor["auth_header"] = json!("x-api-key");
+        with_descriptor["auth_scheme"] = json!("raw");
+        run(with_descriptor.clone()).unwrap();
+        let mut legacy = base.clone();
+        legacy["v"] = json!(2);
+        legacy["categories"] = json!(["web-search"]);
+        for body in [with_descriptor.clone(), legacy.clone()] {
+            run(body).unwrap();
+            let reply = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                golden_reply(id, 1, registered_descriptor())
+            );
+        }
+        assert_eq!(
+            store.registered_providers().unwrap()[0].categories,
+            ["web-search"]
+        );
+        assert!(
+            store.categories(id).unwrap().is_empty(),
+            "defaults must not reclassify an existing key"
+        );
+        let providers = store.registered_providers().unwrap();
+        let remote = remote_get_outcome(
+            id,
+            crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
+                payload: b"k".to_vec(),
+                expires_at_ms: None,
+                record_version: 7,
+                project_id: None,
+                account_id: None,
+                email: None,
+                org_name: None,
+            }),
+            &providers,
+        );
+        assert_eq!(
+            serde_json::to_value(remote).unwrap(),
+            golden_reply(id, 7, registered_descriptor())
+        );
+        let tip = store.audit_tip().unwrap();
+        // A v3 replacement with no descriptor clears the provider for existing keys too.
+        run(base.clone()).unwrap();
+        assert_ne!(store.audit_tip().unwrap(), tip);
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .last()
+                .unwrap()
+                .credential_id
+                .as_deref(),
+            Some("provider:custom||||||")
+        );
+        let reply = surface
+            .get_scoped(
+                Some(&principal),
+                &GetScopedParams {
+                    credential_id: id.into(),
+                    min_ttl_ms: None,
+                    enrollment_token: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            serde_json::to_value(reply).unwrap(),
+            golden_reply(id, 1, json!({}))
+        );
+        let before = store.registered_providers().unwrap();
+        let tip = store.audit_tip().unwrap();
+        for hosts in [json!(["api.example.com"]), Value::Null] {
+            let mut body = legacy.clone();
+            body["hosts"] = hosts;
+            assert!(run(body).is_err());
+            assert_eq!(store.registered_providers().unwrap(), before);
+            assert_eq!(store.audit_tip().unwrap(), tip);
+        }
+        with_descriptor["fusiform_provider_id"] = json!("unavailable-provider");
+        assert!(run(with_descriptor)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable-provider"));
+        assert_eq!(store.registered_providers().unwrap(), before);
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        // Explicit null on every new field is a valid complete, empty registration.
+        let mut cleared = base;
+        for key in [
+            "hosts",
+            "auth_header",
+            "auth_scheme",
+            "fusiform_provider_id",
+        ] {
+            cleared[key] = Value::Null;
+        }
+        assert_eq!(run(cleared).unwrap(), json!({"changed":false}));
     }
 }
 
@@ -3015,12 +3209,16 @@ impl ReadSurface {
         ) {
             return err(code);
         }
+        let providers = match self.engine.store().registered_providers() {
+            Ok(providers) => providers,
+            Err(error) => return err(map_store_error(&error)),
+        };
         // A remote id is served by its home vault, never from the local store. The
         // grant check above already covered it, through this vault's own categories.
         match remote_record {
             Ok(Some(record)) => {
                 let answer = self.remote.get(&record, params.min_ttl_ms).await;
-                return remote_get_outcome(&params.credential_id, answer);
+                return remote_get_outcome(&params.credential_id, answer, &providers);
             }
             Ok(None) => {}
             Err(error) => return err(map_store_error(&error)),
@@ -3114,7 +3312,7 @@ impl ReadSurface {
                         org_name: record.identity.org_name.clone(),
                         scoped_descriptor: None,
                     }
-                    .with_scoped_descriptor(&params.credential_id),
+                    .with_scoped_descriptor(&params.credential_id, &providers),
                 )
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
@@ -3745,7 +3943,11 @@ fn err(code: ReadError) -> GetOutcome {
 
 /// A remote read's answer in the local `get_scoped` shape: a served token is the same
 /// `GetResult` a local read returns, with the caller's id echoed.
-fn remote_get_outcome(credential_id: &str, answer: crate::federation::RemoteAnswer) -> GetOutcome {
+fn remote_get_outcome(
+    credential_id: &str,
+    answer: crate::federation::RemoteAnswer,
+    providers: &[credentials_core::store::RegisteredProvider],
+) -> GetOutcome {
     match answer {
         crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(
             GetResult {
@@ -3759,7 +3961,7 @@ fn remote_get_outcome(credential_id: &str, answer: crate::federation::RemoteAnsw
                 org_name: get.org_name,
                 scoped_descriptor: None,
             }
-            .with_scoped_descriptor(credential_id),
+            .with_scoped_descriptor(credential_id, providers),
         ),
         crate::federation::RemoteAnswer::Refused(refusal) => GetOutcome::RemoteErr {
             error: refusal.body(),

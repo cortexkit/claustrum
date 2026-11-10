@@ -29,13 +29,14 @@ use crate::store::{
 /// module refuses any other version rather than best-effort parsing it.
 pub const ADMIN_OP_SCHEMA_V1: u32 = 1;
 pub const ADMIN_OP_SCHEMA_V2: u32 = 2;
+pub const ADMIN_OP_SCHEMA_V3: u32 = 3;
 
 /// Operator signing is for short machine-authentication transcripts, not artifacts.
 /// Keep the decoded limit below the unchanged admin-envelope limit online.
 pub const MAX_OPERATOR_SIGN_PAYLOAD: usize = 64 * 1024;
 
-// Preserve an explicit null so the shared scope parser refuses it as a non-array.
-// Only an omitted extended field is absent; legacy Option fields still accept null.
+// Preserve explicit null on extended fields: presence affects schema admission and
+// validation. Only omission is absent; legacy Option fields still accept null.
 fn present_scope_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -54,6 +55,30 @@ pub enum AdminOpBody {
         service: String,
         categories: Vec<String>,
         provider_ids: Vec<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        hosts: Option<serde_json::Value>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        auth_header: Option<serde_json::Value>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        auth_scheme: Option<serde_json::Value>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        fusiform_provider_id: Option<serde_json::Value>,
     },
     #[serde(rename = "admin.provider_remove")]
     ProviderRemove { v: u32, service: String },
@@ -448,12 +473,20 @@ impl std::fmt::Debug for AdminOpBody {
                 service,
                 categories,
                 provider_ids,
+                hosts,
+                auth_header,
+                auth_scheme,
+                fusiform_provider_id,
             } => f
                 .debug_struct("ProviderSet")
                 .field("v", v)
                 .field("service", service)
                 .field("categories", categories)
                 .field("provider_ids", provider_ids)
+                .field("hosts", hosts)
+                .field("auth_header", auth_header)
+                .field("auth_scheme", auth_scheme)
+                .field("fusiform_provider_id", fusiform_provider_id)
                 .finish(),
             AdminOpBody::ProviderRemove { v, service } => f
                 .debug_struct("ProviderRemove")
@@ -905,12 +938,28 @@ impl AdminOpBody {
         }
     }
 
-    /// Version admitted for this exact variant. The exhaustive match is the pairing
-    /// table: adding a variant cannot silently inherit either schema version.
+    /// Minimum version for this body. ProviderSet also admits v3 with no new keys,
+    /// which clears the descriptor rather than preserving it as a legacy v2 set does.
     pub const fn required_schema_version(&self) -> u32 {
         match self {
+            AdminOpBody::ProviderSet {
+                hosts,
+                auth_header,
+                auth_scheme,
+                fusiform_provider_id,
+                ..
+            } => {
+                if hosts.is_some()
+                    || auth_header.is_some()
+                    || auth_scheme.is_some()
+                    || fusiform_provider_id.is_some()
+                {
+                    ADMIN_OP_SCHEMA_V3
+                } else {
+                    ADMIN_OP_SCHEMA_V2
+                }
+            }
             AdminOpBody::GrantCreateV2 { .. }
-            | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
@@ -963,10 +1012,12 @@ impl AdminOpBody {
     }
 
     pub fn has_valid_schema_version(&self) -> bool {
-        matches!(
-            self.schema_version(),
-            ADMIN_OP_SCHEMA_V1 | ADMIN_OP_SCHEMA_V2
-        ) && self.schema_version() == self.required_schema_version()
+        if matches!(self, AdminOpBody::ProviderSet { .. }) {
+            return self.schema_version() == ADMIN_OP_SCHEMA_V3
+                || (self.schema_version() == ADMIN_OP_SCHEMA_V2
+                    && self.required_schema_version() == ADMIN_OP_SCHEMA_V2);
+        }
+        self.schema_version() == self.required_schema_version()
     }
 
     /// The credential id this op serializes against, for per-credential single-flight
@@ -1289,15 +1340,37 @@ pub fn apply(
     }
     match op {
         AdminOpBody::ProviderSet {
+            v,
             service,
             categories,
             provider_ids,
-            ..
+            hosts,
+            auth_header,
+            auth_scheme,
+            fusiform_provider_id,
         } => {
-            let changed = store.set_registered_provider_audited(
+            let settings = if v == ADMIN_OP_SCHEMA_V3 {
+                let hosts = hosts
+                    .filter(|value| !value.is_null())
+                    .unwrap_or_else(|| serde_json::json!([]));
+                let value = serde_json::json!({"hosts": hosts, "auth_header": auth_header,
+                    "auth_scheme": auth_scheme, "fusiform_provider_id": fusiform_provider_id});
+                Some(
+                    serde_json::from_value::<crate::store::RegisteredProviderSettings>(
+                        value.clone(),
+                    )
+                    .map_err(|error| {
+                        StoreOpError::Encode(format!("invalid provider settings {value}: {error}"))
+                    })?,
+                )
+            } else {
+                None
+            };
+            let changed = store.set_registered_provider_settings_audited(
                 &service,
                 &categories,
                 &provider_ids,
+                settings.as_ref(),
                 AuditCtx::route_admin(AuditOp::ProviderSet, actor),
             )?;
             Ok(serde_json::json!({"changed": changed}))
@@ -2148,6 +2221,38 @@ mod tests {
         };
         assert_eq!(rules, Some(serde_json::Value::Null));
         assert_eq!(origins, None);
+    }
+
+    #[test]
+    fn provider_set_extended_keys_preserve_presence_and_require_v3() {
+        let legacy = br#"{"op":"admin.provider_set","v":2,"service":"custom","categories":[],"provider_ids":[]}"#;
+        let op: AdminOpBody = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(op.to_bytes().unwrap(), legacy);
+        assert!(op.has_valid_schema_version());
+        for (key, value) in [
+            ("hosts", serde_json::json!(["api.example.com"])),
+            ("auth_header", serde_json::json!("x-api-key")),
+            ("auth_scheme", serde_json::json!("raw")),
+            ("fusiform_provider_id", serde_json::json!("custom")),
+        ] {
+            for value in [value, serde_json::Value::Null] {
+                let mut body: serde_json::Value = serde_json::from_slice(legacy).unwrap();
+                body[key] = value;
+                let op: AdminOpBody = serde_json::from_value(body.clone()).unwrap();
+                assert_eq!(serde_json::to_value(&op).unwrap(), body);
+                assert_eq!(op.required_schema_version(), ADMIN_OP_SCHEMA_V3);
+                assert!(!op.has_valid_schema_version(), "v2 must refuse {key}");
+                body["v"] = serde_json::json!(3);
+                let op: AdminOpBody = serde_json::from_value(body).unwrap();
+                assert!(op.has_valid_schema_version());
+            }
+        }
+        for version in [0, 1, 3, 4, u32::MAX] {
+            let mut body: serde_json::Value = serde_json::from_slice(legacy).unwrap();
+            body["v"] = serde_json::json!(version);
+            let op: AdminOpBody = serde_json::from_value(body).unwrap();
+            assert_eq!(op.has_valid_schema_version(), version == 3);
+        }
     }
 
     #[test]

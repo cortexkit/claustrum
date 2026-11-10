@@ -30,6 +30,7 @@ mod secret_use;
 mod test_support;
 mod watch_scoped;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -58,7 +59,7 @@ use subc_protocol::manifest::{
 use subc_protocol::{
     manifest::{
         Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
-        ProviderRole, StorageBinding, StorageKind, StorageScope, TrustTier,
+        OperationDelivery, ProviderRole, StorageBinding, StorageKind, StorageScope, TrustTier,
     },
     session::{
         HealthStatus, ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
@@ -2220,6 +2221,28 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         requires: Vec::new(),
         must_never_reach: Vec::new(),
     }))
+    // Keep the vault switch's stable id so existing approvals remain on the same switch.
+    .role_declarations(BTreeMap::from([(
+        "peer-sharing/v1".to_owned(),
+        serde_json::Map::from_iter([("shares".to_owned(), json!([{
+            "id": "vault",
+            "label": "Use this computer's vault",
+            "operations": [
+                federation::ingress::OP_REMOTE_TOKEN,
+                federation::ingress::OP_REPORT_AUTH_FAILURE,
+                federation::ingress::OP_TRANSFER_DELIVER,
+                federation::ingress::OP_SECRET_USE,
+                federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+                federation::ingress::OP_REMOTE_WATCH,
+            ],
+            "peer_classes": ["computer"],
+        }]))]),
+    )]))
+    .operation_delivery(BTreeMap::from([(
+        federation::ingress::OP_REMOTE_WATCH.to_owned(),
+        OperationDelivery::WATCH,
+    )]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2508,6 +2531,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation {
                 name: federation::ingress::OP_REMOTE_TOKEN.to_string(),
                 description: Some("Serve a member vault a short-lived access token for a login this vault holds. Never returns refresh material.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_REMOTE_WATCH.to_string(),
+                description: Some("Subscribe to the non-secret inventory of logins a member vault's remote-read grants reach.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -2832,7 +2860,9 @@ mod tests {
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
                 ManagementOperationKind::Mutate,
             ),
+            ("federation.remote_watch", ManagementOperationKind::Query),
         ] {
+            assert!(federation::is_federation_op(op), "{op} must be allowlisted");
             assert!(
                 declared.iter().any(|(name, k)| name == op && *k == kind),
                 "{op} must be declared as {kind:?}: callosum offers a paired computer only \
@@ -2840,10 +2870,32 @@ mod tests {
             );
         }
         assert_eq!(
-            federation::ingress::FEDERATION_OPS.len(),
-            6,
-            "a new federation op must be added to the manifest and to this test"
+            manifest.operation_delivery.get("federation.remote_watch"),
+            Some(&subc_protocol::manifest::OperationDelivery::WATCH),
+            "remote inventory snapshots must be exposed as a watch"
         );
+        let sharing = manifest
+            .role_declarations
+            .get("peer-sharing/v1")
+            .expect("the vault declares its own sharing switch");
+        let shares = sharing["shares"].as_array().expect("shares array");
+        assert_eq!(shares.len(), 1);
+        let share = &shares[0];
+        assert_eq!(share["id"], "vault");
+        assert_eq!(share["label"], "Use this computer's vault");
+        assert_eq!(share["peer_classes"], json!(["computer"]));
+        assert_eq!(
+            share["operations"],
+            json!(federation::ingress::FEDERATION_OPS),
+            "the sharing switch must list exactly the federation allowlist"
+        );
+        for op in share["operations"].as_array().expect("operations array") {
+            let op = op.as_str().expect("operation name");
+            assert!(
+                declared.iter().any(|(name, _)| name == op),
+                "{op} must be a declared management operation to be shared"
+            );
+        }
         // `secret.home` is a phone op: declared, but never on the member allowlist.
         assert!(declared
             .iter()
@@ -7306,6 +7358,45 @@ mod tests {
             let (_, body) = routed_reply(&surface, &admin, 91, op, params).await;
             assert_eq!(body, not_found, "gate on, callosum-self, {op}");
         }
+    }
+
+    #[tokio::test]
+    async fn remote_watch_keeps_the_federation_not_found_boundary() {
+        let (surface, admin, store, routes) = granted_scoped_rig(195, "callosum");
+        bind_reserved_route(&surface, &admin, &routes, 97, 1, "callosum", MEMBER_HARNESS).await;
+        bind_reserved_route(&surface, &admin, &routes, 98, 1, "broca", "").await;
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for mapping_on in [false, true] {
+            set_member_mapping(&store, mapping_on);
+            for channel in [97, 98] {
+                if mapping_on && channel == 97 {
+                    continue;
+                }
+                let token = routed_reply(
+                    &surface,
+                    &admin,
+                    channel,
+                    federation::ingress::OP_REMOTE_TOKEN,
+                    json!({}),
+                )
+                .await;
+                assert_eq!(token, (FrameType::Response, not_found.clone()));
+                for params in [json!({}), json!({ "handle": "ckh_x" })] {
+                    let watch =
+                        routed_reply(&surface, &admin, channel, "federation.remote_watch", params)
+                            .await;
+                    assert_eq!(watch, token, "mapping {mapping_on}, channel {channel}");
+                }
+            }
+        }
+        let answer = admin
+            .home()
+            .serve(MEMBER_HARNESS, "federation.remote_watch", &json!({}))
+            .await;
+        let federation::HomeAnswer::Reply(reply) = answer else {
+            panic!("the single-reply home dispatcher must refuse remote_watch");
+        };
+        assert_eq!(serde_json::to_vec(&wrap_result(reply)).unwrap(), not_found);
     }
 
     /// The gate is read on every decision: switching it changes the same bound route's

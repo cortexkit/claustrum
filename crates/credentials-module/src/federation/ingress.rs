@@ -58,6 +58,8 @@ use crate::secret_use::{ForwardedUseAnswer, UseAnswer};
 /// A peer asks the home for a short-lived access token (a `query`: callosum keeps no
 /// reply body on disk).
 pub const OP_REMOTE_TOKEN: &str = "federation.remote_token";
+/// A peer watches the non-secret inventory of logins its remote-read grants reach.
+pub const OP_REMOTE_WATCH: &str = "federation.remote_watch";
 /// A peer forwards its consumer's report that a token was refused upstream.
 pub const OP_REPORT_AUTH_FAILURE: &str = "federation.report_auth_failure";
 /// A peer delivers a sealed static-key transfer.
@@ -72,13 +74,14 @@ pub const OP_SECRET_REQUEST_FLOW_APPROVAL: &str = "federation.secret_request_flo
 pub const OP_SECRET_REVOKE_FLOW_GRANTS: &str = "federation.secret_revoke_flow_grants";
 
 /// The closed allowlist of a federation channel. Nothing else is dispatched there.
-pub const FEDERATION_OPS: [&str; 6] = [
+pub const FEDERATION_OPS: [&str; 7] = [
     OP_REMOTE_TOKEN,
     OP_REPORT_AUTH_FAILURE,
     OP_TRANSFER_DELIVER,
     OP_SECRET_USE,
     OP_SECRET_REQUEST_FLOW_APPROVAL,
     OP_SECRET_REVOKE_FLOW_GRANTS,
+    OP_REMOTE_WATCH,
 ];
 
 /// The HPKE `info` of a sealed token reply. A transfer envelope uses a different
@@ -996,6 +999,8 @@ impl HomeVault {
             let work = async {
                 match method {
                     OP_REMOTE_TOKEN => self.remote_token(member, params, budget).await,
+                    // A watch needs streaming replies; this dispatcher returns only one reply.
+                    OP_REMOTE_WATCH => Err(Refusal::NotFound),
                     OP_REPORT_AUTH_FAILURE => {
                         self.report_auth_failure(member, params, budget).await
                     }

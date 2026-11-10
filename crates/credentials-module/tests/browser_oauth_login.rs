@@ -1,14 +1,16 @@
 //! Process-level browser OAuth regression tests. All CLI runs use an isolated home.
 #![cfg(all(unix, debug_assertions, feature = "test-support"))]
 
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use cortexkit_test_support::{ckdev_binary, dev_command};
 use credentials_core::test_support::TestTempDir;
@@ -18,6 +20,66 @@ use serde_json::{json, Value};
 /// exchange) before it gives up. This only stops a real hang; it isn't a speed check.
 /// It's generous because loaded build hosts can take many seconds to start the CLI.
 const HANG_GUARD: Duration = Duration::from_secs(120);
+
+const CALLBACK_PORT_FIRST: u16 = 20000;
+const CALLBACK_PORT_LAST: u16 = 32767;
+
+fn callback_ports_exclude_ephemeral(first: u16, last: u16) -> bool {
+    CALLBACK_PORT_LAST < first || CALLBACK_PORT_FIRST > last
+}
+
+fn reserve_callback() -> TcpListener {
+    // Releasing a :0 reservation lets another test's token server take that port
+    // before the CLI starts listening. Use ports below the usual Linux and macOS
+    // ephemeral ranges, and refuse a Linux host whose configured range overlaps.
+    // Spread parallel test processes apart by PID; the counter and held listener
+    // keep fixtures within each process from choosing the same available port.
+    #[cfg(target_os = "linux")]
+    {
+        static CHECK_RANGE: std::sync::Once = std::sync::Once::new();
+        CHECK_RANGE.call_once(|| {
+            let configured =
+                std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+            let range: Vec<u16> = configured
+                .split_whitespace()
+                .map(|port| port.parse().unwrap())
+                .collect();
+            assert_eq!(range.len(), 2, "unexpected ephemeral port range: {configured}");
+            assert!(
+                callback_ports_exclude_ephemeral(range[0], range[1]),
+                "callback ports {CALLBACK_PORT_FIRST}..={CALLBACK_PORT_LAST} overlap the host's ephemeral range: {configured}"
+            );
+        });
+    }
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    const COUNT: u32 = (CALLBACK_PORT_LAST - CALLBACK_PORT_FIRST) as u32 + 1;
+    for _ in 0..COUNT {
+        let index = std::process::id()
+            .wrapping_mul(97)
+            .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed));
+        let port = CALLBACK_PORT_FIRST + (index % COUNT) as u16;
+        match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+            Ok(listener) => return listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("reserving callback port {port}: {error}"),
+        }
+    }
+    panic!("no callback port available in {CALLBACK_PORT_FIRST}..={CALLBACK_PORT_LAST}");
+}
+
+#[test]
+fn callback_port_range_checks_both_ephemeral_boundaries() {
+    assert!(callback_ports_exclude_ephemeral(
+        CALLBACK_PORT_LAST + 1,
+        65535
+    ));
+    assert!(!callback_ports_exclude_ephemeral(CALLBACK_PORT_LAST, 65535));
+    assert!(callback_ports_exclude_ephemeral(
+        1024,
+        CALLBACK_PORT_FIRST - 1
+    ));
+    assert!(!callback_ports_exclude_ephemeral(1024, CALLBACK_PORT_FIRST));
+}
 
 #[path = "support/isolated_cli.rs"]
 mod isolated_cli;
@@ -36,20 +98,26 @@ fn every_browser_oauth_command_uses_an_isolated_home() {
 struct Fixture {
     root: TestTempDir,
     callback: String,
+    callback_reservation: RefCell<Option<TcpListener>>,
     origin: String,
     token_server: TcpListener,
 }
 
 impl Fixture {
-    fn new() -> Self {
-        let root = TestTempDir::new(format!(
-            "browser-login-{}-{}",
+    fn root_name(now: SystemTime) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            "browser-login-{}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            now.duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
-        ));
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn new() -> Self {
+        let root = TestTempDir::new(Self::root_name(SystemTime::now()));
         std::fs::create_dir_all(root.join("vault")).unwrap();
         std::fs::OpenOptions::new()
             .write(true)
@@ -59,17 +127,23 @@ impl Fixture {
             .unwrap()
             .write_all("17".repeat(32).as_bytes())
             .unwrap();
-        let callback = TcpListener::bind("127.0.0.1:0").unwrap();
+        let callback = reserve_callback();
         let address = callback.local_addr().unwrap().to_string();
-        drop(callback);
         let token_server = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", token_server.local_addr().unwrap());
         Self {
             root,
             callback: address,
+            callback_reservation: RefCell::new(Some(callback)),
             origin,
             token_server,
         }
+    }
+
+    // Keep the port reserved unless the CLI itself needs to bind it. In particular,
+    // another-device logins must succeed even while this listener occupies it.
+    fn release_callback(&self) {
+        drop(self.callback_reservation.borrow_mut().take().unwrap());
     }
 
     fn command(&self, provider: &str, flags: &[&str]) -> Command {
@@ -175,6 +249,63 @@ impl Fixture {
             .env("CK_AUTH_TEST_HELPER_INPUT", self.root.join("clipboard"));
         log
     }
+}
+
+#[test]
+fn fixture_names_are_unique_when_the_clock_repeats() {
+    let now = std::time::UNIX_EPOCH;
+    assert_ne!(Fixture::root_name(now), Fixture::root_name(now));
+}
+
+#[test]
+fn fixture_reserves_its_callback_port() {
+    let fixture = Fixture::new();
+    assert_ne!(fixture.origin, format!("http://{}", fixture.callback));
+    assert!(
+        TcpListener::bind(&fixture.callback).is_err(),
+        "the fixture must reserve its callback port until the CLI needs it"
+    );
+}
+
+// A port probe can hit an unrelated test's listener after the CLI closes its own.
+// On Linux, the socket's inode is an identifier that distinguishes the CLI's
+// listener from a different listener that later reuses the same port.
+#[cfg(target_os = "linux")]
+fn callback_listener_inode(callback: &str) -> String {
+    let address: std::net::SocketAddrV4 = callback.parse().unwrap();
+    let local = format!("0100007F:{:04X}", address.port());
+    let sockets = std::fs::read_to_string("/proc/net/tcp").unwrap();
+    let inode = sockets
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields[1] == local && fields[3] == "0A").then(|| fields[9].to_string())
+        })
+        .expect("this computer must hold the callback LISTEN socket");
+    assert_ne!(inode, "0", "the callback listener must have a socket inode");
+    inode
+}
+
+#[cfg(target_os = "linux")]
+fn assert_callback_listener_closed(inode: &str) {
+    let sockets = std::fs::read_to_string("/proc/net/tcp").unwrap();
+    assert!(
+        !sockets
+            .lines()
+            .skip(1)
+            .any(|line| line.split_whitespace().nth(9) == Some(inode)),
+        "pasting must close the losing listener (socket inode {inode})"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[should_panic(expected = "pasting must close the losing listener")]
+fn callback_listener_closed_rejects_a_live_listener() {
+    let fixture = Fixture::new();
+    let inode = callback_listener_inode(&fixture.callback);
+    assert_callback_listener_closed(&inode);
 }
 
 fn decode(raw: &str) -> String {
@@ -309,8 +440,34 @@ fn paste_while_listening_completes_without_waiting_and_show_spawns_nothing() {
     let server = fixture.exchange(true);
     let mut command = fixture.command("xai", &["--approve-on", "this", "--browser", "show"]);
     let helpers = fixture.helper_tools(&mut command, false);
+    fixture.release_callback();
     let mut login = Login::start(command);
     let url = login.authorize_url();
+    #[cfg(target_os = "linux")]
+    let listener_inode = {
+        let inode = callback_listener_inode(&fixture.callback);
+        // process_hardening.rs makes the CLI non-dumpable, hiding its descriptors
+        // from same-user /proc/<pid>/fd reads. Prove ownership through its callback
+        // page and stdout instead, then verify the same socket is still listening.
+        let mut probe = TcpStream::connect(&fixture.callback).unwrap();
+        write!(
+            probe,
+            "GET /callback?code=ownership-probe&state=wrong-{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            param(&url, "state")
+        )
+        .unwrap();
+        probe.set_read_timeout(Some(HANG_GUARD)).unwrap();
+        let mut page = String::new();
+        probe.read_to_string(&mut page).unwrap();
+        assert!(page.contains("<title>CortexKit · login</title>"), "{page}");
+        login.until("callback state does not match");
+        assert_eq!(
+            callback_listener_inode(&fixture.callback),
+            inode,
+            "a rejected browser callback must leave the CLI's listener open"
+        );
+        inode
+    };
     assert!(
         TcpListener::bind(&fixture.callback).is_err(),
         "this computer must hold the callback socket"
@@ -348,18 +505,17 @@ fn paste_while_listening_completes_without_waiting_and_show_spawns_nothing() {
         !url.contains(verifier),
         "the PKCE verifier must stay in-process"
     );
-    assert!(
-        TcpStream::connect(&fixture.callback).is_err(),
-        "pasting must close the losing listener"
-    );
+    #[cfg(target_os = "linux")]
+    assert_callback_listener_closed(&listener_inode);
 }
 
 #[test]
 fn browser_callback_wins_without_waiting_for_stdin_to_close() {
     let fixture = Fixture::new();
     let server = fixture.exchange(true);
-    let mut login =
-        Login::start(fixture.command("xai", &["--approve-on", "this", "--browser", "show"]));
+    let command = fixture.command("xai", &["--approve-on", "this", "--browser", "show"]);
+    fixture.release_callback();
+    let mut login = Login::start(command);
     let url = login.authorize_url();
     let mut browser = TcpStream::connect(&fixture.callback).unwrap();
     write!(
@@ -385,8 +541,10 @@ fn another_device_binds_nothing_and_bad_pastes_let_the_user_retry() {
     let mut login =
         Login::start(fixture.command("xai", &["--approve-on", "other", "--browser", "show"]));
     let url = login.authorize_url();
-    let _available =
-        TcpListener::bind(&fixture.callback).expect("another device must not bind a listener");
+    assert!(
+        fixture.callback_reservation.borrow().is_some(),
+        "another device must not bind a listener: the fixture still owns the port"
+    );
     login.paste("not a callback");
     login.until("Could not parse the login callback");
     login.paste("old-code#wrong-state");
@@ -411,12 +569,17 @@ fn non_tty_defaults_show_and_headless_defaults_to_another_device() {
             command.env_remove("DISPLAY");
         }
         let helpers = fixture.helper_tools(&mut command, false);
+        let another_device = cfg!(target_os = "linux") && headless;
+        if !another_device {
+            fixture.release_callback();
+        }
         let mut login = Login::start(command);
         let url = login.authorize_url();
-        assert_eq!(
-            TcpListener::bind(&fixture.callback).is_ok(),
-            cfg!(target_os = "linux") && headless
-        );
+        if another_device {
+            assert!(fixture.callback_reservation.borrow().is_some());
+        } else {
+            assert!(TcpListener::bind(&fixture.callback).is_err());
+        }
         login.paste(&format!("code#{}", param(&url, "state")));
         let output = login.finish(true);
         assert!(
@@ -460,6 +623,7 @@ fn explicit_open_runs_the_opener_once() {
     let server = fixture.exchange(true);
     let mut command = fixture.command("xai", &["--approve-on", "this", "--browser", "open"]);
     let helpers = fixture.helper_tools(&mut command, false);
+    fixture.release_callback();
     let mut login = Login::start(command);
     let url = login.authorize_url();
     login.paste(&format!("code#{}", param(&url, "state")));
@@ -495,7 +659,7 @@ fn clipboard_failure_shows_the_url_and_still_accepts_a_callback() {
 #[test]
 fn google_busy_callback_port_refuses_without_authorization_url() {
     let fixture = Fixture::new();
-    let _occupied = TcpListener::bind(&fixture.callback).unwrap();
+    assert!(fixture.callback_reservation.borrow().is_some());
     let output = fixture
         .command("google", &["--approve-on", "this", "--browser", "show"])
         .output()
@@ -555,16 +719,20 @@ fn google_reuses_concurrent_paste_and_other_device_listener_policy() {
         // An exchange refusal proves the real Google driver reached the fake token
         // server without proceeding to its unrelated userinfo/project APIs.
         let server = fixture.exchange(false);
-        let mut login = Login::start(
-            fixture.command("google", &["--approve-on", location, "--browser", "show"]),
-        );
+        let command = fixture.command("google", &["--approve-on", location, "--browser", "show"]);
+        if location == "this" {
+            fixture.release_callback();
+        }
+        let mut login = Login::start(command);
         let url = login.authorize_url();
-        let _available = if location == "other" {
-            Some(TcpListener::bind(&fixture.callback).expect("Google other must not bind"))
+        if location == "other" {
+            assert!(
+                fixture.callback_reservation.borrow().is_some(),
+                "Google other must not bind: the fixture still owns the port"
+            );
         } else {
             assert!(TcpListener::bind(&fixture.callback).is_err());
-            None
-        };
+        }
         login.paste("broken");
         login.until("Could not parse the login callback");
         login.paste(&format!("google-code#{}", param(&url, "state")));
@@ -654,6 +822,9 @@ fn manual_this_computer_and_another_device_transcripts() {
                 Ok(())
             });
         }
+        if !other {
+            fixture.release_callback();
+        }
         let mut child = command.spawn().unwrap();
         command
             .stdin(Stdio::null())
@@ -696,7 +867,11 @@ fn manual_this_computer_and_another_device_transcripts() {
                         .find(|line| line.starts_with("  http://"))
                         .unwrap()
                         .trim();
-                    assert_eq!(TcpListener::bind(&fixture.callback).is_ok(), other);
+                    if other {
+                        assert!(fixture.callback_reservation.borrow().is_some());
+                    } else {
+                        assert!(TcpListener::bind(&fixture.callback).is_err());
+                    }
                     Some(format!("manual-code#{}\r", param(url, "state")))
                 }
                 _ => None,
@@ -738,10 +913,21 @@ fn manual_this_computer_and_another_device_transcripts() {
 fn a_bad_paste_does_not_cancel_a_browser_callback_in_progress() {
     let fixture = Fixture::new();
     let server = fixture.exchange(true);
-    let mut login =
-        Login::start(fixture.command("xai", &["--approve-on", "this", "--browser", "show"]));
+    let command = fixture.command("xai", &["--approve-on", "this", "--browser", "show"]);
+    fixture.release_callback();
+    let mut login = Login::start(command);
     let url = login.authorize_url();
-    let mut browser = TcpStream::connect(&fixture.callback).unwrap();
+    let mut browser = match TcpStream::connect(&fixture.callback) {
+        Ok(browser) => browser,
+        Err(error) => {
+            let _ = login.child.kill();
+            let output = login.finish(false);
+            panic!(
+                "connecting to callback {}: {error}; {output}",
+                fixture.callback
+            );
+        }
+    };
     write!(
         browser,
         "GET /callback?code=fragmented-browser&state={}",

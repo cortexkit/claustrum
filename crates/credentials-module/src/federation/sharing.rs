@@ -15,8 +15,9 @@ use serde_json::{json, Value};
 
 use super::outbound::{management_surface, OutboundClient, RouteCall, ADMIN_OP_BUDGET};
 
+// Ignore additional Callosum metadata so a newer reply can still revoke a
+// computer's grants when its vault-sharing switch turns off.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Snapshot {
     devices: Vec<Device>,
     #[serde(rename = "self")]
@@ -24,13 +25,11 @@ struct Snapshot {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Identity {
     static_public_key_hex: String,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Device {
     class: Class,
     fingerprint: String,
@@ -44,11 +43,11 @@ enum Class {
     Computer,
     Phone,
     Sim,
+    #[serde(other)]
     Unknown,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Share {
     share: String,
     enabled: bool,
@@ -103,7 +102,11 @@ fn request(method: &str) -> RouteCall {
     }
 }
 
-async fn apply(store: Arc<EncryptedStore>, body: Value) -> Result<(), String> {
+async fn apply(
+    store: Arc<EncryptedStore>,
+    body: Value,
+    retries: &mut RetryState,
+) -> Result<(), String> {
     let snapshot =
         decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?;
     tokio::task::spawn_blocking(move || {
@@ -116,21 +119,70 @@ async fn apply(store: Arc<EncryptedStore>, body: Value) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if retries.applied() {
+        tracing::info!(target: "federation", "vault sharing snapshot reconciliation recovered");
+    }
+    Ok(())
+}
+
+const MAX_SHARING_RETRY_SECONDS: u64 = 60;
+
+/// Delay after consecutive failed attempts: 1, 2, 4, 8, 16, 32, then at most 60 seconds.
+fn retry_delay(failures: u32) -> Duration {
+    Duration::from_secs(
+        1u64.checked_shl(failures.saturating_sub(1))
+            .unwrap_or(u64::MAX)
+            .min(MAX_SHARING_RETRY_SECONDS),
+    )
+}
+
+#[derive(Default)]
+struct RetryState {
+    failures: u32,
+    last_error: Option<String>,
+}
+
+impl RetryState {
+    fn failed(&mut self, error: &str) -> (Duration, bool) {
+        self.failures = self.failures.saturating_add(1);
+        let warn = self.last_error.as_deref() != Some(error);
+        if warn {
+            self.last_error = Some(error.to_string());
+        }
+        (retry_delay(self.failures), warn)
+    }
+
+    fn applied(&mut self) -> bool {
+        self.failures = 0;
+        self.last_error.take().is_some()
+    }
 }
 
 /// Run until cancelled by the daemon's task guard. Every reopen starts with a full
 /// read; the watch's initial snapshot closes the read/subscribe race.
 pub async fn run(store: Arc<EncryptedStore>, client: OutboundClient) {
+    let mut retries = RetryState::default();
     loop {
-        if let Err(error) = watch(Arc::clone(&store), &client).await {
-            tracing::warn!(target: "federation", %error, "vault sharing unchanged until Callosum supplies a valid snapshot");
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let delay = match watch(Arc::clone(&store), &client, &mut retries).await {
+            Err(error) => {
+                let (delay, warn) = retries.failed(&error);
+                if warn {
+                    tracing::warn!(target: "federation", %error, "vault sharing unchanged until Callosum supplies a valid snapshot");
+                }
+                delay
+            }
+            Ok(()) => retry_delay(1),
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 
-async fn watch(store: Arc<EncryptedStore>, client: &OutboundClient) -> Result<(), String> {
+async fn watch(
+    store: Arc<EncryptedStore>,
+    client: &OutboundClient,
+    retries: &mut RetryState,
+) -> Result<(), String> {
     let snapshot = client
         .call(
             "callosum",
@@ -139,7 +191,7 @@ async fn watch(store: Arc<EncryptedStore>, client: &OutboundClient) -> Result<()
         )
         .await
         .map_err(|e| e.message().to_string())?;
-    apply(Arc::clone(&store), snapshot).await?;
+    apply(Arc::clone(&store), snapshot, retries).await?;
     let mut subscription = client
         .subscribe(
             "callosum",
@@ -153,7 +205,50 @@ async fn watch(store: Arc<EncryptedStore>, client: &OutboundClient) -> Result<()
         .await
         .map_err(|e| e.message().to_string())?
     {
-        apply(Arc::clone(&store), snapshot).await?;
+        apply(Arc::clone(&store), snapshot, retries).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sharing_retry_delay_doubles_until_the_sixty_second_cap() {
+        for (failures, seconds) in [
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 4),
+            (4, 8),
+            (5, 16),
+            (6, 32),
+            (7, 60),
+            (8, 60),
+            (u32::MAX, 60),
+        ] {
+            assert_eq!(retry_delay(failures), Duration::from_secs(seconds));
+        }
+    }
+
+    #[test]
+    fn sharing_retries_warn_only_on_first_or_changed_error_and_recover_once() {
+        let mut state = RetryState::default();
+        assert!(!state.applied());
+        for (error, seconds, warn) in [
+            ("offline", 1, true),
+            ("offline", 2, false),
+            ("different", 4, true),
+            ("different", 8, false),
+        ] {
+            assert_eq!(state.failed(error), (Duration::from_secs(seconds), warn));
+        }
+        assert!(state.applied());
+        assert!(!state.applied());
+        assert_eq!(state.failed("different"), (Duration::from_secs(1), true));
+        assert_eq!(state.failed("different"), (Duration::from_secs(2), false));
+        state.failures = u32::MAX;
+        assert_eq!(state.failed("different"), (Duration::from_secs(60), false));
+    }
 }

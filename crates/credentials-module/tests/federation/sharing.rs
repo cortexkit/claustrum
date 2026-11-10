@@ -402,12 +402,9 @@ fn malformed_snapshots_are_not_partial_or_empty_inventories() {
     let mut empty_pairing = valid.clone();
     empty_pairing["devices"][1]["pairing_id"] = json!("");
     cases.push(empty_pairing);
-    let mut unknown_field = valid.clone();
-    unknown_field["devices"][0]["extra"] = json!(true);
-    cases.push(unknown_field);
-    let mut unknown_class = valid.clone();
-    unknown_class["devices"][0]["class"] = json!("future");
-    cases.push(unknown_class);
+    let mut invalid_fingerprint = valid.clone();
+    invalid_fingerprint["devices"][0]["fingerprint"] = json!("not-hex");
+    cases.push(invalid_fingerprint);
     let mut missing_self = valid.clone();
     missing_self.as_object_mut().unwrap().remove("self");
     cases.push(missing_self);
@@ -443,5 +440,70 @@ async fn changed_pairing_with_enabled_switch_replaces_only_switch_pairings() {
             .filter(|entry| entry.op == "member_grant_revoke")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn extra_snapshot_fields_do_not_freeze_switch_off_revocation() {
+    let mut next = snapshot("empty");
+    next["future_metadata"] = json!({"revision": 2});
+    revokes("sharing-extra-top-level", next).await;
+}
+
+#[tokio::test]
+async fn extra_device_identity_and_share_fields_still_reconcile() {
+    let mut rig = Rig::new("sharing-extra-fields", snapshot("empty")).await;
+    rig.start().await;
+    let mut next = snapshot("all_classes");
+    next["devices"][0]["future_metadata"] = json!({"revision": 2});
+    next["self"]["future_identity"] = json!(true);
+    next["devices"][0]["shares"][2]["future_share"] = json!(true);
+    rig.callosum.watch_snapshot(Some(next.clone())).await;
+    rig.grants(2).await;
+    assert!(rig
+        .home
+        .store
+        .list_member_grants()
+        .unwrap()
+        .iter()
+        .all(|grant| grant.member_id == MEMBER));
+    next["devices"][0]["shares"][2]["enabled"] = json!(false);
+    rig.callosum.watch_snapshot(Some(next)).await;
+    rig.grants(0).await;
+}
+
+#[tokio::test]
+async fn unknown_device_class_gets_no_grants_and_other_devices_still_reconcile() {
+    let mut rig = Rig::new("sharing-unknown-class", snapshot("all_classes")).await;
+    rig.start().await;
+    rig.grants(2).await;
+    let mut next = snapshot("all_classes");
+    next["devices"][0]["class"] = json!("future-tablet");
+    next["devices"][1]["class"] = json!("computer");
+    next["devices"][1]["shares"] = json!([{"share": "vault", "enabled": true}]);
+    let other = format!(
+        "fed-computer:{}",
+        next["devices"][1]["fingerprint"].as_str().unwrap()
+    );
+    rig.callosum.watch_snapshot(Some(next)).await;
+    wait_until(|| {
+        let grants = rig.home.store.list_member_grants().unwrap();
+        grants.len() == 2 && grants.iter().all(|grant| grant.member_id == other)
+    })
+    .await;
+    let audit = rig.home.store.read_audit(None).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|entry| entry.op == "member_grant_revoke")
+            .count(),
+        2
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|entry| entry.op == "member_grant_create")
+            .count(),
+        4
     );
 }

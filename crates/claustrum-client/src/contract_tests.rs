@@ -86,7 +86,7 @@ fn producer_reply(reply: &Value) -> Value {
 }
 
 #[test]
-fn provider_catalog_decodes_producer_hosts_and_absence() {
+fn provider_catalog_decodes_producer_fusiform_ids_hosts_and_absence() {
     let reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
     let listing = decode_list_scoped_reply(reply.clone()).unwrap();
     assert!(listing.undecodable_credentials.is_empty());
@@ -109,6 +109,7 @@ fn provider_catalog_decodes_producer_hosts_and_absence() {
         .find(|row| row.id == "apikey:openai")
         .unwrap();
     assert_eq!(openai.hosts, Some(vec!["api.openai.com".into()]));
+    assert_eq!(openai.fusiform_provider_id.as_deref(), Some("openai"));
     let oauth = listing
         .credentials
         .iter()
@@ -119,13 +120,9 @@ fn provider_catalog_decodes_producer_hosts_and_absence() {
 }
 
 #[test]
-fn provider_catalog_decodes_fusiform_ids_and_empty_hosts_missing_from_vectors() {
+fn provider_catalog_decodes_empty_hosts_missing_from_vectors() {
     let mut reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
-    // The producer has hosts, but no Fusiform ids or explicitly empty host arrays yet.
-    assert!(reply["result"]["credentials"][1]
-        .get("fusiform_provider_id")
-        .is_none());
-    reply["result"]["credentials"][1]["fusiform_provider_id"] = json!("openai");
+    // The vectors omit explicitly empty host lists; exercise that presence separately.
     assert!(reply["result"]["credentials"][2].get("hosts").is_none());
     reply["result"]["credentials"][2]["hosts"] = json!([]);
     let listing = decode_list_scoped_reply(reply).unwrap();
@@ -395,7 +392,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("openrouter".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
-                    fusiform_provider_id: None,
+                    fusiform_provider_id: Some("openrouter".into()),
                     hosts: Some(vec!["openrouter.ai".into()]),
                     id: "apikey:openrouter".into(),
                     categories: vec!["llm-provider".into()],
@@ -512,7 +509,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "5nGCY1+bA0OaU3AWJqQzwycYy8es/tHZWUOMc25xrNk=".into(),
+            view: "kehakvIMhQw4gPUf4l6aG9YnOTL4SyubRengxfCPZ0I=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

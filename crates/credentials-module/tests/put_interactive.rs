@@ -102,6 +102,7 @@ fn plain_put_stores_a_hidden_api_key_and_default_no_preserves_the_existing_recor
             ("Groups for this provider", b"\r", false),
             ("Which models may this key run? Leave empty if unsure.", b"\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"\r", false),
             ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
@@ -152,6 +153,7 @@ fn explicit_id_prompts_only_for_value_trims_it_and_reprompts_after_empty_input()
             ("Groups for this provider", b"\r", false),
             ("Which models may this key run? Leave empty if unsure.", b"\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"\r", false),
             ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", b"  \r", true),
             ("Value (hidden)", format!("  {VALUE}  \r").as_bytes(), true),
@@ -180,6 +182,7 @@ fn confirming_replace_uses_the_existing_unconditional_rotation_path() {
             ("Groups for this provider", b"\r", false),
             ("Which models may this key run? Leave empty if unsure.", b"\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"\r", false),
             ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", b"initial-test-value\r", true),
         ],
@@ -321,6 +324,7 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
             ("Groups for this provider", b" \x1b[B\x1b[B\x1b[B \r", false),
             ("Which models may this key run? Leave empty if unsure.", b"custom-route\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"openai\r", false),
             ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
@@ -335,6 +339,7 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
     assert_eq!(answer[0].service, "customvendor");
     assert_eq!(answer[0].categories, ["llm-provider", "web-search"]);
     assert_eq!(answer[0].provider_ids, ["custom-route"]);
+    assert_eq!(answer[0].fusiform_provider_id.as_deref(), Some("openai"));
     assert!(answer[0].created_at_ms > 0);
     let screen = fixture.terminal(
         &["put", "--id", "apikey:customvendor:second"],
@@ -362,6 +367,7 @@ fn registered_provider_default_no_stores_nothing_and_never_reads_the_value() {
             ("Groups for this provider", b" \r", false),
             ("Which models may this key run? Leave empty if unsure.", b"\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"\r", false),
             ("Save these provider settings and continue?", b"\r", false),
         ],
     );
@@ -381,6 +387,7 @@ fn registered_provider_empty_answer_is_remembered_and_nonterminal_put_prints_a_h
             ("Groups for this provider", b"\r", false),
             ("Which models may this key run? Leave empty if unsure.", b"\r", false),
             ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"\r", false),
             ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
@@ -403,6 +410,7 @@ fn registered_provider_empty_answer_is_remembered_and_nonterminal_put_prints_a_h
     assert!(answer[0].hosts.is_empty());
     assert_eq!(answer[0].auth_header, None);
     assert_eq!(answer[0].auth_scheme, None);
+    assert_eq!(answer[0].fusiform_provider_id, None);
 
     let path = fixture.0.join("value");
     std::fs::write(&path, VALUE).unwrap();
@@ -455,6 +463,7 @@ fn registered_provider_prompt_pins_descriptor_questions_and_canonicalizes_answer
                 ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b" B.example.com, a.example.com, b.example.com \r", false),
                 ("Which request header carries the key?", b"X-API-Key\r", false),
                 ("Is the key sent as 'Bearer <key>' or by itself?", choice, false),
+                ("Which provider is this in Fusiform's list? Leave empty if unsure.", b"openai\r", false),
                 ("Save these provider settings and continue?", b"y\r", false),
                 ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
             ],
@@ -462,11 +471,28 @@ fn registered_provider_prompt_pins_descriptor_questions_and_canonicalizes_answer
         for choice in ["Bearer <key>", "The key by itself"] {
             assert!(screen.contains(choice), "{screen}");
         }
+        let mut position = 0;
+        for prompt in [
+            "Groups for this provider",
+            "Which models may this key run? Leave empty if unsure.",
+            "Which addresses may receive this key?",
+            "Which request header carries the key?",
+            "Is the key sent as 'Bearer <key>' or by itself?",
+            "Which provider is this in Fusiform's list? Leave empty if unsure.",
+            "Save these provider settings and continue?",
+            "Value (hidden)",
+        ] {
+            position += screen[position..]
+                .find(prompt)
+                .unwrap_or_else(|| panic!("missing ordered prompt {prompt}: {screen}"))
+                + prompt.len();
+        }
         let rows = fixture.store().registered_providers().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hosts, ["a.example.com", "b.example.com"]);
         assert_eq!(rows[0].auth_header.as_deref(), Some("x-api-key"));
         assert_eq!(rows[0].auth_scheme.as_deref(), Some(scheme));
+        assert_eq!(rows[0].fusiform_provider_id.as_deref(), Some("openai"));
     }
 }
 
@@ -500,9 +526,11 @@ fn registered_provider_descriptor_flags_round_trip_and_omission_clears_settings(
             "X-API-Key",
             "--auth-scheme",
             scheme,
+            "--fusiform-id",
+            "openai",
         ]);
         assert_eq!(run(&["provider", "list"]), format!(
-            "SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID\ncustom-descriptor\t[\"llm-provider\"]\t[\"custom-route\"]\t[\"a.example.com\",\"b.example.com\"]\t{{\"header\":\"x-api-key\",\"scheme\":\"{scheme}\"}}\tnull\n"
+            "SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID\ncustom-descriptor\t[\"llm-provider\"]\t[\"custom-route\"]\t[\"a.example.com\",\"b.example.com\"]\t{{\"header\":\"x-api-key\",\"scheme\":\"{scheme}\"}}\t\"openai\"\n"
         ));
     }
     run(&["provider", "set", "--service", "custom-descriptor"]);
@@ -518,6 +546,7 @@ fn registered_provider_bad_descriptor_flags_are_refused_before_preflight_or_writ
     let saved_key = fixture.0.join("saved.key");
     std::fs::rename(&key_path, &saved_key).unwrap();
     let cases: &[(&[&str], &str)] = &[
+        (&["--fusiform-id", "unknown-provider"], "unknown-provider"),
         (
             &[
                 "--host",
@@ -943,6 +972,11 @@ fn login_other_new_provider_stores_registration_defaults_like_put_and_reuses_the
             ("Groups for this provider", b" \x1b[B\x1b[B\x1b[B \r", false),
             (MODELS, b"custom-route\r", false),
             (ADDRESSES, b"\r", false),
+            (
+                "Which provider is this in Fusiform's list? Leave empty if unsure.",
+                b"\r",
+                false,
+            ),
             ("Save these provider settings and continue?", b"y\r", false),
             (
                 "Enter API key for loginvendor:work",
@@ -958,6 +992,7 @@ fn login_other_new_provider_stores_registration_defaults_like_put_and_reuses_the
         "Groups for this provider",
         MODELS,
         ADDRESSES,
+        "Which provider is this in Fusiform's list? Leave empty if unsure.",
         "Save these provider settings and continue?",
         NO_FREE_CHECK,
         "Enter API key for loginvendor:work",
@@ -1095,6 +1130,11 @@ fn login_other_declining_registration_writes_neither_registration_nor_key() {
             ("Groups for this provider", b" \r", false),
             (MODELS, b"\r", false),
             (ADDRESSES, b"\r", false),
+            (
+                "Which provider is this in Fusiform's list? Leave empty if unsure.",
+                b"\r",
+                false,
+            ),
             ("Save these provider settings and continue?", b"\r", false),
         ],
     );
@@ -1201,6 +1241,11 @@ fn login_other_picker_lists_every_existing_row_before_other() {
         ("Groups for this provider", b"\r".as_slice(), false),
         (MODELS, b"\r".as_slice(), false),
         (ADDRESSES, b"\r".as_slice(), false),
+        (
+            "Which provider is this in Fusiform's list? Leave empty if unsure.",
+            b"\r".as_slice(),
+            false,
+        ),
         (
             "Save these provider settings and continue?",
             b"\r".as_slice(),

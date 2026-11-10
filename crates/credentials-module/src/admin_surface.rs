@@ -2140,12 +2140,26 @@ mod tests {
         }
         assert_eq!(r.store.audit_tip().unwrap(), tip);
         assert!(r.store.registered_providers().unwrap().is_empty());
+        let mut provider = provider;
+        provider["fusiform_provider_id"] = json!("openai");
         let body = provider.to_string();
         let (tag, _) = challenge_and_sign(&r, 5, &body);
         assert!(matches!(
             r.admin.execute(5, body.as_bytes(), &tag).await,
             AdminOutcome::Ok(_)
         ));
+        let before = r.store.registered_providers().unwrap();
+        assert_eq!(before[0].fusiform_provider_id.as_deref(), Some("openai"));
+        let tip = r.store.audit_tip().unwrap();
+        provider["fusiform_provider_id"] = json!("unknown-provider");
+        let body = provider.to_string();
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Refused(message) if message.contains("unknown-provider")
+        ));
+        assert_eq!(r.store.registered_providers().unwrap(), before);
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
     }
 
     #[tokio::test]

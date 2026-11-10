@@ -957,6 +957,7 @@ mod get_scoped_tests {
         with_descriptor["hosts"] = json!(["api.example.com"]);
         with_descriptor["auth_header"] = json!("x-api-key");
         with_descriptor["auth_scheme"] = json!("raw");
+        with_descriptor["fusiform_provider_id"] = json!("anthropic");
         run(with_descriptor.clone()).unwrap();
         let mut legacy = base.clone();
         legacy["v"] = json!(2);
@@ -987,6 +988,10 @@ mod get_scoped_tests {
             "defaults must not reclassify an existing key"
         );
         let providers = store.registered_providers().unwrap();
+        assert_eq!(
+            providers[0].fusiform_provider_id.as_deref(),
+            Some("anthropic")
+        );
         let remote = remote_get_outcome(
             id,
             crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
@@ -1566,7 +1571,14 @@ fn project_list_scoped_with_providers(
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
-                fusiform_provider_id: None,
+                fusiform_provider_id: if let Some(provider) =
+                    credentials_core::catalog::api_key_provider_for_credential(&row.id)
+                {
+                    provider.fusiform_provider_id.map(str::to_owned)
+                } else {
+                    credentials_core::store::RegisteredProvider::for_id(providers, &row.id)
+                        .and_then(|provider| provider.fusiform_provider_id.clone())
+                },
                 hosts: ScopedKeyDescriptor::for_id(&row.id, providers)
                     .map(|descriptor| descriptor.hosts),
                 provider: row.provider,
@@ -4843,7 +4855,7 @@ mod list_scoped_tests {
                 ),
                 with_providers(
                     row(
-                        "a-active",
+                        "apikey:openai",
                         &["llm-provider", "monitoring"],
                         RecordState::Active,
                         &[GrantOperation::Read, GrantOperation::Sign],
@@ -4892,10 +4904,10 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "pF4xYlW17T7v0T9py168AkfP25/IKuL6svQM0eWpv7c=",
+            "D2CalG28QGfnfZL4p9Sb/24UA7d+uWruQKqPROpdTCE=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
-        assert_eq!(result.credentials[0].id, "a-active");
+        assert_eq!(result.credentials[0].id, "apikey:openai");
         assert!(result
             .credentials
             .iter()
@@ -5161,6 +5173,69 @@ mod list_scoped_tests {
     }
 
     #[test]
+    fn list_scoped_fusiform_ids_project_catalog_and_registry_without_deriving_routing_ids() {
+        use credentials_core::store::RegisteredProvider;
+        let mut providers = vec![RegisteredProvider {
+            service: "custom".into(),
+            categories: vec![],
+            provider_ids: vec!["unrelated-route".into()],
+            created_at_ms: 1,
+            hosts: vec![],
+            auth_header: None,
+            auth_scheme: None,
+            fusiform_provider_id: Some("anthropic".into()),
+        }];
+        let cases = [
+            ("apikey:openai:work", Some("openai")),
+            ("apikey:firepass", Some("fireworks-fire-pass")),
+            ("apikey:brave", None),
+            ("oauth:openai", None),
+            ("manual:custom", None),
+            ("apikey:custom:work", Some("anthropic")),
+            ("apikey:unregistered", None),
+        ];
+        let snapshot = || ScopedListSnapshot {
+            rows: cases
+                .iter()
+                .map(|(id, _)| {
+                    let mut source =
+                        row(id, &[], RecordState::Active, &[GrantOperation::Read], None);
+                    source.provider_ids = vec!["stored-route".into()];
+                    source
+                })
+                .collect(),
+            grants: vec![],
+        };
+        let result = project_list_scoped_with_providers(snapshot(), &providers);
+        for (id, expected) in cases {
+            let credential = result.credentials.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(credential.fusiform_provider_id.as_deref(), expected, "{id}");
+            assert_eq!(credential.provider_ids, ["stored-route"], "{id}");
+        }
+        let custom = result
+            .credentials
+            .iter()
+            .find(|row| row.id == "apikey:custom:work")
+            .unwrap();
+        assert_eq!(custom.hosts, None, "an id does not require a descriptor");
+        providers[0].fusiform_provider_id = None;
+        let cleared = project_list_scoped_with_providers(snapshot(), &providers);
+        assert_eq!(
+            cleared
+                .credentials
+                .iter()
+                .find(|row| row.id == "apikey:custom:work")
+                .unwrap()
+                .fusiform_provider_id,
+            None
+        );
+        assert_ne!(
+            cleared.view, result.view,
+            "an id-only registry change changes the view"
+        );
+    }
+
+    #[test]
     fn list_scoped_view_frames_fusiform_id_then_hosts_after_plan_observation() {
         fn string(bytes: &mut Vec<u8>, value: &str) {
             bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
@@ -5180,57 +5255,72 @@ mod list_scoped_tests {
         });
         let mut credential = result.credentials[0].clone();
         let mut views = std::collections::BTreeSet::new();
-        for hosts in [
-            None,
-            Some(vec![]),
-            Some(vec!["ab"]),
-            Some(vec!["a", "b"]),
-            Some(vec!["b", "a"]),
-        ] {
-            credential.hosts = hosts
-                .as_ref()
-                .map(|hosts| hosts.iter().map(|host| (*host).to_owned()).collect());
-            assert_eq!(credential.fusiform_provider_id, None);
-            // Assemble the entire frame independently: the two new slots follow the
-            // observation time, and an absent host list is not a present empty list.
-            let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
-            bytes.push(1);
-            bytes.extend_from_slice(&1u32.to_be_bytes());
-            string(&mut bytes, "apikey:framing");
-            bytes.extend_from_slice(&0u32.to_be_bytes()); // categories
-            string(&mut bytes, "active");
-            bytes.extend_from_slice(&1u32.to_be_bytes());
-            string(&mut bytes, "read");
-            bytes.extend_from_slice(&[0, 0, 0]); // identity
-            bytes.extend_from_slice(&0u32.to_be_bytes()); // routing provider ids
-            bytes.extend_from_slice(&[0, 0, 0, 0]); // auth method, tier, source, provider
-            string(&mut bytes, "0123456789abcdef0123456789abcdef");
-            bytes.push(1);
-            string(&mut bytes, "42");
-            bytes.push(0); // Fusiform provider id
-            match &hosts {
-                None => bytes.push(0),
-                Some(hosts) => {
-                    bytes.push(1);
-                    bytes.extend_from_slice(&(hosts.len() as u32).to_be_bytes());
-                    for host in hosts {
-                        string(&mut bytes, host);
+        for fusiform_id in [None, Some("openai"), Some("anthropic")] {
+            credential.fusiform_provider_id = fusiform_id.map(str::to_owned);
+            for hosts in [
+                None,
+                Some(vec![]),
+                Some(vec!["ab"]),
+                Some(vec!["a", "b"]),
+                Some(vec!["b", "a"]),
+            ] {
+                credential.hosts = hosts
+                    .as_ref()
+                    .map(|hosts| hosts.iter().map(|host| (*host).to_owned()).collect());
+                // Assemble the entire frame independently: the two new slots follow the
+                // observation time, and an absent host list is not a present empty list.
+                let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
+                bytes.push(1);
+                bytes.extend_from_slice(&1u32.to_be_bytes());
+                string(&mut bytes, "apikey:framing");
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // categories
+                string(&mut bytes, "active");
+                bytes.extend_from_slice(&1u32.to_be_bytes());
+                string(&mut bytes, "read");
+                bytes.extend_from_slice(&[0, 0, 0]); // identity
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // routing provider ids
+                bytes.extend_from_slice(&[0, 0, 0, 0]); // auth method, tier, source, provider
+                string(&mut bytes, "0123456789abcdef0123456789abcdef");
+                bytes.push(1);
+                string(&mut bytes, "42");
+                match fusiform_id {
+                    None => bytes.push(0),
+                    Some(id) => {
+                        bytes.push(1);
+                        string(&mut bytes, id);
                     }
                 }
-            }
-            bytes.push(2);
-            bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
-            let expected = base64::engine::general_purpose::STANDARD
-                .encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
-            let view = list_scoped_view(std::slice::from_ref(&credential), &[]);
-            assert_eq!(view, expected, "hosts {hosts:?}");
-            assert!(views.insert(view), "every host frame must be distinct");
-            let wire = serde_json::to_value(&credential).unwrap();
-            assert!(wire.get("fusiform_provider_id").is_none());
-            if let Some(hosts) = hosts {
-                assert_eq!(wire["hosts"], serde_json::json!(hosts));
-            } else {
-                assert!(wire.get("hosts").is_none());
+                match &hosts {
+                    None => bytes.push(0),
+                    Some(hosts) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&(hosts.len() as u32).to_be_bytes());
+                        for host in hosts {
+                            string(&mut bytes, host);
+                        }
+                    }
+                }
+                bytes.push(2);
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
+                let expected = base64::engine::general_purpose::STANDARD
+                    .encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+                let view = list_scoped_view(std::slice::from_ref(&credential), &[]);
+                assert_eq!(
+                    view, expected,
+                    "Fusiform id {fusiform_id:?}, hosts {hosts:?}"
+                );
+                assert!(views.insert(view), "every id/host frame must be distinct");
+                let wire = serde_json::to_value(&credential).unwrap();
+                if let Some(id) = fusiform_id {
+                    assert_eq!(wire["fusiform_provider_id"], id);
+                } else {
+                    assert!(wire.get("fusiform_provider_id").is_none());
+                }
+                if let Some(hosts) = hosts {
+                    assert_eq!(wire["hosts"], serde_json::json!(hosts));
+                } else {
+                    assert!(wire.get("hosts").is_none());
+                }
             }
         }
     }

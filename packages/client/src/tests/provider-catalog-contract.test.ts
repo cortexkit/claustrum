@@ -52,7 +52,7 @@ function producerGetScopedReply(caseName = 'catalog_with_evidence'): any {
   return entry.reply
 }
 
-test('provider catalog decodes producer hosts and absence', () => {
+test('provider catalog decodes producer Fusiform ids, hosts and absence', () => {
   const reply = producerReply('descriptor_presence')
   const decoded = decodeScopedInventory(reply, () => {})
   expect(decoded.rows).toHaveLength(3)
@@ -62,17 +62,17 @@ test('provider catalog decodes producer hosts and absence', () => {
     expect(row.hosts).toEqual(wire.hosts)
     expect(row.fusiformProviderId).toBe(wire.fusiform_provider_id)
   }
-  expect(decoded.rows.find((row) => row.id === 'apikey:openai')!.hosts).toEqual(['api.openai.com'])
+  const openai = decoded.rows.find((row) => row.id === 'apikey:openai')!
+  expect(openai.hosts).toEqual(['api.openai.com'])
+  expect(openai.fusiformProviderId).toBe('openai')
   const oauth = decoded.rows.find((row) => row.id === 'oauth:anthropic')!
   expect(oauth.hosts).toBeUndefined()
   expect(oauth.fusiformProviderId).toBeUndefined()
 })
 
-test('provider catalog decodes Fusiform ids and empty hosts missing from vectors', () => {
+test('provider catalog decodes empty hosts missing from vectors', () => {
   const reply = producerReply('descriptor_presence')
-  // The producer has hosts, but no Fusiform ids or explicitly empty host arrays yet.
-  expect(reply.result.credentials[1].fusiform_provider_id).toBeUndefined()
-  reply.result.credentials[1].fusiform_provider_id = 'openai'
+  // The vectors omit explicitly empty host lists; exercise that presence separately.
   expect(reply.result.credentials[2].hosts).toBeUndefined()
   reply.result.credentials[2].hosts = []
   const decoded = decodeScopedInventory(reply, () => {})

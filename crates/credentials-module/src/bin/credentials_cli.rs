@@ -505,6 +505,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "--host",
             "--auth-header",
             "--auth-scheme",
+            "--fusiform-id",
         ],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
@@ -747,6 +748,7 @@ fn help_verb(verb: &str) -> String {
              \x20                    [--provider-id <id>]...\n\
              \x20                    [--host <host>]...\n\
              \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
+             \x20                    [--fusiform-id <id>]\n\
              ck auth provider remove --service <name>\n\
              \n\
              \x20 --service <name>    API-key service name (set and remove)\n\
@@ -755,10 +757,11 @@ fn help_verb(verb: &str) -> String {
              \x20 --host <host>       allowed key destination (set; repeatable)\n\
              \x20 --auth-header <h>   key header, for example authorization (set)\n\
              \x20 --auth-scheme <s>   bearer or raw (set)\n\
+             \x20 --fusiform-id <id>  provider id in the embedded Fusiform list (set)\n\
              \n\
              NOTES\n\
              list is read-only and lease-free; descriptor fields are JSON columns.\n\
-             set states the whole registration; omitted hosts and auth are cleared.\n\
+             set states the whole registration; omitted optional settings are cleared.\n\
              Groups and routing ids are defaults for future keys. Hosts and auth\n\
              describe every key for this service, including existing keys.\n\
              Choose groups from ck auth categories; no groups or routing ids is valid.\n\
@@ -780,6 +783,7 @@ fn help_verb(verb: &str) -> String {
              \x20                    [--provider-id <id>]...\n\
              \x20                    [--host <host>]...\n\
              \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
+             \x20                    [--fusiform-id <id>]\n\
              \n\
              \x20 --service <name>    API-key service absent from the fixed catalog\n\
              \x20 --category <c>      default group for future keys (repeatable)\n\
@@ -787,10 +791,11 @@ fn help_verb(verb: &str) -> String {
              \x20 --host <host>       allowed key destination (repeatable; commas OK)\n\
              \x20 --auth-header <h>   key header, for example authorization\n\
              \x20 --auth-scheme <s>   bearer (Bearer <key>) or raw (the key alone)\n\
+             \x20 --fusiform-id <id>  provider id in the embedded Fusiform list\n\
              \n\
              NOTES\n\
              No groups or routing ids is valid. Groups are from ck auth categories.\n\
-             set states the whole registration; omitted hosts and auth are cleared.\n\
+             set states the whole registration; omitted optional settings are cleared.\n\
              Give hosts and auth together, or neither. Hosts are exact names only,\n\
              with no scheme, port, path or pattern (at most 8). Hosts and the header\n\
              are lowercased; hosts are trimmed, sorted and deduplicated.\n\
@@ -2280,6 +2285,7 @@ fn cmd_provider(
             "--host",
             "--auth-header",
             "--auth-scheme",
+            "--fusiform-id",
         ],
         Some("remove") => &service_flags,
         _ => return Err(CliError::Usage(help_verb("provider"))),
@@ -2329,7 +2335,7 @@ fn cmd_provider(
                     hosts: repeated_values(args, "--host"),
                     auth_header: options.optional("--auth-header"),
                     auth_scheme: options.optional("--auth-scheme"),
-                    fusiform_provider_id: None,
+                    fusiform_provider_id: options.optional("--fusiform-id"),
                 },
             )?;
             commit_admin(global, op)?;
@@ -9107,11 +9113,11 @@ mod provider_cli_tests {
     fn provider_registration_help_explains_complete_replacement_and_new_flags() {
         for page in ["provider", "provider set"] {
             let help = help_verb(page);
-            for flag in ["--host", "--auth-header", "--auth-scheme"] {
+            for flag in ["--host", "--auth-header", "--auth-scheme", "--fusiform-id"] {
                 assert!(help.contains(flag), "{page}: {flag}");
             }
             assert!(help.contains(
-                "set states the whole registration; omitted hosts and auth are cleared."
+                "set states the whole registration; omitted optional settings are cleared."
             ));
             assert!(help.lines().all(|line| line.len() <= 80), "{page}");
         }

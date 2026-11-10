@@ -80,12 +80,13 @@ pub fn validate_registered_provider_settings(
             ))
         }
     }
-    // Until the embedded provider list is available, no id can be verified.
     if let Some(id) = &settings.fusiform_provider_id {
-        return Err(invalid(
-            "fusiform_provider_id (provider list unavailable)",
-            format!("{id:?}"),
-        ));
+        if !crate::fusiform_providers::fusiform_providers()
+            .iter()
+            .any(|provider| provider.id == *id)
+        {
+            return Err(invalid("fusiform_provider_id", format!("{id:?}")));
+        }
     }
     Ok(())
 }
@@ -616,23 +617,51 @@ mod tests {
     }
 
     #[test]
-    fn registered_provider_non_null_fusiform_id_is_refused_until_list_ships() {
-        let (_root, store) = taxonomy_tests::rig("registered-fusiform-unavailable", 198);
-        let mut settings = descriptor();
-        settings.fusiform_provider_id = Some("unavailable-provider".into());
-        let tip = store.audit_tip().unwrap();
-        let error = store
-            .set_registered_provider_settings_audited(
+    fn registered_provider_fusiform_ids_accept_published_values_and_refuse_unknown_unchanged() {
+        let (_root, store) = taxonomy_tests::rig("registered-fusiform", 198);
+        let set = |settings: &RegisteredProviderSettings| {
+            store.set_registered_provider_settings_audited(
                 "custom",
                 &[],
                 &[],
-                Some(&settings),
+                Some(settings),
                 AuditCtx::admin(AuditOp::ProviderSet),
             )
-            .unwrap_err();
-        assert!(error.to_string().contains("unavailable-provider"));
-        assert!(store.registered_providers().unwrap().is_empty());
+        };
+        let mut settings = RegisteredProviderSettings::default();
+        for provider in crate::fusiform_providers::fusiform_providers() {
+            settings.fusiform_provider_id = Some(provider.id.clone());
+            validate_registered_provider_settings(&settings).unwrap();
+        }
+        settings.fusiform_provider_id = Some("openai".into());
+        assert!(set(&settings).unwrap());
+        assert_eq!(
+            store.registered_providers().unwrap()[0]
+                .fusiform_provider_id
+                .as_deref(),
+            Some("openai")
+        );
+        assert!(!set(&settings).unwrap());
+        settings.fusiform_provider_id = Some("anthropic".into());
+        assert!(set(&settings).unwrap(), "an id-only change must write");
+        let before = store.registered_providers().unwrap();
+        let tip = store.audit_tip().unwrap();
+        for id in ["unavailable-provider", "", "OpenAI", " openai "] {
+            settings.fusiform_provider_id = Some(id.into());
+            let preflight = validate_registered_provider_settings(&settings)
+                .unwrap_err()
+                .to_string();
+            assert!(preflight.contains(&format!("{id:?}")), "{preflight}");
+            assert_eq!(set(&settings).unwrap_err().to_string(), preflight);
+            assert_eq!(store.registered_providers().unwrap(), before);
+        }
         assert_eq!(store.audit_tip().unwrap(), tip);
+        settings.fusiform_provider_id = None;
+        assert!(set(&settings).unwrap());
+        assert_eq!(
+            store.registered_providers().unwrap()[0].fusiform_provider_id,
+            None
+        );
     }
 
     #[test]

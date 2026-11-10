@@ -441,7 +441,17 @@ mod scoped_watch {
                 let row = listing.credentials.iter().find(|row| row.id == id).unwrap();
                 let wire = serde_json::to_value(row).unwrap();
                 assert_eq!(wire.get("hosts"), hosts.as_ref(), "{id}");
-                assert!(wire.get("fusiform_provider_id").is_none(), "{id}");
+                let fusiform_id = match id.split(':').nth(1) {
+                    Some("openai") if id.starts_with("apikey:") => Some("openai"),
+                    Some("nanogpt") => Some("nano-gpt"),
+                    Some("typesafe") => Some("typesafe"),
+                    _ => None,
+                };
+                assert_eq!(
+                    wire.get("fusiform_provider_id").and_then(serde_json::Value::as_str),
+                    fusiform_id,
+                    "{id}"
+                );
             }
         }
     }

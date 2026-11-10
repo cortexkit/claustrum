@@ -281,6 +281,11 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
             Some(if scheme == 0 { "bearer" } else { "raw" }.to_string()),
         )
     };
+    let fusiform_id: String = Input::with_theme(&theme)
+        .with_prompt("Which provider is this in Fusiform's list? Leave empty if unsure.")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_error)?;
     let op = super::provider_set_op(
         service.to_string(),
         categories,
@@ -289,7 +294,11 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
             hosts,
             auth_header,
             auth_scheme,
-            fusiform_provider_id: None,
+            fusiform_provider_id: if fusiform_id.trim().is_empty() {
+                None
+            } else {
+                Some(fusiform_id.trim().to_string())
+            },
         },
     )?;
     if !Confirm::with_theme(&theme)

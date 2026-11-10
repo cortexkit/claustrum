@@ -121,7 +121,10 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[3]["state"], "retired");
     assert_eq!(rows[1]["hosts"], json!(["api.exa.ai"]));
     assert!(rows.iter().all(|row| row.get("hosts").is_some()));
-    assert!(rows.iter().all(|row| row.get("fusiform_provider_id").is_none()));
+    assert_eq!(rows[2]["fusiform_provider_id"], "kimi-code-plan-global");
+    for index in [0, 1, 3] {
+        assert!(rows[index].get("fusiform_provider_id").is_none());
+    }
     let mut cases = vec![list_vector_case(
         "catalog_and_lifecycle",
         OP_LIST_SCOPED,
@@ -238,7 +241,10 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["hosts"], json!(["api.nano-gpt.com", "nano-gpt.com"]));
     assert_eq!(rows[1]["hosts"], json!(["api.openai.com"]));
+    assert_eq!(rows[0]["fusiform_provider_id"], "nano-gpt");
+    assert_eq!(rows[1]["fusiform_provider_id"], "openai");
     assert!(rows[2].get("hosts").is_none());
+    assert!(rows[2].get("fusiform_provider_id").is_none());
     cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))

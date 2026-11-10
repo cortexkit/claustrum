@@ -330,7 +330,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
                     fusiform_provider_id: None,
-                    hosts: None,
+                    hosts: Some(vec!["openrouter.ai".into()]),
                     id: "apikey:openrouter".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "apikey".into(),
@@ -446,7 +446,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "+hVsGpurYe8HLf5URcObYYtmrde+iBAkEGnKYWo4WKM=".into(),
+            view: "5nGCY1+bA0OaU3AWJqQzwycYy8es/tHZWUOMc25xrNk=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }
@@ -487,7 +487,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 selector: "llm-provider".into(),
                 operation: "list".into()
             }],
-            view: "uwFwpdF/kjLYzixwV6c44qDX41GonCY4TorjPAG/E+M=".into(),
+            view: "Xqi9f8zrVXEj+oY9i33BPScGE8JAedPfEwj5rD/GGpk=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

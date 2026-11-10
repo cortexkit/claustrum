@@ -101,6 +101,27 @@ impl ModelVendor {
     }
 }
 
+/// Provider identities used to resolve model-family routing aliases, not key offerings.
+/// Qwen's model family is published under Alibaba; product-specific ids stay on rows.
+pub const MODEL_VENDOR_FUSIFORM_IDS: &[(ModelVendor, &str)] = &[
+    (ModelVendor::Anthropic, "anthropic"),
+    (ModelVendor::OpenAI, "openai"),
+    (ModelVendor::Google, "google"),
+    (ModelVendor::XAI, "xai"),
+    (ModelVendor::DeepSeek, "deepseek"),
+    (ModelVendor::Mistral, "mistral"),
+    (ModelVendor::Moonshot, "moonshotai"),
+    (ModelVendor::Zhipu, "zhipuai"),
+    (ModelVendor::Meta, "meta"),
+    (ModelVendor::Qwen, "alibaba"),
+    (ModelVendor::Perplexity, "perplexity"),
+    (ModelVendor::Nvidia, "nvidia"),
+    (ModelVendor::MiniMax, "minimax"),
+    (ModelVendor::Xiaomi, "xiaomi"),
+    (ModelVendor::StepFun, "stepfun-ai"),
+    (ModelVendor::Inception, "inception"),
+];
+
 const LLM: &[CredentialCategory] = &[CredentialCategory::LlmProvider];
 const LLM_AND_MEDIA: &[CredentialCategory] = &[
     CredentialCategory::LlmProvider,
@@ -255,6 +276,18 @@ pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[
     ("jina", "search_service_pending_ruling"),
     ("tinyfish", "search_service_pending_ruling"),
     ("searxng", "search_service_pending_ruling"),
+];
+
+/// Reviewed Fusiform ids deliberately not carried by an API-key row, paired with
+/// one of the reasons below. Unreviewed providers remain gaps, not automatic skips.
+pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[];
+
+/// The permitted dispositions for a provider researched but not added to the catalog.
+pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
+    "OAuth only",
+    "no API key in its documentation",
+    "a duplicate offering of an existing row",
+    "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
 ];
 
 use ModelVendor::{
@@ -2414,6 +2447,330 @@ mod tests {
             unchecked_exemptions.is_empty(),
             "offering-domain exemptions must name mapped catalog rows: {unchecked_exemptions:?}"
         );
+    }
+
+    fn published_fusiform_ids() -> std::collections::BTreeSet<&'static str> {
+        crate::fusiform_providers::fusiform_providers()
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect()
+    }
+
+    fn fusiform_skip_errors(
+        rows: &[ApiKeyProvider],
+        skips: &[(&str, &str)],
+        document: &str,
+    ) -> Vec<String> {
+        let published = published_fusiform_ids();
+        let mut errors = Vec::new();
+        let mut expected = std::collections::BTreeMap::new();
+        for row in rows {
+            if let Some(id) = row.fusiform_provider_id {
+                if !published.contains(id) {
+                    errors.push(format!("unknown row Fusiform id: {id}"));
+                }
+            }
+        }
+        for &(id, reason) in skips {
+            if !published.contains(id) {
+                errors.push(format!("unknown skip Fusiform id: {id}"));
+            }
+            if rows.iter().any(|row| row.fusiform_provider_id == Some(id)) {
+                errors.push(format!("Fusiform id is both skipped and carried: {id}"));
+            }
+            if !FUSIFORM_SKIP_REASONS.contains(&reason) {
+                errors.push(format!("unapproved skip reason for {id}: {reason}"));
+            }
+            if expected.insert(id, reason).is_some() {
+                errors.push(format!("duplicate Fusiform skip: {id}"));
+            }
+        }
+
+        let mut lines = document
+            .lines()
+            .skip_while(|line| line.trim() != "| Fusiform id | reason |");
+        if lines.next().is_none() {
+            errors.push("missing Fusiform skip table".to_owned());
+            return errors;
+        }
+        if lines.next().map(str::trim) != Some("| --- | --- |") {
+            errors.push("malformed Fusiform skip table header".to_owned());
+        }
+        let mut documented = std::collections::BTreeMap::new();
+        for line in lines.take_while(|line| line.starts_with('|')) {
+            let columns: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if columns.len() != 2 {
+                errors.push(format!("malformed Fusiform skip line: {line}"));
+            } else if documented.insert(columns[0], columns[1]).is_some() {
+                errors.push(format!(
+                    "duplicate documented Fusiform skip: {}",
+                    columns[0]
+                ));
+            }
+        }
+        if documented != expected {
+            errors.push("Fusiform skip table differs from documented skips".to_owned());
+        }
+        errors
+    }
+
+    #[test]
+    fn fusiform_skips_are_published_uncarried_and_documented() {
+        assert_eq!(
+            fusiform_skip_errors(
+                API_KEY_PROVIDERS,
+                FUSIFORM_PROVIDER_SKIPS,
+                include_str!("../../../docs/provider-key-evidence.md"),
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn fusiform_skip_gate_rejects_unknown_ids_overlap_and_unapproved_reasons() {
+        for (id, reason, expected) in [
+            (
+                "not-published",
+                "OAuth only",
+                "unknown skip Fusiform id: not-published",
+            ),
+            (
+                "anthropic",
+                "not researched",
+                "unapproved skip reason for anthropic: not researched",
+            ),
+        ] {
+            let document =
+                format!("| Fusiform id | reason |\n| --- | --- |\n| {id} | {reason} |\n");
+            assert_eq!(
+                fusiform_skip_errors(&[], &[(id, reason)], &document),
+                [expected]
+            );
+        }
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.fusiform_provider_id = Some("anthropic");
+        let document = "| Fusiform id | reason |\n| --- | --- |\n| anthropic | OAuth only |\n";
+        assert_eq!(
+            fusiform_skip_errors(
+                std::slice::from_ref(&row),
+                &[("anthropic", "OAuth only")],
+                document
+            ),
+            ["Fusiform id is both skipped and carried: anthropic"]
+        );
+        row.fusiform_provider_id = Some("not-published");
+        assert_eq!(
+            fusiform_skip_errors(&[row], &[], "| Fusiform id | reason |\n| --- | --- |\n"),
+            ["unknown row Fusiform id: not-published"]
+        );
+    }
+
+    #[test]
+    fn fusiform_skip_gate_checks_document_ids_reasons_and_duplicates() {
+        let skips = &[("anthropic", "OAuth only")];
+        let header = "| Fusiform id | reason |\n| --- | --- |\n";
+        let entry = "| anthropic | OAuth only |\n";
+        assert!(fusiform_skip_errors(&[], skips, &format!("{header}{entry}")).is_empty());
+        for document in [
+            header.to_owned(),
+            format!("{header}| openai | OAuth only |\n"),
+            format!("{header}| anthropic | no API key in its documentation |\n"),
+            format!("{header}{entry}| openai | OAuth only |\n"),
+        ] {
+            assert_eq!(
+                fusiform_skip_errors(&[], skips, &document),
+                ["Fusiform skip table differs from documented skips"]
+            );
+        }
+        assert_eq!(
+            fusiform_skip_errors(&[], skips, &format!("{header}{entry}{entry}")),
+            ["duplicate documented Fusiform skip: anthropic"]
+        );
+        assert_eq!(
+            fusiform_skip_errors(&[], &[skips[0], skips[0]], &format!("{header}{entry}")),
+            ["duplicate Fusiform skip: anthropic"]
+        );
+        assert_eq!(
+            fusiform_skip_errors(&[], &[], ""),
+            ["missing Fusiform skip table"]
+        );
+    }
+
+    fn fusiform_vendor_mapping_errors(mapping: &[(ModelVendor, &str)]) -> Vec<String> {
+        let published = published_fusiform_ids();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut errors = Vec::new();
+        for &(vendor, id) in mapping {
+            if !seen.insert(vendor) {
+                errors.push(format!(
+                    "duplicate Fusiform mapping for {}",
+                    vendor.as_str()
+                ));
+            }
+            if !published.contains(id) {
+                errors.push(format!("unknown vendor Fusiform id: {id}"));
+            }
+        }
+        for vendor in ModelVendor::ALL {
+            if !seen.contains(vendor) {
+                errors.push(format!("unmapped ModelVendor: {}", vendor.as_str()));
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn fusiform_vendor_mapping_covers_every_vendor_with_a_published_id() {
+        assert_eq!(
+            fusiform_vendor_mapping_errors(MODEL_VENDOR_FUSIFORM_IDS),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn fusiform_vendor_mapping_gate_rejects_missing_unknown_and_duplicate_entries() {
+        let mut mapping = MODEL_VENDOR_FUSIFORM_IDS.to_vec();
+        mapping.remove(0);
+        assert_eq!(
+            fusiform_vendor_mapping_errors(&mapping),
+            ["unmapped ModelVendor: anthropic"]
+        );
+        mapping.insert(0, (Anthropic, "not-published"));
+        assert_eq!(
+            fusiform_vendor_mapping_errors(&mapping),
+            ["unknown vendor Fusiform id: not-published"]
+        );
+        mapping[0].1 = "anthropic";
+        mapping.push(mapping[0]);
+        assert_eq!(
+            fusiform_vendor_mapping_errors(&mapping),
+            ["duplicate Fusiform mapping for anthropic"]
+        );
+    }
+
+    fn fusiform_routing_resolutions(
+        api_rows: &[ApiKeyProvider],
+        login_rows: &[LoginProvider],
+        mapping: &[(ModelVendor, &str)],
+    ) -> Result<std::collections::BTreeMap<String, String>, Vec<String>> {
+        let published = published_fusiform_ids();
+        let mut vendors_by_id: std::collections::BTreeMap<_, std::collections::BTreeSet<_>> =
+            std::collections::BTreeMap::new();
+        for (ids, vendors) in api_rows
+            .iter()
+            .map(|row| (row.default_provider_ids, row.serves))
+            .chain(
+                login_rows
+                    .iter()
+                    .map(|row| (row.default_provider_ids, row.serves)),
+            )
+        {
+            for &id in ids {
+                vendors_by_id.entry(id).or_default().extend(vendors);
+            }
+        }
+        let mut resolutions = std::collections::BTreeMap::new();
+        let mut errors = Vec::new();
+        for (id, vendors) in vendors_by_id {
+            // A published provider id resolves directly, even on a multi-vendor row.
+            if published.contains(id) {
+                continue;
+            }
+            let mut targets = std::collections::BTreeSet::new();
+            for vendor in vendors {
+                if let Some((_, target)) = mapping.iter().find(|(value, _)| *value == vendor) {
+                    targets.insert(*target);
+                } else {
+                    errors.push(format!(
+                        "{id} serves unmapped ModelVendor: {}",
+                        vendor.as_str()
+                    ));
+                }
+            }
+            if targets.len() != 1 {
+                errors.push(format!(
+                    "{id} must resolve to exactly one Fusiform id, got {targets:?}"
+                ));
+            } else {
+                resolutions.insert(id.to_owned(), targets.first().unwrap().to_string());
+            }
+        }
+        if errors.is_empty() {
+            Ok(resolutions)
+        } else {
+            Err(errors)
+        }
+    }
+
+    #[test]
+    fn fusiform_routing_gate_resolves_both_catalogs_and_pins_every_alias() {
+        let actual = fusiform_routing_resolutions(
+            API_KEY_PROVIDERS,
+            LOGIN_PROVIDERS,
+            MODEL_VENDOR_FUSIFORM_IDS,
+        )
+        .unwrap_or_else(|errors| panic!("unresolvable catalog routing ids: {errors:?}"));
+        let expected: std::collections::BTreeMap<String, String> = serde_json::from_str(
+            include_str!("../tests/fixtures/fusiform/routing-resolution.json"),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fusiform_routing_gate_uses_all_serves_across_both_catalogs() {
+        let mut api = API_KEY_PROVIDERS[0].clone();
+        api.default_provider_ids = &["test-alias"];
+        api.serves = &[Anthropic];
+        let mut login = LOGIN_PROVIDERS[0];
+        login.default_provider_ids = &["test-alias"];
+        login.serves = &[OpenAI];
+        assert_eq!(
+            fusiform_routing_resolutions(&[api.clone()], &[login], MODEL_VENDOR_FUSIFORM_IDS),
+            Err(vec!["test-alias must resolve to exactly one Fusiform id, got {\"anthropic\", \"openai\"}".to_owned()])
+        );
+        assert_eq!(
+            fusiform_routing_resolutions(&[], &[login], MODEL_VENDOR_FUSIFORM_IDS).unwrap(),
+            [("test-alias".to_owned(), "openai".to_owned())].into()
+        );
+        // Distinct model vendors are allowed when their mapped provider identity is the same.
+        assert_eq!(
+            fusiform_routing_resolutions(
+                &[api],
+                &[login],
+                &[(Anthropic, "anthropic"), (OpenAI, "anthropic")],
+            )
+            .unwrap(),
+            [("test-alias".to_owned(), "anthropic".to_owned())].into()
+        );
+    }
+
+    #[test]
+    fn fusiform_routing_gate_rejects_empty_or_unmapped_serves_but_accepts_direct_ids() {
+        let mut row = API_KEY_PROVIDERS[0].clone();
+        row.default_provider_ids = &["test-alias"];
+        row.serves = &[];
+        assert_eq!(
+            fusiform_routing_resolutions(
+                std::slice::from_ref(&row),
+                &[],
+                MODEL_VENDOR_FUSIFORM_IDS
+            ),
+            Err(vec![
+                "test-alias must resolve to exactly one Fusiform id, got {}".to_owned()
+            ])
+        );
+        row.serves = &[Anthropic, OpenAI];
+        assert_eq!(
+            fusiform_routing_resolutions(std::slice::from_ref(&row), &[], &[(OpenAI, "openai")]),
+            Err(vec![
+                "test-alias serves unmapped ModelVendor: anthropic".to_owned()
+            ])
+        );
+        row.default_provider_ids = &["openai"];
+        assert!(fusiform_routing_resolutions(&[row], &[], &[])
+            .unwrap()
+            .is_empty());
     }
 
     const NO_DESCRIPTORS: &[(&str, &str)] = &[

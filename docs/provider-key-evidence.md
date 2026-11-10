@@ -103,6 +103,22 @@ Each of these rows keeps `invalid_key: None`. Their checks are not changed here.
 
 No scheme was added: the descriptor supports only Bearer and raw header values.
 
+## Fusiform provider skips
+
+This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. No providers have a
+reviewed skip yet. An uncovered provider stays a gap until its documentation is
+reviewed; an empty key-variable list alone is not a reason to skip it.
+
+Only these reasons are permitted:
+
+- OAuth only
+- no API key in its documentation
+- a duplicate offering of an existing row
+- a second secret or a per-account host in the style of Azure, Bedrock or Vertex
+
+| Fusiform id | reason |
+| --- | --- |
+
 ## Hosts without provider documentation
 
 These existing check hosts are retained because login already sends the key there.

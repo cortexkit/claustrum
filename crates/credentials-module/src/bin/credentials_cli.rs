@@ -673,7 +673,7 @@ fn usage_short() -> String {
      usage: ck auth <verb> [flags]\n\
      \n\
      verbs:\n\
-       login               OAuth/device/api-key login (interactive with no flags)\n\
+       login               OAuth/device/api-key login; picker includes custom keys\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
@@ -886,6 +886,10 @@ fn help_verb(verb: &str) -> String {
              api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
+             The picker ends with Other API key provider… for a named API key.\n\
+             Enter a provider name or provider:label; existing ids ask Replace it?\n\
+             with default No before provider settings or the hidden key prompt.\n\
+             Unknown providers reuse the groups and routing ids chosen on first use.\n\
               Catalog API-key and subscription logins store their table's routing\n\
               provider ids when no --provider-id is given. An explicit\n\
              --provider-id replaces the default; --replace keeps an existing\n\
@@ -1188,6 +1192,7 @@ fn help_verb(verb: &str) -> String {
               default. A cookie:<domain> id always creates a session-cookie record.\n\
               Catalog ids store the table's routing provider ids by default. Explicit\n\
               --provider-id wins; --replace keeps a stored set, as login does.\n\
+              Use ck auth login to add a provider key, with a check where available.\n\
               Unknown API-key providers ask once for groups and routing ids before\n\
               reading the value. No groups or routing ids is valid; confirmation\n\
               defaults to No. Later keys reuse the answer. Without a terminal, put\n\
@@ -3012,8 +3017,10 @@ fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option
     ))
 }
 
+const OTHER_API_KEY_PROVIDER: &str = "__other_api_key__";
+
 /// Every row the interactive login picker offers, as (provider key, display name,
-/// default id): the OAuth/device logins first, then every API-key catalog row.
+/// default id): OAuth/device logins, API-key catalog rows, then a custom provider.
 fn login_picker_rows() -> Vec<(String, String, String)> {
     let mut rows = Vec::new();
     for &(key, name) in LOGIN_PICKER_ROWS {
@@ -3031,6 +3038,11 @@ fn login_picker_rows() -> Vec<(String, String, String)> {
             provider.default_id.to_string(),
         ));
     }
+    rows.push((
+        OTHER_API_KEY_PROVIDER.to_string(),
+        "Other API key provider…".to_string(),
+        String::new(),
+    ));
     rows
 }
 
@@ -3067,6 +3079,13 @@ fn pick_login_interactively(
             ))
         })?;
     let (provider, _, default_id) = &combined_rows[pick];
+    if provider == OTHER_API_KEY_PROVIDER {
+        return Ok(InteractiveChoice {
+            provider: provider.clone(),
+            id_override: None,
+            replace: false,
+        });
+    }
     google_login::validate_client_flags(args, provider)?;
     let default_id = default_id.as_str();
     let existing = provider_ids(&inventory, default_id);
@@ -3333,6 +3352,68 @@ fn cmd_device_login(
     Ok(())
 }
 
+struct OtherApiKeyChoice {
+    key: put_prompt::ApiKeyName,
+    replace: bool,
+}
+
+fn pick_other_api_key(global: &GlobalArgs) -> Result<Option<OtherApiKeyChoice>, CliError> {
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let key = put_prompt::api_key_name(&theme)?;
+    let inventory = parse_inventory(&request_admin_status(global)?)?;
+    let replace = inventory.iter().any(|row| row.2 == key.id());
+    if replace && !put_prompt::confirm_replacement(&theme, key.id())? {
+        return Ok(None);
+    }
+    Ok(Some(OtherApiKeyChoice { key, replace }))
+}
+
+fn cmd_other_api_key_login(
+    global: &GlobalArgs,
+    args: &[String],
+    choice: &OtherApiKeyChoice,
+) -> Result<(), CliError> {
+    let id = choice.key.id();
+    let replace = choice.replace;
+    let preflighted_key = preflight_login(
+        global,
+        id,
+        replace,
+        format!("{id} already holds a credential."),
+    )?;
+    if !put_prompt::provider(global, id)? {
+        return Ok(());
+    }
+    println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
+    let name = choice.key.name();
+    let key = dialoguer::Password::new()
+        .with_prompt(format!("Enter API key for {name}"))
+        .interact()
+        .map_err(|e| CliError::Io(format!("reading API key: {e}")))?;
+    let record = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "login",
+        key.trim().as_bytes().to_vec(),
+        None,
+    );
+    let (audit_op, store_mode) = if replace {
+        (AdminAuditOp::Overwrite, StoreMode::ReplaceUnconditional)
+    } else {
+        (AdminAuditOp::Put, StoreMode::Create)
+    };
+    commit_login_admin(
+        global,
+        store_op(id, record, audit_op, store_mode),
+        preflighted_key,
+        args,
+    )?;
+    println!(
+        "logged in and {} {id}",
+        if replace { "replaced" } else { "stored" }
+    );
+    Ok(())
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     provider_id_flags(args)?;
     use credentials_core::oauth_login::{
@@ -3355,21 +3436,38 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         None => pick_login_interactively(global, args)?,
     };
-    let provider = interactive.provider.clone();
+    let from_other =
+        optional(args, "--provider").is_none() && interactive.provider == OTHER_API_KEY_PROVIDER;
+    let other = if from_other {
+        let Some(choice) = pick_other_api_key(global)? else {
+            return Ok(());
+        };
+        Some(choice)
+    } else {
+        None
+    };
+    let provider = match &other {
+        Some(choice) => parse_credential_id(choice.key.id()).provider.to_string(),
+        None => interactive.provider.clone(),
+    };
     google_login::validate_client_flags(args, &provider)?;
 
     // Resolve the target credential id BEFORE routing so the dispatch can key on the
     // credential METHOD, not the bare provider name. openai/xai/google each name both
     // an OAuth login (chatgpt:openai / oauth:xai / oauth:google) and an api-key row
     // (apikey:*). Precedence: explicit --id > the interactive picker's chosen id > the
-    // provider's default. Route to the api-key branch when the provider has ONLY an
+    // provider's default. Other uses the id entered at its name prompt instead.
+    // Route to the api-key branch when the provider has ONLY an
     // api-key login, OR it has both AND the resolved id is explicitly an `apikey:` id.
     // (Gating purely on the id's method would send a malformed `--id zai` for an
     // api-key-only provider to the "unknown provider" path instead of the helpful
     // id-rail error.)
-    let target_id = optional(args, "--id")
-        .or_else(|| interactive.id_override.clone())
-        .unwrap_or_else(|| default_login_id(&provider));
+    let target_id = match &other {
+        Some(choice) => choice.key.id().to_string(),
+        None => optional(args, "--id")
+            .or_else(|| interactive.id_override.clone())
+            .unwrap_or_else(|| default_login_id(&provider)),
+    };
     let has_oauth_login =
         login_provider(&provider).is_some() || google_login::is_provider(&provider);
     let apikey_row = api_key_login::API_KEY_PROVIDERS
@@ -3397,6 +3495,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
     }
 
+    if let Some(choice) = other.as_ref().filter(|_| apikey_row.is_none()) {
+        return cmd_other_api_key_login(global, args, choice);
+    }
+
     if !route_api_key && google_login::is_provider(&provider) {
         return google_login::cmd_login(
             global,
@@ -3418,7 +3520,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )));
         }
 
-        let replace = login_replace(args, interactive.replace);
+        let replace = match &other {
+            Some(choice) => choice.replace,
+            None => login_replace(args, interactive.replace),
+        };
         let preflighted_key = preflight_login(
             global,
             &id,
@@ -3433,6 +3538,12 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ),
         )?;
 
+        if matches!(
+            p.validation,
+            api_key_login::KeyValidation::Unvalidated { .. }
+        ) {
+            println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
+        }
         let key = if let Some(path) = optional(args, "--payload-file") {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
@@ -8843,6 +8954,37 @@ mod login_regressions {
                     && name == "Cloudflare Workers AI"
                     && default_id == "apikey:cloudflare-workers-ai"),
             "picker rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_login_picker_keeps_all_rows_and_appends_other_api_key_provider() {
+        let rows = login_picker_rows();
+        let expected: Vec<_> = LOGIN_PICKER_ROWS
+            .iter()
+            .map(|(key, name)| {
+                (
+                    key.to_string(),
+                    name.to_string(),
+                    login_provider(key).unwrap().default_id.to_string(),
+                )
+            })
+            .chain(api_key_login::API_KEY_PROVIDERS.iter().map(|row| {
+                (
+                    row.key.to_string(),
+                    row.display_name.to_string(),
+                    row.default_id.to_string(),
+                )
+            }))
+            .collect();
+        assert_eq!(&rows[..rows.len() - 1], expected);
+        assert_eq!(
+            rows.last().unwrap(),
+            &(
+                OTHER_API_KEY_PROVIDER.to_string(),
+                "Other API key provider…".to_string(),
+                String::new(),
+            )
         );
     }
 

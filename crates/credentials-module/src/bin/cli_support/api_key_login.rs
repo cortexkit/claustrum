@@ -43,6 +43,9 @@ pub async fn check_login_key(
     Ok(validate_key(transport, row, key, account_id).await)
 }
 
+pub const NO_FREE_CHECK_MESSAGE: &str =
+    "This provider has no free check; the key is checked when first used.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationOutcome {
     Valid,
@@ -1204,6 +1207,26 @@ mod tests {
             ValidationOutcome::Unchecked("no probe exists")
         );
         assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_unvalidated_catalog_row_skips_the_login_request() {
+        let mut checked = 0;
+        for row in API_KEY_PROVIDERS {
+            let KeyValidation::Unvalidated { reason } = &row.validation else {
+                continue;
+            };
+            let transport = FixtureTransport::new(Vec::new());
+            assert_eq!(
+                check_login_key(&transport, row, "test-key", None).await,
+                Ok(ValidationOutcome::Unchecked(reason)),
+                "{}",
+                row.key
+            );
+            assert!(transport.requests().is_empty(), "{}", row.key);
+            checked += 1;
+        }
+        assert!(checked > 0);
     }
 
     #[tokio::test]

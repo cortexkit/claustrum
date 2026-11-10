@@ -40,6 +40,46 @@ fn api_key_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
+/// Keep the validated name and id together so callers need neither to recover the
+/// name from an assumed prefix nor to fill in a missing id.
+pub(super) struct ApiKeyName {
+    name: String,
+    id: String,
+}
+
+impl ApiKeyName {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(super) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(super) fn into_id(self) -> String {
+        self.id
+    }
+}
+
+pub(super) fn api_key_name(theme: &ColorfulTheme) -> Result<ApiKeyName, CliError> {
+    let value: String = Input::with_theme(theme)
+        .with_prompt("Provider name (optionally provider:label)")
+        .validate_with(|value: &String| api_key_id(value).map(|_| ()))
+        .interact_text()
+        .map_err(prompt_error)?;
+    let id = api_key_id(&value).map_err(CliError::Usage)?;
+    Ok(ApiKeyName { name: value, id })
+}
+
+pub(super) fn confirm_replacement(theme: &ColorfulTheme, id: &str) -> Result<bool, CliError> {
+    eprintln!("{id} already holds a credential.");
+    Confirm::with_theme(theme)
+        .with_prompt("Replace it?")
+        .default(false)
+        .interact()
+        .map_err(prompt_error)
+}
+
 fn cookie_id(domain: &str, account: &str) -> Result<String, String> {
     if !valid_deposit_cookie_id(&format!("cookie:{domain}:account")) {
         return Err("use a lowercase site domain, such as example.com (no URL or path)".into());
@@ -61,14 +101,7 @@ fn manual_id(id: &str) -> Result<String, String> {
 
 fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
     match kind {
-        0 => {
-            let value: String = Input::with_theme(theme)
-                .with_prompt("Provider name (optionally provider:label)")
-                .validate_with(|value: &String| api_key_id(value).map(|_| ()))
-                .interact_text()
-                .map_err(prompt_error)?;
-            api_key_id(&value).map_err(CliError::Usage)
-        }
+        0 => api_key_name(theme).map(ApiKeyName::into_id),
         1 => {
             let domain: String = Input::with_theme(theme)
                 .with_prompt("Site domain")
@@ -150,13 +183,7 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
     if !options.has_flag("--replace") && options.optional("--expected-hash").is_none() {
         let inventory = parse_inventory(&request_admin_status(global)?)?;
         if inventory.iter().any(|row| row.2 == id) {
-            eprintln!("{id} already holds a credential.");
-            if !Confirm::with_theme(&theme)
-                .with_prompt("Replace it?")
-                .default(false)
-                .interact()
-                .map_err(prompt_error)?
-            {
+            if !confirm_replacement(&theme, &id)? {
                 return Ok(false);
             }
             options.bools.insert("--replace".into());

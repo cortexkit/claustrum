@@ -768,7 +768,9 @@
       "doc": "https://elevenlabs.io/docs/overview/intro",
       "source": "hand_kept",
       "env": [],
-      "output_modalities": []
+      "output_modalities": [
+        "audio"
+      ]
     },
     {
       "id": "empiriolabs",
@@ -832,6 +834,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "fireworks-fire-pass",
+      "name": "Fire Pass",
+      "doc": "https://docs.fireworks.ai/firepass",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "freemodel",
@@ -2110,6 +2120,14 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "qwen-portal",
+      "name": "Qwen OAuth",
+      "doc": "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "reflection",

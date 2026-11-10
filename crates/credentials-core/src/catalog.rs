@@ -246,7 +246,6 @@ pub struct ApiKeyProvider {
 /// Rows without a published Fusiform identity pending an upstream or search-service ruling.
 /// Remove a row from this list when assigning its published id; mapped rows cannot stay here.
 pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[
-    ("qwen-portal", "pending_fusiform_decision"),
     ("tavily", "search_service_pending_ruling"),
     ("kagi", "search_service_pending_ruling"),
     ("exa", "search_service_pending_ruling"),
@@ -850,7 +849,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `/v1/models`, so the probe is a chat request to a router model.
     ApiKeyProvider {
         key: "firepass",
-        fusiform_provider_id: Some("fireworks-ai"),
+        fusiform_provider_id: Some("fireworks-fire-pass"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.fireworks.ai"],
         hosts_doc: "https://docs.fireworks.ai/firepass/",
@@ -1085,7 +1084,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // the operator's own vendor rather than read off model ids.
     ApiKeyProvider {
         key: "qwen-portal",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("qwen-portal"),
         auth: Some(BEARER_AUTH),
         hosts: &["portal.qwen.ai"],
         hosts_doc: "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/",
@@ -1220,12 +1219,12 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "stepfun",
-        fusiform_provider_id: Some("stepfun"),
+        fusiform_provider_id: Some("stepfun-ai"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.stepfun.ai"],
         hosts_doc: "https://platform.stepfun.ai/docs/en/quickstart/overview",
         invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/type") }),
-        default_provider_ids: &["stepfun"],
+        default_provider_ids: &["stepfun-ai"],
         display_name: "StepFun",
         default_id: "apikey:stepfun",
         dashboard_url: "https://platform.stepfun.ai/interface-key",
@@ -2309,7 +2308,7 @@ mod tests {
             ("abliteration", "abliteration-ai"),
             ("charm-hyper", "hyper"),
             ("cline-pass", "cline-pass"),
-            ("firepass", "fireworks-ai"),
+            ("firepass", "fireworks-fire-pass"),
             ("fireworks-ai", "fireworks-ai"),
             ("gmi-cloud", "gmicloud"),
             ("meta", "meta"),
@@ -2325,6 +2324,7 @@ mod tests {
             ("kimi-for-coding", "kimi-code-plan-global"),
             ("kiro", "kiro"),
             ("qianfan", "qianfan"),
+            ("qwen-portal", "qwen-portal"),
             ("typesafe", "typesafe"),
             ("yolo-auto", "yolo-auto"),
             ("singularityapi-dev", "singularityapi"),
@@ -2338,6 +2338,82 @@ mod tests {
                 None => panic!("{key} has no published Fusiform id"),
             }
         }
+    }
+
+    #[test]
+    fn api_key_fusiform_ids_match_offering_host_domains() {
+        fn provider_domain(host: &str) -> &str {
+            let Some(subdomains) = host.rsplitn(3, '.').nth(2) else {
+                return host;
+            };
+            &host[subdomains.len() + 1..]
+        }
+
+        const EXEMPTIONS: &[(&str, &str)] = &[
+            ("kiro", "Kiro keys are sent to Amazon Q endpoints"),
+            ("google", "AI Studio uses Google's separate API domain"),
+            (
+                "qianfan",
+                "Baidu hosts Qianfan APIs on baidubce.com, not baidu.com",
+            ),
+            (
+                "qwen-portal",
+                "Qwen documents the portal on qwenlm.github.io; keys go to portal.qwen.ai",
+            ),
+            (
+                "siliconflow-cn",
+                "China API and provider documentation use different domains",
+            ),
+            (
+                "minimax-code-cn",
+                "China plan documentation and API use different MiniMax domains",
+            ),
+            (
+                "vercel-ai-gateway",
+                "Fusiform links GitHub documentation; gateway requests use vercel.sh",
+            ),
+            ("typesafe", "TypeSafe has no fixed receiving hosts yet"),
+        ];
+        let mut unchecked_exemptions = std::collections::BTreeSet::new();
+        for &(key, reason) in EXEMPTIONS {
+            assert!(
+                !reason.is_empty(),
+                "{key} needs an offering-domain exemption reason"
+            );
+            assert!(
+                unchecked_exemptions.insert(key),
+                "duplicate offering-domain exemption: {key}"
+            );
+        }
+
+        let providers = crate::fusiform_providers::fusiform_providers();
+        for row in API_KEY_PROVIDERS {
+            let Some(id) = row.fusiform_provider_id else {
+                continue;
+            };
+            let Some(provider) = providers.iter().find(|provider| provider.id == id) else {
+                panic!("{} names an unknown Fusiform provider: {id}", row.key);
+            };
+            let Ok(doc) = url::Url::parse(&provider.doc) else {
+                panic!("{id} has an invalid documentation URL: {}", provider.doc);
+            };
+            let Some(doc_host) = doc.domain() else {
+                panic!("{id} has no documentation domain: {}", provider.doc);
+            };
+            if unchecked_exemptions.remove(row.key) {
+                continue;
+            }
+            assert!(
+                row.hosts.iter().any(|host| provider_domain(host) == provider_domain(doc_host)),
+                "{} maps to {id} with documentation host {doc_host}, outside its receiving host domains: {:?}",
+                row.key,
+                row.hosts
+            );
+        }
+        assert!(
+            unchecked_exemptions.is_empty(),
+            "offering-domain exemptions must name mapped catalog rows: {unchecked_exemptions:?}"
+        );
     }
 
     const NO_DESCRIPTORS: &[(&str, &str)] = &[
@@ -2843,7 +2919,7 @@ mod tests {
             ("siliconflow-cn", &["siliconflow-cn"]),
             ("singularityapi-dev", &[]),
             ("singularityapi-tech", &[]),
-            ("stepfun", &["stepfun"]),
+            ("stepfun", &["stepfun-ai"]),
             ("synthetic", &["synthetic"]),
             ("typesafe", &["typesafe"]),
             ("umans", &["umans-ai-coding-plan"]),

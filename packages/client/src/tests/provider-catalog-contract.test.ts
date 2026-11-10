@@ -2,9 +2,11 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { decodeCredential, decodeScopedInventory } from '../wire.js'
 
-function producerReply(): any {
+function producerReply(caseName = 'catalog_and_lifecycle'): any {
   const vector = JSON.parse(readFileSync(new URL('../../../../crates/credentials-module/tests/vectors/list-scoped-v2.json', import.meta.url), 'utf8'))
-  return vector.cases[0].reply
+  const entry = vector.cases.find((row: { case: string }) => row.case === caseName)
+  if (!entry) throw new Error(`producer list vector has no ${caseName}`)
+  return entry.reply
 }
 
 test('provider catalog decodes real vault rows with service, incarnation and tier time', () => {
@@ -43,27 +45,44 @@ test('provider catalog rejects malformed additive metadata', () => {
   }
 })
 
-function producerGetScopedReply(): any {
-  const fixture = JSON.parse(readFileSync(new URL('../../../../crates/credentials-module/tests/fixtures/enrollment_wire_contract.json', import.meta.url), 'utf8'))
-  const operation = fixture.operations.find((row: { op: string }) => row.op === 'credential.get_scoped')
-  return JSON.parse(operation.success[0])
+function producerGetScopedReply(caseName = 'catalog_with_evidence'): any {
+  const vector = JSON.parse(readFileSync(new URL('../../../../crates/credentials-module/tests/vectors/get-scoped-v1.json', import.meta.url), 'utf8'))
+  const entry = vector.cases.find((row: { case: string }) => row.case === caseName)
+  if (!entry) throw new Error(`producer get_scoped vector has no ${caseName}`)
+  return entry.reply
 }
 
-test('provider catalog decodes injected Fusiform ids and hosts', () => {
-  const reply = producerReply()
-  reply.result.credentials[0].fusiform_provider_id = 'openai'
-  reply.result.credentials[0].hosts = ['api.openai.com']
-  const row = decodeScopedInventory(reply, () => {}).rows[0]!
-  expect(row.fusiformProviderId).toBe('openai')
-  expect(row.hosts).toEqual(['api.openai.com'])
+test('provider catalog decodes producer hosts and absence', () => {
+  const reply = producerReply('descriptor_presence')
+  const decoded = decodeScopedInventory(reply, () => {})
+  expect(decoded.rows).toHaveLength(3)
+  for (const [index, row] of decoded.rows.entries()) {
+    const wire = reply.result.credentials[index]
+    expect(row.id).toBe(wire.id)
+    expect(row.hosts).toEqual(wire.hosts)
+    expect(row.fusiformProviderId).toBe(wire.fusiform_provider_id)
+  }
+  expect(decoded.rows.find((row) => row.id === 'apikey:openai')!.hosts).toEqual(['api.openai.com'])
+  const oauth = decoded.rows.find((row) => row.id === 'oauth:anthropic')!
+  expect(oauth.hosts).toBeUndefined()
+  expect(oauth.fusiformProviderId).toBeUndefined()
+})
 
-  reply.result.credentials[0].hosts = []
-  expect(decodeScopedInventory(reply, () => {}).rows[0]!.hosts).toEqual([])
+test('provider catalog decodes Fusiform ids and empty hosts missing from vectors', () => {
+  const reply = producerReply('descriptor_presence')
+  // The producer has hosts, but no Fusiform ids or explicitly empty host arrays yet.
+  expect(reply.result.credentials[1].fusiform_provider_id).toBeUndefined()
+  reply.result.credentials[1].fusiform_provider_id = 'openai'
+  expect(reply.result.credentials[2].hosts).toBeUndefined()
+  reply.result.credentials[2].hosts = []
+  const decoded = decodeScopedInventory(reply, () => {})
+  expect(decoded.rows[1]!.fusiformProviderId).toBe('openai')
+  expect(decoded.rows[2]!.hosts).toEqual([])
 })
 
 test('provider catalog treats omitted and null Fusiform ids and hosts as absent', () => {
   for (const nulls of [false, true]) {
-    const reply = producerReply()
+    const reply = producerReply('descriptor_presence')
     for (const row of reply.result.credentials) {
       for (const field of ['fusiform_provider_id', 'hosts']) {
         if (nulls) row[field] = null
@@ -71,7 +90,7 @@ test('provider catalog treats omitted and null Fusiform ids and hosts as absent'
       }
     }
     const decoded = decodeScopedInventory(reply, () => {})
-    expect(decoded.rows).toHaveLength(4)
+    expect(decoded.rows).toHaveLength(3)
     for (const row of decoded.rows) {
       expect(row.fusiformProviderId).toBeUndefined()
       expect(row.hosts).toBeUndefined()
@@ -84,26 +103,43 @@ test('provider catalog rejects malformed Fusiform ids and hosts', () => {
     ['fusiform_provider_id', 1], ['fusiform_provider_id', []],
     ['hosts', 'api.openai.com'], ['hosts', [1]], ['hosts', [null]],
   ] as const) {
-    const reply = producerReply()
+    const reply = producerReply('descriptor_presence')
     reply.result.credentials[0][field] = value
     expect(() => decodeScopedInventory(reply, () => {})).toThrow()
   }
 })
 
-test('get_scoped decodes injected auth, hosts and invalid-key evidence', () => {
-  for (const scheme of ['bearer', 'raw'] as const) {
-    const reply = producerGetScopedReply()
-    reply.result.auth = { header: 'authorization', scheme }
-    reply.result.hosts = ['api.openai.com']
-    reply.result.invalid_key = { status: 401, error_code: 'invalid_api_key', error_code_field: '/error/code' }
+test('get_scoped decodes real auth, hosts and invalid-key evidence', () => {
+  for (const caseName of ['catalog_with_evidence', 'catalog_without_evidence']) {
+    const reply = producerGetScopedReply(caseName)
     const decoded = decodeCredential(reply, () => {})
-    expect(decoded.material).toBe('fixture-not-a-secret')
-    expect(decoded.auth).toEqual({ header: 'authorization', scheme })
-    expect(decoded.hosts).toEqual(['api.openai.com'])
-    expect(decoded.invalidKey).toEqual({ status: 401, errorCode: 'invalid_api_key', errorCodeField: '/error/code' })
+    expect(decoded.material).toBe('vector-test-key')
+    expect(decoded.auth).toEqual({ header: 'authorization', scheme: 'bearer' })
+    expect(decoded.hosts).toEqual(reply.result.hosts)
+    if (caseName === 'catalog_with_evidence') {
+      expect(decoded.hosts).toEqual(['api.openai.com'])
+      expect(decoded.invalidKey).toEqual({ status: 401, errorCode: 'invalid_api_key', errorCodeField: '/error/code' })
+    } else {
+      expect(reply.result.invalid_key).toBeNull()
+      expect(decoded.invalidKey).toBeUndefined()
+    }
   }
+  const reply = producerGetScopedReply('oauth_without_descriptor')
+  for (const field of ['auth', 'hosts', 'invalid_key']) expect(Object.hasOwn(reply.result, field)).toBe(false)
+  const decoded = decodeCredential(reply, () => {})
+  expect(decoded.material).toBe('vector-test-key')
+  expect(decoded.auth).toBeUndefined()
+  expect(decoded.hosts).toBeUndefined()
+  expect(decoded.invalidKey).toBeUndefined()
+})
+
+test('get_scoped decodes descriptor values missing from vectors', () => {
+  // Preserve the catalog descriptors and inject only wire values absent from the vectors.
+  const reply = producerGetScopedReply('oauth_without_descriptor')
+  reply.result.auth = { header: 'authorization', scheme: 'raw' }
+  expect(decodeCredential(reply, () => {}).auth).toEqual({ header: 'authorization', scheme: 'raw' })
   for (const status of [0, 65535]) {
-    const reply = producerGetScopedReply()
+    const reply = producerGetScopedReply('oauth_without_descriptor')
     reply.result.hosts = []
     reply.result.invalid_key = { status, error_code: null, error_code_field: null }
     const decoded = decodeCredential(reply, () => {})

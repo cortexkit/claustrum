@@ -148,14 +148,14 @@ fn producer_notices_decode_exactly() {
                 kind: ScopedWatchKind::Changed,
                 epoch: "00000000000000000000000000000000".into(),
                 seq: 1,
-                view: "WJ4kwtxL+iITIKBjbo2xVnNBe5EIH6Xu+QGOrGBoIKs=".into(),
+                view: "+skaLPyrcLeF01AH35WtFtgjkrAcAc4AmXU0xzLgTbs=".into(),
                 keys: "gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=".into()
             },
             ScopedWatchNotice {
                 kind: ScopedWatchKind::Changed,
                 epoch: "00000000000000000000000000000000".into(),
                 seq: 2,
-                view: "voJahchvv3WOVUvaYC1dqSvNT7k4hUZZrrLYEujPSkg=".into(),
+                view: "YDo4I9eAWt7JGIeAHyD4My3SJT58kkfmNB+7Kw/Tl0c=".into(),
                 keys: "gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=".into()
             },
         ]

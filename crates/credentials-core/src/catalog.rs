@@ -116,14 +116,29 @@ const WEB_SEARCH: &[CredentialCategory] = &[CredentialCategory::WebSearch];
 const NO_CATEGORIES: &[CredentialCategory] = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthHeaderScheme {
+pub enum AuthScheme {
     Bearer,
-    XGoogApiKey,
-    /// Brave Search: `X-Subscription-Token`.
-    BraveSubscriptionToken,
-    /// Anthropic's API: `x-api-key` plus the required `anthropic-version` header.
-    AnthropicApiKey,
+    Raw,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthDescriptor {
+    pub header: &'static str,
+    pub scheme: AuthScheme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidKeyEvidence {
+    pub status: u16,
+    pub error_code: Option<&'static str>,
+    /// RFC 6901 pointer to the observed string, present exactly when `error_code` is.
+    pub error_code_field: Option<&'static str>,
+}
+
+const BEARER_AUTH: AuthDescriptor = AuthDescriptor {
+    header: "authorization",
+    scheme: AuthScheme::Bearer,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyValidation {
@@ -147,7 +162,7 @@ pub enum KeyValidation {
     TinyFishWallet { url: &'static str },
     GetEndpoint {
         url: &'static str,
-        auth_header: AuthHeaderScheme,
+        extra_headers: &'static [(&'static str, &'static str)],
     },
     /// Cloudflare Workers AI: `GET {api_base}/accounts/{account_id}/ai/models/search?per_page=1`
     /// with a Bearer token. Free and read-only, and unlike `/user/tokens/verify` (which
@@ -210,6 +225,12 @@ pub struct ApiKeyProvider {
     pub default_id: &'static str,
     pub dashboard_url: &'static str,
     pub placeholder: &'static str,
+    pub auth: Option<AuthDescriptor>,
+    pub hosts: &'static [&'static str],
+    /// Provider documentation for the key presentation and fixed receiving hosts.
+    pub hosts_doc: &'static str,
+    /// Observation from a deliberately bogus key, not a rule evaluated by the vault.
+    pub invalid_key: Option<InvalidKeyEvidence>,
     pub validation: KeyValidation,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
@@ -226,6 +247,10 @@ use ModelVendor::{
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     ApiKeyProvider {
         key: "kiro",
+        auth: Some(BEARER_AUTH),
+        hosts: &["q.us-east-1.amazonaws.com"],
+        hosts_doc: "https://kiro.dev/docs/getting-started/authentication/",
+        invalid_key: Some(InvalidKeyEvidence { status: 403, error_code: None, error_code_field: None }),
         default_provider_ids: &[],
         display_name: "Kiro",
         default_id: "apikey:kiro",
@@ -243,6 +268,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "zai",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.z.ai"],
+        hosts_doc: "https://docs.z.ai/devpack/quick-start",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["zai-coding-plan"],
         display_name: "Z.AI (GLM Coding Plan)",
         default_id: "apikey:zai",
@@ -258,6 +287,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openrouter",
+        auth: Some(BEARER_AUTH),
+        hosts: &["openrouter.ai"],
+        hosts_doc: "https://openrouter.ai/docs/api-reference/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["openrouter"],
         display_name: "OpenRouter",
         default_id: "apikey:openrouter",
@@ -265,7 +298,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-or-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://openrouter.ai/api/v1/auth/key",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: ModelVendor::ALL,
@@ -273,6 +306,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "deepseek",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.deepseek.com"],
+        hosts_doc: "https://api-docs.deepseek.com/quick_start",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_request_error"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["deepseek"],
         display_name: "DeepSeek",
         default_id: "apikey:deepseek",
@@ -288,6 +325,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "cerebras",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.cerebras.ai"],
+        hosts_doc: "https://inference-docs.cerebras.ai/quickstart",
+        invalid_key: None,
         default_provider_ids: &["cerebras"],
         display_name: "Cerebras",
         default_id: "apikey:cerebras",
@@ -303,6 +344,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "fireworks-ai",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.fireworks.ai"],
+        hosts_doc: "https://docs.fireworks.ai/api-reference",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("UNAUTHORIZED"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["fireworks-ai"],
         display_name: "Fireworks AI",
         default_id: "apikey:fireworks-ai",
@@ -319,7 +364,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         // every valid key is noise that hides a real one.
         validation: KeyValidation::GetEndpoint {
             url: "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI],
@@ -327,6 +372,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "groq",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.groq.com"],
+        hosts_doc: "https://console.groq.com/docs/api-reference",
+        invalid_key: None,
         default_provider_ids: &["groq"],
         display_name: "Groq",
         default_id: "apikey:groq",
@@ -334,7 +383,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "gsk_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.groq.com/openai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Meta, Qwen, OpenAI, Moonshot, Mistral],
@@ -342,6 +391,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "mistral",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.mistral.ai"],
+        hosts_doc: "https://docs.mistral.ai/api/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["mistral"],
         display_name: "Mistral",
         default_id: "apikey:mistral",
@@ -349,7 +402,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.mistral.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Mistral],
@@ -357,6 +410,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "together",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api-inference.together.ai", "api.together.ai", "api.together.xyz", "us-api.together.ai"],
+        hosts_doc: "https://docs.together.ai/docs/inference/openai-compatibility",
+        invalid_key: None,
         default_provider_ids: &["togetherai"],
         display_name: "Together AI",
         default_id: "apikey:together",
@@ -364,7 +421,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.together.xyz/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot],
@@ -372,6 +429,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "perplexity",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.perplexity.ai"],
+        hosts_doc: "https://docs.perplexity.ai/getting-started/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["perplexity"],
         display_name: "Perplexity",
         default_id: "apikey:perplexity",
@@ -387,6 +448,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "moonshot",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.moonshot.ai"],
+        hosts_doc: "https://platform.moonshot.ai/docs/guide/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_authentication_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["moonshotai"],
         display_name: "Moonshot",
         default_id: "apikey:moonshot",
@@ -402,6 +467,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "huggingface",
+        auth: Some(BEARER_AUTH),
+        hosts: &["huggingface.co", "router.huggingface.co"],
+        hosts_doc: "https://huggingface.co/docs/inference-providers/main/en/index",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["huggingface"],
         display_name: "Hugging Face",
         default_id: "apikey:huggingface",
@@ -409,7 +478,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "hf_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://huggingface.co/api/whoami-v2",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot, Zhipu],
@@ -417,6 +486,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "nvidia",
+        auth: Some(BEARER_AUTH),
+        hosts: &["integrate.api.nvidia.com"],
+        hosts_doc: "https://docs.api.nvidia.com/nim/reference/nvidia-llama-3_3-nemotron-super-49b-v1-infer",
+        invalid_key: None,
         default_provider_ids: &["nvidia"],
         display_name: "NVIDIA",
         default_id: "apikey:nvidia",
@@ -432,6 +505,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "xai",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.x.ai"],
+        hosts_doc: "https://docs.x.ai/docs/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 400, error_code: Some("invalid-argument"), error_code_field: Some("/code") }),
         default_provider_ids: &["xai"],
         display_name: "xAI (API Key)",
         default_id: "apikey:xai",
@@ -439,7 +516,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "xai-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.x.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[XAI],
@@ -447,6 +524,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openai",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.openai.com"],
+        hosts_doc: "https://developers.openai.com/api/reference/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["openai"],
         display_name: "OpenAI (API Key)",
         default_id: "apikey:openai",
@@ -454,7 +535,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-proj-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.openai.com/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM_AND_MEDIA,
         serves: &[OpenAI],
@@ -462,6 +543,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "google",
+        auth: Some(AuthDescriptor { header: "x-goog-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["generativelanguage.googleapis.com"],
+        hosts_doc: "https://ai.google.dev/api",
+        invalid_key: Some(InvalidKeyEvidence { status: 400, error_code: Some("API_KEY_INVALID"), error_code_field: Some("/error/details/0/reason") }),
         default_provider_ids: &["google"],
         display_name: "Google AI Studio (API Key)",
         default_id: "apikey:google",
@@ -469,7 +554,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "AIzaSy...",
         validation: KeyValidation::GetEndpoint {
             url: "https://generativelanguage.googleapis.com/v1beta/models",
-            auth_header: AuthHeaderScheme::XGoogApiKey,
+            extra_headers: &[],
         },
         categories: LLM_AND_MEDIA,
         serves: &[Google],
@@ -481,6 +566,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `anthropic-native`, which stays the subscription accounts' family.
     ApiKeyProvider {
         key: "anthropic",
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.anthropic.com"],
+        hosts_doc: "https://platform.claude.com/docs/en/api/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["anthropic-platform"],
         display_name: "Anthropic (API Key)",
         default_id: "apikey:anthropic",
@@ -490,7 +579,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         // messages probe.
         validation: KeyValidation::GetEndpoint {
             url: "https://api.anthropic.com/v1/models",
-            auth_header: AuthHeaderScheme::AnthropicApiKey,
+            extra_headers: &[("anthropic-version", "2023-06-01")],
         },
         categories: LLM,
         serves: &[Anthropic],
@@ -501,6 +590,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // prefix is undocumented, so the placeholder is generic.
     ApiKeyProvider {
         key: "inception",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inceptionlabs.ai"],
+        hosts_doc: "https://docs.inceptionlabs.ai/get-started.md",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["inception"],
         display_name: "Inception (Mercury)",
         default_id: "apikey:inception",
@@ -529,6 +622,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // token, so it would not work here anyway.
     ApiKeyProvider {
         key: "cloudflare-workers-ai",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.cloudflare.com"],
+        hosts_doc: "https://developers.cloudflare.com/workers-ai/get-started/rest-api/",
+        invalid_key: Some(InvalidKeyEvidence { status: 400, error_code: None, error_code_field: None }),
         default_provider_ids: &["cloudflare-workers-ai"],
         display_name: "Cloudflare Workers AI",
         default_id: "apikey:cloudflare-workers-ai",
@@ -562,6 +659,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/abliteration.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "abliteration",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.abliteration.ai"],
+        hosts_doc: "https://docs.abliteration.ai/api/introduction.md",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["abliteration-ai"],
         display_name: "Abliteration",
         default_id: "apikey:abliteration",
@@ -569,7 +670,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "ak_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.abliteration.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Zhipu],
@@ -578,6 +679,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "aiand",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.aiand.com"],
+        hosts_doc: "https://docs.aiand.com",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["aiand"],
         display_name: "ai&",
         default_id: "apikey:aiand",
@@ -585,7 +690,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.aiand.com/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[OpenAI, Google, DeepSeek, Moonshot, Zhipu, Qwen],
@@ -594,6 +699,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "baseten",
+        auth: Some(BEARER_AUTH),
+        hosts: &["inference.baseten.co"],
+        hosts_doc: "https://docs.baseten.co/reference/inference-api/chat-completions",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["baseten"],
         display_name: "Baseten",
         default_id: "apikey:baseten",
@@ -601,7 +710,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "bt_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://inference.baseten.co/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Nvidia],
@@ -614,6 +723,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/charm-hyper.kdl names: GLM (default model), Kimi and Gemma.
     ApiKeyProvider {
         key: "charm-hyper",
+        auth: Some(BEARER_AUTH),
+        hosts: &["hyper.charm.land"],
+        hosts_doc: "https://hyper.charm.land/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["hyper"],
         display_name: "Charm Hyper",
         default_id: "apikey:charm-hyper",
@@ -621,7 +734,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-hyper-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://hyper.charm.land/v1/credits",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Google, Moonshot, Zhipu],
@@ -630,6 +743,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "cline-pass",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.cline.bot"],
+        hosts_doc: "https://docs.cline.bot/getting-started/clinepass",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "ClinePass",
         default_id: "apikey:cline-pass",
@@ -645,6 +762,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "commandcode",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.commandcode.ai"],
+        hosts_doc: "https://commandcode.ai/docs/provider",
+        invalid_key: None,
         default_provider_ids: &["commandcode"],
         display_name: "Command Code",
         default_id: "apikey:commandcode",
@@ -662,6 +783,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // endpoint is public and would accept any string as a key.
     ApiKeyProvider {
         key: "deepinfra",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.deepinfra.com"],
+        hosts_doc: "https://docs.deepinfra.com/api-reference/introduction",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["deepinfra"],
         display_name: "DeepInfra",
         default_id: "apikey:deepinfra",
@@ -680,6 +805,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `/v1/models`, so the probe is a chat request to a router model.
     ApiKeyProvider {
         key: "firepass",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.fireworks.ai"],
+        hosts_doc: "https://docs.fireworks.ai/firepass/",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Fire Pass (Fireworks subscription)",
         default_id: "apikey:firepass",
@@ -696,6 +825,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "gmi-cloud",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.gmi-serving.com", "console.gmicloud.ai"],
+        hosts_doc: "https://docs.gmicloud.ai/api-reference/introduction",
+        invalid_key: None,
         default_provider_ids: &["gmicloud"],
         display_name: "GMI Cloud",
         default_id: "apikey:gmi-cloud",
@@ -703,7 +836,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "eyJ...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.gmi-serving.com/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek],
@@ -712,6 +845,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/meta.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "meta",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.meta.ai"],
+        hosts_doc: "https://dev.meta.ai/docs/api-reference",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &[],
         display_name: "Meta Model API",
         default_id: "apikey:meta",
@@ -719,7 +856,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "Model API key",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.meta.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Meta],
@@ -728,6 +865,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.minimax.io", "www.minimax.io"],
+        hosts_doc: "https://platform.minimax.io/docs/m-plan/faq",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authorized_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["minimax-coding-plan"],
         display_name: "MiniMax Token Plan (International)",
         default_id: "apikey:minimax-code",
@@ -744,6 +885,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code-cn",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.minimax.cn", "www.minimax.cn"],
+        hosts_doc: "https://platform.minimaxi.com/docs/m-plan/faq",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authorized_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["minimax-cn-coding-plan"],
         display_name: "MiniMax Token Plan (China)",
         default_id: "apikey:minimax-code-cn",
@@ -761,6 +906,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "nanogpt",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.nano-gpt.com", "nano-gpt.com"],
+        hosts_doc: "https://docs.nano-gpt.com/api-reference/miscellaneous/api-hosts",
+        invalid_key: None,
         default_provider_ids: &["nano-gpt"],
         display_name: "NanoGPT",
         default_id: "apikey:nanogpt",
@@ -768,7 +917,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://nano-gpt.com/api/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: ModelVendor::ALL,
@@ -779,6 +928,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Balance permission some team roles lack, which rejected their valid keys.
     ApiKeyProvider {
         key: "novita",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.novita.ai"],
+        hosts_doc: "https://novita.ai/docs/api-reference",
+        invalid_key: None,
         default_provider_ids: &["novita-ai"],
         display_name: "Novita",
         default_id: "apikey:novita",
@@ -795,6 +948,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "ollama-cloud",
+        auth: Some(BEARER_AUTH),
+        hosts: &["ollama.com"],
+        hosts_doc: "https://docs.ollama.com/api/authentication",
+        invalid_key: None,
         default_provider_ids: &["ollama-cloud"],
         display_name: "Ollama Cloud",
         default_id: "apikey:ollama-cloud",
@@ -810,6 +967,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-go",
+        auth: Some(BEARER_AUTH),
+        hosts: &["opencode.ai"],
+        hosts_doc: "https://opencode.ai/docs/console/go/",
+        invalid_key: None,
         default_provider_ids: &["opencode-go"],
         display_name: "OpenCode Go",
         default_id: "apikey:opencode-go",
@@ -825,6 +986,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-zen",
+        auth: Some(BEARER_AUTH),
+        hosts: &["opencode.ai"],
+        hosts_doc: "https://opencode.ai/docs/zen/",
+        invalid_key: None,
         default_provider_ids: &["opencode"],
         display_name: "OpenCode Zen",
         default_id: "apikey:opencode-zen",
@@ -843,6 +1008,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // chat probe here treats every 401 as a bad key, so it would refuse valid keys.
     ApiKeyProvider {
         key: "qianfan",
+        auth: Some(BEARER_AUTH),
+        hosts: &["qianfan.baidubce.com"],
+        hosts_doc: "https://cloud.baidu.com/doc/qianfan/s/rmh4stn9m",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Qianfan",
         default_id: "apikey:qianfan",
@@ -860,6 +1029,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // the operator's own vendor rather than read off model ids.
     ApiKeyProvider {
         key: "qwen-portal",
+        auth: Some(BEARER_AUTH),
+        hosts: &["portal.qwen.ai"],
+        hosts_doc: "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &[],
         display_name: "Qwen Portal",
         default_id: "apikey:qwen-portal",
@@ -877,6 +1050,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves Sakana's own models only, and Sakana is not a vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "sakana",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.sakana.ai"],
+        hosts_doc: "https://sakana.ai/",
+        invalid_key: None,
         default_provider_ids: &["sakana"],
         display_name: "Sakana AI",
         default_id: "apikey:sakana",
@@ -884,7 +1061,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.sakana.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[],
@@ -895,6 +1072,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/siliconflow.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.siliconflow.com"],
+        hosts_doc: "https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["siliconflow"],
         display_name: "SiliconFlow",
         default_id: "apikey:siliconflow",
@@ -902,7 +1083,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.siliconflow.com/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Zhipu],
@@ -913,6 +1094,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // in oh-my-pi's providers/siliconflow-cn.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow-cn",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.siliconflow.cn"],
+        hosts_doc: "https://docs.siliconflow.cn/api-reference/chat-completions/chat-completions",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["siliconflow-cn"],
         display_name: "SiliconFlow (China)",
         default_id: "apikey:siliconflow-cn",
@@ -920,7 +1105,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.siliconflow.cn/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek],
@@ -931,6 +1116,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // providers/singularityapi-dev.kdl names (DeepSeek, Kimi, GLM), not the full catalog.
     ApiKeyProvider {
         key: "singularityapi-dev",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.singularityapi.dev"],
+        hosts_doc: "https://docs.singularityapi.dev/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &[],
         display_name: "SingularityAPI",
         default_id: "apikey:singularityapi-dev",
@@ -938,7 +1127,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-sapi-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.singularityapi.dev/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu],
@@ -949,6 +1138,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // deployment routes requests only to DeepSeek models.
     ApiKeyProvider {
         key: "singularityapi-tech",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.singularityapi.tech"],
+        hosts_doc: "https://singularityapi.tech/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &[],
         display_name: "SingularityAPI Reserved Lanes",
         default_id: "apikey:singularityapi-tech",
@@ -956,7 +1149,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.singularityapi.tech/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek],
@@ -965,6 +1158,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "stepfun",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.stepfun.ai"],
+        hosts_doc: "https://platform.stepfun.ai/docs/en/quickstart/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["stepfun"],
         display_name: "StepFun",
         default_id: "apikey:stepfun",
@@ -981,6 +1178,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "synthetic",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.synthetic.new"],
+        hosts_doc: "https://dev.synthetic.new/docs/api/overview",
+        invalid_key: None,
         default_provider_ids: &["synthetic"],
         display_name: "Synthetic",
         default_id: "apikey:synthetic",
@@ -988,7 +1189,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://api.synthetic.new/openai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Qwen, Nvidia],
@@ -998,6 +1199,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves TypeSafe's own judgment models only, which match no vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "typesafe",
+        auth: None,
+        hosts: &[],
+        hosts_doc: "https://docs.typesafe.ai/introduction/quickstart",
+        invalid_key: None,
         default_provider_ids: &["typesafe"],
         display_name: "TypeSafe",
         default_id: "apikey:typesafe",
@@ -1013,6 +1218,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/umans.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "umans",
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.code.umans.ai"],
+        hosts_doc: "https://app.umans.ai/offers/code/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
         default_provider_ids: &["umans-ai-coding-plan"],
         display_name: "Umans AI Coding Plan",
         default_id: "apikey:umans",
@@ -1029,6 +1238,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/venice.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "venice",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.venice.ai"],
+        hosts_doc: "https://docs.venice.ai/api-reference",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &["venice"],
         display_name: "Venice",
         default_id: "apikey:venice",
@@ -1046,6 +1259,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "vercel-ai-gateway",
+        auth: Some(BEARER_AUTH),
+        hosts: &["ai-gateway.vercel.sh"],
+        hosts_doc: "https://vercel.com/docs/ai-gateway/authentication-and-byok",
+        invalid_key: None,
         default_provider_ids: &["vercel"],
         display_name: "Vercel AI Gateway",
         default_id: "apikey:vercel-ai-gateway",
@@ -1061,6 +1278,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "wafer-serverless",
+        auth: Some(BEARER_AUTH),
+        hosts: &["pass.wafer.ai"],
+        hosts_doc: "https://docs.wafer.ai",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
         default_provider_ids: &[],
         display_name: "Wafer Serverless (pay-as-you-go)",
         default_id: "apikey:wafer-serverless",
@@ -1068,7 +1289,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "wfr_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://pass.wafer.ai/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu, Qwen, MiniMax],
@@ -1077,6 +1298,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-ams",
+        auth: Some(BEARER_AUTH),
+        hosts: &["token-plan-ams.xiaomimimo.com"],
+        hosts_doc: "https://platform.xiaomimimo.com/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["xiaomi-token-plan-ams"],
         display_name: "Xiaomi Token Plan (Europe)",
         default_id: "apikey:xiaomi-token-plan-ams",
@@ -1093,6 +1318,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-cn",
+        auth: Some(BEARER_AUTH),
+        hosts: &["token-plan-cn.xiaomimimo.com"],
+        hosts_doc: "https://platform.xiaomimimo.com/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["xiaomi-token-plan-cn"],
         display_name: "Xiaomi Token Plan (China)",
         default_id: "apikey:xiaomi-token-plan-cn",
@@ -1109,6 +1338,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-sgp",
+        auth: Some(BEARER_AUTH),
+        hosts: &["token-plan-sgp.xiaomimimo.com"],
+        hosts_doc: "https://platform.xiaomimimo.com/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["xiaomi-token-plan-sgp"],
         display_name: "Xiaomi Token Plan (Singapore)",
         default_id: "apikey:xiaomi-token-plan-sgp",
@@ -1125,6 +1358,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "yolo-auto",
+        auth: Some(BEARER_AUTH),
+        hosts: &["yolo-auto.com"],
+        hosts_doc: "https://yolo-auto.com/docs/api",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Yolo-Auto",
         default_id: "apikey:yolo-auto",
@@ -1132,7 +1369,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "yolo_...",
         validation: KeyValidation::GetEndpoint {
             url: "https://yolo-auto.com/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[DeepSeek, Qwen],
@@ -1141,6 +1378,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zenmux",
+        auth: Some(BEARER_AUTH),
+        hosts: &["zenmux.ai"],
+        hosts_doc: "https://docs.zenmux.ai/docs/guide/quickstart.html",
+        invalid_key: None,
         default_provider_ids: &["zenmux"],
         display_name: "ZenMux",
         default_id: "apikey:zenmux",
@@ -1148,7 +1389,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk-...",
         validation: KeyValidation::GetEndpoint {
             url: "https://zenmux.ai/api/v1/models",
-            auth_header: AuthHeaderScheme::Bearer,
+            extra_headers: &[],
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi, StepFun],
@@ -1157,6 +1398,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zhipu-coding-plan",
+        auth: Some(BEARER_AUTH),
+        hosts: &["open.bigmodel.cn"],
+        hosts_doc: "https://docs.bigmodel.cn/cn/coding-plan/quick-start",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
         default_provider_ids: &["zhipuai-coding-plan"],
         display_name: "Zhipu Coding Plan (智谱)",
         default_id: "apikey:zhipu-coding-plan",
@@ -1173,6 +1418,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kimi-for-coding",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.kimi.ai", "api.kimi.com"],
+        hosts_doc: "https://www.kimi.com/code/docs/en",
+        invalid_key: None,
         default_provider_ids: &["kimi-code-plan-global"],
         display_name: "Kimi for Coding",
         default_id: "apikey:kimi-for-coding",
@@ -1187,6 +1436,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "tavily",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.tavily.com"],
+        hosts_doc: "https://docs.tavily.com/documentation/api-reference/endpoint/search",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Tavily",
         default_id: "apikey:tavily",
@@ -1202,6 +1455,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kagi",
+        auth: None,
+        hosts: &["kagi.com"],
+        hosts_doc: "https://help.kagi.com/kagi/api/api-portal.html",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Kagi",
         default_id: "apikey:kagi",
@@ -1217,6 +1474,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "exa",
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.exa.ai"],
+        hosts_doc: "https://docs.exa.ai/reference/search",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Exa",
         default_id: "apikey:exa",
@@ -1232,6 +1493,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "parallel",
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.parallel.ai"],
+        hosts_doc: "https://docs.parallel.ai/api-reference/search",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Parallel",
         default_id: "apikey:parallel",
@@ -1250,6 +1515,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://api-dashboard.search.brave.com/api-reference/web/search/get
     ApiKeyProvider {
         key: "brave",
+        auth: Some(AuthDescriptor { header: "x-subscription-token", scheme: AuthScheme::Raw }),
+        hosts: &["api.search.brave.com"],
+        hosts_doc: "https://api-dashboard.search.brave.com/documentation/guides/authentication",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Brave Search",
         default_id: "apikey:brave",
@@ -1268,6 +1537,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.firecrawl.dev/api-reference/errors
     ApiKeyProvider {
         key: "firecrawl",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.firecrawl.dev"],
+        hosts_doc: "https://docs.firecrawl.dev/api-reference/introduction",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
         default_provider_ids: &[],
         display_name: "Firecrawl",
         default_id: "apikey:firecrawl",
@@ -1285,6 +1558,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.jina.ai/embedding-api
     ApiKeyProvider {
         key: "jina",
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.jina.ai", "eu.r.jina.ai", "eu.s.jina.ai", "r.jina.ai", "s.jina.ai"],
+        hosts_doc: "https://docs.jina.ai/embedding-api",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "Jina AI",
         default_id: "apikey:jina",
@@ -1303,6 +1580,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.tinyfish.ai/error-codes
     ApiKeyProvider {
         key: "tinyfish",
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["agent.tinyfish.ai", "api.browser.tinyfish.ai", "api.fetch.tinyfish.ai", "api.search.tinyfish.ai", "api.tinyfish.ai"],
+        hosts_doc: "https://docs.tinyfish.ai/authentication",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "TinyFish",
         default_id: "apikey:tinyfish",
@@ -1318,6 +1599,10 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
     ApiKeyProvider {
         key: "searxng",
+        auth: None,
+        hosts: &[],
+        hosts_doc: "https://docs.searxng.org/dev/search_api.html",
+        invalid_key: None,
         default_provider_ids: &[],
         display_name: "SearXNG",
         default_id: "apikey:searxng",
@@ -1842,6 +2127,289 @@ pub fn valid_category_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    const NO_DESCRIPTORS: &[(&str, &str)] = &[
+        (
+            "kagi",
+            "Kagi's API portal documents Authorization: Bot <key>, not Bearer or a raw key",
+        ),
+        (
+            "searxng",
+            "SearXNG is self-hosted, with instance-specific authentication and hosts",
+        ),
+        (
+            "typesafe",
+            "TypeSafe keys may belong to a deployment at a custom base URL",
+        ),
+    ];
+
+    fn canonical_host(host: &str) -> bool {
+        !host.is_empty()
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && label.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+    }
+
+    fn canonical_header(header: &str) -> bool {
+        !header.is_empty()
+            && header.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
+            })
+    }
+
+    fn check_url(validation: &KeyValidation) -> Option<&str> {
+        match validation {
+            KeyValidation::OpenAiChat { base_url, .. }
+            | KeyValidation::AnthropicMessages { base_url, .. } => Some(base_url),
+            KeyValidation::AwsApiKeyGet { url }
+            | KeyValidation::FirecrawlCreditUsage { url }
+            | KeyValidation::TinyFishWallet { url }
+            | KeyValidation::GetEndpoint { url, .. } => Some(url),
+            KeyValidation::CloudflareWorkersAiModels { api_base } => Some(api_base),
+            KeyValidation::Unvalidated { .. } => None,
+        }
+    }
+
+    fn row_model_errors(row: &ApiKeyProvider) -> Vec<&'static str> {
+        let mut errors = Vec::new();
+        let exempt = NO_DESCRIPTORS.iter().any(|(key, _)| *key == row.key);
+        if row.hosts.is_empty() && !exempt {
+            errors.push("empty hosts");
+        }
+        if !row.hosts.iter().all(|host| canonical_host(host)) {
+            errors.push("non-canonical host");
+        }
+        if !row.hosts.windows(2).all(|pair| pair[0] < pair[1]) {
+            errors.push("unsorted or duplicate hosts");
+        }
+        match row.auth {
+            Some(auth) if !canonical_header(auth.header) => errors.push("non-canonical header"),
+            None if !exempt => errors.push("missing auth"),
+            _ => {}
+        }
+        if row.auth.is_none() && !matches!(row.validation, KeyValidation::Unvalidated { .. }) {
+            errors.push("checked row without auth");
+        }
+        if !row.hosts_doc.starts_with("https://")
+            || !url::Url::parse(row.hosts_doc)
+                .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+        {
+            errors.push("non-https documentation");
+        }
+        if let Some(url) = check_url(&row.validation) {
+            if !url::Url::parse(url)
+                .is_ok_and(|url| url.host_str().is_some_and(|host| row.hosts.contains(&host)))
+            {
+                errors.push("check host outside hosts");
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn api_key_row_hosts_and_auth_are_canonical_and_cover_checks() {
+        for row in API_KEY_PROVIDERS {
+            assert_eq!(row_model_errors(row), Vec::<&str>::new(), "{}", row.key);
+        }
+        let no_auth: Vec<_> = API_KEY_PROVIDERS
+            .iter()
+            .filter(|row| row.auth.is_none())
+            .map(|row| row.key)
+            .collect();
+        assert_eq!(
+            no_auth
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            NO_DESCRIPTORS
+                .iter()
+                .map(|(key, _)| *key)
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(no_auth.len(), NO_DESCRIPTORS.len());
+        assert!(NO_DESCRIPTORS.iter().all(|(_, reason)| !reason.is_empty()));
+    }
+
+    #[test]
+    fn api_key_row_host_gate_refuses_each_malformed_shape() {
+        let original = api_key_provider("openai").unwrap();
+        const BAD_HOSTS: &[&[&str]] = &[
+            &[],
+            &["API.openai.com"],
+            &["api.openai.com:443"],
+            &["https://api.openai.com"],
+            &["api.openai.com/path"],
+            &["*.openai.com"],
+            &["api.openai.com."],
+            &["api..openai.com"],
+            &["other.example"],
+            &["z.example", "api.openai.com"],
+            &["api.openai.com", "api.openai.com"],
+        ];
+        for &hosts in BAD_HOSTS {
+            let mut row = original.clone();
+            row.hosts = hosts;
+            assert!(!row_model_errors(&row).is_empty(), "accepted {hosts:?}");
+        }
+        for header in [
+            "",
+            "Authorization",
+            "x api key",
+            "x-api-key:",
+            "x-api-key\n",
+        ] {
+            let mut row = original.clone();
+            row.auth = Some(AuthDescriptor {
+                header,
+                scheme: AuthScheme::Raw,
+            });
+            assert!(row_model_errors(&row).contains(&"non-canonical header"));
+        }
+        for doc in ["http://docs.example", "not a URL", "https:opaque"] {
+            let mut row = original.clone();
+            row.hosts_doc = doc;
+            assert!(row_model_errors(&row).contains(&"non-https documentation"));
+        }
+        let mut row = original.clone();
+        row.auth = None;
+        assert!(row_model_errors(&row).contains(&"missing auth"));
+        row.validation = KeyValidation::Unvalidated { reason: "test" };
+        assert!(row_model_errors(&row).contains(&"missing auth"));
+        row = api_key_provider("kagi").unwrap().clone();
+        row.validation = original.validation.clone();
+        assert!(row_model_errors(&row).contains(&"checked row without auth"));
+    }
+
+    fn valid_json_pointer(pointer: &str) -> bool {
+        if !pointer.is_empty() && !pointer.starts_with('/') {
+            return false;
+        }
+        let mut chars = pointer.chars();
+        while let Some(c) = chars.next() {
+            if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn evidence_errors(document: &str, rows: &[ApiKeyProvider]) -> Vec<String> {
+        let mut errors = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut lines = document.lines().skip_while(|line| {
+            line.trim() != "| row | url | date | status | error_code | code field |"
+        });
+        if lines.next().is_none() {
+            return vec!["missing evidence table".to_string()];
+        }
+        lines.next();
+        for line in lines.take_while(|line| line.starts_with('|')) {
+            let columns: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if columns.len() != 6 {
+                errors.push(format!("bad evidence line: {line}"));
+                continue;
+            }
+            let key = columns[0];
+            if !seen.insert(key) {
+                errors.push(format!("duplicate evidence: {key}"));
+            }
+            let Some(row) = rows.iter().find(|row| row.key == key) else {
+                errors.push(format!("unknown evidence row: {key}"));
+                continue;
+            };
+            let Some(evidence) = row.invalid_key else {
+                errors.push(format!("unexpected evidence: {key}"));
+                continue;
+            };
+            if columns[3].parse::<u16>().ok() != Some(evidence.status)
+                || columns[4] != evidence.error_code.unwrap_or("-")
+                || columns[5] != evidence.error_code_field.unwrap_or("-")
+            {
+                errors.push(format!("differing evidence: {key}"));
+            }
+            if !url::Url::parse(columns[1])
+                .is_ok_and(|url| url.host_str().is_some_and(|host| row.hosts.contains(&host)))
+            {
+                errors.push(format!("evidence host outside hosts: {key}"));
+            }
+        }
+        for row in rows {
+            if let Some(evidence) = row.invalid_key {
+                if !seen.contains(row.key) {
+                    errors.push(format!("missing evidence: {}", row.key));
+                }
+                if evidence.error_code.is_some() != evidence.error_code_field.is_some()
+                    || evidence
+                        .error_code_field
+                        .is_some_and(|pointer| !valid_json_pointer(pointer))
+                {
+                    errors.push(format!("invalid code pointer pair: {}", row.key));
+                }
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn api_key_invalid_key_evidence_matches_recorded_lines() {
+        assert_eq!(
+            evidence_errors(
+                include_str!("../../../docs/provider-key-evidence.md"),
+                API_KEY_PROVIDERS
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn api_key_evidence_gate_refuses_missing_extra_duplicate_and_differing_lines() {
+        let header = "| row | url | date | status | error_code | code field |\n| --- | --- | --- | --- | --- | --- |\n";
+        let line = "| openai | https://api.openai.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |\n";
+        let mut row = api_key_provider("openai").unwrap().clone();
+        row.invalid_key = Some(InvalidKeyEvidence {
+            status: 401,
+            error_code: Some("invalid_api_key"),
+            error_code_field: Some("/error/code"),
+        });
+        let document = format!("{header}{line}");
+        assert!(evidence_errors(&document, std::slice::from_ref(&row)).is_empty());
+        for bad in [
+            header.to_string(),
+            format!("{document}{line}"),
+            document.replace("401", "403"),
+            document.replace("invalid_api_key", "other"),
+            document.replace("/error/code", "/code"),
+            document.replace("api.openai.com", "other.example"),
+        ] {
+            assert!(
+                !evidence_errors(&bad, std::slice::from_ref(&row)).is_empty(),
+                "accepted {bad}"
+            );
+        }
+        for pair in [
+            (None, Some("/error/code")),
+            (Some("invalid_api_key"), None),
+            (Some("invalid_api_key"), Some("/error/~2code")),
+        ] {
+            row.invalid_key.as_mut().unwrap().error_code = pair.0;
+            row.invalid_key.as_mut().unwrap().error_code_field = pair.1;
+            let matching_line = format!(
+                "{header}| openai | https://api.openai.com/v1/models | 2026-11-10 | 401 | {} | {} |\n",
+                pair.0.unwrap_or("-"), pair.1.unwrap_or("-")
+            );
+            assert!(evidence_errors(&matching_line, std::slice::from_ref(&row))
+                .contains(&"invalid code pointer pair: openai".to_string()));
+        }
+        row.invalid_key = None;
+        assert!(!evidence_errors(&document, &[row]).is_empty());
+        assert!(valid_json_pointer("/a~0b/c~1d"));
+        assert!(valid_json_pointer(""));
+        assert!(!valid_json_pointer("error/code"));
+    }
     use std::collections::{BTreeSet, HashSet};
 
     use super::*;
@@ -2455,7 +3023,7 @@ mod tests {
             row.validation,
             KeyValidation::GetEndpoint {
                 url: "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1",
-                auth_header: AuthHeaderScheme::Bearer,
+                extra_headers: &[],
             }
         );
     }

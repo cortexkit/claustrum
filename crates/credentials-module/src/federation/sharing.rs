@@ -58,6 +58,7 @@ struct Share {
 pub struct VaultSharingSnapshot {
     pub members: Vec<VaultSharingMember>,
     pub enabled: bool,
+    pub devices: Vec<(String, String)>,
 }
 
 pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
@@ -68,6 +69,7 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     let mut fingerprints = BTreeSet::new();
     let mut members = Vec::new();
     let mut enabled = false;
+    let mut devices = Vec::new();
     for device in snapshot.devices {
         if !is_lower_hex_16_bytes(&device.fingerprint)
             || device.pairing_id.is_empty()
@@ -90,8 +92,13 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
                 }
             }
         }
+        devices.push((device.fingerprint, device.pairing_id));
     }
-    Some(VaultSharingSnapshot { members, enabled })
+    Some(VaultSharingSnapshot {
+        members,
+        enabled,
+        devices,
+    })
 }
 
 fn request(method: &str) -> RouteCall {
@@ -106,9 +113,13 @@ async fn apply(
     store: Arc<EncryptedStore>,
     body: Value,
     retries: &mut RetryState,
+    home_watches: Option<&super::home_watch::RemoteWatchHub>,
 ) -> Result<(), String> {
     let snapshot =
         decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?;
+    if let Some(hub) = home_watches {
+        hub.paired_devices(snapshot.devices);
+    }
     tokio::task::spawn_blocking(move || {
         if snapshot.enabled {
             super::transfer::ensure_transfer_key(&store, "vault")?;
@@ -162,9 +173,24 @@ impl RetryState {
 /// Run until cancelled by the daemon's task guard. Every reopen starts with a full
 /// read; the watch's initial snapshot closes the read/subscribe race.
 pub async fn run(store: Arc<EncryptedStore>, client: OutboundClient) {
+    run_with_home_watches(store, client, None).await;
+}
+
+pub async fn run_with_home_watches(
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
+) {
     let mut retries = RetryState::default();
     loop {
-        let delay = match watch(Arc::clone(&store), &client, &mut retries).await {
+        let delay = match watch(
+            Arc::clone(&store),
+            &client,
+            &mut retries,
+            home_watches.as_deref(),
+        )
+        .await
+        {
             Err(error) => {
                 let (delay, warn) = retries.failed(&error);
                 if warn {
@@ -182,6 +208,7 @@ async fn watch(
     store: Arc<EncryptedStore>,
     client: &OutboundClient,
     retries: &mut RetryState,
+    home_watches: Option<&super::home_watch::RemoteWatchHub>,
 ) -> Result<(), String> {
     let snapshot = client
         .call(
@@ -191,7 +218,7 @@ async fn watch(
         )
         .await
         .map_err(|e| e.message().to_string())?;
-    apply(Arc::clone(&store), snapshot, retries).await?;
+    apply(Arc::clone(&store), snapshot, retries, home_watches).await?;
     let mut subscription = client
         .subscribe(
             "callosum",
@@ -205,7 +232,7 @@ async fn watch(
         .await
         .map_err(|e| e.message().to_string())?
     {
-        apply(Arc::clone(&store), snapshot, retries).await?;
+        apply(Arc::clone(&store), snapshot, retries, home_watches).await?;
     }
     Ok(())
 }

@@ -1255,29 +1255,26 @@ impl EncryptedStore {
                 });
             }
         }
+        // A no-op commit would wake inventory streams even though no grant changed.
+        let unchanged = self.store.with_conn(|conn| {
+            let existing = member_grants_conn(conn)?;
+            let (created, revoked) = vault_sharing_diff(&existing, &wanted);
+            Ok(created.is_empty() && revoked.is_empty())
+        })?;
+        if unchanged {
+            return Ok((0, 0));
+        }
         self.fenced_write(|tx| {
             let existing = member_grants_conn(tx)?;
+            let (to_create, to_revoke) = vault_sharing_diff(&existing, &wanted);
             let mut revoked = 0;
             let mut created = 0;
-            for grant in &existing {
-                if grant.source == MemberGrantSource::SharingSwitch
-                    && !wanted.iter().any(|want| {
-                        same_member_grant(grant, want) && grant.pairing_id == want.pairing_id
-                    })
-                {
-                    revoke_member_grant_tx(tx, &self.audit_key, grant)?;
-                    revoked += 1;
-                    after_write();
-                }
+            for grant in to_revoke {
+                revoke_member_grant_tx(tx, &self.audit_key, grant)?;
+                revoked += 1;
+                after_write();
             }
-            for grant in &wanted {
-                if existing.iter().any(|old| {
-                    same_member_grant(old, grant)
-                        && (old.source == MemberGrantSource::Operator
-                            || old.pairing_id == grant.pairing_id)
-                }) {
-                    continue;
-                }
+            for grant in to_create {
                 created += usize::from(create_member_grant_tx(tx, &self.audit_key, grant)?);
                 after_write();
             }
@@ -2310,6 +2307,32 @@ fn same_member_grant(left: &MemberGrant, right: &MemberGrant) -> bool {
     left.member_id == right.member_id
         && left.operation == right.operation
         && left.selector == right.selector
+}
+
+fn vault_sharing_diff<'a>(
+    existing: &'a [MemberGrant],
+    wanted: &'a [MemberGrant],
+) -> (Vec<&'a MemberGrant>, Vec<&'a MemberGrant>) {
+    let revoked = existing
+        .iter()
+        .filter(|grant| {
+            grant.source == MemberGrantSource::SharingSwitch
+                && !wanted.iter().any(|want| {
+                    same_member_grant(grant, want) && grant.pairing_id == want.pairing_id
+                })
+        })
+        .collect();
+    let created = wanted
+        .iter()
+        .filter(|grant| {
+            !existing.iter().any(|old| {
+                same_member_grant(old, grant)
+                    && (old.source == MemberGrantSource::Operator
+                        || old.pairing_id == grant.pairing_id)
+            })
+        })
+        .collect();
+    (created, revoked)
 }
 
 fn member_grants_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MemberGrant>> {

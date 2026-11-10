@@ -7,7 +7,7 @@ const MEMBER: &str = "fed-computer:aa11bb22cc33dd44ee55ff6600112233";
 const HOME: &str = "fed-computer:00000000000000000000000000000001";
 const OTHER: &str = "fed-computer:00000000000000000000000000000002";
 
-fn paired(home: HomeVault) -> HomeVault {
+pub(super) fn paired(home: HomeVault) -> HomeVault {
     home.with_callosum_stub(Arc::new(|method| {
         assert_eq!(method, "callosum.paired_devices_read");
         Some(json!({"devices":[
@@ -17,7 +17,7 @@ fn paired(home: HomeVault) -> HomeVault {
     }))
 }
 
-fn setup(home: &HomeVault) {
+pub(super) fn setup(home: &HomeVault) {
     let store = home.engine.store();
     store
         .set_federation_self_member_audited(HOME, AuditCtx::admin(AuditOp::FederationSelfSet))
@@ -49,7 +49,7 @@ fn header(channel: u16, corr: u64) -> EnvelopeHeader {
     .header
 }
 
-async fn open(
+pub(super) async fn open(
     home: &HomeVault,
     writer: &mpsc::Sender<Frame>,
     channel: u16,
@@ -65,7 +65,7 @@ async fn open(
         .unwrap();
 }
 
-fn body(frame: Frame, ty: FrameType) -> Value {
+pub(super) fn body(frame: Frame, ty: FrameType) -> Value {
     assert_eq!(frame.header.ty, ty);
     serde_json::from_slice(&frame.body).unwrap()
 }

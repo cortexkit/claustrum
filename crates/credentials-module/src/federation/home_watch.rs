@@ -1,15 +1,20 @@
 //! Home-side remote inventory streams, including opens still checking their pairing.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use credentials_core::federation::RemoteWatchRow;
+use credentials_core::store::EncryptedStore;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{json, Value};
 use subc_protocol::{EnvelopeHeader, ErrorBody, Flags, Frame, FrameType, Priority};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch, Semaphore};
 
-use super::ingress::{remote_watch_logins_wire, HomeAnswer, HomeVault};
+use super::ingress::{remote_watch_lists_equal, remote_watch_logins_wire, HomeAnswer, HomeVault};
+
+const COALESCE: Duration = Duration::from_millis(250);
+const RECHECK: Duration = Duration::from_secs(60);
 
 fn wrap_result(value: Value) -> Value {
     json!({"result": value})
@@ -30,16 +35,19 @@ pub(crate) struct PreparedWatch {
     pub pairing: String,
     pub home: String,
     pub rows: Vec<RemoteWatchRow>,
+    pub store: Arc<EncryptedStore>,
+    pub writes: watch::Receiver<()>,
+    pub budget: Duration,
 }
 
 pub struct PendingOpen {
     key: Key,
     identity: Arc<()>,
+    pairing_generation: u64,
 }
 
 struct Live {
     member: String,
-    _pairing: String,
     order: u64,
     writer: mpsc::Sender<Frame>,
     header: EnvelopeHeader,
@@ -48,6 +56,7 @@ struct Live {
 struct Entry {
     identity: Arc<()>,
     live: Option<Live>,
+    stopped: watch::Sender<()>,
 }
 
 #[derive(Default)]
@@ -58,14 +67,48 @@ struct Registry {
 }
 
 #[derive(Default)]
+struct Pairings {
+    generation: u64,
+    devices: HashMap<String, String>,
+}
+
 pub struct RemoteWatchHub {
-    registry: Mutex<Registry>,
+    registry: Arc<Mutex<Registry>>,
     // Serialize admission and terminal publication, never the pairing/store checks.
-    publication: tokio::sync::Mutex<()>,
+    publication: Arc<tokio::sync::Mutex<()>>,
+    pairings: watch::Sender<Arc<Pairings>>,
+    snapshots: Arc<Semaphore>,
     #[cfg(test)]
     pub(crate) before_checks: OnceLock<super::ingress::IssueAuditGate>,
     #[cfg(test)]
     pub(crate) completed: tokio::sync::Notify,
+    #[cfg(test)]
+    pub(crate) waking: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) refreshed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
+}
+
+impl Default for RemoteWatchHub {
+    fn default() -> Self {
+        Self {
+            registry: Arc::default(),
+            publication: Arc::default(),
+            pairings: watch::channel(Arc::new(Pairings::default())).0,
+            snapshots: Arc::new(Semaphore::new(MAX_REMOTE_WATCHES_PER_MEMBER)),
+            #[cfg(test)]
+            before_checks: OnceLock::new(),
+            #[cfg(test)]
+            completed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            waking: Arc::default(),
+            #[cfg(test)]
+            refreshed: Arc::default(),
+            #[cfg(test)]
+            before_projection: Arc::default(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +181,7 @@ impl RemoteWatchHub {
         let pending = PendingOpen {
             key: (header.channel, header.corr),
             identity: Arc::new(()),
+            pairing_generation: self.pairings.borrow().generation,
         };
         self.registry
             .lock()
@@ -148,9 +192,24 @@ impl RemoteWatchHub {
                 Entry {
                     identity: Arc::clone(&pending.identity),
                     live: None,
+                    stopped: watch::channel(()).0,
                 },
             );
         pending
+    }
+
+    /// A decoded full inventory is authoritative even if reconciling its grants fails.
+    /// Include devices whose vault switch is off: operator grants can still cover them.
+    pub fn paired_devices(&self, devices: impl IntoIterator<Item = (String, String)>) {
+        self.pairings.send_modify(|current| {
+            *current = Arc::new(Pairings {
+                generation: current.generation + 1,
+                devices: devices
+                    .into_iter()
+                    .map(|(fingerprint, pairing)| (format!("fed-computer:{fingerprint}"), pairing))
+                    .collect(),
+            });
+        });
     }
 
     pub fn cancel(&self, channel: u16, corr: u64) {
@@ -331,13 +390,34 @@ impl RemoteWatchHub {
                     .get_mut(&pending.key)
                     .expect("pending open")
                     .live = Some(Live {
-                    member: watch.member,
-                    _pairing: watch.pairing,
+                    member: watch.member.clone(),
                     order,
                     writer: writer.clone(),
                     header,
                 });
                 permit.send(snapshot.expect("successful projection"));
+                let subscription = Subscription {
+                    registry: Arc::downgrade(&self.registry),
+                    publication: Arc::clone(&self.publication),
+                    pending: PendingOpen {
+                        key: pending.key,
+                        identity: Arc::clone(&pending.identity),
+                        pairing_generation: pending.pairing_generation,
+                    },
+                    stopped: registry.entries[&pending.key].stopped.subscribe(),
+                    pairings: self.pairings.subscribe(),
+                    snapshots: Arc::clone(&self.snapshots),
+                    writer: writer.clone(),
+                    header,
+                    watch,
+                    #[cfg(test)]
+                    waking: Arc::clone(&self.waking),
+                    #[cfg(test)]
+                    refreshed: Arc::clone(&self.refreshed),
+                    #[cfg(test)]
+                    before_projection: Arc::clone(&self.before_projection),
+                };
+                tokio::spawn(subscription.run());
             }
         }
         Ok(())
@@ -346,5 +426,167 @@ impl RemoteWatchHub {
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
         self.registry.lock().expect("remote watches").entries.len()
+    }
+}
+
+struct Subscription {
+    registry: Weak<Mutex<Registry>>,
+    publication: Arc<tokio::sync::Mutex<()>>,
+    pending: PendingOpen,
+    stopped: watch::Receiver<()>,
+    pairings: watch::Receiver<Arc<Pairings>>,
+    snapshots: Arc<Semaphore>,
+    writer: mpsc::Sender<Frame>,
+    header: EnvelopeHeader,
+    watch: PreparedWatch,
+    #[cfg(test)]
+    waking: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    refreshed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut registry = registry.lock().expect("remote watches");
+            if registry.contains(&self.pending) {
+                registry.entries.remove(&self.pending.key);
+            }
+        }
+    }
+}
+
+impl Subscription {
+    fn pairing_lost(&self) -> bool {
+        let latest = self.pairings.borrow();
+        latest.generation > self.pending.pairing_generation
+            && latest.devices.get(&self.watch.member) != Some(&self.watch.pairing)
+    }
+
+    async fn project(&self) -> Result<Option<Vec<RemoteWatchRow>>, ()> {
+        let store = Arc::clone(&self.watch.store);
+        let member = self.watch.member.clone();
+        let pairing = self.watch.pairing.clone();
+        let snapshots = Arc::clone(&self.snapshots);
+        let deadline = tokio::time::Instant::now() + self.watch.budget;
+        let result = tokio::time::timeout_at(deadline, async {
+            #[cfg(test)]
+            if let Some(gate) = self.before_projection.get() {
+                gate().await;
+            }
+            let permit = snapshots.acquire_owned().await.map_err(|_| ())?;
+            tokio::task::spawn_blocking(move || {
+                // A timed-out SQLite read still owns its slot until the worker exits.
+                let _permit = permit;
+                if !store.federation_member_mapping().map_err(|_| ())? {
+                    return Ok(None);
+                }
+                HomeVault::project_remote_watch(&store, &member, &pairing)
+                    .map(Some)
+                    .map_err(|_| ())
+            })
+            .await
+            .map_err(|_| ())?
+        })
+        .await
+        .map_err(|_| ())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(());
+        }
+        result
+    }
+
+    async fn publish(&self, rows: Option<&[RemoteWatchRow]>, seq: u64) -> Result<(), String> {
+        let _publication = self.publication.lock().await;
+        let permit = self.writer.reserve().await.map_err(|e| e.to_string())?;
+        let Some(registry) = self.registry.upgrade() else {
+            return Ok(());
+        };
+        let mut registry = registry.lock().expect("remote watches");
+        if registry.draining || !registry.contains(&self.pending) {
+            return Ok(());
+        }
+        // A pairing snapshot can arrive while the projection or writer is waiting.
+        let rows = rows.filter(|_| !self.pairing_lost());
+        let next = match rows {
+            Some(rows) => frame(
+                self.header,
+                FrameType::StreamData,
+                serde_json::to_vec(&json!({
+                    "kind":"snapshot", "home":self.watch.home, "epoch":epoch(), "seq":seq,
+                    "logins":remote_watch_logins_wire(rows),
+                }))
+                .map_err(|e| e.to_string())?,
+            )?,
+            None => {
+                registry.entries.remove(&self.pending.key);
+                refusal(
+                    self.header,
+                    HomeAnswer::Reply(json!({"error":{"code":"not_found","class":"permanent"}})),
+                )?
+            }
+        };
+        permit.send(next);
+        Ok(())
+    }
+
+    async fn run(mut self) {
+        let mut seq = 1;
+        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // The decoded snapshot may have arrived during the open's checks, before
+            // this receiver was created. Do not wait for another event to inspect it.
+            if !self.pairing_lost() {
+                tokio::select! {
+                    biased;
+                    _ = self.stopped.changed() => break,
+                    _ = self.writer.closed() => break,
+                    result = self.watch.writes.changed() => { if result.is_err() { break; } }
+                    result = self.pairings.changed() => { if result.is_err() { break; } }
+                    _ = timer.tick() => {}
+                }
+            }
+            #[cfg(test)]
+            self.waking.notify_one();
+            tokio::select! {
+                biased;
+                _ = self.stopped.changed() => break,
+                _ = tokio::time::sleep(COALESCE) => {}
+            }
+            self.watch.writes.borrow_and_update();
+            self.pairings.borrow_and_update();
+            let mut stopped = self.stopped.clone();
+            let mut pairings = self.pairings.clone();
+            let writer = self.writer.clone();
+            let cycle = async {
+                if self.pairing_lost() {
+                    return self.publish(None, seq).await;
+                }
+                match self.project().await {
+                    Ok(None) => self.publish(None, seq).await,
+                    Ok(Some(rows)) if !remote_watch_lists_equal(&self.watch.rows, &rows) => {
+                        self.publish(Some(&rows), seq + 1).await?;
+                        self.watch.rows = rows;
+                        seq += 1;
+                        Ok(())
+                    }
+                    // Failures retain the last list. They must never look like revocation.
+                    _ => Ok(()),
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = stopped.changed() => break,
+                _ = writer.closed() => break,
+                // A re-pair must not wait out a slow store read's operation budget.
+                result = pairings.changed() => { if result.is_err() { break; } else { continue; } }
+                result = cycle => { if result.is_err() { break; } }
+            }
+            #[cfg(test)]
+            self.refreshed.notify_one();
+        }
     }
 }

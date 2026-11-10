@@ -388,9 +388,10 @@ where
     // Clones share one connection and one binding cache.
     admin.home().attach_outbound(outbound.clone());
     surface.remote().attach_outbound(outbound.clone());
-    let _sharing_guard = AbortOnDrop(tokio::spawn(federation::sharing::run(
+    let _sharing_guard = AbortOnDrop(tokio::spawn(federation::sharing::run_with_home_watches(
         Arc::clone(surface.store()),
         outbound.clone(),
+        Some(Arc::clone(&admin.home().remote_watches)),
     )));
     let _usage_guard = AbortOnDrop(Arc::clone(&surface.usage).spawn(outbound));
     // `remote add` fetches through this same reader, so it validates a home reply

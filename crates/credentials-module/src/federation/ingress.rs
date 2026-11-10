@@ -952,7 +952,7 @@ pub type CallosumStub = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
 /// This vault in its role as home: it answers other members' federation ops.
 pub struct HomeVault {
     engine: Arc<RefreshEngine>,
-    pub remote_watches: super::home_watch::RemoteWatchHub,
+    pub remote_watches: Arc<super::home_watch::RemoteWatchHub>,
     /// The outbound client the home uses to ask callosum about pairings and keys. Set
     /// once at startup; until then every lookup is unavailable (transient).
     callosum: OnceLock<OutboundClient>,
@@ -984,7 +984,7 @@ impl HomeVault {
     pub fn new(engine: Arc<RefreshEngine>) -> Self {
         Self {
             engine,
-            remote_watches: super::home_watch::RemoteWatchHub::default(),
+            remote_watches: Arc::default(),
             callosum: OnceLock::new(),
             cooldown_clock: Arc::new(wall_now_ms),
             secret_clock: Arc::new(wall_now_ms),
@@ -1121,6 +1121,8 @@ impl HomeVault {
         params: &Value,
     ) -> Result<super::home_watch::PreparedWatch, HomeAnswer> {
         let budget = tokio::time::Instant::now() + self.op_deadline;
+        // Subscribe before the first projection, including while the open checks wait.
+        let writes = self.engine.store().subscribe_writes();
         let work = async {
             if carries_bearer(params) {
                 return Err(Refusal::InvalidParams(
@@ -1155,6 +1157,9 @@ impl HomeVault {
                 pairing,
                 home,
                 rows,
+                store: Arc::clone(self.engine.store()),
+                writes,
+                budget: self.op_deadline,
             })
         };
         let outcome = tokio::time::timeout_at(budget, work)
@@ -1624,7 +1629,14 @@ impl HomeVault {
         member: &str,
         pairing_id: &str,
     ) -> Result<Vec<RemoteWatchRow>, StoreOpError> {
-        let store = self.engine.store();
+        Self::project_remote_watch(self.engine.store(), member, pairing_id)
+    }
+
+    pub(crate) fn project_remote_watch(
+        store: &EncryptedStore,
+        member: &str,
+        pairing_id: &str,
+    ) -> Result<Vec<RemoteWatchRow>, StoreOpError> {
         let grants = store.list_member_grants()?;
         let mut rows = Vec::new();
         for candidate in store.home_watch_candidates()? {
@@ -1827,6 +1839,10 @@ mod home_watch_open_tests;
 #[cfg(test)]
 #[path = "home_watch_projection_tests.rs"]
 mod home_watch_projection_tests;
+
+#[cfg(test)]
+#[path = "home_watch_stream_tests.rs"]
+mod home_watch_stream_tests;
 
 #[cfg(test)]
 mod tests {

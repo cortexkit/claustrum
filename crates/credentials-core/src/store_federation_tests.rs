@@ -3235,6 +3235,102 @@ fn remote_list_includes_source_and_home_pairing_id_for_each_record() {
 }
 
 #[test]
+fn sharing_reconcile_noop_does_not_signal_or_change_audit_or_generation() {
+    use crate::federation::VaultSharingMember;
+    let (_root, store) = rig("sharing-noop", 243);
+    let members = [VaultSharingMember {
+        member_id: HOME.into(),
+        pairing_id: "pair-one".into(),
+    }];
+    for (wanted, expected) in [
+        (&[][..], (0, 0)),
+        (&members[..], (2, 0)),
+        (&members[..], (0, 0)),
+        (&[][..], (0, 2)),
+        (&[][..], (0, 0)),
+    ] {
+        let grants = store.list_member_grants().unwrap();
+        let audit = store.read_audit(None).unwrap();
+        let generation = store.grants_generation().unwrap();
+        let writes = store.subscribe_writes();
+        let changed = store.reconcile_vault_sharing_audited(wanted).unwrap();
+        assert_eq!(changed, expected);
+        if changed == (0, 0) {
+            assert!(
+                !writes.has_changed().unwrap(),
+                "a no-op must not send a commit signal"
+            );
+            assert_eq!(store.list_member_grants().unwrap(), grants);
+            assert_eq!(store.read_audit(None).unwrap(), audit);
+            assert_eq!(store.grants_generation().unwrap(), generation);
+        } else {
+            assert!(writes.has_changed().unwrap());
+        }
+    }
+    store
+        .create_member_grant_audited(
+            HOME,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Category("llm-provider".into()),
+            "operator-pair",
+        )
+        .unwrap();
+    let audit = store.read_audit(None).unwrap();
+    let generation = store.grants_generation().unwrap();
+    let writes = store.subscribe_writes();
+    assert_eq!(store.reconcile_vault_sharing_audited(&[]).unwrap(), (0, 0));
+    assert!(!writes.has_changed().unwrap());
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+    assert_eq!(store.grants_generation().unwrap(), generation);
+    assert_eq!(store.list_member_grants().unwrap().len(), 1);
+}
+
+#[test]
+fn sharing_reconcile_single_grant_changes_still_commit_and_audit() {
+    use crate::federation::VaultSharingMember;
+    let (_root, store) = rig("sharing-one-change", 244);
+    // The operator owns remote_read, so only the secret_use grant is switch-owned.
+    store
+        .create_member_grant_audited(
+            HOME,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Category("llm-provider".into()),
+            "operator-pair",
+        )
+        .unwrap();
+    let members = [VaultSharingMember {
+        member_id: HOME.into(),
+        pairing_id: "pair-one".into(),
+    }];
+    for (wanted, expected, op) in [
+        (&members[..], (1, 0), AuditOp::MemberGrantCreate),
+        (&[][..], (0, 1), AuditOp::MemberGrantRevoke),
+    ] {
+        let count = store.read_audit(None).unwrap().len();
+        let generation = store.grants_generation().unwrap();
+        let writes = store.subscribe_writes();
+        assert_eq!(
+            store.reconcile_vault_sharing_audited(wanted).unwrap(),
+            expected
+        );
+        assert!(writes.has_changed().unwrap());
+        // Federation reads member grants fresh; they do not use the local grants counter.
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        let audit = store.read_audit(None).unwrap();
+        assert_eq!(audit.len(), count + 1);
+        assert_eq!(audit.last().unwrap().op, op.as_str());
+        assert_eq!(audit.last().unwrap().actor, "vault");
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+    let remaining = store.list_member_grants().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].source,
+        crate::federation::MemberGrantSource::Operator
+    );
+}
+
+#[test]
 fn sharing_reconcile_rolls_back_every_grant_and_audit_on_panic_or_second_audit_failure() {
     use crate::federation::VaultSharingMember;
     for (panic, replacing) in [(true, false), (false, false), (true, true), (false, true)] {

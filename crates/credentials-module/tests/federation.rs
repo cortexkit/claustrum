@@ -38,6 +38,9 @@ mod callosum_vectors;
 #[path = "federation/sharing.rs"]
 mod sharing;
 
+#[path = "federation/home_watch_stream.rs"]
+mod home_watch_stream;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

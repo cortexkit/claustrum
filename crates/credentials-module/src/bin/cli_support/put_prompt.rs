@@ -40,6 +40,24 @@ fn api_key_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
+pub(super) fn api_key_name(theme: &ColorfulTheme) -> Result<String, CliError> {
+    let value: String = Input::with_theme(theme)
+        .with_prompt("Provider name (optionally provider:label)")
+        .validate_with(|value: &String| api_key_id(value).map(|_| ()))
+        .interact_text()
+        .map_err(prompt_error)?;
+    api_key_id(&value).map_err(CliError::Usage)
+}
+
+pub(super) fn confirm_replacement(theme: &ColorfulTheme, id: &str) -> Result<bool, CliError> {
+    eprintln!("{id} already holds a credential.");
+    Confirm::with_theme(theme)
+        .with_prompt("Replace it?")
+        .default(false)
+        .interact()
+        .map_err(prompt_error)
+}
+
 fn cookie_id(domain: &str, account: &str) -> Result<String, String> {
     if !valid_deposit_cookie_id(&format!("cookie:{domain}:account")) {
         return Err("use a lowercase site domain, such as example.com (no URL or path)".into());
@@ -61,14 +79,7 @@ fn manual_id(id: &str) -> Result<String, String> {
 
 fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
     match kind {
-        0 => {
-            let value: String = Input::with_theme(theme)
-                .with_prompt("Provider name (optionally provider:label)")
-                .validate_with(|value: &String| api_key_id(value).map(|_| ()))
-                .interact_text()
-                .map_err(prompt_error)?;
-            api_key_id(&value).map_err(CliError::Usage)
-        }
+        0 => api_key_name(theme),
         1 => {
             let domain: String = Input::with_theme(theme)
                 .with_prompt("Site domain")
@@ -150,13 +161,7 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
     if !options.has_flag("--replace") && options.optional("--expected-hash").is_none() {
         let inventory = parse_inventory(&request_admin_status(global)?)?;
         if inventory.iter().any(|row| row.2 == id) {
-            eprintln!("{id} already holds a credential.");
-            if !Confirm::with_theme(&theme)
-                .with_prompt("Replace it?")
-                .default(false)
-                .interact()
-                .map_err(prompt_error)?
-            {
+            if !confirm_replacement(&theme, &id)? {
                 return Ok(false);
             }
             options.bools.insert("--replace".into());

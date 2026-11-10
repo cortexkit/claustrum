@@ -910,3 +910,324 @@ fn registered_provider_help_lists_each_action_and_stays_within_eighty_columns() 
         "{page}"
     );
 }
+
+const LOGIN_PICKER: &str = "Select provider to login (type to search)";
+const PROVIDER_NAME: &str = "Provider name (optionally provider:label)";
+const NO_FREE_CHECK: &str = "This provider has no free check; the key is checked when first used.";
+const MODELS: &str = "Which models may this key run? Leave empty if unsure.";
+const ADDRESSES: &str = "Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.";
+
+fn seed_login_key(fixture: &Fixture, id: &str) {
+    let path = fixture.0.join("key-input");
+    std::fs::write(&path, "initial-login-test-value").unwrap();
+    let output = fixture
+        .command(&["put", "--kind", "api_key", "--id", id, "--payload-file"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn login_other_new_provider_stores_registration_defaults_like_put_and_reuses_them() {
+    let fixture = Fixture::new();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Other API key provider\r", false),
+            (PROVIDER_NAME, b"loginvendor:work\r", false),
+            ("Groups for this provider", b" \x1b[B\x1b[B\x1b[B \r", false),
+            (MODELS, b"custom-route\r", false),
+            (ADDRESSES, b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
+            (
+                "Enter API key for loginvendor:work",
+                format!("{VALUE}\r").as_bytes(),
+                true,
+            ),
+        ],
+    );
+    let mut position = 0;
+    for prompt in [
+        LOGIN_PICKER,
+        PROVIDER_NAME,
+        "Groups for this provider",
+        MODELS,
+        ADDRESSES,
+        "Save these provider settings and continue?",
+        NO_FREE_CHECK,
+        "Enter API key for loginvendor:work",
+        "logged in and stored apikey:loginvendor:work",
+    ] {
+        position += screen[position..]
+            .find(prompt)
+            .unwrap_or_else(|| panic!("missing ordered prompt {prompt}: {screen}"))
+            + prompt.len();
+    }
+    assert!(!screen.contains("Validating API key"), "{screen}");
+    let registration = fixture.store().registered_providers().unwrap();
+    assert_eq!(registration.len(), 1);
+    assert_eq!(registration[0].service, "loginvendor");
+    assert_eq!(registration[0].categories, ["llm-provider", "web-search"]);
+    assert_eq!(registration[0].provider_ids, ["custom-route"]);
+    seed_login_key(&fixture, "apikey:loginvendor:put");
+    {
+        let store = fixture.store();
+        let record = store.get("apikey:loginvendor:work").unwrap();
+        assert_eq!(record.kind, CredentialKind::ApiKey);
+        assert_eq!(record.payload.expose(), VALUE.as_bytes());
+        for id in ["apikey:loginvendor:work", "apikey:loginvendor:put"] {
+            assert_eq!(store.categories(id).unwrap(), registration[0].categories);
+            assert_eq!(
+                store.provider_ids(id).unwrap(),
+                registration[0].provider_ids
+            );
+        }
+    }
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Other API key provider\r", false),
+            (PROVIDER_NAME, b"loginvendor:work\r", false),
+            ("Replace it?", b"y\r", false),
+            (
+                "Enter API key for loginvendor:work",
+                b"rotated-login-test-value\r",
+                true,
+            ),
+        ],
+    );
+    assert!(!screen.contains("Groups for this provider"), "{screen}");
+    assert!(!screen.contains("Save these provider settings"), "{screen}");
+    assert!(!screen.contains("rotated-login-test-value"));
+    assert!(
+        screen.contains("logged in and replaced apikey:loginvendor:work"),
+        "{screen}"
+    );
+    let store = fixture.store();
+    assert_eq!(store.registered_providers().unwrap(), registration);
+    assert_eq!(
+        store
+            .meta("apikey:loginvendor:work")
+            .unwrap()
+            .record_version,
+        2
+    );
+    assert_eq!(
+        store
+            .get("apikey:loginvendor:work")
+            .unwrap()
+            .payload
+            .expose(),
+        b"rotated-login-test-value"
+    );
+}
+
+#[test]
+fn login_other_default_no_preserves_unregistered_and_catalog_credentials_before_any_questions() {
+    for (name, id) in [
+        ("unregistered:work", "apikey:unregistered:work"),
+        ("zai", "apikey:zai"),
+    ] {
+        let fixture = Fixture::new();
+        seed_login_key(&fixture, id);
+        let (record, categories, ids, registry, tip, version) = {
+            let store = fixture.store();
+            (
+                store.get(id).unwrap(),
+                store.categories(id).unwrap(),
+                store.provider_ids(id).unwrap(),
+                store.registered_providers().unwrap(),
+                store.audit_tip().unwrap(),
+                store.meta(id).unwrap().record_version,
+            )
+        };
+        assert!(registry.is_empty());
+        let screen = fixture.terminal(
+            &["login"],
+            &[
+                (LOGIN_PICKER, b"Other API key provider\r", false),
+                (PROVIDER_NAME, format!("{name}\r").as_bytes(), false),
+                ("Replace it?", b"\r", false),
+            ],
+        );
+        assert!(
+            screen.contains(&format!("{id} already holds a credential.")),
+            "{screen}"
+        );
+        for absent in [
+            "Groups for this provider",
+            MODELS,
+            ADDRESSES,
+            "Enter API key",
+            "Validating API key",
+            NO_FREE_CHECK,
+            "--replace",
+        ] {
+            assert!(!screen.contains(absent), "unexpected {absent}: {screen}");
+        }
+        let store = fixture.store();
+        assert_eq!(
+            store.get(id).unwrap().payload.expose(),
+            record.payload.expose()
+        );
+        assert_eq!(store.categories(id).unwrap(), categories);
+        assert_eq!(store.provider_ids(id).unwrap(), ids);
+        assert_eq!(store.meta(id).unwrap().record_version, version);
+        assert_eq!(store.registered_providers().unwrap(), registry);
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+}
+
+#[test]
+fn login_other_declining_registration_writes_neither_registration_nor_key() {
+    let fixture = Fixture::new();
+    let before = fixture.store().audit_tip().unwrap();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Other API key provider\r", false),
+            (PROVIDER_NAME, b"declinedlogin\r", false),
+            ("Groups for this provider", b" \r", false),
+            (MODELS, b"\r", false),
+            (ADDRESSES, b"\r", false),
+            ("Save these provider settings and continue?", b"\r", false),
+        ],
+    );
+    assert!(!screen.contains("Enter API key"), "{screen}");
+    assert!(!screen.contains(NO_FREE_CHECK), "{screen}");
+    let store = fixture.store();
+    assert!(store.registered_providers().unwrap().is_empty());
+    assert!(store.list_meta().unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn login_other_catalog_replacement_uses_the_rows_probe_without_replace_advice() {
+    let fixture = Fixture::new();
+    seed_login_key(&fixture, "apikey:zai:work");
+    let mut command = fixture.command(&["login"]);
+    command.env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1");
+    let (status, screen) = terminal_cli::run(
+        command,
+        &[
+            (LOGIN_PICKER, b"Other API key provider\r", false),
+            (PROVIDER_NAME, b"zai:work\r", false),
+            ("Replace it?", b"y\r", false),
+            ("Enter API key for", format!("{VALUE}\r").as_bytes(), true),
+        ],
+    );
+    assert!(!screen.contains(VALUE));
+    assert!(status.success(), "{screen}");
+    assert!(screen.contains("Validating API key..."), "{screen}");
+    assert!(screen.contains("API key is valid."), "{screen}");
+    assert!(
+        screen.contains("logged in and replaced apikey:zai:work"),
+        "{screen}"
+    );
+    for absent in ["--replace", "Groups for this provider", NO_FREE_CHECK] {
+        assert!(!screen.contains(absent), "{screen}");
+    }
+    let store = fixture.store();
+    assert_eq!(store.meta("apikey:zai:work").unwrap().record_version, 2);
+    assert_eq!(
+        store.get("apikey:zai:work").unwrap().payload.expose(),
+        VALUE.as_bytes()
+    );
+    assert!(store.registered_providers().unwrap().is_empty());
+}
+
+#[test]
+fn login_other_unvalidated_catalog_row_warns_before_the_key_and_keeps_the_note_after_it() {
+    let fixture = Fixture::new();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Other API key provider\r", false),
+            (PROVIDER_NAME, b"searxng:work\r", false),
+            ("Enter API key for", format!("{VALUE}\r").as_bytes(), true),
+        ],
+    );
+    let warning = screen.find(NO_FREE_CHECK).unwrap();
+    let prompt = screen.find("Enter API key for").unwrap();
+    let note = screen
+        .find("NOTE: storing this API key without checking it:")
+        .unwrap();
+    assert!(warning < prompt && prompt < note, "{screen}");
+    assert!(!screen.contains("Validating API key"), "{screen}");
+    assert!(
+        screen.contains("logged in and stored apikey:searxng:work"),
+        "{screen}"
+    );
+    assert!(fixture.store().registered_providers().unwrap().is_empty());
+}
+
+#[test]
+fn login_other_picker_lists_every_existing_row_before_other() {
+    let fixture = Fixture::new();
+    let names: Vec<_> = [
+        "Anthropic (Claude Pro/Max)",
+        "ChatGPT (Codex subscription)",
+        "xAI (Grok)",
+        "GitHub Copilot",
+        "Kimi Code",
+        "Meta Muse (coding subscription)",
+        "Google Gemini CLI (Code Assist)",
+        "Gmail (send as you)",
+        "Antigravity (Gemini 3)",
+        "Cursor",
+        "Devin",
+        "Snowflake Cortex",
+        "DigitalOcean GenAI",
+    ]
+    .into_iter()
+    .chain(
+        credentials_core::catalog::API_KEY_PROVIDERS
+            .iter()
+            .map(|row| row.display_name),
+    )
+    .collect();
+    let mut steps: Vec<(&str, &[u8], bool)> = names
+        .iter()
+        .map(|name| (*name, b"\x1b[B".as_slice(), false))
+        .collect();
+    steps.extend([
+        ("Other API key provider…", b"\r".as_slice(), false),
+        (PROVIDER_NAME, b"pickeronly\r".as_slice(), false),
+        ("Groups for this provider", b"\r".as_slice(), false),
+        (MODELS, b"\r".as_slice(), false),
+        (ADDRESSES, b"\r".as_slice(), false),
+        (
+            "Save these provider settings and continue?",
+            b"\r".as_slice(),
+            false,
+        ),
+    ]);
+    let screen = fixture.terminal(&["login"], &steps);
+    for name in names.into_iter().chain(["Other API key provider…"]) {
+        assert!(screen.contains(name), "missing picker row {name}: {screen}");
+    }
+    assert!(fixture.store().list_meta().unwrap().is_empty());
+}
+
+#[test]
+fn login_other_help_names_login_as_the_provider_key_entry_point() {
+    let fixture = Fixture::new();
+    for (verb, expected) in [
+        ("put", "Use ck auth login to add a provider key"),
+        ("login", "Other API key provider…"),
+    ] {
+        let output = fixture.command(&[verb, "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains(expected), "{help}");
+        assert!(
+            help.lines().all(|line| line.chars().count() <= 80),
+            "{help}"
+        );
+    }
+}

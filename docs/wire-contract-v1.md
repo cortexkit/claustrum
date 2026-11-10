@@ -1433,8 +1433,11 @@ and on each `callosum.paired_devices_watch` full snapshot, A reconciles grants f
 `fed-computer:<B>` at B's current `pairing_id`. An enabled `vault` share on a
 `computer` creates `remote_read` on category `llm-provider` and selector-free
 `secret_use`, with source `sharing_switch`. Switch-off, disappearance, a non-computer
-class or a changed pairing revokes obsolete switch grants. Changes in the effective
-switch caused by declaration changes are treated just like operator changes.
+class or a changed pairing revokes obsolete switch grants. Callosum reports `enabled`
+only while at least one operation the operator approved for the switch is still in this
+vault's manifest, so a vault build that stops declaring all of them reads as off, and a
+later build that declares one again reads as on, with no operator action. The
+reconciler handles both exactly like the operator turning the switch off or on.
 
 Existing grants have source `operator`. The reconciler never changes or removes an
 operator row, including an identical selector whose pairing is stale. All grant

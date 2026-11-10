@@ -74,6 +74,7 @@ use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{
     AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+    ADMIN_OP_SCHEMA_V3,
 };
 use credentials_core::catalog::{
     default_provider_ids as catalog_default_provider_ids, login_provider, DeviceKind, ExchangeWire,
@@ -497,7 +498,14 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "--client-id",
             "--provider-id",
         ],
-        "provider" => &["--service", "--category", "--provider-id"],
+        "provider" => &[
+            "--service",
+            "--category",
+            "--provider-id",
+            "--host",
+            "--auth-header",
+            "--auth-scheme",
+        ],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
         "import" => &[
@@ -737,39 +745,57 @@ fn help_verb(verb: &str) -> String {
             "ck auth provider list\n\
              ck auth provider set --service <name> [--category <c>]...\n\
              \x20                    [--provider-id <id>]...\n\
+             \x20                    [--host <host>]...\n\
+             \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
              ck auth provider remove --service <name>\n\
              \n\
              \x20 --service <name>    API-key service name (set and remove)\n\
              \x20 --category <c>      default group for future keys (set; repeatable)\n\
              \x20 --provider-id <id>  default routing id (set; repeatable)\n\
+             \x20 --host <host>       allowed key destination (set; repeatable)\n\
+             \x20 --auth-header <h>   key header, for example authorization (set)\n\
+             \x20 --auth-scheme <s>   bearer or raw (set)\n\
              \n\
              NOTES\n\
-             list is read-only and lease-free: service, groups and routing ids.\n\
-             set remembers defaults for future apikey:<service>[:<label>] keys.\n\
+             list is read-only and lease-free; descriptor fields are JSON columns.\n\
+             set states the whole registration; omitted hosts and auth are cleared.\n\
+             Groups and routing ids are defaults for future keys. Hosts and auth\n\
+             describe every key for this service, including existing keys.\n\
              Choose groups from ck auth categories; no groups or routing ids is valid.\n\
              A fixed catalog service cannot be registered. Repeating a set is a no-op.\n\
-             set and remove never change existing keys. Use set-category or\n\
-             set-providers to edit those. Routing ids tell routing which models a key\n\
+             Use set-category or set-providers to edit existing keys' groups or ids.\n\
+             Routing ids tell routing which models a key\n\
              may serve; a wrong id sends work to a key that refuses it. Empty is safe."
         }
         "provider list" => {
             "ck auth provider list\n\
              \n\
              NOTES\n\
-             List registered service names, groups and routing provider ids.\n\
+             Columns: SERVICE, GROUPS, PROVIDER IDS, HOSTS, AUTH, FUSIFORM ID.\n\
+             All but SERVICE are JSON: arrays, an auth object or null, an id or null.\n\
              Read-only and lease-free; no master key is needed."
         }
         "provider set" => {
             "ck auth provider set --service <name> [--category <c>]...\n\
              \x20                    [--provider-id <id>]...\n\
+             \x20                    [--host <host>]...\n\
+             \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
              \n\
              \x20 --service <name>    API-key service absent from the fixed catalog\n\
              \x20 --category <c>      default group for future keys (repeatable)\n\
              \x20 --provider-id <id>  default routing id (repeatable)\n\
+             \x20 --host <host>       allowed key destination (repeatable; commas OK)\n\
+             \x20 --auth-header <h>   key header, for example authorization\n\
+             \x20 --auth-scheme <s>   bearer (Bearer <key>) or raw (the key alone)\n\
              \n\
              NOTES\n\
              No groups or routing ids is valid. Groups are from ck auth categories.\n\
-             Existing records are never changed; an identical set writes nothing.\n\
+             set states the whole registration; omitted hosts and auth are cleared.\n\
+             Give hosts and auth together, or neither. Hosts are exact names only,\n\
+             with no scheme, port, path or pattern (at most 8). Hosts and the header\n\
+             are lowercased; hosts are trimmed, sorted and deduplicated.\n\
+             Groups and routing ids apply to future keys only. Hosts and auth also\n\
+             describe existing keys; an identical set writes nothing.\n\
              Routing ids tell routing which models a key may serve. A wrong id sends\n\
              work to a key that refuses it; empty is the safe answer."
         }
@@ -2195,6 +2221,44 @@ fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 
+fn canonical_provider_hosts(values: &[String]) -> Vec<String> {
+    let mut hosts: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(|host| host.trim().to_ascii_lowercase())
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn provider_set_op(
+    service: String,
+    categories: Vec<String>,
+    provider_ids: Vec<String>,
+    mut settings: credentials_core::store::RegisteredProviderSettings,
+) -> Result<AdminOpBody, CliError> {
+    credentials_core::store::validate_registered_provider_service(&service)
+        .map_err(CliError::Store)?;
+    check_cli_provider_ids(&provider_ids, true)?;
+    settings.hosts = canonical_provider_hosts(&settings.hosts);
+    settings.auth_header = settings
+        .auth_header
+        .map(|header| header.to_ascii_lowercase());
+    credentials_core::store::validate_registered_provider_settings(&settings)
+        .map_err(CliError::Store)?;
+    Ok(AdminOpBody::ProviderSet {
+        v: ADMIN_OP_SCHEMA_V3,
+        service,
+        categories,
+        provider_ids,
+        hosts: Some(serde_json::json!(settings.hosts)),
+        auth_header: Some(serde_json::json!(settings.auth_header)),
+        auth_scheme: Some(serde_json::json!(settings.auth_scheme)),
+        fusiform_provider_id: Some(serde_json::json!(settings.fusiform_provider_id)),
+    })
+}
+
 fn cmd_provider(
     global: &GlobalArgs,
     args: &[String],
@@ -2204,7 +2268,14 @@ fn cmd_provider(
     let service_flags = ["--service"];
     let flags: &[&str] = match action {
         Some("list") if args.len() == 1 => &[],
-        Some("set") => &["--service", "--category", "--provider-id"],
+        Some("set") => &[
+            "--service",
+            "--category",
+            "--provider-id",
+            "--host",
+            "--auth-header",
+            "--auth-scheme",
+        ],
         Some("remove") => &service_flags,
         _ => return Err(CliError::Usage(help_verb("provider"))),
     };
@@ -2226,38 +2297,37 @@ fn cmd_provider(
         Some("list") if args.len() == 1 => {
             let rows = credentials_core::store::registered_providers_read_only(&store_path(global))
                 .map_err(CliError::Store)?;
-            println!("SERVICE\tGROUPS\tPROVIDER IDS");
+            println!("SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID");
             for row in rows {
+                let auth = row.auth_header.zip(row.auth_scheme).map(
+                    |(header, scheme)| serde_json::json!({"header": header, "scheme": scheme}),
+                );
                 println!(
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     row.service,
                     serde_json::to_string(&row.categories).unwrap(),
-                    serde_json::to_string(&row.provider_ids).unwrap()
+                    serde_json::to_string(&row.provider_ids).unwrap(),
+                    serde_json::to_string(&row.hosts).unwrap(),
+                    serde_json::to_string(&auth).unwrap(),
+                    serde_json::to_string(&row.fusiform_provider_id).unwrap()
                 );
             }
         }
         Some("set") => {
             let service = options.required("--service")?;
-            credentials_core::store::validate_registered_provider_service(&service)
-                .map_err(CliError::Store)?;
             let provider_ids = provider_id_flags(args)?;
-            credentials_core::store::validate_registered_provider_settings(
-                &credentials_core::store::RegisteredProviderSettings::default(),
-            )
-            .map_err(CliError::Store)?;
-            commit_admin(
-                global,
-                AdminOpBody::ProviderSet {
-                    v: ADMIN_OP_SCHEMA_V2,
-                    service: service.clone(),
-                    categories: repeated_values(args, "--category"),
-                    provider_ids,
-                    hosts: None,
-                    auth_header: None,
-                    auth_scheme: None,
+            let op = provider_set_op(
+                service.clone(),
+                repeated_values(args, "--category"),
+                provider_ids,
+                credentials_core::store::RegisteredProviderSettings {
+                    hosts: repeated_values(args, "--host"),
+                    auth_header: options.optional("--auth-header"),
+                    auth_scheme: options.optional("--auth-scheme"),
                     fusiform_provider_id: None,
                 },
             )?;
+            commit_admin(global, op)?;
             println!("set provider {service}");
         }
         Some("remove") if args.len() == 3 && args[1] == "--service" => {
@@ -8842,6 +8912,70 @@ mod explicit_route_regressions {
 #[cfg(test)]
 mod provider_cli_tests {
     use super::*;
+
+    #[test]
+    fn provider_set_body_is_v3_and_canonical() {
+        let op = provider_set_op(
+            "custom-service".into(),
+            vec!["llm-provider".into()],
+            vec!["custom-models".into()],
+            credentials_core::store::RegisteredProviderSettings {
+                hosts: vec![
+                    " B.example.com, a.example.com ".into(),
+                    "b.example.com".into(),
+                ],
+                auth_header: Some("X-API-Key".into()),
+                auth_scheme: Some("raw".into()),
+                fusiform_provider_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(op).unwrap(),
+            serde_json::json!({
+                "op": "admin.provider_set", "v": 3, "service": "custom-service",
+                "categories": ["llm-provider"], "provider_ids": ["custom-models"],
+                "hosts": ["a.example.com", "b.example.com"],
+                "auth_header": "x-api-key", "auth_scheme": "raw",
+                "fusiform_provider_id": null
+            })
+        );
+    }
+
+    #[test]
+    fn provider_set_empty_registration_is_a_v3_clear() {
+        let op = provider_set_op(
+            "custom-service".into(),
+            vec![],
+            vec![],
+            credentials_core::store::RegisteredProviderSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(op).unwrap(),
+            serde_json::json!({
+                "op": "admin.provider_set", "v": 3, "service": "custom-service",
+                "categories": [], "provider_ids": [], "hosts": [],
+                "auth_header": null, "auth_scheme": null, "fusiform_provider_id": null
+            })
+        );
+    }
+
+    #[test]
+    fn provider_registration_help_explains_complete_replacement_and_new_flags() {
+        for page in ["provider", "provider set"] {
+            let help = help_verb(page);
+            for flag in ["--host", "--auth-header", "--auth-scheme"] {
+                assert!(help.contains(flag), "{page}: {flag}");
+            }
+            assert!(help.contains(
+                "set states the whole registration; omitted hosts and auth are cleared."
+            ));
+            assert!(help.lines().all(|line| line.len() <= 80), "{page}");
+        }
+        assert!(help_verb("provider list")
+            .contains("Columns: SERVICE, GROUPS, PROVIDER IDS, HOSTS, AUTH, FUSIFORM ID."));
+    }
 
     #[test]
     fn provider_flags_do_not_parse_another_flags_value_as_a_flag() {

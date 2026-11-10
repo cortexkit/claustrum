@@ -100,8 +100,9 @@ fn plain_put_stores_a_hidden_api_key_and_default_no_preserves_the_existing_recor
             ("Credential kind", b"\r", false),
             ("Provider name", b"probe:one\r", false),
             ("Groups for this provider", b"\r", false),
-            ("Routing provider ids (", b"\r", false),
-            ("Save these provider defaults", b"y\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
     );
@@ -149,8 +150,9 @@ fn explicit_id_prompts_only_for_value_trims_it_and_reprompts_after_empty_input()
         &["put", "--id", "apikey:probe:trim"],
         &[
             ("Groups for this provider", b"\r", false),
-            ("Routing provider ids (", b"\r", false),
-            ("Save these provider defaults", b"y\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", b"  \r", true),
             ("Value (hidden)", format!("  {VALUE}  \r").as_bytes(), true),
         ],
@@ -176,8 +178,9 @@ fn confirming_replace_uses_the_existing_unconditional_rotation_path() {
         &["put", "--id", "apikey:probe:rotate"],
         &[
             ("Groups for this provider", b"\r", false),
-            ("Routing provider ids (", b"\r", false),
-            ("Save these provider defaults", b"y\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", b"initial-test-value\r", true),
         ],
     );
@@ -316,8 +319,9 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
         &["put", "--id", "apikey:customvendor:first"],
         &[
             ("Groups for this provider", b" \x1b[B\x1b[B\x1b[B \r", false),
-            ("Routing provider ids (", b"custom-route\r", false),
-            ("Save these provider defaults", b"y\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"custom-route\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
     );
@@ -356,8 +360,9 @@ fn registered_provider_default_no_stores_nothing_and_never_reads_the_value() {
         &["put", "--id", "apikey:declined"],
         &[
             ("Groups for this provider", b" \r", false),
-            ("Routing provider ids (", b"\r", false),
-            ("Save these provider defaults", b"\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"\r", false),
         ],
     );
     assert!(!screen.contains("Value (hidden)"), "{screen}");
@@ -370,15 +375,22 @@ fn registered_provider_default_no_stores_nothing_and_never_reads_the_value() {
 #[test]
 fn registered_provider_empty_answer_is_remembered_and_nonterminal_put_prints_a_hint() {
     let fixture = Fixture::new();
-    fixture.terminal(
+    let first_screen = fixture.terminal(
         &["put", "--id", "apikey:emptyanswer:first"],
         &[
             ("Groups for this provider", b"\r", false),
-            ("Routing provider ids (", b"\r", false),
-            ("Save these provider defaults", b"y\r", false),
+            ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+            ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b"\r", false),
+            ("Save these provider settings and continue?", b"y\r", false),
             ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
         ],
     );
+    for prompt in [
+        "Which request header carries the key?",
+        "Is the key sent as 'Bearer <key>' or by itself?",
+    ] {
+        assert!(!first_screen.contains(prompt), "{first_screen}");
+    }
     let screen = fixture.terminal(
         &["put", "--id", "apikey:emptyanswer:second"],
         &[("Value (hidden)", format!("{VALUE}\r").as_bytes(), true)],
@@ -388,6 +400,9 @@ fn registered_provider_empty_answer_is_remembered_and_nonterminal_put_prints_a_h
     assert_eq!(answer.len(), 1);
     assert!(answer[0].categories.is_empty());
     assert!(answer[0].provider_ids.is_empty());
+    assert!(answer[0].hosts.is_empty());
+    assert_eq!(answer[0].auth_header, None);
+    assert_eq!(answer[0].auth_scheme, None);
 
     let path = fixture.0.join("value");
     std::fs::write(&path, VALUE).unwrap();
@@ -422,6 +437,182 @@ fn registered_provider_empty_answer_is_remembered_and_nonterminal_put_prints_a_h
         store.get("apikey:nonterminal").unwrap().payload.expose(),
         VALUE.as_bytes()
     );
+}
+
+#[test]
+fn registered_provider_prompt_pins_descriptor_questions_and_canonicalizes_answers() {
+    for (service, choice, scheme) in [
+        ("prompt-bearer", b"\r".as_slice(), "bearer"),
+        ("prompt-raw", b"\x1b[B\r".as_slice(), "raw"),
+    ] {
+        let fixture = Fixture::new();
+        let id = format!("apikey:{service}");
+        let screen = fixture.terminal(
+            &["put", "--id", &id],
+            &[
+                ("Groups for this provider", b"\r", false),
+                ("Which models may this key run? Leave empty if unsure.", b"\r", false),
+                ("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.", b" B.example.com, a.example.com, b.example.com \r", false),
+                ("Which request header carries the key?", b"X-API-Key\r", false),
+                ("Is the key sent as 'Bearer <key>' or by itself?", choice, false),
+                ("Save these provider settings and continue?", b"y\r", false),
+                ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
+            ],
+        );
+        for choice in ["Bearer <key>", "The key by itself"] {
+            assert!(screen.contains(choice), "{screen}");
+        }
+        let rows = fixture.store().registered_providers().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hosts, ["a.example.com", "b.example.com"]);
+        assert_eq!(rows[0].auth_header.as_deref(), Some("x-api-key"));
+        assert_eq!(rows[0].auth_scheme.as_deref(), Some(scheme));
+    }
+}
+
+#[test]
+fn registered_provider_descriptor_flags_round_trip_and_omission_clears_settings() {
+    let fixture = Fixture::new();
+    let run = |args: &[&str]| {
+        let output = fixture.command(args).stdin(Stdio::null()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    for scheme in ["bearer", "raw"] {
+        run(&[
+            "provider",
+            "set",
+            "--service",
+            "custom-descriptor",
+            "--category",
+            "llm-provider",
+            "--provider-id",
+            "custom-route",
+            "--host",
+            " B.example.com, a.example.com ",
+            "--host",
+            "b.example.com",
+            "--auth-header",
+            "X-API-Key",
+            "--auth-scheme",
+            scheme,
+        ]);
+        assert_eq!(run(&["provider", "list"]), format!(
+            "SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID\ncustom-descriptor\t[\"llm-provider\"]\t[\"custom-route\"]\t[\"a.example.com\",\"b.example.com\"]\t{{\"header\":\"x-api-key\",\"scheme\":\"{scheme}\"}}\tnull\n"
+        ));
+    }
+    run(&["provider", "set", "--service", "custom-descriptor"]);
+    assert_eq!(run(&["provider", "list"]),
+        "SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID\ncustom-descriptor\t[]\t[]\t[]\tnull\tnull\n");
+}
+
+#[test]
+fn registered_provider_bad_descriptor_flags_are_refused_before_preflight_or_writes() {
+    let fixture = Fixture::new();
+    let before = fixture.store().audit_tip().unwrap();
+    let key_path = fixture.0.join("master.key");
+    let saved_key = fixture.0.join("saved.key");
+    std::fs::rename(&key_path, &saved_key).unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &[
+                "--host",
+                "https://bad.example.com",
+                "--auth-header",
+                "authorization",
+                "--auth-scheme",
+                "bearer",
+            ],
+            "https://bad.example.com",
+        ),
+        (
+            &[
+                "--host",
+                "bad.example.com:443",
+                "--auth-header",
+                "authorization",
+                "--auth-scheme",
+                "bearer",
+            ],
+            "bad.example.com:443",
+        ),
+        (
+            &[
+                "--host",
+                "*.example.com",
+                "--auth-header",
+                "authorization",
+                "--auth-scheme",
+                "bearer",
+            ],
+            "*.example.com",
+        ),
+        (
+            &[
+                "--host",
+                "a.example.com",
+                "--auth-header",
+                "Bad Header",
+                "--auth-scheme",
+                "bearer",
+            ],
+            "bad header",
+        ),
+        (
+            &[
+                "--host",
+                "a.example.com",
+                "--auth-header",
+                "authorization",
+                "--auth-scheme",
+                "Basic",
+            ],
+            "Basic",
+        ),
+        (
+            &["--host", "a.example.com"],
+            "hosts/auth (must be given together)",
+        ),
+        (
+            &["--auth-header", "authorization", "--auth-scheme", "bearer"],
+            "hosts/auth (must be given together)",
+        ),
+        (
+            &["--host", "a.example.com", "--auth-header", "authorization"],
+            "hosts/auth (must be given together)",
+        ),
+        (
+            &["--host", "a.example.com", "--auth-scheme", "bearer"],
+            "hosts/auth (must be given together)",
+        ),
+    ];
+    for (flags, bad_value) in cases {
+        let mut args = vec!["provider", "set", "--service", "invalid-descriptor"];
+        args.extend_from_slice(flags);
+        let output = fixture
+            .command(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("invalid provider") && stderr.contains(bad_value),
+            "{stderr}"
+        );
+        assert!(
+            !key_path.exists(),
+            "validation reached master-key preflight"
+        );
+    }
+    std::fs::rename(saved_key, key_path).unwrap();
+    let store = fixture.store();
+    assert!(store.registered_providers().unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), before);
 }
 
 #[test]
@@ -484,8 +675,8 @@ fn registered_provider_verbs_are_audited_idempotent_and_never_rewrite_existing_r
         assert_eq!(store.meta("apikey:registered:old").unwrap(), old_meta);
     }
     let output = run(&["provider", "list"]);
-    assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("registered\t[\"web-search\"]\t[\"registered-route\"]"));
+    assert_eq!(String::from_utf8_lossy(&output.stdout),
+        "SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID\nregistered\t[\"web-search\"]\t[\"registered-route\"]\t[]\tnull\tnull\n");
     put("apikey:registered:new");
     let output = run(&["list", "--json"]);
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

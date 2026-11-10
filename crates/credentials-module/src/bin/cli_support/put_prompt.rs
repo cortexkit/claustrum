@@ -218,7 +218,7 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         .collect();
     eprintln!("Routing provider ids tell routing which models the key may serve. A wrong id sends work to a key that refuses it; empty is the safe answer.");
     let raw: String = Input::with_theme(&theme)
-        .with_prompt("Routing provider ids (comma-separated, empty for none)")
+        .with_prompt("Which models may this key run? Leave empty if unsure.")
         .allow_empty(true)
         .validate_with(|value: &String| {
             let ids = routing_ids(value);
@@ -226,27 +226,54 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         })
         .interact_text()
         .map_err(prompt_error)?;
+    let raw_hosts: String = Input::with_theme(&theme)
+        .with_prompt("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_error)?;
+    let hosts = if raw_hosts.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![raw_hosts]
+    };
+    let (auth_header, auth_scheme) = if hosts.is_empty() {
+        (None, None)
+    } else {
+        let header: String = Input::with_theme(&theme)
+            .with_prompt("Which request header carries the key?")
+            .interact_text()
+            .map_err(prompt_error)?;
+        let scheme = Select::with_theme(&theme)
+            .with_prompt("Is the key sent as 'Bearer <key>' or by itself?")
+            .items(["Bearer <key>", "The key by itself"])
+            .default(0)
+            .interact()
+            .map_err(prompt_error)?;
+        (
+            Some(header),
+            Some(if scheme == 0 { "bearer" } else { "raw" }.to_string()),
+        )
+    };
+    let op = super::provider_set_op(
+        service.to_string(),
+        categories,
+        routing_ids(&raw),
+        credentials_core::store::RegisteredProviderSettings {
+            hosts,
+            auth_header,
+            auth_scheme,
+            fusiform_provider_id: None,
+        },
+    )?;
     if !Confirm::with_theme(&theme)
-        .with_prompt("Save these provider defaults and continue?")
+        .with_prompt("Save these provider settings and continue?")
         .default(false)
         .interact()
         .map_err(prompt_error)?
     {
         return Ok(false);
     }
-    super::commit_admin(
-        global,
-        credentials_core::admin_ops::AdminOpBody::ProviderSet {
-            v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
-            service: service.to_string(),
-            categories,
-            provider_ids: routing_ids(&raw),
-            hosts: None,
-            auth_header: None,
-            auth_scheme: None,
-            fusiform_provider_id: None,
-        },
-    )?;
+    super::commit_admin(global, op)?;
     Ok(true)
 }
 

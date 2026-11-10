@@ -6423,6 +6423,204 @@ fn enrollment_label_cli_sets_lists_and_clears_approved_name() {
 }
 
 #[test]
+fn enrollment_requested_grants_approval_uses_only_first_proposal_after_every_resume_path() {
+    use serde_json::json;
+    let vault = GrantCliVault::new("enrollment-requested-grants-first");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    assert!(vault
+        .run(&["set-category", "apikey:zai", "--set", ""])
+        .status
+        .success());
+    let first: Vec<credentials_core::enrollment::RequestedGrant> = serde_json::from_value(json!([
+        {"selector":{"category":"llm-provider"},"operation":"read"},
+        {"selector":{"exact":"apikey:zai"},"operation":"list"}
+    ]))
+    .unwrap();
+    let wider =
+        serde_json::from_value::<Vec<credentials_core::enrollment::RequestedGrant>>(json!([
+            {"selector":{"category":"browser-session"},"operation":"read"},
+            {"selector":{"exact":"apikey:openrouter"},"operation":"read"}
+        ]))
+        .unwrap();
+    let request = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let secret_hash = "a".repeat(64);
+        let request = store
+            .propose_enrollment_with_requested_grants_by(
+                None,
+                "plugin",
+                &secret_hash,
+                None,
+                Some(&first),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .propose_enrollment_with_requested_grants_by(
+                    None,
+                    "plugin",
+                    &secret_hash,
+                    Some("Later label"),
+                    Some(&wider)
+                )
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            store
+                .propose_enrollment_with_requested_grants_by(
+                    None,
+                    "plugin",
+                    &secret_hash,
+                    None,
+                    None
+                )
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            store
+                .propose_enrollment_with_display_name_by(
+                    None,
+                    "plugin",
+                    &secret_hash,
+                    Some("Another label")
+                )
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            store
+                .propose_enrollment_by(None, "plugin", &secret_hash)
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            store.propose_enrollment("plugin", &secret_hash).unwrap(),
+            request
+        );
+        request
+    };
+    for output in [
+        vault.run(&["enroll", "list"]),
+        vault.run(&[
+            "enroll",
+            "approve",
+            "--request-id",
+            &request.request_id,
+            "--grant-requested",
+            "--name",
+            "renamed-plugin",
+        ]),
+    ] {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(stdout.contains("read category:llm-provider"), "{stdout}");
+        assert!(stdout.contains("list exact:apikey:zai"), "{stdout}");
+        assert!(stdout.contains("reaches 0 credentials"), "{stdout}");
+        assert!(stdout.contains("reaches 1 credential"), "{stdout}");
+        assert!(
+            stderr.contains("ck auth reclassify --from-registry"),
+            "{stderr}"
+        );
+        assert!(!stdout.contains("browser-session"), "{stdout}");
+        assert!(!stdout.contains("apikey:openrouter"), "{stdout}");
+        assert!(!stdout.contains("Later label"), "{stdout}");
+    }
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let grants = store.list_read_grants().unwrap();
+    assert_eq!(grants.len(), 2);
+    for requested in &first {
+        let (kind, selector) = requested.selector.parts();
+        assert!(
+            grants.iter().any(|grant| grant.principal_kind == "enrolled"
+                && grant.principal_id == "renamed-plugin"
+                && grant.selector_kind == kind
+                && grant.selector == selector
+                && grant.operation == requested.operation),
+            "{grants:?}"
+        );
+    }
+    drop(store);
+    let listed = vault.run(&["grants"]);
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("renamed-plugin"), "{stdout}");
+    assert!(stdout.contains("llm-provider"), "{stdout}");
+    assert!(stdout.contains("apikey:zai"), "{stdout}");
+}
+
+#[test]
+fn enrollment_requested_grants_nonterminal_requires_choice_and_no_grants_skips_them() {
+    use serde_json::json;
+    let vault = GrantCliVault::new("enrollment-requested-grants-consent");
+    vault.bootstrap();
+    let requested =
+        serde_json::from_value::<Vec<credentials_core::enrollment::RequestedGrant>>(json!([
+            {"selector":{"category":"llm-provider"},"operation":"read"}
+        ]))
+        .unwrap();
+    let (request, before) = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let request = store
+            .propose_enrollment_with_requested_grants_by(
+                None,
+                "plugin",
+                &"a".repeat(64),
+                None,
+                Some(&requested),
+            )
+            .unwrap();
+        (request, store.audit_tip().unwrap())
+    };
+    for flags in [vec![], vec!["--grant-requested", "--no-grants"]] {
+        let mut args = vec!["enroll", "approve", "--request-id", &request.request_id];
+        args.extend(flags);
+        let output = vault.run(&args);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--grant-requested") && stderr.contains("--no-grants"),
+            "{stderr}"
+        );
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(store.list_read_grants().unwrap().is_empty());
+        let rows =
+            credentials_core::store::list_enrollments_read_only(&vault.data_dir.join("store.db"))
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "pending");
+    }
+    let approved = vault.run(&[
+        "enroll",
+        "approve",
+        "--request-id",
+        &request.request_id,
+        "--no-grants",
+    ]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    assert!(store.list_read_grants().unwrap().is_empty());
+    assert_eq!(
+        store.audit_tip().unwrap().unwrap().0,
+        before.map_or(0, |tip| tip.0) + 1
+    );
+    let rows =
+        credentials_core::store::list_enrollments_read_only(&vault.data_dir.join("store.db"))
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "plugin");
+    assert_eq!(rows[0].state, "awaiting-poll");
+}
+
+#[test]
 fn enrollment_display_name_cli_reviews_keeps_overrides_and_refuses_empty() {
     let vault = GrantCliVault::new("enrollment-display-names");
     vault.bootstrap();

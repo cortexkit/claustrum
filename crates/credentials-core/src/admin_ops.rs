@@ -187,6 +187,9 @@ pub enum AdminOpBody {
         /// Explicitly allow the new consumer to inherit existing name-bound grants.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_grants: bool,
+        /// Apply only the permissions stored on the pending request, never caller-supplied grants.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        grant_requested: bool,
     },
     /// Set or clear the display name of a live, approved enrollment.
     #[serde(rename = "admin.enroll_label")]
@@ -572,6 +575,7 @@ impl std::fmt::Debug for AdminOpBody {
                 final_name,
                 keep_grants,
                 display_name,
+                grant_requested,
             } => f
                 .debug_struct("EnrollApprove")
                 .field("v", v)
@@ -579,6 +583,7 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("final_name", final_name)
                 .field("display_name", display_name)
                 .field("keep_grants", keep_grants)
+                .field("grant_requested", grant_requested)
                 .finish(),
             AdminOpBody::EnrollLabel {
                 v,
@@ -1362,13 +1367,15 @@ pub fn apply(
             final_name,
             keep_grants,
             display_name,
+            grant_requested,
             ..
         } => {
-            let (enrollment_id, display_name) = store.approve_enrollment_with_display_name(
+            let (enrollment_id, display_name) = store.approve_enrollment_with_requested_grants(
                 &request_id,
                 &final_name,
                 keep_grants,
                 display_name.as_deref(),
+                grant_requested,
                 actor,
             )?;
             // The token is deliberately absent: approval admits a NAME, and only the

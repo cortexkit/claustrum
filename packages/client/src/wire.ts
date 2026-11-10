@@ -479,12 +479,25 @@ export class ClaustrumClient {
    * Optional `displayName` proposes a person-facing label for operator approval. It
    * needs a vault build with enrollment display-name support; an older vault refuses
    * the `display_name` field as `invalid_params`. Omit it for older vaults.
+   * Optional `requestedGrants` proposes read/list permissions for operator review.
+   * Older vaults refuse `requested_grants` as `invalid_params`. Callers that want to
+   * support them must choose to retry without the field themselves; the client never
+   * silently drops permissions, since malformed grants have the same refusal code.
    */
-  async enrollPropose(input: { name: string; requestSecretHash: string; displayName?: string }): Promise<{ requestId: string }> {
+  async enrollPropose(input: {
+    name: string
+    requestSecretHash: string
+    displayName?: string
+    requestedGrants?: ReadonlyArray<{
+      selector: { category: string; exact?: never } | { exact: string; category?: never }
+      operation: 'read' | 'list'
+    }>
+  }): Promise<{ requestId: string }> {
     const response = await this.#call('auth.enroll_propose', {
       proposed_name: input.name,
       request_secret_hash: input.requestSecretHash,
       ...(input.displayName !== undefined ? { display_name: input.displayName } : {}),
+      ...(input.requestedGrants !== undefined ? { requested_grants: input.requestedGrants } : {}),
     })
     const result = decodeEnrollmentResult(response, this.#logger)
     const requestId = result.request_id

@@ -2,6 +2,7 @@
   "operations": [
     {
       "op": "admin.enroll_approve",
+      "requested_grants_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"grant_requested\":true}",
       "display_name_success": "{\"result\":{\"display_name\":\"Approved Pi label\",\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}",
       "display_name_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"display_name\":\"Approved Pi label\"}",
       "request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\"}",
@@ -41,6 +42,7 @@
     },
     {
       "op": "auth.enroll_propose",
+      "requested_grants_request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"requested_grants\":[{\"selector\":{\"category\":\"llm-provider\"},\"operation\":\"read\"}]}",
       "display_name_request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"display_name\":\"Claude sign-in for Pi\"}",
       "request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
       "success": [

@@ -195,6 +195,12 @@ crates/credentials-core/src/refresh_adapters/xai.rs AUTHORIZE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_001 x.test
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_002 y.test
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_003 z.test
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_004 a.test
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_005 a.test
+crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_006 z.test
 crates/credentials-core/src/store_secret_extended_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_extended_tests.rs INLINE_002 y.test:443
 crates/credentials-core/src/store_secret_extended_tests.rs INLINE_003 x.test:443

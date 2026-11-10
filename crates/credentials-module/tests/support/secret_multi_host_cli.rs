@@ -444,3 +444,50 @@ fn secret_multi_host_list_reads_step_34_and_mixed_migrated_scopes_without_lease(
     ));
     assert!(!vault.key_path.exists());
 }
+
+#[test]
+fn secret_multi_host_operator_list_vectors_use_the_real_renderer() {
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../credentials-core/tests/vectors/multi-host/secret-list-v2.json"
+    ))
+    .unwrap();
+    let mut checked = 0;
+    for case in corpus["cases"].as_array().unwrap() {
+        if case["operation"] != "ck auth secret list" {
+            continue;
+        }
+        let label = case["case"].as_str().unwrap();
+        let vault = GrantCliVault::new(label);
+        vault.bootstrap();
+        stdout_ok(vault.run(&["secret", "multi-host", "on"]));
+        let setup = &case["setup"];
+        let kind = setup["kind"].as_str().unwrap();
+        let scope = &setup["stored_scope"];
+        let raw = setup["scope_json"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                scope[if kind == "agent_api_key" {
+                    "rules"
+                } else {
+                    "origins"
+                }]
+                .to_string()
+            });
+        let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+        conn.execute(
+            "INSERT INTO agent_secrets (name,kind,incarnation,state,location,record_version,key_id,envelope,created_at_ms,scope_json) VALUES (?1,?2,'00000000000000000000000000000149','active',?3,1,'test-key',x'00',10,?4)",
+            rusqlite::params![setup["name"].as_str().unwrap(),kind,
+                (kind == "agent_api_key").then(||scope["location"].as_str().unwrap_or("header:X-Api-Key")),raw],
+        ).unwrap();
+        drop(conn);
+        let expected = case["expect"]["line"].as_str().unwrap();
+        assert_eq!(
+            stdout_ok(vault.run(&["secret", "list"])),
+            format!("{expected}\n"),
+            "{label}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 3, "every operator-list vector must reach the CLI");
+}

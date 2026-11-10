@@ -13975,7 +13975,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            39,
+            40,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16957,6 +16957,9 @@ mod migration_10_tests {
                 column("proposer_kind", "TEXT", false, None, false),
                 column("proposer_id", "TEXT", false, None, false),
                 column("display_name", "TEXT", false, None, false),
+                // Migration 40: nullable, because a proposal that names no grants
+                // stores none.
+                column("requested_grants_json", "TEXT", false, None, false),
             ],
             "everything an approval fills in is nullable at proposal time"
         );

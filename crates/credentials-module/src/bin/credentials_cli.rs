@@ -6228,8 +6228,7 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
             row.state,
             proposer,
             row.name,
-            row.display_name
-                .as_ref()
+            row.effective_display_name()
                 .map(|name| format!("  display name: \"{}\"", name.escape_debug()))
                 .unwrap_or_default(),
             width = width,

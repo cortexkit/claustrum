@@ -6331,6 +6331,104 @@ fn enrollment_regression_retained_grants_require_flag_and_revoke_lists_removed_g
 }
 
 #[test]
+fn enrollment_default_display_name_cli_stored_label_wins_and_clear_restores_default() {
+    let vault = GrantCliVault::new("enrollment-default-display-name");
+    vault.bootstrap();
+    let name = "anthropic-auth-pi";
+    let request = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        store.propose_enrollment(name, &"a".repeat(64)).unwrap()
+    };
+    let approved = vault.run(&["enroll", "approve", "--request-id", &request.request_id]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&approved.stdout).contains("display name:"));
+
+    for (index, stored) in [None, Some("My Claude"), None].into_iter().enumerate() {
+        if let Some(label) = stored {
+            let labelled = vault.run(&["enroll", "label", "--name", name, "--display-name", label]);
+            assert!(
+                labelled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&labelled.stderr)
+            );
+        } else if index > 0 {
+            let cleared = vault.run(&["enroll", "label", "--name", name, "--clear"]);
+            assert!(
+                cleared.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cleared.stderr)
+            );
+        }
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        let before =
+            credentials_core::store::list_enrollments_read_only(&vault.data_dir.join("store.db"))
+                .unwrap();
+        assert_eq!(before[0].display_name.as_deref(), stored);
+        let tip = store.audit_tip().unwrap();
+        let listed = vault.run(&["enroll", "list"]);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        let expected = stored.unwrap_or("Claude sign-in for Pi");
+        assert!(
+            stdout.contains(&format!("display name: \"{expected}\"")),
+            "{stdout}"
+        );
+        assert_eq!(
+            credentials_core::store::list_enrollments_read_only(&vault.data_dir.join("store.db"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+}
+
+#[test]
+fn enrollment_default_display_name_cli_omits_pending_and_similar_names() {
+    let vault = GrantCliVault::new("enrollment-default-exact-name");
+    vault.bootstrap();
+    for name in [
+        "anthropic-auth-pi",
+        "openai-auth-opencode-x",
+        "xopenai-auth-opencode",
+    ] {
+        let request = {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            store.propose_enrollment(name, &"a".repeat(64)).unwrap()
+        };
+        let listed = vault.run(&["enroll", "list"]);
+        assert!(listed.status.success());
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        let pending = stdout
+            .lines()
+            .find(|line| line.contains(&request.request_id))
+            .unwrap();
+        assert!(pending.contains("pending"), "{pending}");
+        assert!(!pending.contains("display name:"), "{pending}");
+        let approved = vault.run(&["enroll", "approve", "--request-id", &request.request_id]);
+        assert!(
+            approved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approved.stderr)
+        );
+        if name != "anthropic-auth-pi" {
+            let listed = vault.run(&["enroll", "list"]);
+            assert!(listed.status.success());
+            let stdout = String::from_utf8_lossy(&listed.stdout);
+            let row = stdout.lines().find(|line| line.starts_with(name)).unwrap();
+            assert!(!row.contains("display name:"), "{row}");
+        }
+    }
+}
+
+#[test]
 fn enrollment_label_cli_sets_lists_and_clears_approved_name() {
     let vault = GrantCliVault::new("enrollment-label-command");
     vault.bootstrap();

@@ -51,7 +51,14 @@ pub(super) fn permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<V
                     .query_row(
                         "SELECT display_name FROM enrolled_consumers WHERE name=?1 AND revoked_at_ms IS NULL",
                         [&grant.principal_id],
-                        |row| row.get(0),
+                        |row| {
+                            let label: Option<String> = row.get(0)?;
+                            Ok(crate::display_name::effective_enrollment_display_name(
+                                &grant.principal_id,
+                                label.as_deref(),
+                            )
+                            .map(str::to_owned))
+                        },
                     )
                     .optional()?
                     .flatten();

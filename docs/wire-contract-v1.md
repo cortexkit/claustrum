@@ -2033,8 +2033,9 @@ Each stored selector/operation grant is one row:
 
 A `reserved:<id>` principal becomes `holder: {kind: "module", module_id: "<id>"}`;
 an `enrolled:<name>` principal becomes `holder: {kind: "enrolled", name: "<name>"}`.
-When that enrollment has an approved display name, its holder also includes
-`"label":"<approved name>"`; otherwise the `label` key is absent. Module holders
+When that enrollment has a display name, its holder also includes
+`"label":"<display name>"`; otherwise the `label` key is absent. When none was set,
+the label may come from a fixed table of CortexKit plugin names. Module holders
 never receive a vault label: apps get module names from the module's catalog entry.
 Neither holder includes its principal prefix. Other principal kinds are not listed.
 The `scope` is the stored operation: `read`, `list`, `sign`, `open`, `seal`,

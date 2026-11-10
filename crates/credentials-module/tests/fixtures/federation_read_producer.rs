@@ -95,7 +95,7 @@ mod federation_read_fixture {
         let routes = Arc::new(RouteEpochs::default());
         bind_reserved_route(&surface, &admin, &routes, 100, 1, "broca", "").await;
         let mut cases = Vec::new();
-        for adapter in ["anthropic", "antigravity"] {
+        for (index, adapter) in ["anthropic", "antigravity"].into_iter().enumerate() {
             let id = format!("oauth:{adapter}:fixture");
             let identity = RecordIdentity {
                 account_id: Some(format!("fixture-{adapter}-account")),
@@ -148,6 +148,10 @@ mod federation_read_fixture {
                     categories: vec!["llm-provider".into()],
                 })
                 .unwrap();
+            // The inventory serves each row's incarnation and digests it into `view`;
+            // a fixed value keeps the fixture's bytes the same on every run.
+            b.store
+                .force_remote_incarnation_for_test(&id, &format!("{:032x}", index + 1));
             b.store
                 .create_read_grant_audited(
                     "reserved",

@@ -458,10 +458,13 @@
             ],
             "email": "fixture@example.invalid",
             "id": "oauth:anthropic:fixture",
+            "incarnation": "00000000000000000000000000000001",
             "operations": [
               "read"
             ],
             "org_name": "Fixture Team",
+            "plan_tier_observed_at_ms": null,
+            "provider": "anthropic",
             "provider_ids": [],
             "record_version": 1,
             "refresh_adapter": "anthropic",
@@ -479,10 +482,13 @@
             ],
             "email": "fixture@example.invalid",
             "id": "oauth:antigravity:fixture",
+            "incarnation": "00000000000000000000000000000002",
             "operations": [
               "read"
             ],
             "org_name": "Fixture Team",
+            "plan_tier_observed_at_ms": null,
+            "provider": null,
             "provider_ids": [],
             "record_version": 1,
             "refresh_adapter": "antigravity",
@@ -504,7 +510,7 @@
           }
         ],
         "grants": 2,
-        "view": "gRECeJo1V/OtnToSbW4H4UUIbXvzDtvCxS4dffY6/wE="
+        "view": "zL8UfP8t74tTEw6DBFTogvmM3iOPjcBnllAuJ1zMDSA="
       }
     },
     "refusal": {

@@ -290,6 +290,23 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
+    /// Fix a remote row's incarnation, which `remote_add_audited` mints at random, so a
+    /// wire fixture built from real replies is byte-identical on every run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_remote_incarnation_for_test(&self, credential_id: &str, incarnation: &str) {
+        assert_eq!(incarnation.len(), 32);
+        assert!(incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let changed = self
+            .fenced_write(|tx| {
+                tx.execute(
+                    "UPDATE remote_records SET incarnation = ?1 WHERE credential_id = ?2",
+                    rusqlite::params![incarnation, credential_id],
+                )
+            })
+            .unwrap();
+        assert_eq!(changed, 1, "no remote record {credential_id}");
+    }
+
     /// Register a remote record from one validated home reply, with a fresh
     /// incarnation, and seed this vault's categories for it from that reply.
     ///

@@ -102,6 +102,10 @@ impl ModelVendor {
 }
 
 const LLM: &[CredentialCategory] = &[CredentialCategory::LlmProvider];
+const LLM_AND_MEDIA: &[CredentialCategory] = &[
+    CredentialCategory::LlmProvider,
+    CredentialCategory::MediaProvider,
+];
 const LLM_AND_WEB_SEARCH: &[CredentialCategory] = &[
     CredentialCategory::LlmProvider,
     CredentialCategory::WebSearch,
@@ -452,7 +456,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             url: "https://api.openai.com/v1/models",
             auth_header: AuthHeaderScheme::Bearer,
         },
-        categories: LLM,
+        categories: LLM_AND_MEDIA,
         serves: &[OpenAI],
         account_id_prompt: None,
     },
@@ -467,7 +471,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             url: "https://generativelanguage.googleapis.com/v1beta/models",
             auth_header: AuthHeaderScheme::XGoogApiKey,
         },
-        categories: LLM,
+        categories: LLM_AND_MEDIA,
         serves: &[Google],
         account_id_prompt: None,
     },
@@ -2093,12 +2097,13 @@ mod tests {
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
                 assert_eq!(default_provider_ids(&id), *ids, "{id}");
                 assert_eq!(provider(&id), Some(*key));
-                // Media keys stay hand-stamped until routing stops choosing an
-                // unfunded one for speech jobs, so no catalog row defaults to it.
-                assert!(
-                    !category_defaults(&id)
+                // Only the two speech and media vendors colliculus uses get the
+                // media group; routing parks an unfunded key for media jobs.
+                assert_eq!(
+                    category_defaults(&id)
                         .iter()
                         .any(|category| category == "media-provider"),
+                    matches!(*key, "openai" | "google"),
                     "{id}"
                 );
             }
@@ -2321,7 +2326,12 @@ mod tests {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
-                assert_eq!(category_defaults(&id), vec!["llm-provider"], "{id}");
+                let expected = if matches!(*key, "openai" | "google") {
+                    vec!["llm-provider", "media-provider"]
+                } else {
+                    vec!["llm-provider"]
+                };
+                assert_eq!(category_defaults(&id), expected, "{id}");
             }
         }
         // Every row must be listed somewhere, so a new row cannot land uncategorised

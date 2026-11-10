@@ -9096,10 +9096,10 @@ fn provider_catalog_put_defaults_explicit_override_and_replace_preserve_stored_i
 }
 
 #[test]
-fn provider_catalog_labelled_put_stores_the_rows_groups_and_rotation_keeps_a_stored_set() {
-    let vault = GrantCliVault::new("catalog-labelled-groups");
+fn provider_catalog_openai_put_stores_both_model_and_media_groups() {
+    let vault = GrantCliVault::new("catalog-openai-media");
     vault.bootstrap();
-    let id = "apikey:deepseek:work";
+    let id = "apikey:openai:media";
     let payload = payload_file("catalog-test-key");
     let out = vault.run(&["put", "--id", id, "--payload-file", &payload]);
     assert!(
@@ -9114,7 +9114,7 @@ fn provider_catalog_labelled_put_stores_the_rows_groups_and_rotation_keeps_a_sto
     };
     assert_eq!(
         rows()["categories"],
-        serde_json::json!(["llm-provider", "web-search"])
+        serde_json::json!(["llm-provider", "media-provider"])
     );
     // A deliberate stored classification is not re-derived on rotation or reads.
     assert!(vault

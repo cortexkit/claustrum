@@ -111,10 +111,10 @@ async fn remote_watch_stream_sharing_decodes_repair_after_callosum_failure_witho
     callosum.answer(TARGET_MODULE, READ, Reply::Ok(snapshot("pair-2")));
     callosum.answer(TARGET_MODULE, WATCH, Reply::Watch(snapshot("pair-2")));
     let terminal = wait_for_signal(rx.recv()).await.unwrap();
-    assert_eq!(terminal.header.ty, FrameType::Response);
+    assert_eq!(terminal.header.ty, FrameType::Error);
     assert_eq!(
         serde_json::from_slice::<Value>(&terminal.body).unwrap(),
-        json!({"result":{"error":{"code":"not_found","class":"permanent"}}})
+        json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
     );
     assert!(!writes.has_changed().unwrap());
     assert_eq!(store.audit_tip().unwrap(), audit);

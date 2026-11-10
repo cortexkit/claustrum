@@ -410,6 +410,8 @@ pub enum Reply {
     /// a test puts a real home vault behind the stand-in: the handler calls the home
     /// and returns what it answered, so the requester's fetch crosses a real route.
     Handler(Responder),
+    /// Relay a real home's watch through the same socket as ordinary routed calls.
+    HomeWatch(HomeWatchRelay),
     /// Accept the request, signal [`Held::arrived`], and answer only when the test
     /// calls [`Held::release`]. This is how a test orders its steps against an
     /// outstanding call without sleeping: it knows the call is in flight, and it
@@ -512,6 +514,120 @@ pub type ResponderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Re
 /// A reply computed from a request's params. See [`Reply::Handler`].
 #[derive(Clone)]
 pub struct Responder(pub Arc<dyn Fn(Value) -> ResponderFuture + Send + Sync>);
+
+type RelayFence = tokio::sync::oneshot::Sender<()>;
+
+#[derive(Clone)]
+pub struct HomeWatchRelay {
+    home: Arc<claustrum_module_probe::federation::HomeVault>,
+    member: String,
+    runtime: tokio::runtime::Handle,
+    frames: Arc<Mutex<Vec<Frame>>>,
+    fences: Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<RelayFence>>>>,
+}
+
+impl std::fmt::Debug for HomeWatchRelay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HomeWatchRelay").finish_non_exhaustive()
+    }
+}
+
+impl HomeWatchRelay {
+    pub fn new(home: Arc<claustrum_module_probe::federation::HomeVault>, member: &str) -> Self {
+        Self {
+            home,
+            member: member.into(),
+            runtime: tokio::runtime::Handle::current(),
+            frames: Arc::default(),
+            fences: Arc::default(),
+        }
+    }
+
+    pub fn frames(&self) -> Vec<Frame> {
+        self.frames.lock().unwrap().clone()
+    }
+
+    /// A home cycle can finish before its frames reach the socket runtime. Fence
+    /// that relay queue before tests assert the cycle emitted no snapshot.
+    pub async fn fence(&self) {
+        let senders = {
+            let mut senders = self.fences.lock().unwrap();
+            senders.retain(|sender| !sender.is_closed());
+            senders.clone()
+        };
+        assert!(!senders.is_empty(), "no live home relay to fence");
+        for sender in senders {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            sender.send(tx).expect("live relay");
+            wait_for_signal(rx).await.expect("relay fence");
+        }
+    }
+}
+
+pub fn reexport_home_watch_frame(home_frame: Frame) -> Frame {
+    let header = home_frame.header;
+    // Callosum fed-reexport-watch-v1.0 §8.9 drops a Response body on completion.
+    // relayed_module_error_body preserves ordinary errors; reserved_module_error_body
+    // wraps fed_ codes so a module cannot impersonate a federation refusal.
+    match header.ty {
+        FrameType::Response => watch_frame(header.channel, header.epoch, header.corr, None),
+        FrameType::Error => {
+            let body: Value = serde_json::from_slice(&home_frame.body).unwrap();
+            let Some(code) = body["code"]
+                .as_str()
+                .filter(|code| code.starts_with("fed_"))
+            else {
+                return home_frame;
+            };
+            #[derive(serde::Serialize)]
+            struct Detail<'a> {
+                code: &'a str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                message: Option<&'a str>,
+            }
+            #[derive(serde::Serialize)]
+            struct ReservedError<'a> {
+                code: &'a str,
+                message: &'a str,
+                detail: Detail<'a>,
+            }
+            let wrapped = ReservedError {
+                code: "executor_error",
+                message: "module used a reserved federation error code",
+                detail: Detail {
+                    code,
+                    message: body["message"].as_str(),
+                },
+            };
+            Frame::build(
+                FrameType::Error,
+                Flags::new(false, Priority::Interactive, false),
+                header.channel,
+                header.epoch,
+                header.corr,
+                serde_json::to_vec(&wrapped).unwrap(),
+            )
+            .unwrap()
+        }
+        _ => home_frame,
+    }
+}
+
+struct LiveHomeWatch {
+    relay: HomeWatchRelay,
+    header: subc_protocol::EnvelopeHeader,
+    forward: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LiveHomeWatch {
+    fn drop(&mut self) {
+        self.relay
+            .home
+            .remote_watches
+            .cancel(self.header.channel, self.header.corr);
+        self.forward.abort();
+    }
+}
 
 impl std::fmt::Debug for Responder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1042,6 +1158,7 @@ async fn serve_one(
     // Requests a test answered with `Reply::Stall`: recorded and never replied to.
     let mut stalled: Vec<(u16, u32, u64)> = Vec::new();
     let mut watches = HashMap::<(u16, u64), u32>::new();
+    let mut home_watches = HashMap::<(u16, u64), LiveHomeWatch>::new();
     // Tests waiting for this connection to end after `close_connections`.
     let mut closing: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
     let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
@@ -1108,6 +1225,7 @@ async fn serve_one(
                             .collect();
                         for channel in &channels {
                             watches.retain(|(on, _), _| on != channel);
+                            home_watches.retain(|(on, _), _| on != channel);
                             open_routes.remove(channel);
                             let epoch = route_epochs.remove(channel).unwrap_or(1);
                             closed_routes.insert(*channel, (target.clone(), epoch));
@@ -1132,6 +1250,7 @@ async fn serve_one(
             }
         };
         if frame.header.ty == FrameType::Cancel {
+            home_watches.remove(&(frame.header.channel, frame.header.corr));
             if watches
                 .remove(&(frame.header.channel, frame.header.corr))
                 .is_some()
@@ -1306,6 +1425,50 @@ async fn serve_one(
             continue;
         };
         match reply {
+            Reply::HomeWatch(relay) => {
+                let header = frame.header;
+                let pending = relay.home.remote_watches.register(header);
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(32);
+                let home = Arc::clone(&relay.home);
+                let member = relay.member.clone();
+                relay.runtime.spawn(async move {
+                    home.remote_watches
+                        .open(&home, pending, &tx, header, &member, &params)
+                        .await
+                        .expect("home watch open");
+                });
+                let writer = Arc::clone(&writer);
+                let observed = Arc::clone(&relay.frames);
+                let (fence_tx, mut fence_rx) = tokio::sync::mpsc::unbounded_channel::<RelayFence>();
+                relay.fences.lock().unwrap().push(fence_tx);
+                let forward = tokio::spawn(async move {
+                    loop {
+                        let home_frame = tokio::select! {
+                            biased;
+                            frame = rx.recv() => match frame { Some(frame) => frame, None => break },
+                            Some(fence) = fence_rx.recv() => { let _ = fence.send(()); continue; }
+                        };
+                        observed.lock().unwrap().push(home_frame.clone());
+                        let forwarded = reexport_home_watch_frame(home_frame);
+                        let terminal = forwarded.header.ty != FrameType::StreamData;
+                        if write_frame(&mut *writer.lock().await, &forwarded)
+                            .await
+                            .is_err()
+                            || terminal
+                        {
+                            break;
+                        }
+                    }
+                });
+                home_watches.insert(
+                    (header.channel, header.corr),
+                    LiveHomeWatch {
+                        relay,
+                        header,
+                        forward,
+                    },
+                );
+            }
             Reply::Watch(body) => {
                 watches.insert(
                     (frame.header.channel, frame.header.corr),

@@ -44,6 +44,9 @@ mod home_watch_stream;
 #[path = "federation/member_watch.rs"]
 mod member_watch;
 
+#[path = "federation/two_vault_lifecycle.rs"]
+mod two_vault_lifecycle;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

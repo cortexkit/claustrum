@@ -78,9 +78,9 @@ pub struct RemoteWatchHub {
     pub(crate) before_checks: OnceLock<super::ingress::IssueAuditGate>,
     #[cfg(test)]
     pub(crate) completed: tokio::sync::Notify,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) waking: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) refreshed: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     pub(crate) before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
@@ -97,9 +97,9 @@ impl Default for RemoteWatchHub {
             before_checks: OnceLock::new(),
             #[cfg(test)]
             completed: tokio::sync::Notify::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             waking: Arc::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             refreshed: Arc::default(),
             #[cfg(test)]
             before_projection: Arc::default(),
@@ -184,6 +184,18 @@ impl Registry {
 }
 
 impl RemoteWatchHub {
+    /// Let socket integration tests advance coalescing only after a stream wakes.
+    #[cfg(feature = "test-support")]
+    pub async fn waking_for_test(&self) {
+        self.waking.notified().await;
+    }
+
+    /// Let integration tests observe an inventory re-read even if nothing changed.
+    #[cfg(feature = "test-support")]
+    pub async fn refreshed_for_test(&self) {
+        self.refreshed.notified().await;
+    }
+
     /// No I/O: the frame loop installs this before it can read a following Cancel.
     pub fn register(&self, header: EnvelopeHeader) -> PendingOpen {
         let pending = PendingOpen {
@@ -418,9 +430,9 @@ impl RemoteWatchHub {
                     writer: writer.clone(),
                     header,
                     watch,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     waking: Arc::clone(&self.waking),
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     refreshed: Arc::clone(&self.refreshed),
                     #[cfg(test)]
                     before_projection: Arc::clone(&self.before_projection),
@@ -447,9 +459,9 @@ struct Subscription {
     writer: mpsc::Sender<Frame>,
     header: EnvelopeHeader,
     watch: PreparedWatch,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     waking: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     refreshed: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
@@ -557,7 +569,7 @@ impl Subscription {
                     _ = timer.tick() => {}
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.waking.notify_one();
             tokio::select! {
                 biased;
@@ -593,7 +605,7 @@ impl Subscription {
                 result = pairings.changed() => { if result.is_err() { break; } else { continue; } }
                 result = cycle => { if result.is_err() { break; } }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.refreshed.notify_one();
         }
     }

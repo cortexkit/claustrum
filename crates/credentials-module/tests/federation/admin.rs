@@ -166,7 +166,7 @@ impl Vault {
     }
 }
 
-async fn run_on(admin: &AdminSurface, op: &AdminOpBody) -> AdminOutcome {
+pub(super) async fn run_on(admin: &AdminSurface, op: &AdminOpBody) -> AdminOutcome {
     let channel = CHANNEL.fetch_add(1, Ordering::Relaxed);
     admin.record_bind_at(channel, 0, Principal::Direct, "");
     let AdminOutcome::Challenge { nonce_hex, .. } =

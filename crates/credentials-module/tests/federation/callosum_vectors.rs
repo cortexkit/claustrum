@@ -1,4 +1,4 @@
-//! The vault's decoders for callosum's two discovery replies, checked against callosum's
+//! The vault's decoders for callosum's discovery replies, checked against callosum's
 //! own published vectors (see `tests/fixtures/callosum/VENDORED.md`).
 //!
 //! The decoders in `federation::ingress` were written from callosum's described format.
@@ -52,6 +52,19 @@ fn the_vendored_vectors_are_the_bytes_callosum_published() {
         sha256_hex(PEER_KEYS),
         "8b23d3ab3a9827e4d83584ca441ea84201979ca61cbcbf1560be0fca320ef805",
         "peer-keys vectors must match VENDORED.md"
+    );
+    assert_eq!(
+        sha256_hex(include_bytes!(
+            "../fixtures/callosum/fed-reexport-watch/local.json"
+        )),
+        "d235fcedee29caaf257c984edaa0c4883e19951585acd11a4a8a0991eb19d647",
+        "fed-reexport-watch vectors must match VENDORED.md"
+    );
+    assert_eq!(
+        sha256_hex(include_bytes!(
+            "../fixtures/callosum/fed-reexport-watch/README.md"
+        )),
+        "322215e1f2c654fae79aed04468cbbe75e1176e5c9b3651da1b80761b0c4435b"
     );
 }
 

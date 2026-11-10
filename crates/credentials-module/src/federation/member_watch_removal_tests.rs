@@ -156,89 +156,116 @@ async fn member_pending_removal_blocks_streams_retries_on_inventory_and_newer_pa
     );
 }
 
-#[test]
-fn member_callosum_ending_vectors_classify_removal() {
-    // Verbatim body_json from Callosum fed-reexport-watch-v1.0, commit
-    // 1c9d715de67ee705aa2d54155adb6a770e26760c,
-    // test-vectors/fed-reexport-watch-v1/local.json; each row names its case.
-    let cases = [
-        (
-            "cap_refusal",
-            r#"{"code":"fed_subscription_limit","message":"peer subscription cap reached"}"#,
-            false,
-        ),
-        (
-            "module_error",
-            r#"{"code":"denied","detail":{"scope":"a"},"message":"private"}"#,
-            false,
-        ),
-        (
-            "lagged",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"lagged"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-        (
-            "module_restarted",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"module_restarted"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-        (
-            "not_exposed",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"not_exposed"},"message":"remote subscription ended"}"#,
-            true,
-        ),
-        (
-            "revoked",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"revoked"},"message":"remote subscription ended"}"#,
-            true,
-        ),
-        (
-            "rotating",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"rotating"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-        (
-            "draining",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"draining"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-        (
-            "future_reason",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"future_reason"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-        (
-            "session_closed",
-            r#"{"code":"fed_subscription_ended","detail":{"reason":"session_closed"},"message":"remote subscription ended"}"#,
-            false,
-        ),
-    ];
-    for (case, body, removes) in cases {
-        let body: Value = serde_json::from_str(body).unwrap();
-        let event = SubscriptionEvent::Error {
-            code: body["code"].as_str().unwrap().into(),
-            message: body["message"].as_str().unwrap().into(),
-            detail: body.get("detail").cloned(),
+#[tokio::test]
+async fn member_callosum_ending_vectors_classify_removal() {
+    use subc_protocol::{Flags, Frame, FrameType, Priority};
+
+    let cases: Vec<Value> = serde_json::from_slice(include_bytes!(
+        "../../tests/fixtures/callosum/fed-reexport-watch/local.json"
+    ))
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for row in cases {
+        let case = row["case"].as_str().unwrap();
+        assert!(seen.insert(case.to_string()), "duplicate case {case}");
+        let (send, mut subscription) = super::super::outbound::subscription_for_test().await;
+        if case == "open" {
+            assert_eq!(row["local_frames"], json!([]));
+            // Opening holds the subscription without inventing a data or end event.
+            tokio::select! {
+                biased;
+                event = subscription.next_event() => panic!("open produced {event:?}"),
+                () = std::future::ready(()) => {},
+            }
+            continue;
+        }
+        let kind = match case {
+            "notice" => FrameType::StreamData,
+            "completed" | "unsubscribed" => FrameType::StreamEnd,
+            "cap_refusal" | "module_error" | "lagged" | "module_restarted" | "not_exposed"
+            | "revoked" | "rotating" | "draining" | "future_reason" | "session_closed" => {
+                FrameType::Error
+            }
+            other => panic!("unclassified Callosum case {other}"),
+        };
+        assert_eq!(row["frame_type"], format!("{kind:?}"), "{case}");
+        let body_hex = row["body_hex"].as_str().unwrap();
+        assert_eq!(body_hex.len() % 2, 0, "{case}");
+        let body = body_hex
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let frame = Frame::build(
+            kind,
+            Flags::new(false, Priority::Interactive, false),
+            1,
+            1,
+            1,
+            body,
+        )
+        .unwrap();
+        send.send(Ok(frame)).unwrap();
+        let event = subscription.next_event().await.unwrap();
+        let ending = match kind {
+            FrameType::StreamData => {
+                assert_eq!(
+                    event,
+                    SubscriptionEvent::Data(json!({"snapshot": 1})),
+                    "{case}"
+                );
+                let SubscriptionEvent::Data(body) = event else {
+                    unreachable!()
+                };
+                // Callosum's synthetic module notice is not a vault snapshot.
+                assert!(
+                    decode_notice(HOME, body, &Logged::default()).is_none(),
+                    "{case}"
+                );
+                SessionEnd::Undecodable
+            }
+            FrameType::StreamEnd => {
+                assert_eq!(event, SubscriptionEvent::End, "{case}");
+                SessionEnd::Terminal(event)
+            }
+            FrameType::Error => {
+                let body = &row["body_json"];
+                assert_eq!(
+                    event,
+                    SubscriptionEvent::Error {
+                        code: body["code"].as_str().unwrap().into(),
+                        message: body["message"].as_str().unwrap().into(),
+                        detail: body.get("detail").cloned(),
+                    },
+                    "{case}"
+                );
+                SessionEnd::Terminal(event)
+            }
+            _ => unreachable!(),
         };
         assert_eq!(
-            SessionEnd::Terminal(event).removes_home(),
-            removes,
+            ending.removes_home(),
+            matches!(case, "revoked" | "not_exposed"),
             "{case}"
         );
     }
-    for case in ["completed", "unsubscribed"] {
-        assert!(
-            !SessionEnd::Terminal(SubscriptionEvent::End).removes_home(),
-            "{case}"
-        );
-    }
-    // Home refusal and defensive non-authoritative inputs below are not vectors.
+    assert_eq!(seen.len(), 14, "every published case must be exercised");
+}
+
+#[test]
+fn member_vault_authored_not_found_error_removes_home() {
     assert!(SessionEnd::Terminal(SubscriptionEvent::Error {
         code: "not_found".into(),
         message: "not found".into(),
         detail: Some(json!({"class":"permanent"})),
     })
     .removes_home());
+}
+
+#[test]
+fn member_non_authoritative_terminal_inputs_keep_home() {
     for event in [
         SubscriptionEvent::Error {
             code: "executor_error".into(),

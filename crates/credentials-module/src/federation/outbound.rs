@@ -258,6 +258,37 @@ pub struct Subscription {
     replies: mpsc::UnboundedReceiver<Result<Frame, String>>,
 }
 
+/// Feed exact published frame bodies through `next_event` in sibling decoder tests.
+#[cfg(test)]
+pub(super) async fn subscription_for_test(
+) -> (mpsc::UnboundedSender<Result<Frame, String>>, Subscription) {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (_, write) = tokio::io::split(socket);
+    let (send, replies) = mpsc::unbounded_channel();
+    let link = Arc::new(Link {
+        id: 1,
+        write: AsyncMutex::new(write),
+        waiters: Mutex::new(HashMap::new()),
+        streams: Mutex::new(HashMap::new()),
+        closed: AtomicBool::new(true),
+        route_closures: Mutex::new(HashMap::new()),
+    });
+    (
+        send,
+        Subscription {
+            link,
+            key: WaiterKey::Control(1),
+            epoch: 1,
+            replies,
+        },
+    )
+}
+
 impl Subscription {
     pub async fn next(&mut self) -> Result<Option<Value>, OutboundError> {
         match self.next_event().await? {

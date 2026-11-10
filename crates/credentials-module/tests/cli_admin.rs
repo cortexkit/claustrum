@@ -9181,7 +9181,7 @@ fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() 
     vault.bootstrap();
     for id in [
         "apikey:openai",
-        "apikey:muse",
+        "apikey:kagi",
         "apikey:exa",
         "apikey:unknown",
         "apikey:zai:work",
@@ -9199,7 +9199,7 @@ fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() 
     }
     for (id, ids) in [
         ("apikey:openai", vec![]),
-        ("apikey:muse", vec!["custom-pool"]),
+        ("apikey:kagi", vec!["custom-pool"]),
         ("apikey:unknown", vec!["unknown-pool"]),
     ] {
         let mut args = vec!["set-providers", "--id", id, "--set"];
@@ -9217,7 +9217,7 @@ fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() 
     );
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "ID\tSTORED\tTABLE\napikey:muse\t[\"custom-pool\"]\t[]\napikey:openai\t[]\t[\"openai\"]\n"
+        "ID\tSTORED\tTABLE\napikey:kagi\t[\"custom-pool\"]\t[]\napikey:openai\t[]\t[\"openai\"]\n"
     );
     assert_eq!(vault.run(&["list", "--json"]).stdout, before);
     assert_eq!(vault.run(&["audit"]).stdout, audit);
@@ -9322,7 +9322,7 @@ fn login_without_default_leaves_no_provider_ids() {
         .args([
             "login",
             "--provider",
-            "muse",
+            "kagi",
             "--payload-file",
             key_file.to_str().unwrap(),
             "--no-browser",
@@ -9336,13 +9336,13 @@ fn login_without_default_leaves_no_provider_ids() {
         .expect("run login");
     assert!(
         out.status.success(),
-        "muse login failed: {}",
+        "kagi login failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("logged in and stored apikey:muse"),
+        String::from_utf8_lossy(&out.stdout).contains("logged in and stored apikey:kagi"),
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
-    assert_eq!(list_providers(&vault, "apikey:muse"), "-");
+    assert_eq!(list_providers(&vault, "apikey:kagi"), "-");
 }

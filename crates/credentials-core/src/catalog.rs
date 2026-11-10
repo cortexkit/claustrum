@@ -1186,20 +1186,6 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         account_id_prompt: None,
     },
     ApiKeyProvider {
-        key: "muse",
-        default_provider_ids: &[],
-        display_name: "Muse",
-        default_id: "apikey:muse",
-        dashboard_url: "",
-        placeholder: "...",
-        validation: KeyValidation::Unvalidated {
-            reason: "No known endpoint reliably rejects an invalid key without cost.",
-        },
-        categories: LLM,
-        serves: &[],
-        account_id_prompt: None,
-    },
-    ApiKeyProvider {
         key: "tavily",
         default_provider_ids: &[],
         display_name: "Tavily",
@@ -2090,7 +2076,6 @@ mod tests {
             ("zenmux", &["zenmux"]),
             ("zhipu-coding-plan", &["zhipuai-coding-plan"]),
             ("kimi-for-coding", &["kimi-code-plan-global"]),
-            ("muse", &[]),
             ("tavily", &[]),
             ("kagi", &[]),
             ("exa", &[]),
@@ -2137,9 +2122,9 @@ mod tests {
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding, Muse,
+        // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
         // and 9 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 67);
+        assert_eq!(API_KEY_PROVIDERS.len(), 66);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -2336,7 +2321,6 @@ mod tests {
             &"anthropic",
             &"inception",
             &"cloudflare-workers-ai",
-            &"muse",
         ]) {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
@@ -2360,8 +2344,7 @@ mod tests {
                     || entry.key == "kiro"
                     || entry.key == "anthropic"
                     || entry.key == "inception"
-                    || entry.key == "cloudflare-workers-ai"
-                    || entry.key == "muse",
+                    || entry.key == "cloudflare-workers-ai",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -2450,7 +2433,6 @@ mod tests {
                 "typesafe",
                 "vercel-ai-gateway",
                 "kimi-for-coding",
-                "muse",
                 "tavily",
                 "kagi",
                 "exa",
@@ -2949,7 +2931,6 @@ mod source_ownership_tests {
                 ),
                 ("zhipu-coding-plan", vec!["zhipu"]),
                 ("kimi-for-coding", vec!["moonshot"]),
-                ("muse", vec![]),
                 ("tavily", vec![]),
                 ("kagi", vec![]),
                 ("exa", vec![]),

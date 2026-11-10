@@ -115,19 +115,20 @@ const CLOUD_INFRASTRUCTURE: &[CredentialCategory] = &[CredentialCategory::CloudI
 const WEB_SEARCH: &[CredentialCategory] = &[CredentialCategory::WebSearch];
 const NO_CATEGORIES: &[CredentialCategory] = &[];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AuthScheme {
     Bearer,
     Raw,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AuthDescriptor {
     pub header: &'static str,
     pub scheme: AuthScheme,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct InvalidKeyEvidence {
     pub status: u16,
     pub error_code: Option<&'static str>,
@@ -1996,6 +1997,14 @@ fn catalog_match(id: &str) -> Option<CatalogEntry> {
                 .find(|entry| matches(entry.default_id))
                 .map(CatalogEntry::Login)
         })
+}
+
+/// Resolve an API-key credential id, including labels, without matching login rows.
+pub fn api_key_provider_for_credential(id: &str) -> Option<&'static ApiKeyProvider> {
+    match catalog_match(id)? {
+        CatalogEntry::ApiKey(entry) => Some(entry),
+        CatalogEntry::Login(_) => None,
+    }
 }
 
 /// The categories a credential is stamped with at creation.

@@ -656,6 +656,204 @@ pub struct GetResult {
     /// limits from), when captured at login. NON-secret display metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+    /// Read-time catalog metadata, populated only by `credential.get_scoped`.
+    /// Grouping the fields keeps an absent descriptor distinct from absent evidence.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub scoped_descriptor: Option<Box<ScopedKeyDescriptor>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScopedKeyDescriptor {
+    auth: credentials_core::catalog::AuthDescriptor,
+    hosts: &'static [&'static str],
+    // A descriptor with no observed bogus-key refusal still emits explicit null.
+    invalid_key: Option<credentials_core::catalog::InvalidKeyEvidence>,
+}
+
+impl GetResult {
+    fn with_scoped_descriptor(mut self, credential_id: &str) -> Self {
+        self.scoped_descriptor = credentials_core::catalog::api_key_provider_for_credential(
+            credential_id,
+        )
+        .and_then(|row| {
+            if row.hosts.is_empty() {
+                return None;
+            }
+            Some(Box::new(ScopedKeyDescriptor {
+                auth: row.auth?,
+                hosts: row.hosts,
+                invalid_key: row.invalid_key,
+            }))
+        });
+        self
+    }
+}
+
+#[cfg(test)]
+mod get_scoped_tests {
+    use super::*;
+    use credentials_core::record::{CredentialKind, VaultRecord};
+    use credentials_core::store::SelectorKind;
+    use serde_json::{json, Value};
+
+    fn openai_descriptor() -> Value {
+        json!({
+            "auth": {"header": "authorization", "scheme": "bearer"},
+            "hosts": ["api.openai.com"],
+            "invalid_key": {
+                "status": 401,
+                "error_code": "invalid_api_key",
+                "error_code_field": "/error/code"
+            }
+        })
+    }
+
+    fn golden_reply(id: &str, version: u64, descriptor: Value) -> Value {
+        let mut reply = json!({
+            "payload": [107],
+            "expires_at_ms": null,
+            "record_version": version,
+            "credential_id": id
+        });
+        reply
+            .as_object_mut()
+            .unwrap()
+            .extend(descriptor.as_object().unwrap().clone());
+        reply
+    }
+
+    #[tokio::test]
+    async fn get_scoped_descriptor_golden_cases() {
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(214);
+        store
+            .set_registered_provider_audited(
+                "customservice",
+                &["llm-provider".into()],
+                &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        let null_evidence = json!({
+            "auth": {"header": "authorization", "scheme": "bearer"},
+            "hosts": ["api.nano-gpt.com", "nano-gpt.com"],
+            "invalid_key": null
+        });
+        let mut cases = vec![
+            ("apikey:openai", openai_descriptor()),
+            ("apikey:nanogpt", null_evidence),
+            ("apikey:openai:work", openai_descriptor()),
+            ("apikey:searxng", json!({})),
+            ("apikey:typesafe", json!({})),
+            ("apikey:kagi", json!({})),
+            ("apikey:customservice:work", json!({})),
+            ("apikey:openaiish", json!({})),
+            ("cookie:openai", json!({})),
+            ("manual:openai", json!({})),
+        ];
+        cases.extend(
+            credentials_core::catalog::LOGIN_PROVIDERS
+                .iter()
+                .map(|row| (row.default_id, json!({}))),
+        );
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        for (id, descriptor) in cases {
+            let record = if credentials_core::catalog::credential_type(id) == "oauth" {
+                VaultRecord::new_oauth(
+                    "test",
+                    "anthropic",
+                    credentials_core::oauth::OAuthCredential {
+                        access_token: "test-access".to_owned().into(),
+                        refresh_token: "test-refresh".to_owned().into(),
+                        expires_at_ms: None,
+                        token_url: String::new(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: Vec::new(),
+                    },
+                    b"k".to_vec(),
+                )
+            } else {
+                let kind = if id.starts_with("cookie:") {
+                    CredentialKind::Cookie
+                } else {
+                    CredentialKind::ApiKey
+                };
+                VaultRecord::new_static(kind, "test", b"k".to_vec(), None)
+            };
+            store.create(id, &record).unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "descriptor-reader",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            let outcome = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                golden_reply(id, 1, descriptor),
+                "{id}"
+            );
+        }
+
+        // Even a catalog API key has no descriptor on the handle-authorized surface.
+        let handle = credentials_core::store::mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:openai",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+        let outcome = surface
+            .get(
+                1,
+                &GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            golden_reply("apikey:openai", 1, json!({}))
+        );
+    }
+
+    #[test]
+    fn remote_get_scoped_descriptor_comes_from_local_catalog() {
+        let outcome = remote_get_outcome(
+            "apikey:openai:remote",
+            crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
+                payload: b"k".to_vec(),
+                expires_at_ms: None,
+                record_version: 7,
+                project_id: None,
+                account_id: None,
+                email: None,
+                org_name: None,
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            golden_reply("apikey:openai:remote", 7, openai_descriptor())
+        );
+    }
 }
 
 /// A non-secret error code returned to a consumer (never leaks why beyond the
@@ -2086,6 +2284,7 @@ impl ReadSurface {
                     account_id,
                     email: record.identity.email.clone(),
                     org_name: record.identity.org_name.clone(),
+                    scoped_descriptor: None,
                 })
             }
             Err(e) => err(map_engine_error(&e)),
@@ -2901,18 +3100,22 @@ impl ReadSurface {
                     _ => None,
                 }
                 .or_else(|| record.identity.account_id.clone());
-                GetOutcome::Ok(GetResult {
-                    payload: record.payload.into_inner().to_vec(),
-                    expires_at_ms: record.expires_at_ms,
-                    record_version: record.record_version,
-                    // The principal supplied this id; echo it after the successful read so
-                    // scoped and handle-authorized success bodies keep one shape.
-                    credential_id: Some(params.credential_id.clone()),
-                    project_id,
-                    account_id,
-                    email: record.identity.email.clone(),
-                    org_name: record.identity.org_name.clone(),
-                })
+                GetOutcome::Ok(
+                    GetResult {
+                        payload: record.payload.into_inner().to_vec(),
+                        expires_at_ms: record.expires_at_ms,
+                        record_version: record.record_version,
+                        // The principal supplied this id; echo it after the successful read so
+                        // scoped and handle-authorized success bodies keep one shape.
+                        credential_id: Some(params.credential_id.clone()),
+                        project_id,
+                        account_id,
+                        email: record.identity.email.clone(),
+                        org_name: record.identity.org_name.clone(),
+                        scoped_descriptor: None,
+                    }
+                    .with_scoped_descriptor(&params.credential_id),
+                )
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
                 self.record_scoped_refusal(
@@ -3544,16 +3747,20 @@ fn err(code: ReadError) -> GetOutcome {
 /// `GetResult` a local read returns, with the caller's id echoed.
 fn remote_get_outcome(credential_id: &str, answer: crate::federation::RemoteAnswer) -> GetOutcome {
     match answer {
-        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(GetResult {
-            payload: get.payload,
-            expires_at_ms: get.expires_at_ms,
-            record_version: get.record_version,
-            credential_id: Some(credential_id.to_string()),
-            project_id: get.project_id,
-            account_id: get.account_id,
-            email: get.email,
-            org_name: get.org_name,
-        }),
+        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(
+            GetResult {
+                payload: get.payload,
+                expires_at_ms: get.expires_at_ms,
+                record_version: get.record_version,
+                credential_id: Some(credential_id.to_string()),
+                project_id: get.project_id,
+                account_id: get.account_id,
+                email: get.email,
+                org_name: get.org_name,
+                scoped_descriptor: None,
+            }
+            .with_scoped_descriptor(credential_id),
+        ),
         crate::federation::RemoteAnswer::Refused(refusal) => GetOutcome::RemoteErr {
             error: refusal.body(),
         },

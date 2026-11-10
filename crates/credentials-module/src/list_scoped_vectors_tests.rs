@@ -170,20 +170,88 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         "auth.watch_scoped.unsupported",
         unknown,
     ));
+
+    rig.bind(2, reserved("descriptor-reader"));
+    let mut get_cases = Vec::new();
+    for (index, (label, id)) in [
+        ("catalog_with_evidence", "apikey:openai"),
+        ("catalog_without_evidence", "apikey:nanogpt"),
+        ("oauth_without_descriptor", "oauth:anthropic"),
+    ].iter().enumerate() {
+        let record = if *id == "oauth:anthropic" {
+            VaultRecord::new_oauth(
+                "vector",
+                "anthropic",
+                credentials_core::oauth::OAuthCredential {
+                    access_token: "vector-test-access".to_owned().into(),
+                    refresh_token: "vector-test-refresh".to_owned().into(),
+                    expires_at_ms: None,
+                    token_url: String::new(),
+                    client_id: None,
+                    client_secret: None,
+                    scopes: Vec::new(),
+                },
+                b"vector-test-key".to_vec(),
+            )
+        } else {
+            VaultRecord::new_static(CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None)
+        };
+        rig.store.create(id, &record).unwrap();
+        rig.store.create_read_grant_audited(
+            "reserved", "descriptor-reader", SelectorKind::Exact, id,
+            GrantOperation::Read, AuditCtx::admin(AuditOp::GrantCreate),
+        ).unwrap();
+        let params = json!({"credential_id": id});
+        rig.dispatch(2, 20 + index as u64, FrameType::Request, OP_GET_SCOPED, params.clone()).await;
+        let frame = rig.next().await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let mut case = list_vector_case(label, OP_GET_SCOPED, frame);
+        case["request"]["params"] = params;
+        let reply = &case["reply"]["result"];
+        assert_eq!(reply["credential_id"], *id);
+        match *label {
+            "catalog_with_evidence" => {
+                assert_eq!(reply["invalid_key"]["status"], 401);
+                assert_eq!(reply["invalid_key"]["error_code"], "invalid_api_key");
+            }
+            "catalog_without_evidence" => {
+                assert!(reply.get("auth").is_some());
+                assert_eq!(reply.get("invalid_key"), Some(&serde_json::Value::Null));
+            }
+            _ => {
+                for field in ["auth", "hosts", "invalid_key"] {
+                    assert!(reply.get(field).is_none(), "OAuth must omit {field}");
+                }
+            }
+        }
+        get_cases.push(case);
+    }
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
+    let get_emitted =
+        serde_json::to_vec_pretty(&json!({"v":"ck-get-scoped-vectors/v1", "cases":get_cases}))
+            .unwrap();
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let sums = format!("{}  list-scoped-v2.json\n", hex_digest(&emitted));
+    let sums = format!(
+        "{}  list-scoped-v2.json\n{}  get-scoped-v1.json\n",
+        hex_digest(&emitted), hex_digest(&get_emitted),
+    );
     if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1") {
         std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
+        std::fs::write(directory.join("get-scoped-v1.json"), &get_emitted).unwrap();
         std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
-        println!("emitted five list-scoped v2 cases and SHA256SUMS");
+        println!("emitted five list-scoped v2 cases, three get-scoped v1 cases and SHA256SUMS");
     } else {
         assert_eq!(
             emitted,
             std::fs::read(directory.join("list-scoped-v2.json"))
                 .expect("pinned list-scoped vectors")
+        );
+        assert_eq!(
+            get_emitted,
+            std::fs::read(directory.join("get-scoped-v1.json"))
+                .expect("pinned get-scoped vectors")
         );
         assert_eq!(
             sums,

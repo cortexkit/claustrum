@@ -1,7 +1,7 @@
 # Third-party notices
 
 claustrum is released under the MIT license (see [LICENSE](LICENSE)). It includes material
-adapted from the following project.
+adapted from the following projects.
 
 ## oh-my-pi
 
@@ -40,3 +40,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## models.dev
+
+- Source: <https://models.dev> (<https://github.com/sst/models.dev>)
+- License: MIT
+- What is included: the `models.dev` provider metadata in
+  `crates/credentials-core/tests/fixtures/fusiform/providers-v1.json`, published by
+  <https://github.com/cortexkit/fusiform> alongside its manually maintained `hand_kept`
+  provider entries. The vault embeds that file byte-for-byte for provider ids and display
+  facts. Its source commit, sha256 and fetch date are pinned in the adjacent `VENDORED.md`.

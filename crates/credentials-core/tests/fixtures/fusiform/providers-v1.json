@@ -1,0 +1,2937 @@
+{
+  "format": "providers-v1",
+  "snapshot_fetched_at": "2026-11-09T20:08:23Z",
+  "providers": [
+    {
+      "id": "302ai",
+      "name": "302.AI",
+      "doc": "https://doc.302.ai",
+      "source": "models.dev",
+      "env": [
+        "302AI_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "abacus",
+      "name": "Abacus",
+      "doc": "https://abacus.ai/help/api",
+      "source": "models.dev",
+      "env": [
+        "ABACUS_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "abliteration-ai",
+      "name": "abliteration.ai",
+      "doc": "https://docs.abliteration.ai/models",
+      "source": "models.dev",
+      "env": [
+        "ABLIT_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "above",
+      "name": "above.dev",
+      "doc": "https://above.dev/docs",
+      "source": "models.dev",
+      "env": [
+        "ABOVE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "agentrouter",
+      "name": "AgentRouter",
+      "doc": "https://agentrouter.org/docs/opencode.html",
+      "source": "models.dev",
+      "env": [
+        "AGENTROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "agnes",
+      "name": "Agnes AI",
+      "doc": "https://agnes-ai.com/doc",
+      "source": "models.dev",
+      "env": [
+        "AGNES_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ai-router",
+      "name": "AI-ROUTER",
+      "doc": "https://ai-router.dev/openai-compatible-api-gateway/",
+      "source": "models.dev",
+      "env": [
+        "AI_ROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ai21",
+      "name": "AI21 Labs",
+      "doc": "https://docs.ai21.com/docs/jamba-foundation-models",
+      "source": "models.dev",
+      "env": [
+        "AI21_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "aiand",
+      "name": "ai&",
+      "doc": "https://docs.aiand.com/",
+      "source": "models.dev",
+      "env": [
+        "AIAND_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "aihubmix",
+      "name": "AIHubMix",
+      "doc": "https://docs.aihubmix.com",
+      "source": "models.dev",
+      "env": [
+        "AIHUBMIX_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "aimlapi",
+      "name": "AI/ML API",
+      "doc": "https://docs.aimlapi.com",
+      "source": "models.dev",
+      "env": [
+        "AIMLAPI_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "ainetcafe",
+      "name": "ainetcafe",
+      "doc": "https://ainetcafe.com/k3/guides/",
+      "source": "models.dev",
+      "env": [
+        "AINETCAFE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "aixy",
+      "name": "Aixy",
+      "doc": "https://docs.aixy-gateway.com/integrations/overview",
+      "source": "models.dev",
+      "env": [
+        "AIXY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "aki-io",
+      "name": "AKI.IO",
+      "doc": "https://aki.io/docs/",
+      "source": "models.dev",
+      "env": [
+        "AKI_IO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "alibaba",
+      "name": "Alibaba",
+      "doc": "https://www.alibabacloud.com/help/en/model-studio/models",
+      "source": "models.dev",
+      "env": [
+        "DASHSCOPE_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "alibaba-cn",
+      "name": "Alibaba (China)",
+      "doc": "https://www.alibabacloud.com/help/en/model-studio/models",
+      "source": "models.dev",
+      "env": [
+        "DASHSCOPE_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "alibaba-coding-plan",
+      "name": "Alibaba Coding Plan",
+      "doc": "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
+      "source": "models.dev",
+      "env": [
+        "ALIBABA_CODING_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "alibaba-coding-plan-cn",
+      "name": "Alibaba Coding Plan (China)",
+      "doc": "https://help.aliyun.com/zh/model-studio/coding-plan",
+      "source": "models.dev",
+      "env": [
+        "ALIBABA_CODING_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "alibaba-token-plan",
+      "name": "Alibaba Token Plan",
+      "doc": "https://www.alibabacloud.com/help/en/model-studio/token-plan-overview",
+      "source": "models.dev",
+      "env": [
+        "ALIBABA_TOKEN_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "alibaba-token-plan-cn",
+      "name": "Alibaba Token Plan (China)",
+      "doc": "https://www.alibabacloud.com/help/zh/model-studio/token-plan-overview",
+      "source": "models.dev",
+      "env": [
+        "ALIBABA_TOKEN_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "amazon-bedrock",
+      "name": "Amazon Bedrock",
+      "doc": "https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html",
+      "source": "models.dev",
+      "env": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "AWS_BEARER_TOKEN_BEDROCK"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ambient",
+      "name": "Ambient",
+      "doc": "https://ambient.xyz",
+      "source": "models.dev",
+      "env": [
+        "AMBIENT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "amd",
+      "name": "AMD",
+      "doc": "https://developer.amd.com.cn/radeon/tokenfactory",
+      "source": "models.dev",
+      "env": [
+        "AMD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "doc": "https://docs.anthropic.com/en/docs/about-claude/models",
+      "source": "models.dev",
+      "env": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "anyapi",
+      "name": "AnyAPI",
+      "doc": "https://docs.anyapi.ai",
+      "source": "models.dev",
+      "env": [
+        "ANYAPI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "arcee",
+      "name": "Arcee",
+      "doc": "https://docs.arcee.ai",
+      "source": "models.dev",
+      "env": [
+        "ARCEE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "atomic-chat",
+      "name": "Atomic Chat",
+      "doc": "https://atomic.chat",
+      "source": "models.dev",
+      "env": [
+        "ATOMIC_CHAT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "auriko",
+      "name": "Auriko",
+      "doc": "https://docs.auriko.ai",
+      "source": "models.dev",
+      "env": [
+        "AURIKO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "azure",
+      "name": "Azure",
+      "doc": "https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models",
+      "source": "models.dev",
+      "env": [
+        "AZURE_RESOURCE_NAME",
+        "AZURE_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "azure-cognitive-services",
+      "name": "Azure Cognitive Services",
+      "doc": "https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models",
+      "source": "models.dev",
+      "env": [
+        "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME",
+        "AZURE_COGNITIVE_SERVICES_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "bailing",
+      "name": "Bailing",
+      "doc": "https://alipaytbox.yuque.com/sxs0ba/ling/intro",
+      "source": "models.dev",
+      "env": [
+        "BAILING_API_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "baseten",
+      "name": "Baseten",
+      "doc": "https://docs.baseten.co/inference/model-apis/overview",
+      "source": "models.dev",
+      "env": [
+        "BASETEN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "bee",
+      "name": "Bee by HEOSSI",
+      "doc": "https://bee.heossi.com/docs/sdks",
+      "source": "models.dev",
+      "env": [
+        "BEE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "berget",
+      "name": "Berget.AI",
+      "doc": "https://api.berget.ai",
+      "source": "models.dev",
+      "env": [
+        "BERGET_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "blueclaw",
+      "name": "Blue Claw",
+      "doc": "https://blueclaw.network",
+      "source": "models.dev",
+      "env": [
+        "BLUECLAW_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "bothub",
+      "name": "Bothub",
+      "doc": "https://bothub.ru/models",
+      "source": "models.dev",
+      "env": [
+        "BOTHUB_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "boundless",
+      "name": "Boundless",
+      "doc": "https://inference.boundless.network/models",
+      "source": "models.dev",
+      "env": [
+        "BOUNDLESS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cerebras",
+      "name": "Cerebras",
+      "doc": "https://inference-docs.cerebras.ai/models/overview",
+      "source": "models.dev",
+      "env": [
+        "CEREBRAS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "chutes",
+      "name": "Chutes",
+      "doc": "https://llm.chutes.ai/v1/models",
+      "source": "models.dev",
+      "env": [
+        "CHUTES_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "clarifai",
+      "name": "Clarifai",
+      "doc": "https://docs.clarifai.com/compute/inference/",
+      "source": "models.dev",
+      "env": [
+        "CLARIFAI_PAT"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claudinio",
+      "name": "Claudinio",
+      "doc": "https://claudin.io",
+      "source": "models.dev",
+      "env": [
+        "CLAUDINIO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass",
+      "name": "ClinePass",
+      "doc": "https://docs.cline.bot/getting-started/clinepass",
+      "source": "models.dev",
+      "env": [
+        "CLINE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cloudferro-sherlock",
+      "name": "CloudFerro Sherlock",
+      "doc": "https://docs.sherlock.cloudferro.com/",
+      "source": "models.dev",
+      "env": [
+        "CLOUDFERRO_SHERLOCK_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cloudflare-ai-gateway",
+      "name": "Cloudflare AI Gateway",
+      "doc": "https://developers.cloudflare.com/ai-gateway/",
+      "source": "models.dev",
+      "env": [
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_GATEWAY_ID"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cloudflare-workers-ai",
+      "name": "Cloudflare Workers AI",
+      "doc": "https://developers.cloudflare.com/workers-ai/models/",
+      "source": "models.dev",
+      "env": [
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cohere",
+      "name": "Cohere",
+      "doc": "https://docs.cohere.com/docs/models",
+      "source": "models.dev",
+      "env": [
+        "COHERE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "commandcode",
+      "name": "CommandCode",
+      "doc": "https://commandcode.ai/docs/provider",
+      "source": "models.dev",
+      "env": [
+        "CMD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "coralbricks",
+      "name": "CoralBricks",
+      "doc": "https://www.coralbricks.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "CORAL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cortecs",
+      "name": "Cortecs",
+      "doc": "https://api.cortecs.ai/v1/models",
+      "source": "models.dev",
+      "env": [
+        "CORTECS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "crossmodel",
+      "name": "CrossModel",
+      "doc": "https://www.crossmodel.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "CROSSMODEL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "crusoe",
+      "name": "Crusoe",
+      "doc": "https://docs.crusoecloud.com/managed-inference/overview",
+      "source": "models.dev",
+      "env": [
+        "CRUSOE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "daoxe",
+      "name": "DaoXE",
+      "doc": "https://daoxe.com/pricing",
+      "source": "models.dev",
+      "env": [
+        "DAOXE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "doc": "https://docs.databricks.com/aws/en/machine-learning/foundation-models/",
+      "source": "models.dev",
+      "env": [
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepinfra",
+      "name": "Deep Infra",
+      "doc": "https://deepinfra.com/models",
+      "source": "models.dev",
+      "env": [
+        "DEEPINFRA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "doc": "https://api-docs.deepseek.com/quick_start/pricing",
+      "source": "models.dev",
+      "env": [
+        "DEEPSEEK_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "digitalocean",
+      "name": "DigitalOcean",
+      "doc": "https://docs.digitalocean.com/products/gradient-ai-platform/details/models/",
+      "source": "models.dev",
+      "env": [
+        "DIGITALOCEAN_ACCESS_TOKEN"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "dinference",
+      "name": "DInference",
+      "doc": "https://dinference.com",
+      "source": "models.dev",
+      "env": [
+        "DINFERENCE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "drun",
+      "name": "D.Run (China)",
+      "doc": "https://www.d.run",
+      "source": "models.dev",
+      "env": [
+        "DRUN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ebcloud",
+      "name": "EBCloud",
+      "doc": "https://docs.ebtech.com/ai/model-api.html",
+      "source": "models.dev",
+      "env": [
+        "EBCLOUD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "echo",
+      "name": "Echo",
+      "doc": "https://echo.tracerml.ai/docs/api",
+      "source": "models.dev",
+      "env": [
+        "ECHO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "edenai",
+      "name": "Eden AI",
+      "doc": "https://docs.edenai.co",
+      "source": "models.dev",
+      "env": [
+        "EDENAI_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "elevenlabs",
+      "name": "ElevenLabs",
+      "doc": "https://elevenlabs.io/docs/overview/intro",
+      "source": "hand_kept",
+      "env": [],
+      "output_modalities": []
+    },
+    {
+      "id": "empiriolabs",
+      "name": "EmpirioLabs AI",
+      "doc": "https://docs.empiriolabs.ai",
+      "source": "models.dev",
+      "env": [
+        "EMPIRIOLABS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "engy",
+      "name": "engy",
+      "doc": "https://engy.ai/pricing",
+      "source": "models.dev",
+      "env": [
+        "ENGY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "evroc",
+      "name": "evroc",
+      "doc": "https://docs.evroc.com/products/think/overview.html",
+      "source": "models.dev",
+      "env": [
+        "EVROC_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "fastrouter",
+      "name": "FastRouter",
+      "doc": "https://fastrouter.ai/models",
+      "source": "models.dev",
+      "env": [
+        "FASTROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "fireworks-ai",
+      "name": "Fireworks AI",
+      "doc": "https://fireworks.ai/docs/",
+      "source": "models.dev",
+      "env": [
+        "FIREWORKS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "freemodel",
+      "name": "FreeModel",
+      "doc": "https://freemodel.dev",
+      "source": "models.dev",
+      "env": [
+        "FREEMODEL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "friendli",
+      "name": "Friendli",
+      "doc": "https://friendli.ai/docs/guides/serverless_endpoints/introduction",
+      "source": "models.dev",
+      "env": [
+        "FRIENDLI_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "frogbot",
+      "name": "FrogBot",
+      "doc": "https://docs.frogbot.ai",
+      "source": "models.dev",
+      "env": [
+        "FROGBOT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "github-copilot",
+      "name": "GitHub Copilot",
+      "doc": "https://docs.github.com/en/copilot",
+      "source": "models.dev",
+      "env": [
+        "GITHUB_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab Duo",
+      "doc": "https://docs.gitlab.com/user/duo_agent_platform/",
+      "source": "models.dev",
+      "env": [
+        "GITLAB_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gmicloud",
+      "name": "GMI Cloud",
+      "doc": "https://docs.gmicloud.ai/inference-engine/api-reference/llm-api-reference",
+      "source": "models.dev",
+      "env": [
+        "GMICLOUD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "google",
+      "name": "Google",
+      "doc": "https://ai.google.dev/gemini-api/docs/models",
+      "source": "models.dev",
+      "env": [
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "GEMINI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "google-vertex",
+      "name": "Vertex",
+      "doc": "https://cloud.google.com/vertex-ai/generative-ai/docs/models",
+      "source": "models.dev",
+      "env": [
+        "GOOGLE_VERTEX_PROJECT",
+        "GOOGLE_VERTEX_LOCATION",
+        "GOOGLE_APPLICATION_CREDENTIALS"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "google-vertex-anthropic",
+      "name": "Vertex (Anthropic)",
+      "doc": "https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude",
+      "source": "models.dev",
+      "env": [
+        "GOOGLE_VERTEX_PROJECT",
+        "GOOGLE_VERTEX_LOCATION",
+        "GOOGLE_APPLICATION_CREDENTIALS"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "greenpt",
+      "name": "GreenPT",
+      "doc": "https://docs.greenpt.ai",
+      "source": "models.dev",
+      "env": [
+        "GREENPT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "doc": "https://console.groq.com/docs/models",
+      "source": "models.dev",
+      "env": [
+        "GROQ_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "helicone",
+      "name": "Helicone",
+      "doc": "https://helicone.ai/models",
+      "source": "models.dev",
+      "env": [
+        "HELICONE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hetzner",
+      "name": "Hetzner",
+      "doc": "https://experiments.hetzner.com/docs/inference",
+      "source": "models.dev",
+      "env": [
+        "HETZNER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hopper",
+      "name": "Hopper",
+      "doc": "https://withhopper.com/agents/deepseek-v4.1-flash-1017",
+      "source": "models.dev",
+      "env": [
+        "HOPPER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hpc-ai",
+      "name": "HPC-AI",
+      "doc": "https://www.hpc-ai.com/doc/docs/quickstart/",
+      "source": "models.dev",
+      "env": [
+        "HPC_AI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "huggingface",
+      "name": "Hugging Face",
+      "doc": "https://huggingface.co/docs/inference-providers",
+      "source": "models.dev",
+      "env": [
+        "HF_TOKEN"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "hyper",
+      "name": "Charm Hyper",
+      "doc": "https://hyper.charm.land",
+      "source": "models.dev",
+      "env": [
+        "HYPER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "impossibl",
+      "name": "Impossibl",
+      "doc": "https://impossibl.com/docs/models",
+      "source": "models.dev",
+      "env": [
+        "IMPOSSIBL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "inception",
+      "name": "Inception",
+      "doc": "https://docs.inceptionlabs.ai/get-started/models",
+      "source": "models.dev",
+      "env": [
+        "INCEPTION_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "inceptron",
+      "name": "Inceptron",
+      "doc": "https://docs.inceptron.io",
+      "source": "models.dev",
+      "env": [
+        "INCEPTRON_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "inco",
+      "name": "Inco",
+      "doc": "https://platform.inco.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "INCO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "infer",
+      "name": "Infer by Flow7",
+      "doc": "https://infer.flow7.org/opencode",
+      "source": "models.dev",
+      "env": [
+        "INFER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "inference",
+      "name": "Inference",
+      "doc": "https://inference.net/models",
+      "source": "models.dev",
+      "env": [
+        "INFERENCE_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "inferx",
+      "name": "InferX",
+      "doc": "https://model.inferx.net/endpoints",
+      "source": "models.dev",
+      "env": [
+        "INFERX_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "infomaniak",
+      "name": "Infomaniak",
+      "doc": "https://www.infomaniak.com/en/hosting/ai-services/open-source-models",
+      "source": "models.dev",
+      "env": [
+        "INFOMANIAK_API_KEY",
+        "INFOMANIAK_PRODUCT_ID"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "io-net",
+      "name": "IO.NET",
+      "doc": "https://io.net/docs/guides/intelligence/io-intelligence",
+      "source": "models.dev",
+      "env": [
+        "IOINTELLIGENCE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "iteracompute",
+      "name": "IteraCompute",
+      "doc": "https://iteracompute.com/docs.html",
+      "source": "models.dev",
+      "env": [
+        "ITERACOMPUTE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "jalapeno",
+      "name": "Jalapeno Cloud",
+      "doc": "https://www.jalapeno-cloud.ai/docs/",
+      "source": "models.dev",
+      "env": [
+        "JALAPENO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "jiekou",
+      "name": "Jiekou.AI",
+      "doc": "https://docs.jiekou.ai/docs/support/quickstart?utm_source=github_models.dev",
+      "source": "models.dev",
+      "env": [
+        "JIEKOU_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kenari",
+      "name": "Kenari",
+      "doc": "https://kenari.id/docs",
+      "source": "models.dev",
+      "env": [
+        "KENARI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "kilo",
+      "name": "Kilo Gateway",
+      "doc": "https://kilo.ai",
+      "source": "models.dev",
+      "env": [
+        "KILO_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "kimi-code-plan-cn",
+      "name": "Kimi For Coding (kimi.com)",
+      "doc": "https://www.kimi.com/code/docs/en/kimi-code/models.html",
+      "source": "models.dev",
+      "env": [
+        "KIMI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-code-plan-global",
+      "name": "Kimi For Coding (kimi.ai)",
+      "doc": "https://www.kimi.ai/code/docs/en/kimi-code/models.html",
+      "source": "models.dev",
+      "env": [
+        "KIMI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "klokintegration",
+      "name": "klokintegration.se",
+      "doc": "https://klokintegration.se/docs/ai-api",
+      "source": "models.dev",
+      "env": [
+        "KLOKINTEGRATION_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kosmik",
+      "name": "Kosmik Compute",
+      "doc": "https://api.koscompute.com/docs/",
+      "source": "models.dev",
+      "env": [
+        "KOSMIK_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kuae-cloud-coding-plan",
+      "name": "KUAE Cloud Coding Plan",
+      "doc": "https://docs.mthreads.com/kuaecloud/kuaecloud-doc-online/coding_plan/",
+      "source": "models.dev",
+      "env": [
+        "KUAE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "lilac",
+      "name": "Lilac",
+      "doc": "https://docs.getlilac.com/inference/models",
+      "source": "models.dev",
+      "env": [
+        "LILAC_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "liquid",
+      "name": "Liquid Inference",
+      "doc": "https://inference.ai.exchange/docs",
+      "source": "models.dev",
+      "env": [
+        "LIQUID_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "llmgateway",
+      "name": "DevPass (LLM Gateway)",
+      "doc": "https://llmgateway.io/docs",
+      "source": "models.dev",
+      "env": [
+        "LLMGATEWAY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "llmgateway-providers",
+      "name": "LLM Gateway",
+      "doc": "https://llmgateway.io/docs",
+      "source": "models.dev",
+      "env": [
+        "LLMGATEWAY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "llmtech",
+      "name": "LLM Tech",
+      "doc": "https://llmtech.eu/models/qwen3.8-27b",
+      "source": "models.dev",
+      "env": [
+        "LLMTECH_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "llmtr",
+      "name": "LLMTR",
+      "doc": "https://llmtr.com/docs",
+      "source": "models.dev",
+      "env": [
+        "LLMTR_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "lmstudio",
+      "name": "LMStudio",
+      "doc": "https://lmstudio.ai/models",
+      "source": "models.dev",
+      "env": [
+        "LMSTUDIO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "longcat",
+      "name": "LongCat",
+      "doc": "https://longcat.chat/platform/docs/",
+      "source": "models.dev",
+      "env": [
+        "LONGCAT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "lowrouter",
+      "name": "LowRouter",
+      "doc": "https://lowrouter.ai/docs/models/available",
+      "source": "models.dev",
+      "env": [
+        "LOWROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "lucidquery",
+      "name": "LucidQuery",
+      "doc": "https://lucidquery.com/docs",
+      "source": "models.dev",
+      "env": [
+        "LUCIDQUERY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "lynkr",
+      "name": "Lynkr",
+      "doc": "https://github.com/Fast-Editor/Lynkr",
+      "source": "models.dev",
+      "env": [
+        "LYNKR_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "meganova",
+      "name": "Meganova",
+      "doc": "https://docs.meganova.ai",
+      "source": "models.dev",
+      "env": [
+        "MEGANOVA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "melious",
+      "name": "Melious",
+      "doc": "https://melious.ai/docs/reference/models",
+      "source": "models.dev",
+      "env": [
+        "MELIOUS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "merge-gateway",
+      "name": "Merge Gateway",
+      "doc": "https://docs.merge.dev/merge-gateway",
+      "source": "models.dev",
+      "env": [
+        "MERGE_GATEWAY_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "meta",
+      "name": "Meta",
+      "doc": "https://dev.meta.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "META_MODEL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax (minimax.io)",
+      "doc": "https://platform.minimax.io/docs/guides/quickstart",
+      "source": "models.dev",
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-cn",
+      "name": "MiniMax (minimax.cn)",
+      "doc": "https://platform.minimaxi.com/docs/guides/quickstart",
+      "source": "models.dev",
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-cn-coding-plan",
+      "name": "MiniMax Token Plan (minimax.cn)",
+      "doc": "https://platform.minimaxi.com/docs/token-plan/intro",
+      "source": "models.dev",
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-coding-plan",
+      "name": "MiniMax Token Plan (minimax.io)",
+      "doc": "https://platform.minimax.io/docs/token-plan/intro",
+      "source": "models.dev",
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral",
+      "doc": "https://docs.mistral.ai/getting-started/models/",
+      "source": "models.dev",
+      "env": [
+        "MISTRAL_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "mixlayer",
+      "name": "Mixlayer",
+      "doc": "https://docs.mixlayer.com",
+      "source": "models.dev",
+      "env": [
+        "MIXLAYER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "moark",
+      "name": "Moark",
+      "doc": "https://moark.com/docs/openapi/v1#tag/%E6%96%87%E6%9C%AC%E7%94%9F%E6%88%90",
+      "source": "models.dev",
+      "env": [
+        "MOARK_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "modal",
+      "name": "Modal",
+      "doc": "https://modal.com/docs/guide/endpoints",
+      "source": "models.dev",
+      "env": [
+        "MODAL_PROXY_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "model-oracle-ai",
+      "name": "Model Oracle AI",
+      "doc": "https://modeloracle.com/setup/",
+      "source": "models.dev",
+      "env": [
+        "MODEL_ORACLE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "modelis",
+      "name": "Modelis",
+      "doc": "https://modelishub.com/pricing",
+      "source": "models.dev",
+      "env": [
+        "MODELIS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "modelscope",
+      "name": "ModelScope",
+      "doc": "https://modelscope.cn/docs/model-service/API-Inference/intro",
+      "source": "models.dev",
+      "env": [
+        "MODELSCOPE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "modular",
+      "name": "Modular",
+      "doc": "https://docs.modular.com/models",
+      "source": "models.dev",
+      "env": [
+        "MODULAR_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "moonshotai",
+      "name": "Moonshot AI",
+      "doc": "https://platform.moonshot.ai/docs/api/chat",
+      "source": "models.dev",
+      "env": [
+        "MOONSHOT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "moonshotai-cn",
+      "name": "Moonshot AI (China)",
+      "doc": "https://platform.moonshot.cn/docs/api/chat",
+      "source": "models.dev",
+      "env": [
+        "MOONSHOT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "morph",
+      "name": "Morph",
+      "doc": "https://docs.morphllm.com/api-reference/introduction",
+      "source": "models.dev",
+      "env": [
+        "MORPH_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "munito",
+      "name": "Munito AI",
+      "doc": "https://docs.munito.ai/models",
+      "source": "models.dev",
+      "env": [
+        "MUNITO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "munito-eu",
+      "name": "Munito AI (EU)",
+      "doc": "https://docs.munito.ai/regions",
+      "source": "models.dev",
+      "env": [
+        "MUNITO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "nan",
+      "name": "NaN",
+      "doc": "https://nan.builders/docs/models",
+      "source": "models.dev",
+      "env": [
+        "NAN_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "nano-gpt",
+      "name": "NanoGPT",
+      "doc": "https://docs.nano-gpt.com",
+      "source": "models.dev",
+      "env": [
+        "NANO_GPT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "nearai",
+      "name": "NEAR AI Cloud",
+      "doc": "https://docs.near.ai/",
+      "source": "models.dev",
+      "env": [
+        "NEARAI_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "nebius",
+      "name": "Nebius Token Factory",
+      "doc": "https://docs.tokenfactory.nebius.com/",
+      "source": "models.dev",
+      "env": [
+        "NEBIUS_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "neon",
+      "name": "Neon",
+      "doc": "https://neon.com/docs",
+      "source": "models.dev",
+      "env": [
+        "NEON_AI_GATEWAY_BASE_URL",
+        "NEON_AI_GATEWAY_TOKEN"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "neosmith",
+      "name": "NeoSmith",
+      "doc": "https://neosmith.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "NEOSMITH_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "neuralwatt",
+      "name": "Neuralwatt",
+      "doc": "https://portal.neuralwatt.com/docs",
+      "source": "models.dev",
+      "env": [
+        "NEURALWATT_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "nova",
+      "name": "Nova",
+      "doc": "https://nova.amazon.com/dev/documentation",
+      "source": "models.dev",
+      "env": [
+        "NOVA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "novita-ai",
+      "name": "Novita AI",
+      "doc": "https://novita.ai/docs/guides/introduction",
+      "source": "models.dev",
+      "env": [
+        "NOVITA_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "nvidia",
+      "name": "Nvidia",
+      "doc": "https://docs.api.nvidia.com/nim/",
+      "source": "models.dev",
+      "env": [
+        "NVIDIA_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "oci",
+      "name": "OCI Generative AI",
+      "doc": "https://docs.oracle.com/en-us/iaas/Content/generative-ai/pretrained-models.htm",
+      "source": "models.dev",
+      "env": [
+        "OCI_GENAI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ofox",
+      "name": "Ofox",
+      "doc": "https://ofox.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "OFOX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ollama-cloud",
+      "name": "Ollama Cloud",
+      "doc": "https://docs.ollama.com/cloud",
+      "source": "models.dev",
+      "env": [
+        "OLLAMA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "doc": "https://platform.openai.com/docs/models",
+      "source": "models.dev",
+      "env": [
+        "OPENAI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "doc": "https://opencode.ai/v2/docs/console/models/",
+      "source": "models.dev",
+      "env": [
+        "OPENCODE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "opencode-go",
+      "name": "OpenCode Go",
+      "doc": "https://opencode.ai/v2/docs/console/go/",
+      "source": "models.dev",
+      "env": [
+        "OPENCODE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "openreason",
+      "name": "OpenReason",
+      "doc": "https://openreason.app/docs",
+      "source": "models.dev",
+      "env": [
+        "OPENREASON_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "doc": "https://openrouter.ai/models",
+      "source": "models.dev",
+      "env": [
+        "OPENROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "opper",
+      "name": "Opper",
+      "doc": "https://opper.ai/models",
+      "source": "models.dev",
+      "env": [
+        "OPPER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "orcarouter",
+      "name": "OrcaRouter",
+      "doc": "https://docs.orcarouter.ai",
+      "source": "models.dev",
+      "env": [
+        "ORCAROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "ovhcloud",
+      "name": "OVHcloud AI Endpoints",
+      "doc": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog//",
+      "source": "models.dev",
+      "env": [
+        "OVHCLOUD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "pareto",
+      "name": "Pareto Inference",
+      "doc": "https://docs.paretoinference.com/",
+      "source": "models.dev",
+      "env": [
+        "PARETO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "pendra",
+      "name": "Pendra",
+      "doc": "https://pendra.ai/docs/integrations/opencode",
+      "source": "models.dev",
+      "env": [
+        "PENDRA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "perplexity",
+      "name": "Perplexity",
+      "doc": "https://docs.perplexity.ai",
+      "source": "models.dev",
+      "env": [
+        "PERPLEXITY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "perplexity-agent",
+      "name": "Perplexity Agent",
+      "doc": "https://docs.perplexity.ai/docs/agent-api/models",
+      "source": "models.dev",
+      "env": [
+        "PERPLEXITY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "pioneer",
+      "name": "Pioneer",
+      "doc": "https://agent.pioneer.ai/llms.txt",
+      "source": "models.dev",
+      "env": [
+        "PIONEER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "poe",
+      "name": "Poe",
+      "doc": "https://creator.poe.com/docs/external-applications/openai-compatible-api",
+      "source": "models.dev",
+      "env": [
+        "POE_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "poolside",
+      "name": "Poolside",
+      "doc": "https://platform.poolside.ai",
+      "source": "models.dev",
+      "env": [
+        "POOLSIDE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "prime",
+      "name": "Prime Inference",
+      "doc": "https://docs.primeintellect.ai/inference/overview",
+      "source": "models.dev",
+      "env": [
+        "PRIME_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "privatemode-ai",
+      "name": "Privatemode AI",
+      "doc": "https://docs.privatemode.ai/api/overview",
+      "source": "models.dev",
+      "env": [
+        "PRIVATEMODE_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "qihang-ai",
+      "name": "QiHang",
+      "doc": "https://www.qhaigc.net/docs",
+      "source": "models.dev",
+      "env": [
+        "QIHANG_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qiniu-ai",
+      "name": "Qiniu",
+      "doc": "https://developer.qiniu.com/aitokenapi",
+      "source": "models.dev",
+      "env": [
+        "QINIU_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "qvac",
+      "name": "QVAC",
+      "doc": "https://www.npmjs.com/package/@qvac/ai-sdk-provider",
+      "source": "models.dev",
+      "env": [
+        "QVAC_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "reflection",
+      "name": "Reflection",
+      "doc": "https://developers.reflection.ai/models",
+      "source": "models.dev",
+      "env": [
+        "REFLECTION_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "regolo-ai",
+      "name": "Regolo AI",
+      "doc": "https://docs.regolo.ai/",
+      "source": "models.dev",
+      "env": [
+        "REGOLO_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "requesty",
+      "name": "Requesty",
+      "doc": "https://requesty.ai/solution/llm-routing/models",
+      "source": "models.dev",
+      "env": [
+        "REQUESTY_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "routing-run",
+      "name": "routing.run",
+      "doc": "https://docs.routing.run/api-reference/models",
+      "source": "models.dev",
+      "env": [
+        "ROUTING_RUN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "runinfra",
+      "name": "RunInfra",
+      "doc": "https://runinfra.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "RUNINFRA_GATEWAY_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "sakana",
+      "name": "Sakana AI",
+      "doc": "https://console.sakana.ai/models",
+      "source": "models.dev",
+      "env": [
+        "SAKANA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "salad-cloud",
+      "name": "SaladCloud AI Gateway",
+      "doc": "https://docs.salad.com/ai-gateway/explanation/overview",
+      "source": "models.dev",
+      "env": [
+        "SALAD_CLOUD_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "sambanova",
+      "name": "SambaNova",
+      "doc": "https://docs.sambanova.ai/cloud/docs/get-started/supported-models",
+      "source": "models.dev",
+      "env": [
+        "SAMBANOVA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "sap-ai-core",
+      "name": "SAP AI Core",
+      "doc": "https://help.sap.com/docs/sap-ai-core",
+      "source": "models.dev",
+      "env": [
+        "AICORE_SERVICE_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "sarvam",
+      "name": "Sarvam AI",
+      "doc": "https://docs.sarvam.ai/api-reference-docs/getting-started/models",
+      "source": "models.dev",
+      "env": [
+        "SARVAM_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "scaleway",
+      "name": "Scaleway",
+      "doc": "https://www.scaleway.com/en/docs/generative-apis/",
+      "source": "models.dev",
+      "env": [
+        "SCALEWAY_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "scnet-token-plan",
+      "name": "SCNet Token Plan",
+      "doc": "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
+      "source": "models.dev",
+      "env": [
+        "SCNET_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "scx-ai",
+      "name": "SCX.ai",
+      "doc": "https://platform.scx.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "SCX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "sensenova",
+      "name": "SenseNova (China)",
+      "doc": "https://platform.sensenova.cn/docs",
+      "source": "models.dev",
+      "env": [
+        "SENSENOVA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "siliconflow",
+      "name": "SiliconFlow",
+      "doc": "https://cloud.siliconflow.com/models",
+      "source": "models.dev",
+      "env": [
+        "SILICONFLOW_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "siliconflow-cn",
+      "name": "SiliconFlow (China)",
+      "doc": "https://cloud.siliconflow.com/models",
+      "source": "models.dev",
+      "env": [
+        "SILICONFLOW_CN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "snowflake-cortex",
+      "name": "Snowflake Cortex",
+      "doc": "https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api",
+      "source": "models.dev",
+      "env": [
+        "SNOWFLAKE_ACCOUNT",
+        "SNOWFLAKE_CORTEX_PAT"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "stackit",
+      "name": "STACKIT",
+      "doc": "https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models",
+      "source": "models.dev",
+      "env": [
+        "STACKIT_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "standardcompute",
+      "name": "Standard Compute",
+      "doc": "https://docs.standardcompute.com/models",
+      "source": "models.dev",
+      "env": [
+        "STANDARDCOMPUTE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "stepfun",
+      "name": "StepFun (China)",
+      "doc": "https://platform.stepfun.com/docs/zh/overview/concept",
+      "source": "models.dev",
+      "env": [
+        "STEPFUN_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "stepfun-ai",
+      "name": "StepFun (Global)",
+      "doc": "https://platform.stepfun.ai/docs/en/overview/concept",
+      "source": "models.dev",
+      "env": [
+        "STEPFUN_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "stepfun-ai-step-plan",
+      "name": "StepFun Step Plan (Global)",
+      "doc": "https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api",
+      "source": "models.dev",
+      "env": [
+        "STEPFUN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "stepfun-step-plan",
+      "name": "StepFun Step Plan (China)",
+      "doc": "https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api",
+      "source": "models.dev",
+      "env": [
+        "STEPFUN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "subconscious",
+      "name": "Subconscious",
+      "doc": "https://docs.subconscious.dev",
+      "source": "models.dev",
+      "env": [
+        "SUBCONSCIOUS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "submodel",
+      "name": "submodel",
+      "doc": "https://submodel.gitbook.io",
+      "source": "models.dev",
+      "env": [
+        "SUBMODEL_INSTAGEN_ACCESS_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "synthetic",
+      "name": "Synthetic",
+      "doc": "https://synthetic.new/pricing",
+      "source": "models.dev",
+      "env": [
+        "SYNTHETIC_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tempr",
+      "name": "Tempr Gateway",
+      "doc": "https://temprhq.io/docs/gateway-reference.html",
+      "source": "models.dev",
+      "env": [
+        "TEMPR_API_KEY"
+      ],
+      "output_modalities": [
+        "embedding",
+        "text"
+      ]
+    },
+    {
+      "id": "tencent-coding-plan",
+      "name": "Tencent Coding Plan (China)",
+      "doc": "https://cloud.tencent.com/document/product/1772/128947",
+      "source": "models.dev",
+      "env": [
+        "TENCENT_CODING_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tencent-token-plan",
+      "name": "Tencent Token Plan",
+      "doc": "https://cloud.tencent.com/document/product/1823/130060",
+      "source": "models.dev",
+      "env": [
+        "TENCENT_TOKEN_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tencent-tokenhub",
+      "name": "Tencent TokenHub",
+      "doc": "https://cloud.tencent.com/document/product/1823/130050",
+      "source": "models.dev",
+      "env": [
+        "TENCENT_TOKENHUB_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tensorx",
+      "name": "TensorX",
+      "doc": "https://docs.tensorx.ai/",
+      "source": "models.dev",
+      "env": [
+        "TENSORX_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "the-grid-ai",
+      "name": "The Grid AI",
+      "doc": "https://thegrid.ai/docs",
+      "source": "models.dev",
+      "env": [
+        "THEGRID_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "thinkingmachines",
+      "name": "Thinking Machines",
+      "doc": "https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/anthropic/",
+      "source": "models.dev",
+      "env": [
+        "TINKER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tinfoil",
+      "name": "Tinfoil",
+      "doc": "https://docs.tinfoil.sh",
+      "source": "models.dev",
+      "env": [
+        "TINFOIL_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "togetherai",
+      "name": "Together AI",
+      "doc": "https://docs.together.ai/docs/serverless-models",
+      "source": "models.dev",
+      "env": [
+        "TOGETHER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tokengo",
+      "name": "TokenGo",
+      "doc": "https://www.tokengo.com/docs",
+      "source": "models.dev",
+      "env": [
+        "TOKENGO_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "tokenrouter",
+      "name": "TokenRouter",
+      "doc": "https://www.tokenrouter.com/docs/tokenrouter-feature-guide/",
+      "source": "models.dev",
+      "env": [
+        "TOKENROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "trustedrouter",
+      "name": "TrustedRouter",
+      "doc": "https://trustedrouter.com/docs",
+      "source": "models.dev",
+      "env": [
+        "TRUSTEDROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "umans-ai",
+      "name": "Umans AI",
+      "doc": "https://app.umans.ai/offers/code/docs/orgs",
+      "source": "models.dev",
+      "env": [
+        "UMANS_AI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "umans-ai-coding-plan",
+      "name": "Umans AI Coding Plan",
+      "doc": "https://app.umans.ai/offers/code/docs",
+      "source": "models.dev",
+      "env": [
+        "UMANS_AI_CODING_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "unorouter",
+      "name": "UnoRouter",
+      "doc": "https://unorouter.com/models",
+      "source": "models.dev",
+      "env": [
+        "UNOROUTER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "upstage",
+      "name": "Upstage",
+      "doc": "https://developers.upstage.ai/docs/apis/chat",
+      "source": "models.dev",
+      "env": [
+        "UPSTAGE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "vancine",
+      "name": "Vancine",
+      "doc": "https://vancine.com/docs",
+      "source": "models.dev",
+      "env": [
+        "VANCINE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "venice",
+      "name": "Venice AI",
+      "doc": "https://docs.venice.ai",
+      "source": "models.dev",
+      "env": [
+        "VENICE_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel AI Gateway",
+      "doc": "https://github.com/vercel/ai/tree/5eb85cc45a259553501f535b8ac79a77d0e79223/packages/gateway",
+      "source": "models.dev",
+      "env": [
+        "AI_GATEWAY_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "embedding",
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "vispark",
+      "name": "Vispark",
+      "doc": "https://lab.vispark.in/#vision",
+      "source": "models.dev",
+      "env": [
+        "VISPARK_LAB_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "vivgrid",
+      "name": "Vivgrid",
+      "doc": "https://docs.vivgrid.com/models",
+      "source": "models.dev",
+      "env": [
+        "VIVGRID_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "volcengine",
+      "name": "Volcengine Ark",
+      "doc": "https://www.volcengine.com/docs/82379/1330310",
+      "source": "models.dev",
+      "env": [
+        "ARK_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "volcengine-coding-plan",
+      "name": "Volcengine Ark Coding Plan",
+      "doc": "https://www.volcengine.com/docs/82379/1928261",
+      "source": "models.dev",
+      "env": [
+        "ARK_CODING_PLAN_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "vultr",
+      "name": "Vultr",
+      "doc": "https://api.vultrinference.com/",
+      "source": "models.dev",
+      "env": [
+        "VULTR_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "wafer.ai",
+      "name": "Wafer",
+      "doc": "https://docs.wafer.ai/wafer-pass",
+      "source": "models.dev",
+      "env": [
+        "WAFER_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "wallaby",
+      "name": "Wallaby",
+      "doc": "https://wallabytoken.com/docs",
+      "source": "models.dev",
+      "env": [
+        "WALLABY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "wally",
+      "name": "Wally",
+      "doc": "https://docs.runanywhere.ai/wally-cloud/api",
+      "source": "models.dev",
+      "env": [
+        "WALLY_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "wandb",
+      "name": "CoreWeave",
+      "doc": "https://docs.wandb.ai/inference",
+      "source": "models.dev",
+      "env": [
+        "WANDB_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "watsonx",
+      "name": "watsonx.ai",
+      "doc": "https://www.ibm.com/docs/en/watsonx/saas?topic=solutions-supported-foundation-models",
+      "source": "models.dev",
+      "env": [
+        "WATSONX_AI_APIKEY",
+        "WATSONX_AI_PROJECT_ID"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "xai",
+      "name": "xAI",
+      "doc": "https://docs.x.ai/docs/models",
+      "source": "models.dev",
+      "env": [
+        "XAI_API_KEY"
+      ],
+      "output_modalities": [
+        "image",
+        "text",
+        "video"
+      ]
+    },
+    {
+      "id": "xiaomi",
+      "name": "Xiaomi",
+      "doc": "https://platform.xiaomimimo.com/#/docs",
+      "source": "models.dev",
+      "env": [
+        "XIAOMI_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "xiaomi-token-plan-ams",
+      "name": "Xiaomi Token Plan (Europe)",
+      "doc": "https://platform.xiaomimimo.com/#/docs",
+      "source": "models.dev",
+      "env": [
+        "XIAOMI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "xiaomi-token-plan-cn",
+      "name": "Xiaomi Token Plan (China)",
+      "doc": "https://platform.xiaomimimo.com/#/docs",
+      "source": "models.dev",
+      "env": [
+        "XIAOMI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "xiaomi-token-plan-sgp",
+      "name": "Xiaomi Token Plan (Singapore)",
+      "doc": "https://platform.xiaomimimo.com/#/docs",
+      "source": "models.dev",
+      "env": [
+        "XIAOMI_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "text"
+      ]
+    },
+    {
+      "id": "xpersona",
+      "name": "Xpersona",
+      "doc": "https://www.xpersona.co/docs",
+      "source": "models.dev",
+      "env": [
+        "XPERSONA_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zai",
+      "name": "Z.AI",
+      "doc": "https://docs.z.ai/guides/overview/pricing",
+      "source": "models.dev",
+      "env": [
+        "ZHIPU_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zai-coding-plan",
+      "name": "Z.AI Coding Plan",
+      "doc": "https://docs.z.ai/devpack/overview",
+      "source": "models.dev",
+      "env": [
+        "ZHIPU_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zeldoc",
+      "name": "Zeldoc",
+      "doc": "https://docs.zeldoc.ai",
+      "source": "models.dev",
+      "env": [
+        "ZELDOC_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zenifra",
+      "name": "Zenifra",
+      "doc": "https://docs.zenifra.com",
+      "source": "models.dev",
+      "env": [
+        "ZENIFRA_AI_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zenmux",
+      "name": "ZenMux",
+      "doc": "https://docs.zenmux.ai",
+      "source": "models.dev",
+      "env": [
+        "ZENMUX_API_KEY"
+      ],
+      "output_modalities": [
+        "audio",
+        "image",
+        "text"
+      ]
+    },
+    {
+      "id": "zhipuai",
+      "name": "Zhipu AI",
+      "doc": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+      "source": "models.dev",
+      "env": [
+        "ZHIPU_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zhipuai-coding-plan",
+      "name": "Zhipu AI Coding Plan",
+      "doc": "https://docs.bigmodel.cn/cn/coding-plan/overview",
+      "source": "models.dev",
+      "env": [
+        "ZHIPU_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    }
+  ]
+}

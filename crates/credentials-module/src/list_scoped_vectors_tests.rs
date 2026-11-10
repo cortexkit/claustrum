@@ -119,6 +119,9 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[2]["categories"], json!(["llm-provider", "web-search"]));
     assert_eq!(rows[2]["plan_tier_observed_at_ms"], 1_700_000_000_000_i64);
     assert_eq!(rows[3]["state"], "retired");
+    assert_eq!(rows[1]["hosts"], json!(["api.exa.ai"]));
+    assert!(rows.iter().all(|row| row.get("hosts").is_some()));
+    assert!(rows.iter().all(|row| row.get("fusiform_provider_id").is_none()));
     let mut cases = vec![list_vector_case(
         "catalog_and_lifecycle",
         OP_LIST_SCOPED,
@@ -197,6 +200,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             VaultRecord::new_static(CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None)
         };
         rig.store.create(id, &record).unwrap();
+        rig.store.force_credential_incarnation_for_test(id, &format!("{:032x}", index + 101));
         rig.store.create_read_grant_audited(
             "reserved", "descriptor-reader", SelectorKind::Exact, id,
             GrantOperation::Read, AuditCtx::admin(AuditOp::GrantCreate),
@@ -226,6 +230,16 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         }
         get_cases.push(case);
     }
+    rig.dispatch(2, 30, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let listing = rig.next().await;
+    assert_eq!(listing.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&listing.body).unwrap();
+    let rows = reply["result"]["credentials"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["hosts"], json!(["api.nano-gpt.com", "nano-gpt.com"]));
+    assert_eq!(rows[1]["hosts"], json!(["api.openai.com"]));
+    assert!(rows[2].get("hosts").is_none());
+    cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
@@ -241,7 +255,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
         std::fs::write(directory.join("get-scoped-v1.json"), &get_emitted).unwrap();
         std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
-        println!("emitted five list-scoped v2 cases, three get-scoped v1 cases and SHA256SUMS");
+        println!("emitted six list-scoped v2 cases, three get-scoped v1 cases and SHA256SUMS");
     } else {
         assert_eq!(
             emitted,

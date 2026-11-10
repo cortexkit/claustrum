@@ -337,6 +337,12 @@ pub struct ListScopedCredential {
     /// value, such as a GitHub App.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
+    /// Read-time provider-card join key, distinct from stored routing `provider_ids`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fusiform_provider_id: Option<String>,
+    /// Receiving hosts from the same descriptor served by `credential.get_scoped`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -682,43 +688,49 @@ impl GetResult {
         credential_id: &str,
         providers: &[credentials_core::store::RegisteredProvider],
     ) -> Self {
-        self.scoped_descriptor =
-            credentials_core::catalog::api_key_provider_for_credential(credential_id)
-                .and_then(|row| {
-                    if row.hosts.is_empty() {
-                        return None;
-                    }
-                    Some(Box::new(ScopedKeyDescriptor {
-                        auth: ScopedKeyAuth {
-                            header: row.auth?.header.into(),
-                            scheme: match row.auth?.scheme {
-                                credentials_core::catalog::AuthScheme::Bearer => "bearer",
-                                credentials_core::catalog::AuthScheme::Raw => "raw",
-                            }
-                            .into(),
-                        },
-                        hosts: row.hosts.iter().map(|host| (*host).into()).collect(),
-                        invalid_key: row.invalid_key,
-                    }))
-                })
-                .or_else(|| {
-                    let row = credentials_core::store::RegisteredProvider::for_id(
-                        providers,
-                        credential_id,
-                    )?;
-                    if row.hosts.is_empty() {
-                        return None;
-                    }
-                    Some(Box::new(ScopedKeyDescriptor {
-                        auth: ScopedKeyAuth {
-                            header: row.auth_header.clone()?,
-                            scheme: row.auth_scheme.clone()?,
-                        },
-                        hosts: row.hosts.clone(),
-                        invalid_key: None,
-                    }))
-                });
+        self.scoped_descriptor = ScopedKeyDescriptor::for_id(credential_id, providers);
         self
+    }
+}
+
+impl ScopedKeyDescriptor {
+    fn for_id(
+        credential_id: &str,
+        providers: &[credentials_core::store::RegisteredProvider],
+    ) -> Option<Box<Self>> {
+        credentials_core::catalog::api_key_provider_for_credential(credential_id)
+            .and_then(|row| {
+                if row.hosts.is_empty() {
+                    return None;
+                }
+                Some(Box::new(ScopedKeyDescriptor {
+                    auth: ScopedKeyAuth {
+                        header: row.auth?.header.into(),
+                        scheme: match row.auth?.scheme {
+                            credentials_core::catalog::AuthScheme::Bearer => "bearer",
+                            credentials_core::catalog::AuthScheme::Raw => "raw",
+                        }
+                        .into(),
+                    },
+                    hosts: row.hosts.iter().map(|host| (*host).into()).collect(),
+                    invalid_key: row.invalid_key,
+                }))
+            })
+            .or_else(|| {
+                let row =
+                    credentials_core::store::RegisteredProvider::for_id(providers, credential_id)?;
+                if row.hosts.is_empty() {
+                    return None;
+                }
+                Some(Box::new(ScopedKeyDescriptor {
+                    auth: ScopedKeyAuth {
+                        header: row.auth_header.clone()?,
+                        scheme: row.auth_scheme.clone()?,
+                    },
+                    hosts: row.hosts.clone(),
+                    invalid_key: None,
+                }))
+            })
     }
 }
 
@@ -1500,6 +1512,20 @@ pub(crate) fn list_scoped_view(
                 .map(|time| time.to_string())
                 .as_deref(),
         );
+        push_optional_string(
+            &mut digest_input,
+            credential.fusiform_provider_id.as_deref(),
+        );
+        match &credential.hosts {
+            None => digest_input.push(0),
+            Some(hosts) => {
+                digest_input.push(1);
+                push_u32(&mut digest_input, hosts.len());
+                for host in hosts {
+                    push_string(&mut digest_input, host);
+                }
+            }
+        }
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -1510,7 +1536,15 @@ pub(crate) fn list_scoped_view(
     base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
 }
 
+#[cfg(test)]
 pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
+    project_list_scoped_with_providers(snapshot, &[])
+}
+
+fn project_list_scoped_with_providers(
+    snapshot: ScopedListSnapshot,
+    providers: &[credentials_core::store::RegisteredProvider],
+) -> ListScopedResult {
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
         .into_iter()
@@ -1532,6 +1566,9 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
+                fusiform_provider_id: None,
+                hosts: ScopedKeyDescriptor::for_id(&row.id, providers)
+                    .map(|descriptor| descriptor.hosts),
                 provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
@@ -2953,7 +2990,12 @@ impl ReadSurface {
             )
         });
         let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
-        let result = project_list_scoped(snapshot);
+        let providers = self
+            .engine
+            .store()
+            .registered_providers()
+            .map_err(|_| ReadError::StoreError)?;
+        let result = project_list_scoped_with_providers(snapshot, &providers);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -3016,7 +3058,12 @@ impl ReadSurface {
             .rows
             .retain(|row| !transfer_key_fenced(&row.id, rows_access));
         keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, keys_access));
-        let view = project_list_scoped(snapshot).view;
+        let providers = self
+            .engine
+            .store()
+            .registered_providers()
+            .map_err(|_| ReadError::StoreError)?;
+        let view = project_list_scoped_with_providers(snapshot, &providers).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
         input.push(1);
@@ -4845,7 +4892,7 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "zzrt6oJHB/1jCqi4+TUqAol9XN3jLGea/H09sqqJW14=",
+            "pF4xYlW17T7v0T9py168AkfP25/IKuL6svQM0eWpv7c=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -4939,6 +4986,8 @@ mod list_scoped_tests {
             out.extend_from_slice(value.as_bytes());
         }
         let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
+            fusiform_provider_id: None,
+            hosts: None,
             provider: None,
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -4988,6 +5037,8 @@ mod list_scoped_tests {
             bytes.push(0); // provider absent
             string(&mut bytes, "0123456789abcdef0123456789abcdef");
             bytes.push(0); // tier observation time absent
+            bytes.push(0); // Fusiform provider id absent
+            bytes.push(0); // hosts absent
             bytes.push(2);
             u32_be(&mut bytes, 0);
             let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
@@ -5091,6 +5142,8 @@ mod list_scoped_tests {
             bytes.push(0); // provider absent
             string(&mut bytes, "0123456789abcdef0123456789abcdef");
             bytes.push(0); // tier observation time absent
+            bytes.push(0); // Fusiform provider id absent
+            bytes.push(0); // hosts absent
             bytes.push(2);
             bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
             let expected = base64::engine::general_purpose::STANDARD
@@ -5103,6 +5156,81 @@ mod list_scoped_tests {
             } else {
                 assert!(wire.get("plan_tier").is_none());
                 assert!(wire.get("plan_tier_source").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn list_scoped_view_frames_fusiform_id_then_hosts_after_plan_observation() {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        let mut source = row(
+            "apikey:framing",
+            &[],
+            RecordState::Active,
+            &[GrantOperation::Read],
+            None,
+        );
+        source.plan_tier_observed_at_ms = Some(42);
+        let result = project_list_scoped(ScopedListSnapshot {
+            rows: vec![source],
+            grants: Vec::new(),
+        });
+        let mut credential = result.credentials[0].clone();
+        let mut views = std::collections::BTreeSet::new();
+        for hosts in [
+            None,
+            Some(vec![]),
+            Some(vec!["ab"]),
+            Some(vec!["a", "b"]),
+            Some(vec!["b", "a"]),
+        ] {
+            credential.hosts = hosts
+                .as_ref()
+                .map(|hosts| hosts.iter().map(|host| (*host).to_owned()).collect());
+            assert_eq!(credential.fusiform_provider_id, None);
+            // Assemble the entire frame independently: the two new slots follow the
+            // observation time, and an absent host list is not a present empty list.
+            let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
+            bytes.push(1);
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            string(&mut bytes, "apikey:framing");
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // categories
+            string(&mut bytes, "active");
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            string(&mut bytes, "read");
+            bytes.extend_from_slice(&[0, 0, 0]); // identity
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // routing provider ids
+            bytes.extend_from_slice(&[0, 0, 0, 0]); // auth method, tier, source, provider
+            string(&mut bytes, "0123456789abcdef0123456789abcdef");
+            bytes.push(1);
+            string(&mut bytes, "42");
+            bytes.push(0); // Fusiform provider id
+            match &hosts {
+                None => bytes.push(0),
+                Some(hosts) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(hosts.len() as u32).to_be_bytes());
+                    for host in hosts {
+                        string(&mut bytes, host);
+                    }
+                }
+            }
+            bytes.push(2);
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
+            let expected = base64::engine::general_purpose::STANDARD
+                .encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+            let view = list_scoped_view(std::slice::from_ref(&credential), &[]);
+            assert_eq!(view, expected, "hosts {hosts:?}");
+            assert!(views.insert(view), "every host frame must be distinct");
+            let wire = serde_json::to_value(&credential).unwrap();
+            assert!(wire.get("fusiform_provider_id").is_none());
+            if let Some(hosts) = hosts {
+                assert_eq!(wire["hosts"], serde_json::json!(hosts));
+            } else {
+                assert!(wire.get("hosts").is_none());
             }
         }
     }

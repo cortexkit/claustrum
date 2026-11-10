@@ -443,6 +443,28 @@ operator-chosen label. Account routing pools on `account_id` (with the refresh a
 `list_scoped`), never on `record_version`: that bumps on every token refresh, so a key that
 includes it splits one account into a new pool per refresh.
 
+`credential.get_scoped` also projects an API-key descriptor from this vault's catalog
+when the credential id resolves to a row with a descriptor, including labeled ids such
+as `apikey:openai:work`. The three top-level fields are served together:
+
+- `auth: {header, scheme}`: `header` is a lowercase HTTP header name; `scheme` is
+  `bearer` (`Bearer <key>`) or `raw` (the key alone).
+- `hosts: [..]`: exact lowercase receiving host names, sorted without duplicates,
+  with no scheme, port, path or wildcard.
+- `invalid_key: {status, error_code, error_code_field} | null`: an observation of
+  what a deliberately bogus key returned. `status` is the HTTP status;
+  `error_code_field` is an RFC 6901 JSON Pointer to the observed string `error_code`.
+  Those two code fields are null together when no string code was observed. The
+  vault never evaluates this evidence. `invalid_key: null` means the descriptor is
+  known but no invalid-key observation is recorded.
+
+All three fields are absent for OAuth and other login-provider records,
+no-descriptor catalog rows, registered providers without hosts, and non-provider
+records such as cookies or manual ids. Absence is not the same as `invalid_key: null`.
+The fields are read-time projections, not stored credential metadata. Remote records
+use this vault's catalog lookup by credential id too; no descriptor fields cross
+federation. `credential.get` (and its handle-based batch form) never serves these fields.
+
 `account_id` IS THE PROVIDER'S ACCOUNT IDENTIFIER AND ITS SHAPE IS THE PROVIDER'S CHOICE.
 Treat it as an opaque string. It is stable per account and comparable to itself, and
 nothing more: do not validate it against a pattern, do not compare values across
@@ -715,8 +737,11 @@ visibility, plus the real watch opening, category-change and revoked-caller term
 frames. Its unknown-method case is the dispatcher's actual reply to an unsupported
 method, standing in for an older vault. Storage incarnations and detection times are
 fixed test values; only the process-local watch boot nonce is normalized to zero.
+`crates/credentials-module/tests/vectors/get-scoped-v1.json` pins real dispatched
+`get_scoped` replies for a catalog row with invalid-key evidence, a catalog row with
+`invalid_key: null`, and an OAuth record with all descriptor fields absent.
 Each case carries decoded JSON, base64url reply bytes and a reply hash; `SHA256SUMS`
-pins the file. Regenerate with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
+pins both files. Regenerate both with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
 `list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned` test.
 
 ### `admin.set_plan`

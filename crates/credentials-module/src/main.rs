@@ -9877,7 +9877,8 @@ mod tests {
              Consumers byte-copy this file: regenerate the row from the assertion's left side, \
              announce the change, and update the client decoder and its key-coverage test";
 
-        // credential.get, every optional field populated.
+        // credential.get, every handle-read optional field populated. Scoped-only
+        // descriptor fields stay absent even in the full handle-read shape.
         let get_full = wrap_result(read_surface::GetResult {
             payload: b"fixture-not-a-secret".to_vec(),
             expires_at_ms: Some(1_900_000_000_000),
@@ -9887,6 +9888,7 @@ mod tests {
             account_id: Some("00000000-0000-4000-8000-000000000000".into()),
             email: Some("consumer@example.invalid".into()),
             org_name: Some("Example Org".into()),
+            scoped_descriptor: None,
         });
         assert_eq!(
             result_keys(&get_full),
@@ -9915,6 +9917,7 @@ mod tests {
             account_id: None,
             email: None,
             org_name: None,
+            scoped_descriptor: None,
         });
         assert_eq!(
             result_keys(&get_bare),

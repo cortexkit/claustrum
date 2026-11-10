@@ -6,9 +6,9 @@ use std::time::Duration;
 use claustrum_module_probe::admin_surface::{AdminOutcome, AdminSurface};
 use claustrum_module_probe::federation::{
     ingress::{OP_REMOTE_TOKEN, OP_REMOTE_WATCH},
-    member_watch, sharing,
+    management_surface, member_watch, sharing,
     transfer::ensure_transfer_key,
-    HomeAnswer, HomeVault, RemoteAnswer, RemoteReader,
+    HomeAnswer, HomeVault, RemoteAnswer, RemoteReader, RouteCall, ADMIN_OP_BUDGET,
 };
 use credentials_core::admin_auth::AdminMacKey;
 use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
@@ -797,6 +797,181 @@ async fn two_vault_lifecycle_offline_and_live_repair_replace_every_old_incarnati
     assert_eq!(
         rig.row("oauth:needs").last_home_state,
         RemoteHomeState::NeedsReauth
+    );
+    rig.protected_rows();
+    rig.stop().await;
+}
+
+fn watch_opens(rig: &Rig) -> usize {
+    let target = crate::support::fed_provider_name(rig.vaults.home_member());
+    rig.b_callosum
+        .methods(&target)
+        .into_iter()
+        .filter(|method| method == OP_REMOTE_WATCH)
+        .count()
+}
+
+fn frame_code(frame: &subc_protocol::Frame) -> Option<String> {
+    serde_json::from_slice::<Value>(&frame.body)
+        .ok()?
+        .get("code")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A same-pairing inventory is the wake B already uses to reopen. It does not
+/// depend on the backoff timer being armed before virtual time moves.
+async fn reopen(rig: &Rig, opens: usize) {
+    rig.b_inventory(Some("pair-1")).await;
+    wait_until(|| watch_opens(rig) > opens).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_resilience_draining_home_keeps_rows_and_reopens() {
+    let mut rig = Rig::new("member-resilience-drain", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    let before = rig.row(LOGIN);
+    let opens = watch_opens(&rig);
+    // Draining ends every live stream with a clean end and latches the hub.
+    // That must not look like the home forgetting B.
+    rig.home.remote_watches.finish_all().await.expect("drain");
+    wait_until(|| {
+        rig.relay
+            .frames()
+            .iter()
+            .any(|frame| frame.header.ty == FrameType::StreamEnd)
+    })
+    .await;
+    assert_eq!(rig.row(LOGIN), before);
+    reopen(&rig, opens).await;
+    wait_until(|| {
+        rig.relay.frames().iter().any(|frame| {
+            frame.header.ty == FrameType::Error
+                && frame_code(frame).as_deref() == Some("home_unavailable")
+        })
+    })
+    .await;
+    assert_eq!(
+        rig.row(LOGIN),
+        before,
+        "a drained home must not remove B's rows"
+    );
+    rig.protected_rows();
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn member_resilience_capped_stream_keeps_rows_and_reopens() {
+    let mut rig = Rig::new("member-resilience-cap", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    let before = rig.row(LOGIN);
+    let opens = watch_opens(&rig);
+    let b_corr = rig
+        .relay
+        .frames()
+        .iter()
+        .find(|frame| frame.header.ty == FrameType::StreamData)
+        .expect("B's first snapshot")
+        .header
+        .corr;
+    let target = crate::support::fed_provider_name(rig.vaults.home_member());
+    // B's stream is the oldest. Four more successful opens from the same member
+    // reach A's cap and end that stream; a failed open must not be what evicts it.
+    let mut fillers = Vec::new();
+    for index in 0..4 {
+        let seen = rig.relay.frames().len();
+        fillers.push(
+            rig.vaults
+                .b
+                .outbound
+                .subscribe(
+                    &format!("cap-filler-{index}"),
+                    RouteCall {
+                        target: management_surface(&target),
+                        prelude: None,
+                        request: json!({"method": OP_REMOTE_WATCH, "params": {}}),
+                    },
+                    ADMIN_OP_BUDGET,
+                )
+                .await
+                .expect("filler subscribe"),
+        );
+        wait_until(|| {
+            rig.relay.frames().iter().skip(seen).any(|frame| {
+                frame.header.ty == FrameType::StreamData && frame.header.corr != b_corr
+            })
+        })
+        .await;
+    }
+    wait_until(|| {
+        rig.relay
+            .frames()
+            .iter()
+            .any(|frame| frame.header.ty == FrameType::StreamEnd && frame.header.corr == b_corr)
+    })
+    .await;
+    assert_eq!(rig.row(LOGIN), before);
+    let ended = rig.relay.frames().len();
+    reopen(&rig, opens).await;
+    wait_until(|| {
+        rig.relay
+            .frames()
+            .iter()
+            .skip(ended)
+            .any(|frame| frame.header.ty == FrameType::StreamData)
+    })
+    .await;
+    assert_eq!(
+        rig.row(LOGIN),
+        before,
+        "a cap eviction must not remove or replace B's row"
+    );
+    drop(fillers);
+    rig.protected_rows();
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_resilience_real_not_found_open_removes_rows() {
+    let mut rig = Rig::new("member-resilience-not-found-open", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    assert_eq!(rig.row(LOGIN).source, RemoteRecordSource::HomeWatch);
+    rig.stop_b().await;
+    assert!(rig.b.store.remote_record(LOGIN).unwrap().is_some());
+    let frames_before = rig.relay.frames().len();
+    let opens = watch_opens(&rig);
+    // B still lists A. Only A's open check sees that the pairing is gone, so
+    // the refusal is an open answer rather than B's own inventory cleanup.
+    rig.vaults.callosum.answer(
+        TARGET_MODULE,
+        READ,
+        Reply::Ok(inventory(&rig.vaults.b, None, false)),
+    );
+    rig.start_b();
+    wait_until(|| rig.b.store.remote_record(LOGIN).unwrap().is_none()).await;
+    assert_eq!(watch_opens(&rig), opens + 1, "removal follows one open");
+    let opened: Vec<_> = rig.relay.frames().into_iter().skip(frames_before).collect();
+    assert!(
+        opened.iter().any(|frame| {
+            frame.header.ty == FrameType::Error && frame_code(frame).as_deref() == Some("not_found")
+        }),
+        "A's open answer must be not_found"
+    );
+    assert!(
+        opened
+            .iter()
+            .all(|frame| frame.header.ty != FrameType::StreamData),
+        "an open refusal must not deliver a snapshot"
+    );
+    assert_eq!(
+        rig.b.store.list_remote_records().unwrap(),
+        [rig.operator.clone()]
     );
     rig.protected_rows();
     rig.stop().await;

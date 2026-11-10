@@ -289,6 +289,7 @@ async fn member_watch_sharing_fanout_uses_all_computers_and_rejects_whole_bad_in
         Some(rig.pairings.clone()),
     ));
     rig.row("oauth:x").await;
+    let installed = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
     assert_eq!(rig.pairings.borrow().as_ref().unwrap().len(), 1);
     assert_eq!(rig.requests(), 1);
     body["devices"][0]["fingerprint"] = json!("malformed");
@@ -304,6 +305,11 @@ async fn member_watch_sharing_fanout_uses_all_computers_and_rejects_whole_bad_in
         .reply_fence(&rig.vaults.b.outbound)
         .await;
     assert_eq!(*rig.pairings.borrow(), paired());
+    assert_eq!(
+        rig.home.store.remote_record("oauth:x").unwrap().unwrap(),
+        installed,
+        "a rejected paired-devices snapshot must not change installed rows"
+    );
     sharing.abort();
     let _ = sharing.await;
     rig.stop().await;
@@ -609,5 +615,156 @@ async fn member_watch_collision_replay_inserts_only_skipped_rows_and_fences_repa
         .unwrap()
         .iter()
         .all(|r| r.home_member != home_c || r.home_pairing_id.as_deref() == Some("pair-c-new")));
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_resilience_unknown_operation_open_keeps_existing_rows() {
+    let rig = Rig::new(
+        "resilience-unknown-op",
+        Reply::Watch(notice(vec![login("oauth:x")])),
+    )
+    .await;
+    rig.pairings.send_replace(paired());
+    rig.row("oauth:x").await;
+    let before = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
+    let audit = rig.home.store.read_audit(None).unwrap();
+    // The live stream ends cleanly so the next open is the unknown-operation
+    // refusal. That local refusal must not be treated as revocation.
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP,
+        Reply::Permanent("unknown_operation".into()),
+    );
+    assert_eq!(rig.vaults.callosum.watch_snapshot(None).await, 1);
+    assert_eq!(
+        rig.home.store.remote_record("oauth:x").unwrap().unwrap(),
+        before
+    );
+    let count = rig.requests();
+    rig.pairings.send_replace(paired());
+    wait_until(|| rig.requests() > count).await;
+    assert_eq!(
+        rig.home.store.remote_record("oauth:x").unwrap().unwrap(),
+        before
+    );
+    assert_eq!(rig.home.store.read_audit(None).unwrap(), audit);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn member_resilience_switch_off_and_on_restores_rows_without_another_event() {
+    let rig = Rig::new(
+        "resilience-switch",
+        Reply::Watch(notice(vec![login("oauth:x")])),
+    )
+    .await;
+    rig.pairings.send_replace(paired());
+    rig.row("oauth:x").await;
+    let revoked = json!({"code": "fed_subscription_ended", "detail": {"reason": "revoked"}});
+    assert_eq!(
+        rig.vaults
+            .callosum
+            .watch_frame(TARGET, FrameType::Error, revoked)
+            .await,
+        1
+    );
+    wait_until(|| rig.home.store.remote_record("oauth:x").unwrap().is_none()).await;
+    // The switch coming back is not a paired-devices event on B. Only the
+    // backoff timer may reopen.
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP,
+        Reply::Watch(notice(vec![login("oauth:x")])),
+    );
+    let opens = rig.requests();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    rig.row("oauth:x").await;
+    assert_eq!(
+        rig.requests(),
+        opens + 1,
+        "one timed retry, no inventory wake"
+    );
+    let restored = rig.home.store.remote_record("oauth:x").unwrap().unwrap();
+    assert_eq!(restored.source, RemoteRecordSource::HomeWatch);
+    assert_eq!(restored.home_member, HOME);
+    assert_eq!(restored.home_pairing_id.as_deref(), Some("pair-a"));
+    assert_eq!(restored.last_home_state, RemoteHomeState::NeedsReauth);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn member_resilience_repair_during_home_removal_installs_the_new_snapshot() {
+    let c = "11223344556677889900112233445566";
+    let home_c = format!("fed-computer:{c}");
+    let mut c_snapshot = notice(vec![login("oauth:x"), login("oauth:y")]);
+    c_snapshot["home"] = json!(home_c);
+    let rig = Rig::new(
+        "resilience-repair-replay",
+        Reply::Watch(notice(vec![login("oauth:x")])),
+    )
+    .await;
+    rig.pairings
+        .send_replace(Some(vec![(FP.into(), "pair-h".into())]));
+    rig.row("oauth:x").await;
+    assert_eq!(
+        rig.home
+            .store
+            .remote_record("oauth:x")
+            .unwrap()
+            .unwrap()
+            .home_member,
+        HOME
+    );
+    rig.vaults
+        .callosum
+        .answer("claustrum", OP, Reply::Watch(c_snapshot));
+    rig.pairings.send_replace(Some(vec![
+        (FP.into(), "pair-h".into()),
+        (c.into(), "pair-c".into()),
+    ]));
+    rig.row("oauth:y").await;
+    assert_eq!(
+        rig.home
+            .store
+            .remote_record("oauth:x")
+            .unwrap()
+            .unwrap()
+            .home_member,
+        HOME,
+        "C skips X while H's home_watch row holds it"
+    );
+    let mut renewed = notice(vec![login("oauth:x"), login("oauth:y"), login("oauth:z")]);
+    renewed["home"] = json!(home_c);
+    rig.vaults
+        .callosum
+        .answer("claustrum", OP, Reply::Watch(renewed));
+    // H leaving frees X and signals C's InsertOnly. Wait until that removal
+    // has committed before changing C, so the re-pair is not coalesced away.
+    rig.pairings
+        .send_replace(Some(vec![(c.into(), "pair-c".into())]));
+    wait_until(|| {
+        let row = rig.home.store.remote_record("oauth:x").unwrap();
+        row.is_none() || row.is_some_and(|record| record.home_member == home_c)
+    })
+    .await;
+    rig.pairings
+        .send_replace(Some(vec![(c.into(), "pair-c-new".into())]));
+    wait_until(|| {
+        let rows = rig.home.store.list_remote_records().unwrap();
+        ["oauth:x", "oauth:y", "oauth:z"].iter().all(|id| {
+            rows.iter().any(|row| {
+                row.credential_id == *id
+                    && row.home_member == home_c
+                    && row.home_pairing_id.as_deref() == Some("pair-c-new")
+            })
+        })
+    })
+    .await;
+    let rows = rig.home.store.list_remote_records().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| {
+        row.home_member == home_c && row.home_pairing_id.as_deref() == Some("pair-c-new")
+    }));
     rig.stop().await;
 }

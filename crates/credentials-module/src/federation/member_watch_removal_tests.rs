@@ -340,3 +340,92 @@ async fn member_terminal_removal_joins_owner_and_retries_without_a_stream() {
     drop(pairs);
     task.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn member_resilience_failed_removal_completes_without_opening_a_stream() {
+    // Revoked while the home stays paired. The pending removal must block the
+    // reconnect, and the timer completes it without a new inventory.
+    let mut rig = Rig::new("resilience-revoked-removal");
+    rig.seed("pair-a", "oauth:x");
+    rig.fail_removal();
+    let (_pairs, pairings) = watch::channel(Some(vec![(FP.into(), "pair-a".into())]));
+    rig.reconciler.current.insert(FP.into(), "pair-a".into());
+    rig.reconciler
+        .pending
+        .insert(FP.into(), PendingRemoval::new(None));
+    rig.reconciler.retrying.insert(
+        FP.into(),
+        RetryStart {
+            backoff: Backoff(0),
+            retry_at: Instant::now() + Duration::from_secs(10),
+        },
+    );
+    rig.reconciler.retry_removals(false).await;
+    assert!(rig
+        .reconciler
+        .store
+        .remote_record("oauth:x")
+        .unwrap()
+        .is_some());
+    rig.reconciler.start_tasks(&pairings);
+    assert!(
+        rig.reconciler.tasks.is_empty(),
+        "a pending removal opens no stream"
+    );
+    rig.sql
+        .execute_batch("DROP TRIGGER fail_watch_remove")
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    rig.reconciler.retry_removals(false).await;
+    assert!(rig
+        .reconciler
+        .store
+        .remote_record("oauth:x")
+        .unwrap()
+        .is_none());
+    assert!(rig.reconciler.pending.is_empty());
+    rig.reconciler.start_tasks(&pairings);
+    assert!(
+        rig.reconciler.tasks.is_empty(),
+        "the reconnect backoff still blocks a stream after removal commits"
+    );
+
+    // Unpairing uses the same pending removal. A channel that still names the
+    // home must not open until that removal commits, and not after it either.
+    let mut rig = Rig::new("resilience-unpair-removal");
+    rig.seed("pair-a", "oauth:x");
+    rig.fail_removal();
+    let (_pairs, pairings) = watch::channel(Some(vec![(FP.into(), "pair-a".into())]));
+    rig.reconciler.inventory(vec![]).await;
+    assert!(rig
+        .reconciler
+        .store
+        .remote_record("oauth:x")
+        .unwrap()
+        .is_some());
+    assert!(rig.reconciler.pending.contains_key(FP));
+    rig.reconciler.current.insert(FP.into(), "pair-a".into());
+    rig.reconciler.start_tasks(&pairings);
+    assert!(
+        rig.reconciler.tasks.is_empty(),
+        "unpair removal blocks a stream while it is pending"
+    );
+    rig.reconciler.current.clear();
+    rig.sql
+        .execute_batch("DROP TRIGGER fail_watch_remove")
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    rig.reconciler.retry_removals(false).await;
+    assert!(rig
+        .reconciler
+        .store
+        .remote_record("oauth:x")
+        .unwrap()
+        .is_none());
+    assert!(rig.reconciler.pending.is_empty());
+    rig.reconciler.start_tasks(&pairings);
+    assert!(
+        rig.reconciler.tasks.is_empty(),
+        "an unpaired home is not reopened"
+    );
+}

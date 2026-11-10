@@ -8,7 +8,12 @@ brief.
 
 - Build and test on the build server: use the bash tool with `runon: "linux,8c"`. Don't
   run cargo on the Mac. Keep the normal build directory; a separate `CARGO_TARGET_DIR`
-  forces a cold build every run.
+  forces a cold build every run. If a job is refused for capacity (`runner_full`), nothing
+  ran: resubmit at `linux,4c`, then `linux,2c`, one job at a time, without asking.
+- A change that adds a store migration also changes two tests that pin the whole schema:
+  the newest-migration literal and the per-table column lists in `store.rs`. Run
+  `cargo test --locked -p credentials-core --features test-support --lib store::` before
+  reporting, even when your own filter is narrower.
 - Run only the tests for what you changed, by name or module filter, for example
   `cargo test --locked -p credentials-core --features test-support <filter>`. Never run a
   whole crate's suite, the workspace suite, `scripts/fast-check.sh` or `scripts/gate.sh`:

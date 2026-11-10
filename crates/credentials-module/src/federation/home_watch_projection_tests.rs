@@ -26,7 +26,7 @@ impl HttpTransport for NoHttp {
     }
 }
 
-fn rig() -> (TestTempDir, HomeVault, rusqlite::Connection) {
+pub(super) fn rig() -> (TestTempDir, HomeVault, rusqlite::Connection) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let root = TestTempDir::new(format!(
@@ -51,7 +51,7 @@ fn rig() -> (TestTempDir, HomeVault, rusqlite::Connection) {
     (root, HomeVault::new(Arc::new(engine)), conn)
 }
 
-fn login() -> VaultRecord {
+pub(super) fn login() -> VaultRecord {
     let mut record = VaultRecord::new_oauth(
         "test",
         "anthropic",

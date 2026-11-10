@@ -952,6 +952,7 @@ pub type CallosumStub = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
 /// This vault in its role as home: it answers other members' federation ops.
 pub struct HomeVault {
     engine: Arc<RefreshEngine>,
+    pub remote_watches: super::home_watch::RemoteWatchHub,
     /// The outbound client the home uses to ask callosum about pairings and keys. Set
     /// once at startup; until then every lookup is unavailable (transient).
     callosum: OnceLock<OutboundClient>,
@@ -983,6 +984,7 @@ impl HomeVault {
     pub fn new(engine: Arc<RefreshEngine>) -> Self {
         Self {
             engine,
+            remote_watches: super::home_watch::RemoteWatchHub::default(),
             callosum: OnceLock::new(),
             cooldown_clock: Arc::new(wall_now_ms),
             secret_clock: Arc::new(wall_now_ms),
@@ -1111,6 +1113,57 @@ impl HomeVault {
             })),
             Err(refusal) => HomeAnswer::Reply(json!({ "error": refusal.body() })),
         }
+    }
+
+    pub(crate) async fn prepare_remote_watch(
+        &self,
+        member: &str,
+        params: &Value,
+    ) -> Result<super::home_watch::PreparedWatch, HomeAnswer> {
+        let budget = tokio::time::Instant::now() + self.op_deadline;
+        let work = async {
+            if carries_bearer(params) {
+                return Err(Refusal::InvalidParams(
+                    "a federation channel takes no handle or enrollment_token".into(),
+                ));
+            }
+            let pairing = self
+                .current_pairing(member, UNADDRESSED_SUBJECT, budget)
+                .await?;
+            if !params.as_object().is_some_and(|object| object.is_empty()) {
+                return Err(Refusal::InvalidParams(
+                    "remote_watch takes exactly {}".into(),
+                ));
+            }
+            let home = self
+                .engine
+                .store()
+                .federation_self_member()
+                .map_err(|_| STORE_ERROR)?
+                .ok_or(Refusal::Local("remote_setup_incomplete", "permanent"))?;
+            self.active_transfer_key(&home)?;
+            let rows = self
+                .remote_watch_projection(member, &pairing)
+                .map_err(|_| STORE_ERROR)?;
+            // Synchronous store reads cannot be interrupted by timeout_at. Check again
+            // before admitting a stream, so a slow first projection cannot evict one.
+            if tokio::time::Instant::now() >= budget {
+                return Err(Refusal::HomeUnavailable);
+            }
+            Ok(super::home_watch::PreparedWatch {
+                member: member.to_owned(),
+                pairing,
+                home,
+                rows,
+            })
+        };
+        let outcome = tokio::time::timeout_at(budget, work)
+            .await
+            .unwrap_or(Err(Refusal::HomeUnavailable));
+        outcome.map_err(|refusal| match refusal {
+            Refusal::InvalidParams(detail) => HomeAnswer::InvalidParams(detail),
+            other => HomeAnswer::Reply(json!({"error": other.body()})),
+        })
     }
 
     /// `federation.remote_token`: the numbered checks below run in order and the first
@@ -1766,6 +1819,10 @@ impl HomeVault {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "home_watch_open_tests.rs"]
+mod home_watch_open_tests;
 
 #[cfg(test)]
 #[path = "home_watch_projection_tests.rs"]

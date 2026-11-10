@@ -7,6 +7,7 @@
 //! are dispatched by `AdminSurface` through the stage functions exported here. Every
 //! entry point is reached as `federation::*`.
 
+pub mod home_watch;
 pub mod ingress;
 pub mod outbound;
 pub mod remote_read;

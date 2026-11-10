@@ -2028,7 +2028,7 @@ async fn sc_dispatch(
         serde_json::to_vec(&json!({ "method": method, "params": params })).expect("request"),
     )
     .expect("build request");
-    dispatch_route_request(frame, &writer, surface, admin, caller)
+    dispatch_route_request(frame, &writer, surface, admin, caller, None)
         .await
         .expect("serve request");
     let reply = responses.recv().await.expect("route response");

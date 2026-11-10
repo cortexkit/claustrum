@@ -1017,6 +1017,12 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Goodbye if frame.header.channel == 0 => {
+            admin
+                .home()
+                .remote_watches
+                .finish_all()
+                .await
+                .map_err(ModuleError::Message)?;
             surface.watches.finish_all().await?;
             Ok(false)
         }
@@ -1025,6 +1031,12 @@ async fn handle_frame(
                 serde_json::from_slice::<subc_protocol::session::ModuleControlCommand>(&frame.body),
                 Ok(subc_protocol::session::ModuleControlCommand::Draining { .. })
             ) {
+                admin
+                    .home()
+                    .remote_watches
+                    .finish_all()
+                    .await
+                    .map_err(ModuleError::Message)?;
                 surface.watches.finish_all().await?;
             }
             Ok(true)
@@ -1034,6 +1046,7 @@ async fn handle_frame(
             // limiter state, AND its admin bind state (principal + nonce).
             routes.remove(frame.header.channel);
             surface.watches.close(frame.header.channel);
+            admin.home().remote_watches.close(frame.header.channel);
             surface
                 .drop_connection(route_connection_id(
                     frame.header.channel,
@@ -1058,6 +1071,14 @@ async fn handle_frame(
             // who that bind speaks for before spawning so a later route reuse cannot lend
             // its new principal to an already-accepted request.
             let caller = admin.route_caller(frame.header.channel);
+            let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
+                && serde_json::from_slice::<ReadRequest>(&frame.body)
+                    .is_ok_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
+            {
+                Some(admin.home().remote_watches.register(frame.header))
+            } else {
+                None
+            };
             // Register subscriptions before reading the next ingress frame, so a
             // following CANCEL or route close cannot race ahead of registration.
             // Opening only spawns the SQLite work; it never waits on the reactor.
@@ -1074,13 +1095,19 @@ async fn handle_frame(
             // callosum lookups and refresh wait on the outbound client: no outbound
             // wait ever runs on this frame loop or the control lane.
             tokio::spawn(async move {
-                let _ = dispatch_route_request(frame, &route, &surface, &admin, caller).await;
+                let _ =
+                    dispatch_route_request(frame, &route, &surface, &admin, caller, remote_watch)
+                        .await;
             });
             Ok(true)
         }
         FrameType::Cancel => {
             surface
                 .watches
+                .cancel(frame.header.channel, frame.header.corr);
+            admin
+                .home()
+                .remote_watches
                 .cancel(frame.header.channel, frame.header.corr);
             Ok(true)
         }
@@ -1331,7 +1358,7 @@ struct AdminOpParams {
 
 /// Serve one data-plane request according to who its bind speaks for.
 ///
-/// The one dispatch hook for federation: a federation channel reaches only the three
+/// The one dispatch hook for federation: a federation channel reaches only the
 /// federation ops (`federation::HomeVault::serve` enforces the closed allowlist), a
 /// refused channel answers every op with the uniform `not_found`, and every other
 /// channel is the read surface as before, where the federation ops answer the uniform
@@ -1342,6 +1369,7 @@ async fn dispatch_route_request(
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
     caller: federation::RouteCaller,
+    remote_watch: Option<federation::home_watch::PendingOpen>,
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
@@ -1401,6 +1429,17 @@ async fn dispatch_route_request(
                 )
                 .await;
             };
+            if request.method == federation::ingress::OP_REMOTE_WATCH {
+                let Some(pending) = remote_watch else {
+                    return Ok(());
+                };
+                let home = admin.home();
+                return home
+                    .remote_watches
+                    .open(home, pending, writer, header, &member, &request.params)
+                    .await
+                    .map_err(ModuleError::Message);
+            }
             match admin
                 .home()
                 .serve(&member, &request.method, &request.params)
@@ -2637,6 +2676,7 @@ mod tests {
         include!("usage_report_tests.rs");
     }
     include!("watch_scoped_tests.rs");
+    include!("federation/home_watch_route_tests.rs");
     include!("secret_contract_tests.rs");
     include!("credential_permissions_tests.rs");
     include!("secret_flow_contract_tests.rs");
@@ -5416,7 +5456,10 @@ mod tests {
         )
         .expect("build request");
         let caller = admin.route_caller(channel);
-        dispatch_route_request(frame, &writer, surface, admin, caller)
+        let pending = (method == federation::ingress::OP_REMOTE_WATCH
+            && matches!(&caller, federation::RouteCaller::Member(_)))
+        .then(|| admin.home().remote_watches.register(frame.header));
+        dispatch_route_request(frame, &writer, surface, admin, caller, pending)
             .await
             .expect("serve request");
         let reply = responses.recv().await.expect("route response");

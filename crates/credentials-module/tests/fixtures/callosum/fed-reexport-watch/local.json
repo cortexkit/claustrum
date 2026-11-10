@@ -1,0 +1,163 @@
+[
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f6c696d6974222c226d657373616765223a227065657220737562736372697074696f6e206361702072656163686564227d",
+    "body_json": {
+      "code": "fed_subscription_limit",
+      "message": "peer subscription cap reached"
+    },
+    "case": "cap_refusal",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "case": "open",
+    "local_frames": [],
+    "module_id": "fixture-module",
+    "request": {
+      "method": "fixture.watch",
+      "params": {
+        "cursor": "one"
+      }
+    }
+  },
+  {
+    "body_hex": "207b22736e617073686f74223a317d0a",
+    "body_json": {
+      "snapshot": 1
+    },
+    "case": "notice",
+    "frame_type": "StreamData",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "",
+    "body_json": null,
+    "case": "completed",
+    "frame_type": "StreamEnd",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "",
+    "body_json": null,
+    "case": "unsubscribed",
+    "frame_type": "StreamEnd",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a2264656e696564222c226d657373616765223a2270726976617465222c2264657461696c223a7b2273636f7065223a2261227d7d",
+    "body_json": {
+      "code": "denied",
+      "detail": {
+        "scope": "a"
+      },
+      "message": "private"
+    },
+    "case": "module_error",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a226c6167676564227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "lagged"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "lagged",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a226d6f64756c655f726573746172746564227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "module_restarted"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "module_restarted",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a226e6f745f6578706f736564227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "not_exposed"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "not_exposed",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a227265766f6b6564227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "revoked"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "revoked",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a22726f746174696e67227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "rotating"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "rotating",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a22647261696e696e67227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "draining"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "draining",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a226675747572655f726561736f6e227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "future_reason"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "future_reason",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  },
+  {
+    "body_hex": "7b22636f6465223a226665645f737562736372697074696f6e5f656e646564222c226d657373616765223a2272656d6f746520737562736372697074696f6e20656e646564222c2264657461696c223a7b22726561736f6e223a2273657373696f6e5f636c6f736564227d7d",
+    "body_json": {
+      "code": "fed_subscription_ended",
+      "detail": {
+        "reason": "session_closed"
+      },
+      "message": "remote subscription ended"
+    },
+    "case": "session_closed",
+    "frame_type": "Error",
+    "module_id": "fixture-module"
+  }
+]

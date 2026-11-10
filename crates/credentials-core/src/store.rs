@@ -8467,6 +8467,20 @@ pub struct EnrollmentRow {
     pub proposer_id: Option<String>,
 }
 
+impl EnrollmentRow {
+    /// Defaults describe approved enrollments, never an unverified pending proposal.
+    pub fn effective_display_name(&self) -> Option<&str> {
+        if self.state == "pending" {
+            self.display_name.as_deref()
+        } else {
+            crate::display_name::effective_enrollment_display_name(
+                &self.name,
+                self.display_name.as_deref(),
+            )
+        }
+    }
+}
+
 /// List pending requests and live enrollments WITHOUT a lease or a master key.
 ///
 /// A thin wrapper over [`list_enrollments_read_only_with_schema`] for callers that want

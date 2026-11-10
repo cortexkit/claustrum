@@ -613,7 +613,10 @@ async fn two_vault_lifecycle_automatic_login_token_metadata_and_eligibility() {
             .collect::<Vec<_>>(),
         [1, 2, 3]
     );
-    assert!(writes.has_changed().unwrap());
+    // B applies on a blocking thread and signals writers just after the commit, so
+    // the polled row can be visible a moment before the signal. Await the signal; the
+    // hang guard still fails the test if a metadata change never wakes B's writers.
+    wait_for_signal(writes.changed()).await.unwrap();
     rig.protected_rows();
     rig.stop().await;
 }

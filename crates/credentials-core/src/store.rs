@@ -6090,8 +6090,36 @@ impl EncryptedStore {
     ) -> Result<u64, StoreOpError> {
         let next_version = expected_version.saturating_add(1);
         let mut new_record = new_record.clone();
-        let old_record = self.get(credential_id)?;
-        retain_detected_plan(&mut new_record, Some(&old_record));
+        // The sealed tier of the row this commit replaces decides whether the tier's
+        // first-seen time carries over. Read it without `get`, which refuses
+        // non-active rows and quarantines unreadable ones: this read must neither write
+        // nor change the refusal. It reads the same (version, active) the update below
+        // requires, so whenever the update succeeds this is the record it replaced; when
+        // the row moved or left `active`, the update refuses with `CasMismatch` as before.
+        let previous = self
+            .store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT envelope FROM credentials \
+                     WHERE credential_id = ?1 AND record_version = ?2 AND state = 'active'",
+                    rusqlite::params![credential_id, expected_version as i64],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+            })?
+            .and_then(|sealed| {
+                envelope::open(
+                    &self.key,
+                    &sealed,
+                    &RecordBinding {
+                        credential_id,
+                        record_version: expected_version,
+                    },
+                )
+                .ok()
+            })
+            .and_then(|plain| VaultRecord::decode(&plain).ok());
+        retain_detected_plan(&mut new_record, previous.as_ref());
         new_record.record_version = next_version;
         let blob = self.seal_record(credential_id, &new_record)?;
         let key_id_hex = self.key_id.to_hex();

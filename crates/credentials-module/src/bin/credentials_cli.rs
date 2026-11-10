@@ -3352,27 +3352,29 @@ fn cmd_device_login(
     Ok(())
 }
 
-fn pick_other_api_key(global: &GlobalArgs) -> Result<Option<InteractiveChoice>, CliError> {
+struct OtherApiKeyChoice {
+    key: put_prompt::ApiKeyName,
+    replace: bool,
+}
+
+fn pick_other_api_key(global: &GlobalArgs) -> Result<Option<OtherApiKeyChoice>, CliError> {
     let theme = dialoguer::theme::ColorfulTheme::default();
-    let id = put_prompt::api_key_name(&theme)?;
+    let key = put_prompt::api_key_name(&theme)?;
     let inventory = parse_inventory(&request_admin_status(global)?)?;
-    let replace = inventory.iter().any(|row| row.2 == id);
-    if replace && !put_prompt::confirm_replacement(&theme, &id)? {
+    let replace = inventory.iter().any(|row| row.2 == key.id());
+    if replace && !put_prompt::confirm_replacement(&theme, key.id())? {
         return Ok(None);
     }
-    Ok(Some(InteractiveChoice {
-        provider: parse_credential_id(&id).provider.to_string(),
-        id_override: Some(id),
-        replace,
-    }))
+    Ok(Some(OtherApiKeyChoice { key, replace }))
 }
 
 fn cmd_other_api_key_login(
     global: &GlobalArgs,
     args: &[String],
-    id: &str,
-    replace: bool,
+    choice: &OtherApiKeyChoice,
 ) -> Result<(), CliError> {
+    let id = choice.key.id();
+    let replace = choice.replace;
     let preflighted_key = preflight_login(
         global,
         id,
@@ -3383,9 +3385,7 @@ fn cmd_other_api_key_login(
         return Ok(());
     }
     println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
-    let name = id
-        .strip_prefix("apikey:")
-        .expect("API-key name was validated");
+    let name = choice.key.name();
     let key = dialoguer::Password::new()
         .with_prompt(format!("Enter API key for {name}"))
         .interact()
@@ -3423,7 +3423,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
     // With --provider the flow is fully flag-driven (scriptable); without it, the
     // interactive picker owns provider + id + replace selection.
-    let mut interactive = match optional(args, "--provider") {
+    let interactive = match optional(args, "--provider") {
         Some(provider) => InteractiveChoice {
             provider,
             id_override: None,
@@ -3438,13 +3438,18 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     };
     let from_other =
         optional(args, "--provider").is_none() && interactive.provider == OTHER_API_KEY_PROVIDER;
-    if from_other {
+    let other = if from_other {
         let Some(choice) = pick_other_api_key(global)? else {
             return Ok(());
         };
-        interactive = choice;
-    }
-    let provider = interactive.provider.clone();
+        Some(choice)
+    } else {
+        None
+    };
+    let provider = match &other {
+        Some(choice) => parse_credential_id(choice.key.id()).provider.to_string(),
+        None => interactive.provider.clone(),
+    };
     google_login::validate_client_flags(args, &provider)?;
 
     // Resolve the target credential id BEFORE routing so the dispatch can key on the
@@ -3457,12 +3462,11 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // (Gating purely on the id's method would send a malformed `--id zai` for an
     // api-key-only provider to the "unknown provider" path instead of the helpful
     // id-rail error.)
-    let target_id = if from_other {
-        interactive.id_override.clone().expect("Other chose an id")
-    } else {
-        optional(args, "--id")
+    let target_id = match &other {
+        Some(choice) => choice.key.id().to_string(),
+        None => optional(args, "--id")
             .or_else(|| interactive.id_override.clone())
-            .unwrap_or_else(|| default_login_id(&provider))
+            .unwrap_or_else(|| default_login_id(&provider)),
     };
     let has_oauth_login =
         login_provider(&provider).is_some() || google_login::is_provider(&provider);
@@ -3491,8 +3495,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
     }
 
-    if from_other && apikey_row.is_none() {
-        return cmd_other_api_key_login(global, args, &target_id, interactive.replace);
+    if let Some(choice) = other.as_ref().filter(|_| apikey_row.is_none()) {
+        return cmd_other_api_key_login(global, args, choice);
     }
 
     if !route_api_key && google_login::is_provider(&provider) {
@@ -3516,10 +3520,9 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )));
         }
 
-        let replace = if from_other {
-            interactive.replace
-        } else {
-            login_replace(args, interactive.replace)
+        let replace = match &other {
+            Some(choice) => choice.replace,
+            None => login_replace(args, interactive.replace),
         };
         let preflighted_key = preflight_login(
             global,

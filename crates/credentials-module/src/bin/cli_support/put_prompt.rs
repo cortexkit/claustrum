@@ -40,13 +40,35 @@ fn api_key_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
-pub(super) fn api_key_name(theme: &ColorfulTheme) -> Result<String, CliError> {
+/// Keep the validated name and id together so callers need neither to recover the
+/// name from an assumed prefix nor to fill in a missing id.
+pub(super) struct ApiKeyName {
+    name: String,
+    id: String,
+}
+
+impl ApiKeyName {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(super) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(super) fn into_id(self) -> String {
+        self.id
+    }
+}
+
+pub(super) fn api_key_name(theme: &ColorfulTheme) -> Result<ApiKeyName, CliError> {
     let value: String = Input::with_theme(theme)
         .with_prompt("Provider name (optionally provider:label)")
         .validate_with(|value: &String| api_key_id(value).map(|_| ()))
         .interact_text()
         .map_err(prompt_error)?;
-    api_key_id(&value).map_err(CliError::Usage)
+    let id = api_key_id(&value).map_err(CliError::Usage)?;
+    Ok(ApiKeyName { name: value, id })
 }
 
 pub(super) fn confirm_replacement(theme: &ColorfulTheme, id: &str) -> Result<bool, CliError> {
@@ -79,7 +101,7 @@ fn manual_id(id: &str) -> Result<String, String> {
 
 fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
     match kind {
-        0 => api_key_name(theme),
+        0 => api_key_name(theme).map(ApiKeyName::into_id),
         1 => {
             let domain: String = Input::with_theme(theme)
                 .with_prompt("Site domain")

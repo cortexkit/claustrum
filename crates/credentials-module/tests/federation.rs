@@ -35,6 +35,9 @@ mod secret_forward;
 #[path = "federation/callosum_vectors.rs"]
 mod callosum_vectors;
 
+#[path = "federation/sharing.rs"]
+mod sharing;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

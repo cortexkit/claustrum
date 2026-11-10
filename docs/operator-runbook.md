@@ -1636,12 +1636,26 @@ bearer-secret boundary described under capability handles, not a safe way to sha
 An older binary cannot open the migrated store; roll forward or restore the snapshot
 with the older binary, losing subsequent writes.
 
-On A, authorize B with
+On A, turn on B's Callosum vault-sharing switch. The switch means **B may use A's
+vault**, not the reverse. A's daemon creates two pairing-bound grants for
+`fed-computer:<B>`: `remote_read` on category `llm-provider` and selector-free
+`secret_use`. Turning the switch off removes those grants; disappearance, re-pairing
+or changing to a non-computer class removes obsolete switch grants too. A live switch
+can change when the vault's declared operations change; the daemon follows either
+direction without requiring another operator action. A failed discovery or malformed
+snapshot changes nothing. The watch reopens with a full read after a connection loss.
+
+`ck auth member list` shows `operator` or `sharing_switch` as each row's source.
+Existing and manually written operator rows are left alone, even on switch-off.
+Manual `member revoke` refuses switch rows: use
+`ck callosum share <device> claustrum/vault off` instead, since the reconciler would
+otherwise recreate them. To authorize a narrower or additional selector manually, use
 `ck auth member grant --member <B> --operation remote_read --id <login-id>` (or
 `--category <category>`). On B, run `ck auth remote add --id <login-id> --home <A>`.
 B's modules need their own local read grants. `ck auth remote list` shows home/version/
 fetch outcome; `remote remove --id <id>` removes it. Re-homing is remove then add.
-After a re-pair or trust-backup restore, re-grant: old pairing-bound grants do not apply.
+After a re-pair, Callosum clears that peer's switches: turn sharing back on if wanted.
+After a re-pair or trust-backup restore, re-grant manual rows: old pairings do not apply.
 Repair a home login on A, then poll B's `get_scoped`; remote status alone cannot observe
 the repair. A cached access token can remain usable for at most 300 s after grant revocation.
 
@@ -1652,8 +1666,9 @@ every non-home vault run `ck auth secret home set <home-member>` (or `self` on t
 refused with the blocking counts while the vault still holds agent secrets, grants, flow
 grants or pending requests, and refused `secret_home_elsewhere` is what that vault's phone
 operations and `ck auth secret put` answer until the setting points at the home. On the
-home, each member computer needs `ck auth member grant --member <m> --operation
-secret_use` (selector-free, pairing-bound like `transfer_deliver`); without it the home
+home, each member computer needs the vault-sharing switch or a manual
+`ck auth member grant --member <m> --operation secret_use` (selector-free,
+pairing-bound like `transfer_deliver`); without it the home
 refuses that member's forwarded calls with the uniform `not_found`. After a re-pair,
 re-grant. A remote-role vault forwards `secret.use` and the two flow ops and relays the
 home's answer; a vault that is not the home-role vault answers an inbound forward with
@@ -1663,7 +1678,14 @@ statements (`ck-secret-use-statement/v2` and `ck-secret-flow-statement/v2`) and
 `secret_home_elsewhere` are deployed to every vault does an operator set the member
 setting on any non-home vault.
 
-For a static credential, B grants A `transfer_deliver` without a selector. A runs
+When the first vault switch turns on, a missing transfer key and its public-key read
+grant to `reserved:callosum` are prepared automatically, exactly as by transfer init.
+The daemon never enables member mapping or sets the self member id for the operator;
+the setup and identity checks above still apply. `ck auth federation status` shows
+those settings. This readiness step never replaces an existing transfer key.
+
+For a static credential, B manually grants A `transfer_deliver` without a selector;
+the sharing switch never creates that grant. Every key transfer remains manual. A runs
 `ck auth transfer send --id <id> --to <B>`. B inspects `ck auth transfer receive` and runs
 `ck auth transfer accept <transfer-id> --from <A>` or `reject <transfer-id> --from <A>`.
 Nothing becomes a credential on B before accept. A uses

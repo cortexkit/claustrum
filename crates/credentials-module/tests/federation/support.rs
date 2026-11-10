@@ -382,6 +382,8 @@ impl ReplyNote {
 /// The one reply the stand-in returns for a method.
 #[derive(Debug, Clone)]
 pub enum Reply {
+    /// Start a held discovery watch with a full initial snapshot.
+    Watch(Value),
     /// A successful reply body.
     Ok(Value),
     /// A permanent callosum refusal class, as `fed_not_exposed` and friends arrive.
@@ -542,6 +544,7 @@ pub fn refusal_class(code: &str) -> &'static str {
 
 #[derive(Debug, Default)]
 struct StandInState {
+    cancelled_watches: usize,
     held_opens: HashMap<String, Held>,
     stray_errors: HashMap<String, String>,
     /// Replies keyed by `(target module, method)`. A method with no entry is refused
@@ -568,6 +571,10 @@ struct StandInState {
 /// What a test asks a live connection to do, outside any request it sent.
 #[derive(Debug)]
 enum Command {
+    WatchSnapshot {
+        body: Option<Value>,
+        sent: tokio::sync::oneshot::Sender<usize>,
+    },
     /// Send a route `Goodbye` for every route open to `target`, leaving the connection
     /// open, and report how many were sent once they are written.
     GoodbyeRoutes {
@@ -588,6 +595,28 @@ enum Command {
 const COMMAND_HANG_GUARD: Duration = Duration::from_secs(10);
 
 impl SharedCallosumStandIn {
+    /// Publish a full snapshot on held watches, or close them with StreamEnd.
+    pub async fn watch_snapshot(&self, body: Option<Value>) -> usize {
+        let mut count = 0;
+        for connection in self.live_connections() {
+            let (sent, reply) = tokio::sync::oneshot::channel();
+            if connection
+                .send(Command::WatchSnapshot {
+                    body: body.clone(),
+                    sent,
+                })
+                .is_ok()
+            {
+                count += wait_for_signal(reply).await.unwrap_or(0);
+            }
+        }
+        count
+    }
+
+    pub fn cancelled_watches(&self) -> usize {
+        self.state.lock().unwrap().cancelled_watches
+    }
+
     pub fn stray_error_before(&self, method: &str, code: &str) {
         self.state
             .lock()
@@ -982,6 +1011,7 @@ async fn serve_one(
     let mut closed_routes: HashMap<u16, (String, u32)> = HashMap::new();
     // Requests a test answered with `Reply::Stall`: recorded and never replied to.
     let mut stalled: Vec<(u16, u32, u64)> = Vec::new();
+    let mut watches = HashMap::<(u16, u64), u32>::new();
     // Tests waiting for this connection to end after `close_connections`.
     let mut closing: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
     let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
@@ -1014,6 +1044,15 @@ async fn serve_one(
             },
             Some(command) = commands.recv() => {
                 match command {
+                    Command::WatchSnapshot { body, sent } => {
+                        let mut count = 0;
+                        for (&(channel, corr), &epoch) in &watches {
+                            let frame = watch_frame(channel, epoch, corr, body.as_ref());
+                            if write_frame(&mut *writer.lock().await, &frame).await.is_ok() { count += 1; }
+                        }
+                        if body.is_none() { watches.clear(); }
+                        let _ = sent.send(count);
+                    }
                     Command::GoodbyeRoutes { target, sent } => {
                         let channels: Vec<u16> = open_routes
                             .iter()
@@ -1021,6 +1060,7 @@ async fn serve_one(
                             .map(|(channel, _)| *channel)
                             .collect();
                         for channel in &channels {
+                            watches.retain(|(on, _), _| on != channel);
                             open_routes.remove(channel);
                             let epoch = route_epochs.remove(channel).unwrap_or(1);
                             closed_routes.insert(*channel, (target.clone(), epoch));
@@ -1044,6 +1084,15 @@ async fn serve_one(
                 continue;
             }
         };
+        if frame.header.ty == FrameType::Cancel {
+            if watches
+                .remove(&(frame.header.channel, frame.header.corr))
+                .is_some()
+            {
+                state.lock().unwrap().cancelled_watches += 1;
+            }
+            continue;
+        }
         if frame.header.ty == FrameType::Goodbye {
             for (target, _, _) in open_routes.values() {
                 push(
@@ -1210,6 +1259,19 @@ async fn serve_one(
             continue;
         };
         match reply {
+            Reply::Watch(body) => {
+                watches.insert(
+                    (frame.header.channel, frame.header.corr),
+                    frame.header.epoch,
+                );
+                let reply = watch_frame(
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    Some(&body),
+                );
+                let _ = write_frame(&mut *writer.lock().await, &reply).await;
+            }
             Reply::Ok(body) => {
                 note.record(&body);
                 let reply = response_on_channel(
@@ -1360,6 +1422,22 @@ fn goodbye_frame(channel: u16, epoch: u32) -> Frame {
         Vec::new(),
     )
     .expect("goodbye frame")
+}
+
+fn watch_frame(channel: u16, epoch: u32, corr: u64, body: Option<&Value>) -> Frame {
+    Frame::build(
+        if body.is_some() {
+            FrameType::StreamData
+        } else {
+            FrameType::StreamEnd
+        },
+        Flags::new(false, Priority::Interactive, false),
+        channel,
+        epoch,
+        corr,
+        body.map_or_else(Vec::new, |body| serde_json::to_vec(body).unwrap()),
+    )
+    .unwrap()
 }
 
 fn hold_reply(

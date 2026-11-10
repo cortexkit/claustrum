@@ -79,6 +79,42 @@ const DELIVERY_SUBJECT: &str = "federation.transfer_deliver";
 /// here.
 const MAX_REPLY_CODE_LEN: usize = 48;
 
+/// Prepare the key and public-key announce without changing federation identity or mapping.
+pub fn ensure_transfer_key(store: &EncryptedStore, actor: &str) -> Result<bool, StoreOpError> {
+    let created = match store.meta(VAULT_TRANSFER_ID) {
+        Ok(_) => false,
+        Err(StoreOpError::NotFound) => {
+            let pem = credentials_core::kem::generate_key().map_err(|e| {
+                StoreOpError::Encode(format!("transfer key generation failed: {e}"))
+            })?;
+            store.create_audited(
+                VAULT_TRANSFER_ID,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
+                AuditCtx::route_admin(AuditOp::Put, actor),
+            )?;
+            true
+        }
+        Err(error) => return Err(error),
+    };
+    match store.create_read_grant_audited(
+        "reserved",
+        "callosum",
+        credentials_core::store::SelectorKind::Exact,
+        VAULT_TRANSFER_ID,
+        credentials_core::store::GrantOperation::Read,
+        AuditCtx::route_admin(AuditOp::GrantCreate, actor),
+    ) {
+        Ok(()) | Err(StoreOpError::AlreadyExists) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(created)
+}
+
 // ---------------------------------------------------------------------------------
 // Eligibility
 // ---------------------------------------------------------------------------------

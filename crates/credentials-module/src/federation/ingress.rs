@@ -277,9 +277,8 @@ fn refusal_code<'a>(body: &'a Value, reply_member: &str) -> Option<&'a str> {
 
 /// Decode a `callosum.paired_devices_read` reply into `member_id`'s current pairing id.
 ///
-/// The reply shape is callosum's current one, not yet checked against the vector
-/// files callosum publishes for it (tag `paired-devices-vectors-v1.4`); once those
-/// are vendored, the tests below should read them. The shape:
+/// The reply shape is checked against Callosum's vendored discovery vectors in
+/// `tests/federation/callosum_vectors.rs`. The shape:
 /// `{"devices":[{"class","fingerprint","pairing_id"}]}`,
 /// sorted by fingerprint, with an optional top-level `self` (version 1.3) that this
 /// decoder ignores. A device carries no member id: it is `fed-<class>:<fingerprint>`,

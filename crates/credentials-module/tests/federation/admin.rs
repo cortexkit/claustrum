@@ -1416,6 +1416,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "federation/ingress.rs",
         "federation/outbound.rs",
         "federation/remote_read.rs",
+        "federation/sharing.rs",
     ];
     let mut on_disk = Vec::new();
     for dir in ["", "federation"] {

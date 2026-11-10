@@ -1425,6 +1425,33 @@ fetches only an access token; it never stores the token in its database or recei
 OAuth struct or refresh token. Static credentials instead use an explicitly accepted sealed
 transfer. There is no automatic credential synchronization and no remote-record chaining.
 
+### Callosum vault-sharing switches and member grants
+
+The switch on computer A for peer B means **B may use A's vault**. At daemon start
+and on each `callosum.paired_devices_watch` full snapshot, A reconciles grants for
+`fed-computer:<B>` at B's current `pairing_id`. An enabled `vault` share on a
+`computer` creates `remote_read` on category `llm-provider` and selector-free
+`secret_use`, with source `sharing_switch`. Switch-off, disappearance, a non-computer
+class or a changed pairing revokes obsolete switch grants. Changes in the effective
+switch caused by declaration changes are treated just like operator changes.
+
+Existing grants have source `operator`. The reconciler never changes or removes an
+operator row, including an identical selector whose pairing is stale. All grant
+creates/revokes for one snapshot and their audits commit in one transaction. A failed
+read, refusal or undecodable snapshot leaves grants unchanged. The daemon keeps the
+watch open, re-reads on every reopen after a close or lost connection, and cancels the
+watch on shutdown. Discovery samples are pinned at `paired-devices-vectors-v1.5`.
+
+When any vault switch is on, the daemon prepares a missing `kem:vault-transfer:1` and
+its exact announce `read` for `reserved:callosum` through the same path as
+`ck auth transfer init`. It does not change the member-mapping gate or self member id.
+`transfer_deliver` grants and every key transfer remain manual operator steps.
+
+`ck auth member list` shows each row's source. `ck auth member revoke` refuses a
+switch row with `member_grant_sharing_switch` and directs the operator to
+`ck callosum share <device> claustrum/vault off`; manual revocation would be undone
+by the next snapshot. Operator rows remain manually revocable.
+
 ### Channel identity and harness mapping
 
 The canonical member id is `fed-computer:<fp>`, where `<fp>` is 32 lowercase hex characters
@@ -1856,6 +1883,7 @@ does not turn the protocol Error into a classified read verdict.
 | `transfer_key_protected` | permanent | Mutation or replacement of an active transfer key. |
 | `remote_record` | permanent | A handle or local-only action requested for a remote record. |
 | `member_not_paired` | permanent | Member grant attempted without a current pairing. |
+| `member_grant_sharing_switch` | permanent | The grant follows Callosum's vault-sharing switch; turn that switch off instead of manually revoking the row. |
 | `callosum_unavailable` | transient | Required admin/transfer pairing or key lookup failed. |
 | `federation_requires_daemon` | permanent | Outbound admin op attempted through the synchronous offline path; no write. |
 | `transfer_body_invalid` | permanent | Ineligible or invalid transfer body. |
@@ -1881,7 +1909,8 @@ versions JSON numbers, and reasons refusal codes.
 | `remote_issue` | id | member | `{credential_id, record_version}` |
 | `transfer_out` / `transfer_in` | id | receiver / sender | `{transfer_id, body_hash}` |
 | `transfer_reject` | id | sender on receiver, receiver on abandoned outgoing | `{transfer_id, reason}` |
-| `member_grant_create` / `member_grant_revoke` | exact selector id, otherwise none | member | `{operation, selector_kind, selector, pairing_id}` |
+| `member_grant_create` / `member_grant_revoke` (operator) | exact selector id, otherwise none | member | `{operation, selector_kind, selector, pairing_id}` |
+| `member_grant_create` / `member_grant_revoke` (sharing switch) | exact selector id, otherwise none | vault | `{member_id, operation, selector_kind, selector, pairing_id, source}` (`source` is `sharing_switch`) |
 | `remote_add` / `remote_remove` | id | home | `{incarnation}` |
 | `federation_gate_set` | none | admin | `{value}` |
 | `federation_self_set` | none | admin | `{member}` |

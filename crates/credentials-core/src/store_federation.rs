@@ -12,12 +12,13 @@ use crate::federation::{
     check_member_id, federation_gate_payload_hash, federation_self_payload_hash,
     is_lower_hex_16_bytes, member_grant_payload_hash, remote_membership_payload_hash,
     transfer_payload_hash, IncomingInsert, IncomingTransfer, IncomingTransferState, MemberGrant,
-    MemberGrantOperation, MemberGrantSelector, NewIncomingTransfer, NewOutgoingTransfer,
-    NewRemoteRecord, OutgoingTransfer, OutgoingTransferState, PendingTransferCounts,
-    RecoveredIncoming, RecoveredOutgoing, RemoteHomeState, RemoteHomeSuccess, RemoteInventoryRow,
-    RemoteRecord, RemoteRecordWrite, SealedTransfer, TransferAcceptOutcome, TransferAcceptance,
-    TransferKeyRecovery, MEMBER_MAPPING_SETTING, REJECT_REMOTE_SEAL_INVALID,
-    REJECT_SENDER_KEY_REPLACED, SELF_MEMBER_SETTING, TRANSFER_RETENTION_MS,
+    MemberGrantOperation, MemberGrantSelector, MemberGrantSource, NewIncomingTransfer,
+    NewOutgoingTransfer, NewRemoteRecord, OutgoingTransfer, OutgoingTransferState,
+    PendingTransferCounts, RecoveredIncoming, RecoveredOutgoing, RemoteHomeState,
+    RemoteHomeSuccess, RemoteInventoryRow, RemoteRecord, RemoteRecordWrite, SealedTransfer,
+    TransferAcceptOutcome, TransferAcceptance, TransferKeyRecovery, VaultSharingMember,
+    MEMBER_MAPPING_SETTING, REJECT_REMOTE_SEAL_INVALID, REJECT_SENDER_KEY_REPLACED,
+    SELF_MEMBER_SETTING, TRANSFER_RETENTION_MS,
 };
 
 /// The longest fetch-outcome code stored. Outcomes are refusal codes this vault
@@ -751,13 +752,8 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
-    /// Grant a member one operation, recording the member's current pairing id.
-    ///
-    /// Re-granting the same (member, operation, selector) replaces the stored pairing
-    /// id; re-granting it unchanged writes nothing and returns `false`. Audited
-    /// `member_grant_create` with the member as actor, the exact selector's id (else
-    /// none) as credential id, and `payload_hash` over `{operation, selector_kind,
-    /// selector, pairing_id}`.
+    /// Grant an operator-owned operation at the member's current pairing id.
+    /// An explicit operator grant takes ownership of an existing switch grant.
     pub fn create_member_grant_audited(
         &self,
         member_id: &str,
@@ -768,47 +764,19 @@ impl EncryptedStore {
         check_member_id(member_id)?;
         check_member_grant_shape(operation, selector)?;
         check_pairing_id(pairing_id)?;
-        let audit_key = self.audit_key.clone();
-        let now = now_ms();
-        self.fenced_write(|tx| {
-            let changed = tx.execute(
-                "INSERT INTO member_grants \
-                 (member_id, operation, selector_kind, selector, pairing_id, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT(member_id, operation, selector_kind, selector) DO UPDATE SET \
-                     pairing_id = excluded.pairing_id, created_at_ms = excluded.created_at_ms \
-                 WHERE member_grants.pairing_id <> excluded.pairing_id",
-                rusqlite::params![
-                    member_id,
-                    operation.as_str(),
-                    selector.kind_str(),
-                    selector.selector_str(),
-                    pairing_id,
-                    now,
-                ],
-            )?;
-            if changed == 0 {
-                return Ok(false);
-            }
-            append_audit_tx(
-                tx,
-                &audit_key,
-                &AuditRecord {
-                    op: AuditOp::MemberGrantCreate,
-                    credential_id: member_grant_audit_target(selector),
-                    payload_hash: Some(member_grant_payload_hash(operation, selector, pairing_id)),
-                    actor: member_id.to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
-                },
-            )?;
-            Ok(true)
-        })
-        .map_err(StoreOpError::from)
+        let grant = MemberGrant {
+            member_id: member_id.to_string(),
+            operation,
+            selector: selector.clone(),
+            pairing_id: pairing_id.to_string(),
+            created_at_ms: now_ms(),
+            source: MemberGrantSource::Operator,
+        };
+        self.fenced_write(|tx| create_member_grant_tx(tx, &self.audit_key, &grant))
+            .map_err(StoreOpError::from)
     }
 
-    /// Revoke one member grant. No pairing lookup is needed: the audit payload carries
-    /// the pairing id the revoked row was stored with. [`StoreOpError::NotFound`] when
-    /// there is no such grant.
+    /// Revoke an operator grant. Switch grants must be disabled in Callosum instead.
     pub fn revoke_member_grant_audited(
         &self,
         member_id: &str,
@@ -817,43 +785,89 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         check_member_id(member_id)?;
         check_member_grant_shape(operation, selector)?;
-        let audit_key = self.audit_key.clone();
-        let revoked = self.fenced_write(|tx| {
-            let Some(pairing_id) = tx
-                .query_row(
-                    "DELETE FROM member_grants \
-                     WHERE member_id = ?1 AND operation = ?2 AND selector_kind = ?3 AND selector = ?4 \
-                     RETURNING pairing_id",
-                    rusqlite::params![
-                        member_id,
-                        operation.as_str(),
-                        selector.kind_str(),
-                        selector.selector_str(),
-                    ],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-            else {
-                return Ok(false);
+        self.fenced_write_or_refuse(|tx| {
+            let Some(grant) = member_grants_conn(tx)?.into_iter().find(|grant| {
+                grant.member_id == member_id
+                    && grant.operation == operation
+                    && &grant.selector == selector
+            }) else {
+                return Ok(Err(StoreOpError::NotFound));
             };
-            append_audit_tx(
-                tx,
-                &audit_key,
-                &AuditRecord {
-                    op: AuditOp::MemberGrantRevoke,
-                    credential_id: member_grant_audit_target(selector),
-                    payload_hash: Some(member_grant_payload_hash(operation, selector, &pairing_id)),
-                    actor: member_id.to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
-                },
-            )?;
-            Ok(true)
-        })?;
-        if revoked {
-            Ok(())
-        } else {
-            Err(StoreOpError::NotFound)
+            if grant.source == MemberGrantSource::SharingSwitch {
+                return Ok(Err(StoreOpError::MemberGrantSharingSwitch {
+                    member_id: member_id.to_string(),
+                }));
+            }
+            revoke_member_grant_tx(tx, &self.audit_key, &grant)?;
+            Ok(Ok(()))
+        })
+    }
+
+    /// Atomically make switch-owned grants match one fully decoded Callosum snapshot.
+    /// Operator rows win even if their pairing is stale: only an operator may change them.
+    pub fn reconcile_vault_sharing_audited(
+        &self,
+        members: &[VaultSharingMember],
+    ) -> Result<(usize, usize), StoreOpError> {
+        self.reconcile_vault_sharing_inner(members, || {})
+    }
+
+    pub(super) fn reconcile_vault_sharing_inner(
+        &self,
+        members: &[VaultSharingMember],
+        mut after_write: impl FnMut(),
+    ) -> Result<(usize, usize), StoreOpError> {
+        let now = now_ms();
+        let mut wanted = Vec::new();
+        for member in members {
+            check_member_id(&member.member_id)?;
+            check_pairing_id(&member.pairing_id)?;
+            for (operation, selector) in [
+                (
+                    MemberGrantOperation::RemoteRead,
+                    MemberGrantSelector::Category("llm-provider".into()),
+                ),
+                (MemberGrantOperation::SecretUse, MemberGrantSelector::None),
+            ] {
+                wanted.push(MemberGrant {
+                    member_id: member.member_id.clone(),
+                    operation,
+                    selector,
+                    pairing_id: member.pairing_id.clone(),
+                    created_at_ms: now,
+                    source: MemberGrantSource::SharingSwitch,
+                });
+            }
         }
+        self.fenced_write(|tx| {
+            let existing = member_grants_conn(tx)?;
+            let mut revoked = 0;
+            let mut created = 0;
+            for grant in &existing {
+                if grant.source == MemberGrantSource::SharingSwitch
+                    && !wanted.iter().any(|want| {
+                        same_member_grant(grant, want) && grant.pairing_id == want.pairing_id
+                    })
+                {
+                    revoke_member_grant_tx(tx, &self.audit_key, grant)?;
+                    revoked += 1;
+                    after_write();
+                }
+            }
+            for grant in &wanted {
+                if existing.iter().any(|old| {
+                    same_member_grant(old, grant)
+                        && (old.source == MemberGrantSource::Operator
+                            || old.pairing_id == grant.pairing_id)
+                }) {
+                    continue;
+                }
+                created += usize::from(create_member_grant_tx(tx, &self.audit_key, grant)?);
+                after_write();
+            }
+            Ok((created, revoked))
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Record that this vault, as home, is about to release a token for `credential_id`
@@ -930,41 +944,7 @@ impl EncryptedStore {
     /// Every member grant, ordered by member, operation, selector kind and selector.
     pub fn list_member_grants(&self) -> Result<Vec<MemberGrant>, StoreOpError> {
         self.store
-            .with_conn(|conn| {
-                if read_schema_version(conn)? < MEMBER_GRANTS_SCHEMA_VERSION {
-                    return Ok(Vec::new());
-                }
-                let mut stmt = conn.prepare(
-                    "SELECT member_id, operation, selector_kind, selector, pairing_id, created_at_ms \
-                     FROM member_grants ORDER BY member_id, operation, selector_kind, selector",
-                )?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        let operation: String = row.get(1)?;
-                        let kind: String = row.get(2)?;
-                        let selector: String = row.get(3)?;
-                        let unknown = |what: String| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                what.into(),
-                            )
-                        };
-                        Ok(MemberGrant {
-                            member_id: row.get(0)?,
-                            operation: MemberGrantOperation::from_stored(&operation).ok_or_else(
-                                || unknown(format!("unknown member grant operation {operation:?}")),
-                            )?,
-                            selector: MemberGrantSelector::from_stored(&kind, selector).ok_or_else(
-                                || unknown(format!("unknown member grant selector kind {kind:?}")),
-                            )?,
-                            pairing_id: row.get(4)?,
-                            created_at_ms: row.get(5)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            })
+            .with_conn(member_grants_conn)
             .map_err(StoreOpError::from)
     }
 }
@@ -1908,4 +1888,132 @@ fn member_grant_audit_target(selector: &MemberGrantSelector) -> Option<String> {
         MemberGrantSelector::Exact(id) => Some(id.clone()),
         MemberGrantSelector::Category(_) | MemberGrantSelector::None => None,
     }
+}
+
+fn same_member_grant(left: &MemberGrant, right: &MemberGrant) -> bool {
+    left.member_id == right.member_id
+        && left.operation == right.operation
+        && left.selector == right.selector
+}
+
+fn member_grants_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<MemberGrant>> {
+    let version = read_schema_version(conn)?;
+    if version < MEMBER_GRANTS_SCHEMA_VERSION {
+        return Ok(Vec::new());
+    }
+    let source = if version < MEMBER_GRANT_SOURCE_SCHEMA_VERSION {
+        "'operator'"
+    } else {
+        "source"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT member_id, operation, selector_kind, selector, pairing_id, created_at_ms, {source} FROM member_grants ORDER BY member_id, operation, selector_kind, selector"
+    ))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let operation: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let source: String = row.get(6)?;
+            Ok(MemberGrant {
+                member_id: row.get(0)?,
+                operation: MemberGrantOperation::from_stored(&operation)
+                    .ok_or_else(|| bad_column(format!("unknown member operation {operation}")))?,
+                selector: MemberGrantSelector::from_stored(&kind, row.get(3)?)
+                    .ok_or_else(|| bad_column(format!("unknown member selector {kind}")))?,
+                pairing_id: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                source: MemberGrantSource::from_stored(&source)
+                    .ok_or_else(|| bad_column(format!("unknown member grant source {source}")))?,
+            })
+        })?
+        .collect();
+    rows
+}
+
+fn create_member_grant_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    grant: &MemberGrant,
+) -> rusqlite::Result<bool> {
+    let sql = if read_schema_version(tx)? < MEMBER_GRANT_SOURCE_SCHEMA_VERSION {
+        "INSERT INTO member_grants (member_id, operation, selector_kind, selector, pairing_id, created_at_ms) \
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE ?7 = 'operator' \
+         ON CONFLICT(member_id, operation, selector_kind, selector) DO UPDATE SET \
+         pairing_id = excluded.pairing_id, created_at_ms = excluded.created_at_ms \
+         WHERE member_grants.pairing_id <> excluded.pairing_id"
+    } else {
+        "INSERT INTO member_grants (member_id, operation, selector_kind, selector, pairing_id, created_at_ms, source) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(member_id, operation, selector_kind, selector) DO UPDATE SET \
+         pairing_id = excluded.pairing_id, created_at_ms = excluded.created_at_ms, source = excluded.source \
+         WHERE member_grants.pairing_id <> excluded.pairing_id OR member_grants.source <> excluded.source"
+    };
+    let changed = tx.execute(
+        sql,
+        rusqlite::params![
+            grant.member_id,
+            grant.operation.as_str(),
+            grant.selector.kind_str(),
+            grant.selector.selector_str(),
+            grant.pairing_id,
+            grant.created_at_ms,
+            grant.source.as_str()
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    audit_member_grant_tx(tx, audit_key, grant, AuditOp::MemberGrantCreate)?;
+    Ok(true)
+}
+
+fn revoke_member_grant_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    grant: &MemberGrant,
+) -> rusqlite::Result<()> {
+    let source = if read_schema_version(tx)? < MEMBER_GRANT_SOURCE_SCHEMA_VERSION {
+        "'operator'"
+    } else {
+        "source"
+    };
+    tx.execute(
+        &format!("DELETE FROM member_grants WHERE member_id = ?1 AND operation = ?2 AND selector_kind = ?3 AND selector = ?4 AND {source} = ?5"),
+        rusqlite::params![grant.member_id, grant.operation.as_str(), grant.selector.kind_str(), grant.selector.selector_str(), grant.source.as_str()],
+    )?;
+    audit_member_grant_tx(tx, audit_key, grant, AuditOp::MemberGrantRevoke)
+}
+
+fn audit_member_grant_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    grant: &MemberGrant,
+    op: AuditOp,
+) -> rusqlite::Result<()> {
+    // Preserve the operator audit encoding. Switch mutations name the member in the
+    // payload because their actor is the vault, not the member.
+    let (actor, alarm, payload_hash) = match grant.source {
+        MemberGrantSource::Operator => (
+            grant.member_id.as_str(),
+            Some(AlarmReason::AdminWrite),
+            member_grant_payload_hash(grant.operation, &grant.selector, &grant.pairing_id),
+        ),
+        MemberGrantSource::SharingSwitch => (
+            "vault",
+            None,
+            crate::federation::sharing_switch_grant_payload_hash(grant),
+        ),
+    };
+    append_audit_tx(
+        tx,
+        audit_key,
+        &AuditRecord {
+            op,
+            credential_id: member_grant_audit_target(&grant.selector),
+            payload_hash: Some(payload_hash),
+            actor: actor.to_string(),
+            alarm,
+        },
+    )?;
+    Ok(())
 }

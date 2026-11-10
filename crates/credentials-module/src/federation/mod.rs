@@ -10,6 +10,7 @@
 pub mod ingress;
 pub mod outbound;
 pub mod remote_read;
+pub mod sharing;
 pub mod transfer;
 
 pub use ingress::{

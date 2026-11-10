@@ -9347,3 +9347,100 @@ fn login_without_default_leaves_no_provider_ids() {
     );
     assert_eq!(list_providers(&vault, "apikey:kagi"), "-");
 }
+
+#[test]
+fn member_list_shows_sources_and_revoke_refuses_switch_grants() {
+    use credentials_core::federation::{
+        MemberGrantOperation, MemberGrantSelector, VaultSharingMember,
+    };
+    let vault = GrantCliVault::new("member-sharing-source");
+    vault.bootstrap();
+    let member = "fed-computer:648aa5c579fb30f38af744d97d6ec840";
+    let before = {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        store
+            .create_member_grant_audited(
+                member,
+                MemberGrantOperation::TransferDeliver,
+                &MemberGrantSelector::None,
+                "pair",
+            )
+            .unwrap();
+        store
+            .reconcile_vault_sharing_audited(&[VaultSharingMember {
+                member_id: member.into(),
+                pairing_id: "pair".into(),
+            }])
+            .unwrap();
+        store.list_member_grants().unwrap()
+    };
+    let listed = vault.run(&["member", "list"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("source sharing_switch"))
+            .count(),
+        2,
+        "{text}"
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("source operator"))
+            .count(),
+        1,
+        "{text}"
+    );
+    for (operation, selector) in [
+        ("remote_read", vec!["--category", "llm-provider"]),
+        ("secret_use", vec![]),
+    ] {
+        let mut args = vec![
+            "member",
+            "revoke",
+            "--member",
+            member,
+            "--operation",
+            operation,
+        ];
+        args.extend(selector);
+        let refused = vault.run(&args);
+        assert!(!refused.status.success());
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr
+                .contains("ck callosum share 648aa5c579fb30f38af744d97d6ec840 claustrum/vault off"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("storage error"), "{stderr}");
+    }
+    {
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert_eq!(store.list_member_grants().unwrap(), before);
+        let error = store
+            .revoke_member_grant_audited(
+                member,
+                MemberGrantOperation::SecretUse,
+                &MemberGrantSelector::None,
+            )
+            .unwrap_err();
+        assert_eq!(error.wire_code(), Some("member_grant_sharing_switch"));
+    }
+    let revoked = vault.run(&[
+        "member",
+        "revoke",
+        "--member",
+        member,
+        "--operation",
+        "transfer_deliver",
+    ]);
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+}

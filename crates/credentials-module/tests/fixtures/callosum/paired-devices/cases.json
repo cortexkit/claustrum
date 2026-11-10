@@ -35,22 +35,44 @@
           {
             "class": "computer",
             "fingerprint": "648aa5c579fb30f38af744d97d6ec840",
-            "pairing_id": "11111111-2222-4333-8444-555555555555:3"
+            "pairing_id": "11111111-2222-4333-8444-555555555555:3",
+            "shares": [
+              {
+                "enabled": false,
+                "share": "alpha"
+              },
+              {
+                "enabled": false,
+                "share": "stale"
+              },
+              {
+                "enabled": true,
+                "share": "vault"
+              }
+            ]
           },
           {
             "class": "phone",
             "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
-            "pairing_id": "11111111-2222-4333-8444-555555555555:1"
+            "pairing_id": "11111111-2222-4333-8444-555555555555:1",
+            "shares": [
+              {
+                "enabled": false,
+                "share": "phone_only"
+              }
+            ]
           },
           {
             "class": "sim",
             "fingerprint": "75877bb41d393b5fb8455ce60ecd8dda",
-            "pairing_id": "11111111-2222-4333-8444-555555555555:2"
+            "pairing_id": "11111111-2222-4333-8444-555555555555:2",
+            "shares": []
           },
           {
             "class": "unknown",
             "fingerprint": "9f4fb68f3e1dac82202f9aa581ce0bbf",
-            "pairing_id": "11111111-2222-4333-8444-555555555555:4"
+            "pairing_id": "11111111-2222-4333-8444-555555555555:4",
+            "shares": []
           }
         ],
         "self": {
@@ -106,6 +128,151 @@
       },
       "request": {
         "method": "callosum.paired_devices_read"
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "watch_initial",
+      "reply": {
+        "notices": [
+          {
+            "devices": [
+              {
+                "class": "computer",
+                "fingerprint": "648aa5c579fb30f38af744d97d6ec840",
+                "pairing_id": "11111111-2222-4333-8444-555555555555:3",
+                "shares": [
+                  {
+                    "enabled": false,
+                    "share": "alpha"
+                  },
+                  {
+                    "enabled": false,
+                    "share": "stale"
+                  },
+                  {
+                    "enabled": true,
+                    "share": "vault"
+                  }
+                ]
+              },
+              {
+                "class": "phone",
+                "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+                "pairing_id": "11111111-2222-4333-8444-555555555555:1",
+                "shares": [
+                  {
+                    "enabled": false,
+                    "share": "phone_only"
+                  }
+                ]
+              },
+              {
+                "class": "sim",
+                "fingerprint": "75877bb41d393b5fb8455ce60ecd8dda",
+                "pairing_id": "11111111-2222-4333-8444-555555555555:2",
+                "shares": []
+              },
+              {
+                "class": "unknown",
+                "fingerprint": "9f4fb68f3e1dac82202f9aa581ce0bbf",
+                "pairing_id": "11111111-2222-4333-8444-555555555555:4",
+                "shares": []
+              }
+            ],
+            "self": {
+              "static_public_key_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+            }
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "direct",
+      "name": "watch_wrong_caller",
+      "reply": {
+        "code": "fed_not_authorized",
+        "message": "callosum.paired_devices_watch requires reserved:claustrum"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "name": "watch_occipital",
+      "reply": {
+        "code": "fed_not_authorized",
+        "message": "callosum.paired_devices_watch requires reserved:claustrum"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": null,
+      "name": "watch_missing_caller",
+      "reply": {
+        "code": "fed_not_authorized",
+        "message": "callosum.paired_devices_watch requires reserved:claustrum"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "watch_nonempty_params",
+      "reply": {
+        "code": "fed_bad_request",
+        "message": "callosum.paired_devices_watch requires empty object params"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {
+          "extra": 1
+        }
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "watch_missing_params",
+      "reply": {
+        "code": "fed_bad_request",
+        "message": "callosum.paired_devices_watch requires empty object params"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch"
+      }
+    },
+    {
+      "caller": "direct",
+      "name": "watch_bad_params_before_caller",
+      "reply": {
+        "code": "fed_bad_request",
+        "message": "callosum.paired_devices_watch requires empty object params"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": null
+      }
+    },
+    {
+      "name": "watch_not_ready",
+      "reply": {
+        "code": "fed_not_ready",
+        "message": "peer runtimes are not ready yet"
+      },
+      "request": {
+        "method": "callosum.paired_devices_watch",
+        "params": {}
       }
     }
   ],

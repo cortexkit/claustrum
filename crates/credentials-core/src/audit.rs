@@ -184,9 +184,11 @@ pub enum AuditOp {
     /// receiver).
     TransferReject,
     /// A member grant (another member's vault may read a token or deliver a transfer)
-    /// was created or its pairing id replaced. Actor: the member id.
+    /// was created or its pairing id replaced. Actor: the member id for operator
+    /// grants, or `vault` for Callosum sharing-switch reconciliation.
     MemberGrantCreate,
-    /// A member grant was revoked. Actor: the member id.
+    /// A member grant was revoked. Actor: the member id for operator grants, or
+    /// `vault` for Callosum sharing-switch reconciliation.
     MemberGrantRevoke,
     /// A remote record was registered. Actor: the home member id.
     RemoteAdd,

@@ -530,6 +530,18 @@ fn chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read the xAI account id out of one JWT's claims: `sub`, the xAI user the token acts
+/// as. Its `principal_id` claim carries the same value. `team_id` is deliberately not
+/// used: one user can hold logins in several teams, and the account the vault reports
+/// is the signed-in user, as it is for Anthropic. `None` when `sub` is absent or empty.
+fn xai_account_id_from_jwt(jwt: &str) -> Option<String> {
+    decode_jwt_claims(jwt)?
+        .get("sub")?
+        .as_str()
+        .filter(|sub| !sub.is_empty())
+        .map(str::to_string)
+}
+
 /// Extract the ChatGPT account id from a freshly-minted OpenAI token set. Tries the
 /// id_token first (the official browser-flow source), then the access token — the same
 /// fallback order the ecosystem uses. Used at login time to sanity-warn the operator.
@@ -559,6 +571,7 @@ pub fn extract_chatgpt_account_id(tokens: &LoginTokens) -> Option<String> {
 pub fn account_id_for_adapter(adapter: &str, access_token: &str) -> Option<String> {
     match adapter {
         "openai" => chatgpt_account_id_from_jwt(access_token),
+        "xai" => xai_account_id_from_jwt(access_token),
         _ => None,
     }
 }
@@ -1079,6 +1092,27 @@ mod tests {
         assert_eq!(account_id_for_adapter("anthropic", &access), None);
         assert_eq!(account_id_for_adapter("xai", &access), None);
         assert_eq!(account_id_for_adapter("antigravity", &access), None);
+    }
+
+    #[test]
+    fn account_id_for_adapter_reads_the_xai_user_from_sub_and_never_the_team() {
+        // The claim shape recorded from a live auth.x.ai access token: `sub` and
+        // `principal_id` name the user, `team_id` the billing team.
+        let access = fake_jwt(&serde_json::json!({
+            "iss": "https://auth.x.ai",
+            "sub": "user-xai-7",
+            "principal_id": "user-xai-7",
+            "principal_type": "User",
+            "team_id": "team-xai-3",
+        }));
+        assert_eq!(
+            account_id_for_adapter("xai", &access).as_deref(),
+            Some("user-xai-7")
+        );
+        let teamless = fake_jwt(&serde_json::json!({ "team_id": "team-xai-3", "sub": "" }));
+        assert_eq!(account_id_for_adapter("xai", &teamless), None);
+        // The xAI row reads only its own claim: an xAI token gives no OpenAI account.
+        assert_eq!(account_id_for_adapter("openai", &access), None);
     }
 
     #[test]

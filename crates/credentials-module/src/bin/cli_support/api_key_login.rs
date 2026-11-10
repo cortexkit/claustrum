@@ -933,10 +933,16 @@ mod tests {
         }
 
         let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin_address = origin.local_addr().unwrap();
-        let target_address = target.local_addr().unwrap();
-        assert_ne!(origin_address.ip(), target_address.ip());
+        // The origin uses 127.0.0.1 and the redirect uses localhost, so the
+        // hosts differ without needing a second loopback address on the machine.
+        let target_host = "localhost";
+        let target_url = format!(
+            "http://{target_host}:{}/target",
+            target.local_addr().unwrap().port()
+        );
+        assert_ne!(origin_address.ip().to_string(), target_host);
         let (finished_tx, finished_rx) = oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             let (mut stream, _) = origin.accept().await.unwrap();
@@ -944,7 +950,7 @@ mod tests {
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     )
                     .as_bytes(),
                 )
@@ -954,17 +960,17 @@ mod tests {
 
             // A followed redirect must finish here before validation can return.
             // Otherwise completion of validation ends the listener without a timed sleep.
-            let forwarded_request = tokio::select! {
+            let target_accept_count = tokio::select! {
                 accepted = target.accept() => {
                     let (mut stream, _) = accepted.unwrap();
-                    let request = read_headers(&mut stream).await;
+                    let _ = read_headers(&mut stream).await;
                     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         .await.unwrap();
-                    Some(request)
+                    1
                 }
-                _ = finished_rx => None,
+                _ = finished_rx => 0,
             };
-            (original_request, forwarded_request)
+            (original_request, target_accept_count)
         });
 
         let url = Box::leak(format!("http://{origin_address}/check").into_boxed_str());
@@ -984,7 +990,7 @@ mod tests {
         .await
         .expect("login key check did not complete");
         let _ = finished_tx.send(());
-        let (original_request, forwarded_request) = timeout(Duration::from_secs(5), server)
+        let (original_request, target_accept_count) = timeout(Duration::from_secs(5), server)
             .await
             .expect("stand-in server did not complete")
             .unwrap();
@@ -994,12 +1000,12 @@ mod tests {
             .lines()
             .any(|line| line == "xi-api-key: redirect-test-key"));
         assert_eq!(
+            target_accept_count, 0,
+            "login key checks must not send a request to the redirect host"
+        );
+        assert_eq!(
             outcome,
             ValidationOutcome::Warning("unexpected status 302".to_string())
-        );
-        assert!(
-            forwarded_request.is_none(),
-            "login key checks must not send a request to the redirect host"
         );
     }
 

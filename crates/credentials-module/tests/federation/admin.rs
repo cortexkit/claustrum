@@ -1531,6 +1531,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "secret_phone_tests.rs",
         "secret_contract_tests.rs",
         "credential_permissions_tests.rs",
+        "connectors.rs",
+        "connectors_tests.rs",
         "secret_flow.rs",
         "secret_flow_contract_tests.rs",
         "secret_home_vectors_tests.rs",

@@ -188,9 +188,9 @@ fn row(
     kind: &str,
     incarnation: &str,
     groups: &[String],
-    state: &str,
-    reason: Option<String>,
+    (state, reason): (&str, Option<String>),
     permissions: Vec<String>,
+    extra_setup: Option<Value>,
 ) -> Value {
     let (name, catalog_category) = connector_metadata(id);
     let status = match state {
@@ -200,11 +200,21 @@ fn row(
         "retired" => "signed_out",
         _ => "damaged",
     };
+    let mut primary_setup = json!({"step":if kind == "api_key" {"key"} else {"sign_in"}, "state":if status == "ok" {"done"} else {"needed"}, "where":"computer"});
+    if status != "ok" {
+        primary_setup["remedy"] = json!(if kind == "api_key" {
+            "replace_key"
+        } else {
+            "sign_in_again"
+        });
+    }
+    let mut setup = vec![primary_setup];
+    setup.extend(extra_setup);
     let mut value = json!({
         "id":id, "kind":kind, "incarnation":incarnation,
         "name":name.unwrap_or(id).chars().take(MAX_CONNECTOR_NAME_CHARS).collect::<String>(),
         "status":{"state":status}, "permissions":permissions,
-        "setup":[{"step":if kind == "api_key" {"key"} else {"sign_in"}, "state":if status == "ok" {"done"} else {"needed"}, "where":"computer"}],
+        "setup":setup,
     });
     if let Some(category) = category(groups, catalog_category) {
         value["category"] = json!(category);
@@ -213,11 +223,6 @@ fn row(
         if let Some(reason) = reason {
             value["status"]["reason"] = json!(reason);
         }
-        value["setup"][0]["remedy"] = json!(if kind == "api_key" {
-            "replace_key"
-        } else {
-            "sign_in_again"
-        });
     }
     value
 }
@@ -275,9 +280,9 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             kind,
             meta.incarnation.as_deref().ok_or(ReadError::StoreError)?,
             &meta.categories,
-            meta.state.as_str(),
-            reason,
+            (meta.state.as_str(), reason),
             permissions,
+            None,
         );
         labels(
             &mut value,
@@ -303,9 +308,11 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             "account",
             &record.incarnation,
             &entry.categories,
-            record.last_home_state.as_str(),
-            reason,
+            (record.last_home_state.as_str(), reason),
             permissions,
+            Some(
+                json!({"step":"home", "state":match record.last_fetch_outcome.as_deref() {None => "unknown", Some("ok") => "done", Some(_) => "needed"}, "where":"computer"}),
+            ),
         );
         labels(
             &mut value,
@@ -313,7 +320,6 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             entry.plan_tier,
             record.detected_plan.as_ref(),
         );
-        value["setup"].as_array_mut().expect("setup").push(json!({"step":"home", "state":match record.last_fetch_outcome.as_deref() {None => "unknown", Some("ok") => "done", Some(_) => "needed"}, "where":"computer"}));
         rows.push(value);
     }
     rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));

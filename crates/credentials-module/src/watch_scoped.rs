@@ -327,7 +327,9 @@ impl Subscription {
                     }
                     let snapshot = snapshot(snapshots, move || match params {
                         Some(params) => surface.watch_scoped(principal.as_ref(), &params),
-                        None => crate::connectors::list(surface.store()).map(|reply| (reply["version"].as_str().expect("version").to_owned(), String::new())),
+                        None => crate::connectors::list(surface.store()).and_then(|reply| {
+                            reply["version"].as_str().map(|version| (version.to_owned(), String::new())).ok_or(ReadError::StoreError)
+                        }),
                     }).await;
                     match snapshot {
                         Ok(values) => {

@@ -2030,8 +2030,10 @@ Unreadable (a store read that fails), so every row below covers all nine combina
 | `reserved:aft` | any | NF | served | POR | served | served (its grants) | POR |
 | `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) | POR |
 | `reserved:cingulate` | any | NF | NF | served | served | served (its grants) | served |
-| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) | served (development admission) |
-| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) | served (development admission) |
+| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) | served only without scope (development admission); otherwise POR |
+| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) | served only without scope (development admission); otherwise POR |
+| `direct` with an agent scope | any | NF | NF | POR | served | NF | POR |
+| `direct` with a flow scope | any | not reached | not reached | not reached | not reached | not reached | bind refused (`flow_scopes_unsupported`); directly recorded bind gets `permissions_operator_required` from the dispatcher |
 
 Gates are read only on `reserved:callosum` routes; every other principal's harness is
 ignored. On a phone channel, bearer params (`handle`, `enrollment_token`) are IP even on
@@ -2047,7 +2049,12 @@ column is driven by `connectors_admission_matrix_uses_real_binds_and_route_dispa
 For connectors, a federated scope on a phone bind is always POR, before gates.
 An `operator_app` stamp with `app: "alfonso-desktop"` admits the desktop to connectors
 only; a different app stamp or an absent/unverified principal without a stamp is POR.
-The development admission requires plain `direct` with no app stamp.
+The development admission requires plain `direct` with no app stamp and no scope
+stamp of any kind. Agent- and federated-scoped Direct binds are POR for connectors.
+A flow-stamped Direct bind is refused by the existing `flow_scopes_unsupported`
+bind fence before any operation runs; the matrix also records that stamp directly
+with `record_connector_bind` and checks that the dispatcher independently returns
+`permissions_operator_required`.
 
 The operator uses the existing `admin.challenge` / `admin.op` MAC transcript for
 permissions operations: the authenticated `op_body` is
@@ -3335,7 +3342,9 @@ The vault provides `operator-app/v1` and reads `RouteBindPeer.operator_app` besi
 the control-plane bind. It admits the `alfonso-desktop` stamp, `reserved:cingulate`,
 and the phone route in the matrix above. The one temporary
 `unsigned_desktop_development_admission` also admits plain `direct` so unsigned
-builds work; it must be removed in the change that leaves only the desktop stamp.
+builds work, but only when the bind carries no scope stamp of any kind; scoped
+tool calls are not unsigned desktop reads. It must be removed in the change that
+leaves only the desktop stamp.
 Each call using it writes one fixed, secret-free daemon log line naming that
 admission. No other operation acquires this admission or its log line.
 

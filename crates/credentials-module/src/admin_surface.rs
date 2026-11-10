@@ -79,8 +79,9 @@ pub enum ConnectorAdmission {
 
 /// This admission exists so unsigned desktop builds can read connectors. Remove it
 /// in the same change that leaves only the daemon's operator-app stamp for desktop.
-fn unsigned_desktop_development_admission(principal: &Principal) -> bool {
-    matches!(principal, Principal::Direct)
+/// Unsigned desktop routes have no scope; scoped tool calls are not desktop reads.
+fn unsigned_desktop_development_admission(principal: &Principal, scope_present: bool) -> bool {
+    matches!(principal, Principal::Direct) && !scope_present
 }
 
 /// A single-use challenge nonce with its issue instant (for TTL).
@@ -100,6 +101,7 @@ struct BindState {
     /// or drops both together.
     harness: String,
     operator_app: Option<String>,
+    scope_present: bool,
     federated_scope: bool,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
     nonce: Option<Nonce>,
@@ -234,7 +236,7 @@ impl AdminSurface {
     /// in-flight request prove it still belongs to this binding before claiming a nonce.
     #[allow(dead_code)] // The test-only library's route harness binds without peer metadata.
     pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal, harness: &str) {
-        self.record_connector_bind(channel, epoch, principal, harness, None, false);
+        self.record_connector_bind(channel, epoch, principal, harness, None, None);
     }
 
     pub(crate) fn record_connector_bind(
@@ -244,7 +246,7 @@ impl AdminSurface {
         principal: Principal,
         harness: &str,
         operator_app: Option<String>,
-        federated_scope: bool,
+        scope: Option<&subc_protocol::scope::ScopeStamp>,
     ) {
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
@@ -260,7 +262,9 @@ impl AdminSurface {
                 principal,
                 harness: harness.to_string(),
                 operator_app,
-                federated_scope,
+                scope_present: scope.is_some(),
+                federated_scope: scope
+                    .is_some_and(|stamp| stamp.kind == subc_protocol::scope::ScopeKind::Federated),
                 nonce: None,
             },
         );
@@ -296,7 +300,7 @@ impl AdminSurface {
         {
             Admission::Allowed
         } else if bound.operator_app.is_none()
-            && unsigned_desktop_development_admission(&bound.principal)
+            && unsigned_desktop_development_admission(&bound.principal, bound.scope_present)
         {
             Admission::Development
         } else {

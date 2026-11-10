@@ -320,13 +320,45 @@ mod connectors_contract {
             json!([{"step":"sign_in","state":"needed","remedy":"sign_in_again","where":"computer"}])
         );
     }
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum BindScope {
+        Plain,
+        Agent,
+        Flow,
+        Federated,
+    }
+
+    impl BindScope {
+        fn stamp(self) -> Option<subc_protocol::scope::ScopeStamp> {
+            use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
+            let attributes = ScopeAttributes::new().with_agent_id(Some("connector-agent".into()));
+            match self {
+                Self::Plain => None,
+                Self::Agent => Some(
+                    ScopeStamp::new(reserved("prefrontal-core"), "agent", 1, ScopeKind::Head)
+                        .with_attributes(attributes),
+                ),
+                Self::Flow => Some(
+                    ScopeStamp::new(reserved("prefrontal-core"), "flow", 1, ScopeKind::Worker)
+                        .with_attributes(attributes.with_flow_id(Some("connector-flow".into()))),
+                ),
+                Self::Federated => Some(ScopeStamp::new(
+                    reserved("callosum"),
+                    "phone",
+                    1,
+                    ScopeKind::Federated,
+                )),
+            }
+        }
+    }
+
     async fn bind(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
         principal: Option<subc_protocol::Principal>,
         harness: &str,
         app: Option<&str>,
-        federated: bool,
+        scope: BindScope,
     ) {
         let request = ModuleControlRequest::RouteBind {
             route_channel: 77,
@@ -339,14 +371,7 @@ mod connectors_contract {
             consumer_capabilities: None,
             role_versions: None,
             admission_facts: None,
-            scope: federated.then(|| {
-                subc_protocol::scope::ScopeStamp::new(
-                    reserved("callosum"),
-                    "phone",
-                    1,
-                    subc_protocol::scope::ScopeKind::Federated,
-                )
-            }),
+            scope: scope.stamp(),
             call_mode: None,
         };
         let mut body = serde_json::to_value(request).unwrap();
@@ -379,7 +404,20 @@ mod connectors_contract {
         )
         .await
         .unwrap();
-        assert_eq!(rx.recv().await.unwrap().header.ty, FrameType::Response);
+        let reply = rx.recv().await.unwrap();
+        if scope == BindScope::Flow {
+            assert_eq!(reply.header.ty, FrameType::Error);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["code"],
+                "flow_scopes_unsupported"
+            );
+            assert!(
+                admin.principal(77).is_none(),
+                "refused flow bind installs no caller"
+            );
+        } else {
+            assert_eq!(reply.header.ty, FrameType::Response);
+        }
     }
 
     #[tokio::test]
@@ -391,108 +429,171 @@ mod connectors_contract {
                 Some(subc_protocol::Principal::Direct),
                 "",
                 None,
-                false,
+                BindScope::Plain,
                 "desktop-dev",
+            ),
+            (
+                Some(subc_protocol::Principal::Direct),
+                "",
+                None,
+                BindScope::Agent,
+                "denied",
+            ),
+            (
+                Some(subc_protocol::Principal::Direct),
+                "",
+                None,
+                BindScope::Flow,
+                "denied",
+            ),
+            (
+                Some(subc_protocol::Principal::Direct),
+                "",
+                None,
+                BindScope::Federated,
+                "denied",
             ),
             (
                 Some(subc_protocol::Principal::Unverified),
                 "",
                 Some("alfonso-desktop"),
-                false,
+                BindScope::Plain,
+                "desktop-release",
+            ),
+            (
+                Some(subc_protocol::Principal::Unverified),
+                "",
+                Some("alfonso-desktop"),
+                BindScope::Agent,
                 "desktop-release",
             ),
             (
                 Some(subc_protocol::Principal::Unverified),
                 "",
                 Some("other-app"),
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(subc_protocol::Principal::Direct),
                 "",
                 Some("other-app"),
-                false,
+                BindScope::Plain,
                 "denied",
             ),
-            (Some(reserved("cingulate")), "", None, false, "cingulate"),
+            (
+                Some(reserved("cingulate")),
+                "",
+                None,
+                BindScope::Plain,
+                "cingulate",
+            ),
+            (
+                Some(reserved("cingulate")),
+                "",
+                None,
+                BindScope::Agent,
+                "cingulate",
+            ),
             (
                 Some(reserved("callosum")),
                 "fed-phone:11111111111111111111111111111111",
                 None,
-                false,
+                BindScope::Plain,
                 "phone",
             ),
             (
                 Some(reserved("callosum")),
                 "fed-phone:11111111111111111111111111111111",
                 None,
-                true,
+                BindScope::Federated,
                 "denied",
             ),
             (
                 Some(reserved("callosum")),
                 "fed-phone:1111111111111111111111111111111A",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(reserved("callosum")),
                 "fed-phone:short",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(reserved("callosum")),
                 "fed-sim:11111111111111111111111111111111",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(reserved("callosum")),
                 "fed-computer:11111111111111111111111111111111",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(reserved("callosum")),
                 "callosum-self",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
             (
                 Some(reserved("aft")),
                 "fed-phone:11111111111111111111111111111111",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
-            (Some(reserved("cerebellum")), "", None, false, "denied"),
+            (
+                Some(reserved("cerebellum")),
+                "",
+                None,
+                BindScope::Plain,
+                "denied",
+            ),
             (
                 Some(subc_protocol::Principal::Unverified),
                 "",
                 None,
-                false,
+                BindScope::Plain,
                 "denied",
             ),
-            (None, "", None, false, "denied"),
+            (None, "", None, BindScope::Plain, "denied"),
         ];
         let mut cells = 0;
-        for (principal, harness, app, federated, expected) in rows {
+        for (principal, harness, app, scope, expected) in rows {
             for member in ["true", "false", "unreadable"] {
                 for phone in ["true", "false", "unreadable"] {
                     conn.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('federation.member_mapping',?1,1)",[member]).unwrap();
                     conn.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('secret.phone_mapping',?1,1)",[phone]).unwrap();
-                    bind(&surface, &admin, principal.clone(), harness, app, federated).await;
+                    if scope == BindScope::Flow {
+                        admin.drop_bind(77);
+                    }
+                    bind(&surface, &admin, principal.clone(), harness, app, scope).await;
+                    if scope == BindScope::Flow {
+                        // The real binder refuses flows before any operation can run.
+                        // Seed the same stamp to test the dispatcher's independent fence.
+                        let stamp = scope.stamp();
+                        admin.record_connector_bind(
+                            77,
+                            1,
+                            principal.clone().unwrap(),
+                            harness,
+                            app.map(str::to_owned),
+                            stamp.as_ref(),
+                        );
+                    }
                     for op in ["connectors.list", "connectors.watch"] {
                         let (ty, bytes) = routed_reply(&surface, &admin, 77, op, json!({})).await;
                         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                        let at = format!("{expected} {harness} {member}/{phone} {op}");
+                        let at = format!("{expected} {scope:?} {harness} {member}/{phone} {op}");
                         if expected == "phone" && (member != "true" || phone == "unreadable") {
                             assert_eq!(ty, FrameType::Response, "{at}");
                             assert_eq!(body, uniform_not_found(), "{at}");
@@ -525,7 +626,7 @@ mod connectors_contract {
                 }
             }
         }
-        assert_eq!(cells, 288);
+        assert_eq!(cells, 378);
     }
 
     #[tokio::test]
@@ -612,6 +713,24 @@ mod connectors_contract {
 
     #[tokio::test(flavor = "current_thread")]
     async fn connectors_development_admission_logs_each_call_and_no_other_direct_op() {
+        const CHILD: &str = "CK_CONNECTOR_LOG_CAPTURE_CHILD";
+        const TEST: &str = "tests::connectors_contract::connectors_development_admission_logs_each_call_and_no_other_direct_op";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            // Isolate the subscriber from parallel tests exercising the same log site.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("1 passed;"),
+                "child must execute the capture test: {stdout}"
+            );
+            return;
+        }
         let (surface, admin, _store, _db, _root) = rig(223);
         admin.record_bind_at(77, 1, subc_protocol::Principal::Direct, "");
         let logs = Logs(Arc::default());
@@ -680,7 +799,7 @@ mod connectors_contract {
             Some(reserved("callosum")),
             "fed-phone:11111111111111111111111111111111",
             None,
-            false,
+            BindScope::Plain,
         )
         .await;
         let (_, off) = routed_reply(&surface, &admin, 77, "connectors.list", json!({})).await;
@@ -786,7 +905,7 @@ mod connectors_contract {
             Some(reserved("callosum")),
             "fed-phone:11111111111111111111111111111111",
             None,
-            false,
+            BindScope::Plain,
         )
         .await;
         let (tx, mut rx) = mpsc::channel(4);

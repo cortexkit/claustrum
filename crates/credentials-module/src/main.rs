@@ -1218,9 +1218,7 @@ async fn handle_control_request(
                 principal,
                 &identity.harness,
                 peer.operator_app.map(|app| app.app),
-                scope
-                    .as_ref()
-                    .is_some_and(|stamp| stamp.kind == subc_protocol::scope::ScopeKind::Federated),
+                scope.as_ref(),
             );
             ModuleControlResponse::RouteBindAck {}
         }

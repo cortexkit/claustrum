@@ -915,6 +915,94 @@ mod tests {
         assert!(matches!(outcome, ValidationOutcome::Warning(_)));
     }
 
+    #[tokio::test]
+    async fn get_endpoint_login_does_not_forward_key_to_redirect_host() {
+        use credentials_core::http::ReqwestTransport;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+        use tokio::time::{timeout, Duration};
+
+        async fn read_headers(stream: &mut TcpStream) -> String {
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert_ne!(reader.read_line(&mut request).await.unwrap(), 0);
+            }
+            request
+        }
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let target_address = target.local_addr().unwrap();
+        assert_ne!(origin_address.ip(), target_address.ip());
+        let (finished_tx, finished_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let original_request = read_headers(&mut stream).await;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            drop(stream);
+
+            // A followed redirect must finish here before validation can return.
+            // Otherwise completion of validation ends the listener without a timed sleep.
+            let forwarded_request = tokio::select! {
+                accepted = target.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let request = read_headers(&mut stream).await;
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await.unwrap();
+                    Some(request)
+                }
+                _ = finished_rx => None,
+            };
+            (original_request, forwarded_request)
+        });
+
+        let url = Box::leak(format!("http://{origin_address}/check").into_boxed_str());
+        let mut row = probe_row(KeyValidation::GetEndpoint {
+            url,
+            extra_headers: &[],
+        });
+        row.auth = Some(AuthDescriptor {
+            header: "xi-api-key",
+            scheme: AuthScheme::Raw,
+        });
+        let transport = ReqwestTransport::new().unwrap();
+        let outcome = timeout(
+            Duration::from_secs(5),
+            validate_key(&transport, &row, "redirect-test-key", None),
+        )
+        .await
+        .expect("login key check did not complete");
+        let _ = finished_tx.send(());
+        let (original_request, forwarded_request) = timeout(Duration::from_secs(5), server)
+            .await
+            .expect("stand-in server did not complete")
+            .unwrap();
+
+        assert!(original_request.starts_with("GET /check HTTP/1.1\r\n"));
+        assert!(original_request
+            .lines()
+            .any(|line| line == "xi-api-key: redirect-test-key"));
+        assert_eq!(
+            outcome,
+            ValidationOutcome::Warning("unexpected status 302".to_string())
+        );
+        assert!(
+            forwarded_request.is_none(),
+            "login key checks must not send a request to the redirect host"
+        );
+    }
+
     const CLOUDFLARE_ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 
     fn cloudflare_row() -> &'static ApiKeyProvider {

@@ -2521,7 +2521,10 @@ stamp's `scope_epoch`; anything else, and every flow-read scope, maps to nothing
 `not_found`). A Worker is also served by an `agent_and_workers` grant on Head H when its
 stamp's parent has H's owner and ref, `parent_state` `linked` and an equal epoch.
 
-**Target rules.** The scheme must be `https` and the port 443. The host is lowercase ASCII
+**Target rules.** A stored API-key scope matches only scheme `https` on port 443. The
+scheme's grammar is checked first (lowercase letters, digits, `+`, `-`, `.`; anything else
+is `invalid_params`), but another scheme or port is not a grammar error: it can never
+match, so it is answered as the uniform `not_found`. The host is lowercase ASCII
 (IDN as A-labels), with no trailing dot and no IP literal, and must equal the record's host.
 The path starts with `/` and holds only RFC 3986 pchar bytes and `/`. Senders strip the
 query and fragment before calling; a path with `?` or `#` is `invalid_params`. Refused,

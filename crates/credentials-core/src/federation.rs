@@ -272,6 +272,74 @@ pub struct NewRemoteRecord {
     pub categories: Vec<String>,
 }
 
+/// One `logins` row from a home-watch snapshot, containing only non-secret metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWatchRow {
+    pub credential_id: String,
+    pub state: RemoteHomeState,
+    pub refresh_adapter: Option<String>,
+    pub identity: RecordIdentity,
+    pub categories: Vec<String>,
+    pub detected_plan: Option<DetectedPlan>,
+    pub home_version: u64,
+}
+
+/// Check a snapshot row before applying it. A reconciler can retain a rejected row's
+/// id without blocking the other rows in the snapshot. Operator adds use these same
+/// checks with their initial state set to `active`.
+pub fn validate_remote_watch_row(
+    home_member: &str,
+    row: &RemoteWatchRow,
+) -> Result<(), StoreOpError> {
+    if row.credential_id.is_empty() {
+        return Err(StoreOpError::InvalidCredentialId);
+    }
+    crate::store::validate_deposit_credential_id(&row.credential_id)?;
+    check_member_id(home_member)?;
+    row.identity.validate().map_err(StoreOpError::Encode)?;
+    if row
+        .detected_plan
+        .as_ref()
+        .and_then(|p| p.tier.as_deref())
+        .is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier))
+    {
+        return Err(StoreOpError::InvalidPlanTier);
+    }
+    if row
+        .categories
+        .iter()
+        .any(|c| !crate::catalog::valid_category_name(c))
+    {
+        return Err(StoreOpError::InvalidCategoryName);
+    }
+    if row.state == RemoteHomeState::Corrupt {
+        return Err(StoreOpError::Encode(
+            "home-watch state must be active or needs_reauth".into(),
+        ));
+    }
+    i64::try_from(row.home_version)
+        .map_err(|_| StoreOpError::Encode("home record_version out of range".into()))?;
+    Ok(())
+}
+
+/// How to apply snapshot `logins`: reconcile the full list, or retry skipped inserts
+/// without overwriting metadata that the token-read path may have updated since then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteWatchApplyMode {
+    Full,
+    InsertOnly,
+}
+
+/// Changes made for snapshot `logins`. Skipped credential ids let the reconciler log
+/// each collision once per (id, home) and retry inserts after another home removes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteWatchApplyResult {
+    pub inserted: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub skipped: Vec<String>,
+}
+
 /// Who controls a remote record's lifetime: the operator or the subscription that
 /// keeps it in sync with its home vault's login list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -752,6 +820,27 @@ pub fn remote_membership_payload_hash(incarnation: &str) -> Result<String, Store
         incarnation: &'a str,
     }
     Ok(sha256_hex_of_json(&Payload { incarnation }))
+}
+
+/// Home-watch add, update and removal payload: `{home_member, incarnation}`. The
+/// actor is `vault`, so the payload binds the home that owns the remote metadata.
+pub fn remote_watch_payload_hash(
+    home_member: &str,
+    incarnation: &str,
+) -> Result<String, StoreOpError> {
+    check_member_id(home_member)?;
+    if !is_lower_hex_16_bytes(incarnation) {
+        return Err(invalid("incarnation", "32 lowercase hex characters"));
+    }
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        home_member: &'a str,
+        incarnation: &'a str,
+    }
+    Ok(sha256_hex_of_json(&Payload {
+        home_member,
+        incarnation,
+    }))
 }
 
 /// `federation_gate_set`: `{value}`, the new gate as a JSON boolean.

@@ -190,9 +190,13 @@ pub enum AuditOp {
     /// A member grant was revoked. Actor: the member id for operator grants, or
     /// `vault` for Callosum sharing-switch reconciliation.
     MemberGrantRevoke,
-    /// A remote record was registered. Actor: the home member id.
+    /// A remote record was registered. Actor: the home member id for operator
+    /// records, or `vault` for home-watch reconciliation.
     RemoteAdd,
-    /// A remote record was removed. Actor: the home member id.
+    /// A remote record was updated in place by home-watch reconciliation. Actor: `vault`.
+    RemoteUpdate,
+    /// A remote record was removed. Actor: the home member id for operator
+    /// records, or `vault` for home-watch reconciliation.
     RemoteRemove,
     /// The federation member-mapping gate was switched on or off.
     FederationGateSet,
@@ -257,6 +261,7 @@ impl AuditOp {
             AuditOp::MemberGrantCreate => "member_grant_create",
             AuditOp::MemberGrantRevoke => "member_grant_revoke",
             AuditOp::RemoteAdd => "remote_add",
+            AuditOp::RemoteUpdate => "remote_update",
             AuditOp::RemoteRemove => "remote_remove",
             AuditOp::FederationGateSet => "federation_gate_set",
             AuditOp::FederationSelfSet => "federation_self_set",
@@ -809,6 +814,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::MemberGrantCreate => AuditOp::MemberGrantCreate.as_str(),
                 AuditOp::MemberGrantRevoke => AuditOp::MemberGrantRevoke.as_str(),
                 AuditOp::RemoteAdd => AuditOp::RemoteAdd.as_str(),
+                AuditOp::RemoteUpdate => AuditOp::RemoteUpdate.as_str(),
                 AuditOp::RemoteRemove => AuditOp::RemoteRemove.as_str(),
                 AuditOp::FederationGateSet => AuditOp::FederationGateSet.as_str(),
                 AuditOp::FederationSelfSet => AuditOp::FederationSelfSet.as_str(),

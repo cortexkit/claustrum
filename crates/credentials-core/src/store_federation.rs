@@ -20,6 +20,10 @@ use crate::federation::{
     VaultSharingMember, MEMBER_MAPPING_SETTING, REJECT_REMOTE_SEAL_INVALID,
     REJECT_SENDER_KEY_REPLACED, SELF_MEMBER_SETTING, TRANSFER_RETENTION_MS,
 };
+use crate::federation::{
+    remote_watch_payload_hash, validate_remote_watch_row, RemoteWatchApplyMode,
+    RemoteWatchApplyResult, RemoteWatchRow,
+};
 
 /// The longest fetch-outcome code stored. Outcomes are refusal codes this vault
 /// chose (or `ok`), never text from a peer, so this bounds a column, not a format.
@@ -224,6 +228,203 @@ fn check_pairing_id(pairing_id: &str) -> Result<(), StoreOpError> {
     Ok(())
 }
 
+#[derive(Default)]
+struct RemoteWatchDiff<'a> {
+    inserts: Vec<&'a RemoteWatchRow>,
+    updates: Vec<(RemoteRecord, &'a RemoteWatchRow, bool)>,
+    removals: Vec<RemoteRecord>,
+    skipped: Vec<String>,
+}
+
+impl RemoteWatchDiff<'_> {
+    fn result(&self) -> RemoteWatchApplyResult {
+        RemoteWatchApplyResult {
+            inserted: self.inserts.len(),
+            updated: self.updates.len(),
+            removed: self.removals.len(),
+            skipped: self.skipped.clone(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inserts.is_empty() && self.updates.is_empty() && self.removals.is_empty()
+    }
+}
+
+fn remote_watch_records_conn(
+    conn: &rusqlite::Connection,
+    home: &str,
+) -> rusqlite::Result<Vec<RemoteRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM remote_records WHERE source = 'home_watch' AND home_member = ?1 \
+         ORDER BY credential_id",
+    )?;
+    let rows = stmt.query_map([home], remote_record_from_row)?.collect();
+    rows
+}
+
+fn remote_categories_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<BTreeSet<String>> {
+    let mut stmt =
+        conn.prepare("SELECT category FROM remote_record_categories WHERE credential_id = ?1")?;
+    let rows = stmt.query_map([id], |row| row.get(0))?.collect();
+    rows
+}
+
+fn remote_watch_diff_conn<'a>(
+    conn: &rusqlite::Connection,
+    home: &str,
+    pairing: &str,
+    rows: &'a [RemoteWatchRow],
+    mode: RemoteWatchApplyMode,
+    retained_ids: &[String],
+) -> rusqlite::Result<RemoteWatchDiff<'a>> {
+    let mut diff = RemoteWatchDiff::default();
+    for row in rows {
+        let id = &row.credential_id;
+        if retained_ids.contains(id) {
+            continue;
+        }
+        let current = conn
+            .query_row(
+                "SELECT * FROM remote_records WHERE credential_id = ?1",
+                [id],
+                remote_record_from_row,
+            )
+            .optional()?;
+        match current {
+            Some(current)
+                if current.source == RemoteRecordSource::HomeWatch
+                    && current.home_member == home
+                    && current.home_pairing_id.as_deref() == Some(pairing) =>
+            {
+                if mode == RemoteWatchApplyMode::InsertOnly {
+                    continue;
+                }
+                let categories_changed =
+                    remote_categories_conn(conn, id)? != row.categories.iter().cloned().collect();
+                let same_plan = current.detected_plan.as_ref().map(|p| (&p.tier, &p.raw))
+                    == row.detected_plan.as_ref().map(|p| (&p.tier, &p.raw));
+                if categories_changed
+                    || !same_plan
+                    || current.refresh_adapter != row.refresh_adapter
+                    || current.identity != row.identity
+                    || current.last_home_state != row.state
+                {
+                    diff.updates.push((current, row, categories_changed));
+                }
+            }
+            Some(_) => diff.skipped.push(id.clone()),
+            None => {
+                let local: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                if local {
+                    diff.skipped.push(id.clone());
+                } else {
+                    diff.inserts.push(row);
+                }
+            }
+        }
+    }
+    if mode == RemoteWatchApplyMode::Full {
+        for record in remote_watch_records_conn(conn, home)? {
+            if record.home_pairing_id.as_deref() == Some(pairing)
+                && !rows
+                    .iter()
+                    .any(|row| row.credential_id == record.credential_id)
+                && !retained_ids.contains(&record.credential_id)
+            {
+                diff.removals.push(record);
+            }
+        }
+    }
+    Ok(diff)
+}
+
+fn audit_remote_watch_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    home: &str,
+    id: &str,
+    incarnation: &str,
+    op: AuditOp,
+) -> rusqlite::Result<()> {
+    let payload =
+        remote_watch_payload_hash(home, incarnation).map_err(|e| bad_column(e.to_string()))?;
+    append_audit_tx(
+        tx,
+        audit_key,
+        &AuditRecord {
+            op,
+            credential_id: Some(id.into()),
+            payload_hash: Some(payload),
+            actor: "vault".into(),
+            alarm: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn remove_remote_watch_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    record: &RemoteRecord,
+) -> rusqlite::Result<()> {
+    let mut categories = 0;
+    // Guard the metadata deletions too: a converted operator row owns all of its
+    // metadata, even when foreign-key cascades are disabled on this connection.
+    for table in [
+        "remote_record_categories",
+        "remote_record_provider_ids",
+        "remote_record_plan_tiers",
+        "auth_events",
+    ] {
+        let deleted = tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE credential_id = ?1 AND EXISTS (\
+             SELECT 1 FROM remote_records WHERE credential_id = ?1 \
+             AND source = 'home_watch' AND home_member = ?2 AND home_pairing_id = ?3)",
+            ),
+            rusqlite::params![
+                record.credential_id,
+                record.home_member,
+                record.home_pairing_id
+            ],
+        )?;
+        if table == "remote_record_categories" {
+            categories = deleted;
+        }
+    }
+    let deleted = tx.execute(
+        "DELETE FROM remote_records WHERE credential_id = ?1 AND source = 'home_watch' \
+         AND home_member = ?2 AND home_pairing_id = ?3",
+        rusqlite::params![
+            record.credential_id,
+            record.home_member,
+            record.home_pairing_id
+        ],
+    )?;
+    if categories > 0 {
+        bump_grants_generation_tx(tx)?;
+    }
+    if deleted > 0 {
+        audit_remote_watch_tx(
+            tx,
+            audit_key,
+            &record.home_member,
+            &record.credential_id,
+            &record.incarnation,
+            AuditOp::RemoteRemove,
+        )?;
+    }
+    Ok(())
+}
+
 impl EncryptedStore {
     /// Whether the federation member-mapping gate is on. Read from the store on every
     /// call, so a change made by the admin op takes effect without a restart. Unset,
@@ -333,27 +534,19 @@ impl EncryptedStore {
     /// Audited `remote_add` with the home member as actor and `payload_hash` over
     /// `{incarnation}`, in the same transaction as the rows.
     pub fn remote_add_audited(&self, new: &NewRemoteRecord) -> Result<RemoteRecord, StoreOpError> {
-        if new.credential_id.is_empty() {
-            return Err(StoreOpError::InvalidCredentialId);
-        }
-        validate_deposit_credential_id(&new.credential_id)?;
-        check_member_id(&new.home_member)?;
-        new.identity.validate().map_err(StoreOpError::Encode)?;
-        if new
-            .detected_plan
-            .as_ref()
-            .and_then(|plan| plan.tier.as_deref())
-            .is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier))
-        {
-            return Err(StoreOpError::InvalidPlanTier);
-        }
+        validate_remote_watch_row(
+            &new.home_member,
+            &RemoteWatchRow {
+                credential_id: new.credential_id.clone(),
+                state: RemoteHomeState::Active,
+                refresh_adapter: new.refresh_adapter.clone(),
+                identity: new.identity.clone(),
+                categories: new.categories.clone(),
+                detected_plan: new.detected_plan.clone(),
+                home_version: new.home_version,
+            },
+        )?;
         let categories: BTreeSet<&String> = new.categories.iter().collect();
-        if categories
-            .iter()
-            .any(|category| !crate::catalog::valid_category_name(category))
-        {
-            return Err(StoreOpError::InvalidCategoryName);
-        }
         let incarnation = mint_incarnation()?;
         let payload_hash = remote_membership_payload_hash(&incarnation)?;
         let detected_plan = new
@@ -487,6 +680,152 @@ impl EncryptedStore {
             Ok(Some(record))
         })?;
         removed.ok_or(StoreOpError::NotFound)
+    }
+
+    /// Apply a home's snapshot without touching operator, local or other homes'
+    /// records. `retained_ids` names listed rows the caller rejected during validation:
+    /// Full mode neither updates nor removes those ids, even if no valid row remains.
+    /// Unknown or unparseable retained ids simply match nothing. InsertOnly retries
+    /// collisions without replaying old metadata or deleting any row.
+    ///
+    /// A read-only preflight avoids a fenced commit (and its write signal) for an
+    /// empty diff. A non-empty diff is recomputed inside one fenced transaction.
+    pub fn remote_watch_apply_audited(
+        &self,
+        home_member: &str,
+        pairing_id: &str,
+        rows: &[RemoteWatchRow],
+        mode: RemoteWatchApplyMode,
+        retained_ids: &[String],
+    ) -> Result<RemoteWatchApplyResult, StoreOpError> {
+        check_member_id(home_member)?;
+        check_pairing_id(pairing_id)?;
+        let mut ids = BTreeSet::new();
+        for row in rows {
+            validate_remote_watch_row(home_member, row)?;
+            if !ids.insert(&row.credential_id) {
+                return Err(StoreOpError::Encode(
+                    "duplicate home-watch credential id".into(),
+                ));
+            }
+        }
+        let preflight = self.store.with_conn(|conn| {
+            let diff =
+                remote_watch_diff_conn(conn, home_member, pairing_id, rows, mode, retained_ids)?;
+            Ok((diff.is_empty(), diff.result()))
+        })?;
+        if preflight.0 {
+            return Ok(preflight.1);
+        }
+        self.fenced_write(|tx| {
+            let diff = remote_watch_diff_conn(tx, home_member, pairing_id, rows, mode, retained_ids)?;
+            let result = diff.result();
+            let now = now_ms();
+            for row in diff.inserts {
+                let incarnation = mint_incarnation().map_err(|e| bad_column(e.to_string()))?;
+                let plan = row.detected_plan.as_ref().map(serde_json::to_string).transpose()
+                    .map_err(|e| bad_column(e.to_string()))?;
+                tx.execute(
+                    "INSERT INTO remote_records \
+                     (credential_id, home_member, source, home_pairing_id, incarnation, kind, \
+                      refresh_adapter, detected_plan, account_id, email, org_name, last_home_version, \
+                      last_home_state, created_at_ms, updated_at_ms, detected_plan_tier_observed_at_ms) \
+                     VALUES (?1, ?2, 'home_watch', ?3, ?4, 'oauth', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
+                    rusqlite::params![row.credential_id, home_member, pairing_id, incarnation,
+                        row.refresh_adapter, plan, row.identity.account_id, row.identity.email,
+                        row.identity.org_name, row.home_version as i64, row.state.as_str(), now,
+                        row.detected_plan.as_ref().filter(|p| p.tier.is_some()).map(|p| p.observed_at_ms)],
+                )?;
+                let categories: BTreeSet<_> = row.categories.iter().collect();
+                for category in &categories {
+                    tx.execute("INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
+                        rusqlite::params![row.credential_id, category])?;
+                }
+                if !categories.is_empty() {
+                    bump_grants_generation_tx(tx)?;
+                }
+                audit_remote_watch_tx(tx, &self.audit_key, home_member, &row.credential_id,
+                    &incarnation, AuditOp::RemoteAdd)?;
+            }
+            for (current, row, categories_changed) in diff.updates {
+                let plan = row.detected_plan.as_ref().map(serde_json::to_string).transpose()
+                    .map_err(|e| bad_column(e.to_string()))?;
+                let observed_at = row.detected_plan.as_ref().and_then(|plan| {
+                    let tier = plan.tier.as_ref()?;
+                    if current.identity.account_id == row.identity.account_id
+                        && current.detected_plan.as_ref().and_then(|p| p.tier.as_ref()) == Some(tier) {
+                        current.detected_plan_tier_observed_at_ms
+                    } else {
+                        Some(plan.observed_at_ms)
+                    }
+                });
+                tx.execute(
+                    "UPDATE remote_records SET refresh_adapter = ?4, detected_plan = ?5, \
+                     account_id = ?6, email = ?7, org_name = ?8, last_home_state = ?9, \
+                     last_home_error = CASE WHEN last_home_state != 'active' AND ?9 = 'active' \
+                         THEN NULL ELSE last_home_error END, \
+                     updated_at_ms = ?10, detected_plan_tier_observed_at_ms = ?11 \
+                     WHERE credential_id = ?1 AND source = 'home_watch' \
+                     AND home_member = ?2 AND home_pairing_id = ?3",
+                    rusqlite::params![row.credential_id, home_member, pairing_id, row.refresh_adapter,
+                        plan, row.identity.account_id, row.identity.email, row.identity.org_name,
+                        row.state.as_str(), now, observed_at],
+                )?;
+                if categories_changed {
+                    tx.execute(
+                        "DELETE FROM remote_record_categories WHERE credential_id = ?1 AND EXISTS (\
+                         SELECT 1 FROM remote_records WHERE credential_id = ?1 AND source = 'home_watch' \
+                         AND home_member = ?2 AND home_pairing_id = ?3)",
+                        rusqlite::params![row.credential_id, home_member, pairing_id],
+                    )?;
+                    let categories: BTreeSet<_> = row.categories.iter().collect();
+                    for category in categories {
+                        tx.execute("INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
+                            rusqlite::params![row.credential_id, category])?;
+                    }
+                    bump_grants_generation_tx(tx)?;
+                }
+                audit_remote_watch_tx(tx, &self.audit_key, home_member, &row.credential_id,
+                    &current.incarnation, AuditOp::RemoteUpdate)?;
+            }
+            for record in diff.removals {
+                remove_remote_watch_tx(tx, &self.audit_key, &record)?;
+            }
+            Ok(result)
+        }).map_err(StoreOpError::from)
+    }
+
+    /// Remove a home's home-watch rows except those under `keep_pairing`, or all
+    /// of them for `None`. Empty removals do not open a transaction or signal a write.
+    pub fn remote_watch_remove_audited(
+        &self,
+        home_member: &str,
+        keep_pairing: Option<&str>,
+    ) -> Result<Vec<RemoteRecord>, StoreOpError> {
+        check_member_id(home_member)?;
+        if let Some(pairing) = keep_pairing {
+            check_pairing_id(pairing)?;
+        }
+        let candidates = |conn: &rusqlite::Connection| -> rusqlite::Result<Vec<RemoteRecord>> {
+            Ok(remote_watch_records_conn(conn, home_member)?
+                .into_iter()
+                .filter(|r| keep_pairing.is_none() || r.home_pairing_id.as_deref() != keep_pairing)
+                .collect())
+        };
+        if self
+            .store
+            .with_conn(|conn| Ok(candidates(conn)?.is_empty()))?
+        {
+            return Ok(Vec::new());
+        }
+        self.fenced_write(|tx| {
+            let records = candidates(tx)?;
+            for record in &records {
+                remove_remote_watch_tx(tx, &self.audit_key, record)?;
+            }
+            Ok(records)
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// One remote record, or `None` when the id is not one (or the store predates

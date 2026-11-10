@@ -16,6 +16,614 @@ const HOME: &str = "fed-computer:0123456789abcdef0123456789abcdef";
 const OTHER: &str = "fed-computer:fedcba9876543210fedcba9876543210";
 const ACTOR: &str = "route-admin";
 
+mod remote_watch {
+    use super::*;
+    use crate::federation::{
+        validate_remote_watch_row, RemoteWatchApplyMode, RemoteWatchApplyResult, RemoteWatchRow,
+    };
+
+    fn row(id: &str) -> RemoteWatchRow {
+        let new = new_remote(id);
+        RemoteWatchRow {
+            credential_id: new.credential_id,
+            state: RemoteHomeState::NeedsReauth,
+            refresh_adapter: new.refresh_adapter,
+            identity: new.identity,
+            categories: new.categories,
+            detected_plan: new.detected_plan,
+            home_version: new.home_version,
+        }
+    }
+
+    fn full(store: &EncryptedStore, rows: &[RemoteWatchRow]) -> RemoteWatchApplyResult {
+        store
+            .remote_watch_apply_audited(HOME, "pair", rows, RemoteWatchApplyMode::Full, &[])
+            .unwrap()
+    }
+
+    fn get(store: &EncryptedStore, id: &str) -> crate::federation::RemoteRecord {
+        store.remote_record(id).unwrap().unwrap()
+    }
+
+    fn assert_watch_audit(
+        store: &EncryptedStore,
+        op: AuditOp,
+        record: &crate::federation::RemoteRecord,
+    ) {
+        use sha2::{Digest, Sha256};
+        let entries = audit_rows(store, op);
+        let entry = entries.last().unwrap();
+        assert_eq!(
+            entry.credential_id.as_deref(),
+            Some(record.credential_id.as_str())
+        );
+        assert_eq!(entry.actor, "vault");
+        assert!(!entry.alarm);
+        assert_eq!(entry.alarm_reason, None);
+        let payload = format!(
+            "{{\"home_member\":\"{}\",\"incarnation\":\"{}\"}}",
+            record.home_member, record.incarnation
+        );
+        let expected = Sha256::digest(payload.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(entry.payload_hash.as_ref(), Some(&expected));
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn seeds_snapshot_metadata_and_audits_as_vault() {
+        let (_root, store) = rig("watch-seed", 243);
+        let input = row("oauth:watch");
+        let generation = store.grants_generation().unwrap();
+        let writes = store.subscribe_writes();
+        assert_eq!(
+            full(&store, std::slice::from_ref(&input)),
+            RemoteWatchApplyResult {
+                inserted: 1,
+                ..Default::default()
+            }
+        );
+        assert!(writes.has_changed().unwrap());
+        let saved = get(&store, &input.credential_id);
+        assert_eq!(saved.source, RemoteRecordSource::HomeWatch);
+        assert_eq!(saved.home_pairing_id.as_deref(), Some("pair"));
+        assert_eq!(saved.home_member, HOME);
+        assert!(crate::federation::is_lower_hex_16_bytes(&saved.incarnation));
+        assert_eq!(saved.last_home_state, input.state);
+        assert_eq!(saved.last_home_version, input.home_version);
+        assert_eq!(saved.identity, input.identity);
+        assert_eq!(saved.refresh_adapter, input.refresh_adapter);
+        assert_eq!(saved.detected_plan, input.detected_plan);
+        assert_eq!(
+            saved.detected_plan_tier_observed_at_ms,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            store.categories(&input.credential_id).unwrap(),
+            input.categories
+        );
+        assert_eq!(store.grants_generation().unwrap(), generation + 1);
+        assert_watch_audit(&store, AuditOp::RemoteAdd, &saved);
+        store.remote_watch_remove_audited(HOME, None).unwrap();
+        full(&store, &[input]);
+        assert_ne!(get(&store, "oauth:watch").incarnation, saved.incarnation);
+    }
+
+    #[test]
+    fn empty_diffs_do_not_signal_including_version_and_plan_time_only_changes() {
+        let (_root, store) = rig("watch-noop", 244);
+        let mut input = row("oauth:watch");
+        let writes = store.subscribe_writes();
+        assert_eq!(full(&store, &[]), RemoteWatchApplyResult::default());
+        assert!(store
+            .remote_watch_remove_audited(HOME, None)
+            .unwrap()
+            .is_empty());
+        assert!(!writes.has_changed().unwrap());
+        full(&store, std::slice::from_ref(&input));
+        let writes = store.subscribe_writes();
+        let before = get(&store, "oauth:watch");
+        let audit = store.read_audit(None).unwrap();
+        input.home_version += 100;
+        input.detected_plan.as_mut().unwrap().observed_at_ms += 100;
+        input.categories.push("llm-provider".into());
+        assert_eq!(
+            full(&store, std::slice::from_ref(&input)),
+            RemoteWatchApplyResult::default()
+        );
+        assert_eq!(
+            store
+                .remote_watch_apply_audited(
+                    HOME,
+                    "pair",
+                    &[input],
+                    RemoteWatchApplyMode::InsertOnly,
+                    &[]
+                )
+                .unwrap(),
+            RemoteWatchApplyResult::default()
+        );
+        assert!(store
+            .remote_watch_remove_audited(HOME, Some("pair"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(get(&store, "oauth:watch"), before);
+        assert_eq!(store.read_audit(None).unwrap(), audit);
+        assert!(
+            !writes.has_changed().unwrap(),
+            "a successful no-op transaction would wake subscribers"
+        );
+    }
+
+    #[test]
+    fn updates_each_metadata_field_in_place_without_replaying_home_version() {
+        let (_root, store) = rig("watch-update", 245);
+        let mut input = row("oauth:watch");
+        full(&store, std::slice::from_ref(&input));
+        let incarnation = get(&store, "oauth:watch").incarnation;
+        let generation = store.grants_generation().unwrap();
+        for change in 0..6 {
+            match change {
+                0 => input.refresh_adapter = Some("openai".into()),
+                1 => input.identity.email = Some("updated@example.com".into()),
+                2 => input.categories = vec!["custom-team".into()],
+                3 => input.detected_plan.as_mut().unwrap().raw = Some("updated".into()),
+                4 => input.detected_plan.as_mut().unwrap().tier = Some("max_5x".into()),
+                5 => {
+                    store
+                        .remote_record_apply_home_state(
+                            "oauth:watch",
+                            &incarnation,
+                            RemoteHomeState::NeedsReauth,
+                            "needs_reauth",
+                        )
+                        .unwrap();
+                    input.state = RemoteHomeState::Active;
+                }
+                _ => unreachable!(),
+            }
+            input.home_version += 1;
+            assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 1);
+            let saved = get(&store, "oauth:watch");
+            assert_eq!(saved.incarnation, incarnation);
+            assert_eq!(saved.last_home_version, 4);
+            assert_eq!(saved.identity, input.identity);
+            assert_eq!(saved.refresh_adapter, input.refresh_adapter);
+            assert_eq!(saved.detected_plan, input.detected_plan);
+            assert_eq!(saved.last_home_state, input.state);
+            assert_eq!(store.categories("oauth:watch").unwrap(), input.categories);
+            assert_watch_audit(&store, AuditOp::RemoteUpdate, &saved);
+        }
+        assert_eq!(get(&store, "oauth:watch").last_home_error, None);
+        assert_eq!(audit_rows(&store, AuditOp::RemoteUpdate).len(), 6);
+        assert_eq!(store.grants_generation().unwrap(), generation + 1);
+    }
+
+    #[test]
+    fn plan_value_time_tracks_account_and_tier_not_snapshot_version() {
+        let (_root, store) = rig("watch-plan-time", 246);
+        let mut input = row("oauth:watch");
+        full(&store, std::slice::from_ref(&input));
+        let mut expected = 1_700_000_000_000;
+        for change in 0..6 {
+            input.detected_plan.as_mut().unwrap().observed_at_ms += 10;
+            let time = input.detected_plan.as_ref().unwrap().observed_at_ms;
+            match change {
+                0 => {
+                    input.home_version = 1;
+                    input.detected_plan.as_mut().unwrap().raw = Some("raw-change".into());
+                }
+                1 => {
+                    input.identity.account_id = Some("other-account".into());
+                    expected = time;
+                }
+                2 => {
+                    input.detected_plan.as_mut().unwrap().tier = Some("max_5x".into());
+                    expected = time;
+                }
+                3 => input.detected_plan.as_mut().unwrap().tier = None,
+                4 => {
+                    input.detected_plan.as_mut().unwrap().tier = Some("max_5x".into());
+                    expected = time;
+                }
+                5 => input.detected_plan = None,
+                _ => unreachable!(),
+            }
+            assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 1);
+            assert_eq!(
+                get(&store, "oauth:watch").detected_plan_tier_observed_at_ms,
+                if change == 3 || change == 5 {
+                    None
+                } else {
+                    Some(expected)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn skips_existing_holders_and_insert_only_never_updates_or_removes() {
+        let (_root, store) = rig("watch-collisions", 247);
+        store
+            .create_audited(
+                "oauth:local",
+                &oauth_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        let operator = add_remote(&store, "oauth:operator");
+        store
+            .remote_watch_apply_audited(
+                OTHER,
+                "other-pair",
+                &[row("oauth:other")],
+                RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+        store
+            .remote_watch_apply_audited(
+                HOME,
+                "old-pair",
+                &[row("oauth:old-pair")],
+                RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+        let holders = store.remote_inventory().unwrap();
+        let collision_rows = [
+            row("oauth:local"),
+            row("oauth:operator"),
+            row("oauth:other"),
+            row("oauth:old-pair"),
+        ];
+        let writes = store.subscribe_writes();
+        for mode in [RemoteWatchApplyMode::Full, RemoteWatchApplyMode::InsertOnly] {
+            let result = store
+                .remote_watch_apply_audited(HOME, "pair", &collision_rows, mode, &[])
+                .unwrap();
+            assert_eq!(
+                result,
+                RemoteWatchApplyResult {
+                    skipped: collision_rows
+                        .iter()
+                        .map(|r| r.credential_id.clone())
+                        .collect(),
+                    ..Default::default()
+                }
+            );
+        }
+        assert!(!writes.has_changed().unwrap());
+        assert_eq!(store.remote_inventory().unwrap(), holders);
+        assert_eq!(local_rows(&store, "oauth:local"), 1);
+        assert_eq!(get(&store, "oauth:operator"), operator);
+        full(&store, &[row("oauth:installed"), row("oauth:unlisted")]);
+        let mut stale = row("oauth:installed");
+        stale.refresh_adapter = None;
+        let before = get(&store, "oauth:installed");
+        let result = store
+            .remote_watch_apply_audited(
+                HOME,
+                "pair",
+                &[stale, row("oauth:new")],
+                RemoteWatchApplyMode::InsertOnly,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            RemoteWatchApplyResult {
+                inserted: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(get(&store, "oauth:installed"), before);
+        assert!(store.remote_record("oauth:unlisted").unwrap().is_some());
+    }
+
+    #[test]
+    fn retained_invalid_rows_stay_exactly_as_they_were() {
+        let (_root, store) = rig("watch-retained", 248);
+        full(&store, &[row("oauth:x"), row("oauth:gone")]);
+        let before = get(&store, "oauth:x");
+        let mut invalid = row("oauth:x");
+        invalid.categories = vec!["not a category".into()];
+        assert!(validate_remote_watch_row(HOME, &invalid).is_err());
+        let retained = vec![
+            invalid.credential_id,
+            "unheld".into(),
+            "category:unparseable|id".into(),
+        ];
+        let result = store
+            .remote_watch_apply_audited(
+                HOME,
+                "pair",
+                &[row("oauth:y")],
+                RemoteWatchApplyMode::Full,
+                &retained,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            RemoteWatchApplyResult {
+                inserted: 1,
+                removed: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(get(&store, "oauth:x"), before);
+        assert_eq!(store.categories("oauth:x").unwrap(), ["llm-provider"]);
+        assert!(store.remote_record("oauth:y").unwrap().is_some());
+    }
+
+    #[test]
+    fn removals_clean_metadata_without_cascades_and_respect_home_source_and_pairing() {
+        let (_root, store) = rig("watch-removals", 249);
+        full(&store, &[row("oauth:gone")]);
+        store
+            .remote_watch_apply_audited(
+                HOME,
+                "new-pair",
+                &[row("oauth:keep")],
+                RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+        store
+            .remote_watch_apply_audited(
+                OTHER,
+                "pair",
+                &[row("oauth:other")],
+                RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+        let operator = add_remote(&store, "oauth:operator");
+        store
+            .create_audited(
+                "oauth:local",
+                &oauth_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store.with_raw_conn(|conn| {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            for id in ["oauth:gone", "oauth:keep"] {
+                conn.execute("INSERT INTO remote_record_provider_ids (credential_id, provider_id) VALUES (?1, 'anthropic')", [id])?;
+                conn.execute("INSERT INTO remote_record_plan_tiers (credential_id, plan_tier) VALUES (?1, 'max_5x')", [id])?;
+                conn.execute("INSERT INTO auth_events (credential_id, kind, ts_ms) VALUES (?1, 'refresh_failed', 1)", [id])?;
+            }
+            Ok(())
+        }).unwrap();
+        let gone = get(&store, "oauth:gone");
+        let generation = store.grants_generation().unwrap();
+        assert_eq!(full(&store, &[]).removed, 1);
+        assert_watch_audit(&store, AuditOp::RemoteRemove, &gone);
+        assert_eq!(store.grants_generation().unwrap(), generation + 1);
+        let count =
+            |id: &str| -> i64 {
+                store
+                    .with_raw_conn(|conn| {
+                        conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM remote_records WHERE credential_id = ?1) \
+                 + (SELECT COUNT(*) FROM remote_record_categories WHERE credential_id = ?1) \
+                 + (SELECT COUNT(*) FROM remote_record_provider_ids WHERE credential_id = ?1) \
+                 + (SELECT COUNT(*) FROM remote_record_plan_tiers WHERE credential_id = ?1) \
+                 + (SELECT COUNT(*) FROM auth_events WHERE credential_id = ?1)", [id], |r| r.get(0))
+                    })
+                    .unwrap()
+            };
+        assert_eq!(count("oauth:gone"), 0);
+        assert_eq!(count("oauth:keep"), 5);
+        assert!(store
+            .remote_watch_remove_audited(HOME, Some("new-pair"))
+            .unwrap()
+            .is_empty());
+        let keep = get(&store, "oauth:keep");
+        assert_eq!(
+            store
+                .remote_watch_remove_audited(HOME, None)
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&keep)
+        );
+        assert_eq!(count("oauth:keep"), 0);
+        assert_watch_audit(&store, AuditOp::RemoteRemove, &keep);
+        assert_eq!(store.grants_generation().unwrap(), generation + 2);
+        assert_eq!(get(&store, "oauth:operator"), operator);
+        assert_eq!(get(&store, "oauth:other").home_member, OTHER);
+        assert_eq!(local_rows(&store, "oauth:local"), 1);
+        // A changed pairing removes the old row and permits a fresh incarnation.
+        full(&store, &[row("oauth:again")]);
+        let before = get(&store, "oauth:again");
+        assert_eq!(
+            store
+                .remote_watch_remove_audited(HOME, Some("replacement"))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&before)
+        );
+        store
+            .remote_watch_apply_audited(
+                HOME,
+                "replacement",
+                &[row("oauth:again")],
+                RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+        assert_ne!(get(&store, "oauth:again").incarnation, before.incarnation);
+    }
+
+    #[test]
+    fn audit_failures_roll_back_entire_apply_and_remove_without_signals() {
+        let (_root, store) = rig("watch-atomic", 250);
+        full(&store, &[row("oauth:update"), row("oauth:remove")]);
+        let inventory = store.remote_inventory().unwrap();
+        let audits = store.read_audit(None).unwrap();
+        let generation = store.grants_generation().unwrap();
+        let writes = store.subscribe_writes();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_watch_remove BEFORE INSERT ON audit_log \
+             WHEN NEW.op = 'remote_remove' BEGIN SELECT RAISE(ABORT, 'remove audit failed'); END;",
+                )
+            })
+            .unwrap();
+        let mut updated = row("oauth:update");
+        updated.categories = vec!["custom-team".into()];
+        assert!(store
+            .remote_watch_apply_audited(
+                HOME,
+                "pair",
+                &[updated, row("oauth:new")],
+                RemoteWatchApplyMode::Full,
+                &[]
+            )
+            .is_err());
+        assert_eq!(store.remote_inventory().unwrap(), inventory);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        assert!(!writes.has_changed().unwrap());
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch(
+                    "DROP TRIGGER fail_watch_remove; \
+             CREATE TRIGGER fail_second_watch_remove BEFORE INSERT ON audit_log \
+             WHEN NEW.op = 'remote_remove' AND (SELECT count(*) FROM remote_records) = 0 \
+             BEGIN SELECT RAISE(ABORT, 'second remove audit failed'); END;",
+                )
+            })
+            .unwrap();
+        assert!(store.remote_watch_remove_audited(HOME, None).is_err());
+        assert_eq!(store.remote_inventory().unwrap(), inventory);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert_eq!(store.grants_generation().unwrap(), generation);
+        assert!(!writes.has_changed().unwrap());
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn read_path_keeps_owning_versions_fetch_outcomes_and_home_errors() {
+        use crate::federation::{RemoteHomeSuccess, RemoteRecordWrite};
+        let (_root, store) = rig("watch-read-path", 251);
+        let mut input = row("oauth:watch");
+        full(&store, std::slice::from_ref(&input));
+        let incarnation = get(&store, "oauth:watch").incarnation;
+        assert_eq!(
+            store
+                .remote_record_note_fetch_outcome("oauth:watch", &incarnation, "home_unavailable")
+                .unwrap(),
+            RemoteRecordWrite::Changed
+        );
+        assert_eq!(
+            store
+                .remote_record_apply_home_state(
+                    "oauth:watch",
+                    &incarnation,
+                    RemoteHomeState::NeedsReauth,
+                    "needs_reauth"
+                )
+                .unwrap(),
+            RemoteRecordWrite::Changed
+        );
+        assert_eq!(
+            full(&store, std::slice::from_ref(&input)),
+            RemoteWatchApplyResult::default()
+        );
+        assert_eq!(
+            get(&store, "oauth:watch").last_home_error.as_deref(),
+            Some("needs_reauth")
+        );
+        assert_eq!(
+            store
+                .remote_record_apply_success(
+                    "oauth:watch",
+                    &incarnation,
+                    &RemoteHomeSuccess {
+                        home_version: 100,
+                        refresh_adapter: input.refresh_adapter.clone(),
+                        detected_plan: input.detected_plan.clone(),
+                        identity: input.identity.clone(),
+                        recheck_pending: false,
+                    }
+                )
+                .unwrap(),
+            RemoteRecordWrite::Changed
+        );
+        input.categories = vec!["custom-team".into()];
+        assert_eq!(full(&store, &[input]).updated, 1);
+        let saved = get(&store, "oauth:watch");
+        assert_eq!(saved.last_home_version, 100);
+        assert_eq!(saved.last_home_state, RemoteHomeState::NeedsReauth);
+        assert_eq!(saved.last_home_error, None);
+        assert_eq!(
+            saved.last_fetch_outcome.as_deref(),
+            Some("home_unavailable")
+        );
+        assert_eq!(saved.source, RemoteRecordSource::HomeWatch);
+        assert_eq!(saved.home_pairing_id.as_deref(), Some("pair"));
+    }
+
+    #[test]
+    fn public_row_validation_is_shared_by_add_and_apply_without_writes() {
+        let (_root, store) = rig("watch-validation", 252);
+        let writes = store.subscribe_writes();
+        for invalid in 0..7 {
+            let mut input = row("oauth:watch");
+            let home = if invalid == 2 { "not-a-member" } else { HOME };
+            match invalid {
+                0 => input.credential_id.clear(),
+                1 => input.credential_id = "category:reserved".into(),
+                2 => {}
+                3 => input.identity.account_id = Some(" ".into()),
+                4 => input.detected_plan.as_mut().unwrap().tier = Some("invalid tier".into()),
+                5 => input.categories = vec!["invalid category".into()],
+                6 => input.home_version = u64::MAX,
+                _ => unreachable!(),
+            }
+            let expected = validate_remote_watch_row(home, &input)
+                .unwrap_err()
+                .to_string();
+            let add = NewRemoteRecord {
+                credential_id: input.credential_id.clone(),
+                home_member: home.into(),
+                refresh_adapter: input.refresh_adapter.clone(),
+                detected_plan: input.detected_plan.clone(),
+                identity: input.identity.clone(),
+                home_version: input.home_version,
+                categories: input.categories.clone(),
+            };
+            assert_eq!(
+                store.remote_add_audited(&add).unwrap_err().to_string(),
+                expected
+            );
+            assert_eq!(
+                store
+                    .remote_watch_apply_audited(
+                        home,
+                        "pair",
+                        &[input],
+                        RemoteWatchApplyMode::Full,
+                        &[]
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        let mut corrupt = row("oauth:watch");
+        corrupt.state = RemoteHomeState::Corrupt;
+        assert!(validate_remote_watch_row(HOME, &corrupt).is_err());
+        assert!(!writes.has_changed().unwrap());
+        assert!(store.list_remote_records().unwrap().is_empty());
+        assert!(store.read_audit(None).unwrap().is_empty());
+    }
+}
+
 #[test]
 fn remote_plan_value_time_survives_same_tier_fetches_and_moves_on_changes() {
     let (_root, store) = rig("remote-plan-value-time", 191);

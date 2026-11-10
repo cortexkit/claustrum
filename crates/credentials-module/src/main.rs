@@ -9229,6 +9229,8 @@ mod tests {
             plan_tier_source: Option<&'a str>,
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
+            incarnation: "0123456789abcdef0123456789abcdef".into(),
+            plan_tier_observed_at_ms: None,
             id: stored.id.into(),
             categories: stored.categories.iter().map(|c| (*c).to_string()).collect(),
             state: RecordState::Active,
@@ -11828,6 +11830,114 @@ mod tests {
             .expect("grant");
     }
 
+    fn catalog_field_row(surface: &ReadSurface) -> serde_json::Value {
+        let listing = surface
+            .list_scoped(
+                Some(&reserved("catalog-field-reader")),
+                &read_surface::ListScopedParams {
+                    enrollment_token: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(listing.credentials.len(), 1);
+        serde_json::to_value(&listing.credentials[0]).unwrap()
+    }
+
+    #[test]
+    fn list_scoped_provider_is_the_catalog_service_not_the_routing_id() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(201);
+        let id = "apikey:zai:field-test";
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"test-key".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        grant_for(&store, "catalog-field-reader", id, GrantOperation::List);
+        store
+            .set_providers_audited(
+                id,
+                credentials_core::store::SetProvidersMode::Set,
+                &["unrelated-route".into()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .unwrap();
+        let row = catalog_field_row(&surface);
+        assert_eq!(row["provider"], "zai");
+        assert_eq!(row["provider_ids"], json!(["unrelated-route"]));
+    }
+
+    #[test]
+    fn list_scoped_incarnation_keeps_replacements_and_distinguishes_recreation() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(202);
+        let id = "apikey:exa";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"test-key".to_vec(), None);
+        store.create(id, &record).unwrap();
+        grant_for(&store, "catalog-field-reader", id, GrantOperation::List);
+        let first = catalog_field_row(&surface);
+        assert_eq!(
+            first["incarnation"].as_str().unwrap(),
+            store.credential_incarnation(id).unwrap()
+        );
+        store
+            .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+            .unwrap();
+        assert_eq!(
+            catalog_field_row(&surface)["incarnation"],
+            first["incarnation"]
+        );
+        let params = read_surface::ListScopedParams {
+            enrollment_token: None,
+        };
+        let view = surface
+            .list_scoped(Some(&reserved("catalog-field-reader")), &params)
+            .unwrap()
+            .view;
+        store
+            .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        store.create(id, &record).unwrap();
+        assert_ne!(
+            catalog_field_row(&surface)["incarnation"],
+            first["incarnation"]
+        );
+        assert_ne!(
+            surface
+                .list_scoped(Some(&reserved("catalog-field-reader")), &params)
+                .unwrap()
+                .view,
+            view
+        );
+    }
+
+    #[test]
+    fn list_scoped_plan_tier_observed_time_does_not_move_on_same_value_refresh() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(203);
+        let id = "apikey:exa";
+        let mut record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"test-key".to_vec(), None);
+        record.detected_plan = Some(credentials_core::plan_detection::DetectedPlan {
+            tier: Some("pro".into()),
+            raw: Some("pro".into()),
+            observed_at_ms: 100,
+        });
+        store.create(id, &record).unwrap();
+        grant_for(&store, "catalog-field-reader", id, GrantOperation::List);
+        assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 100);
+        record.detected_plan.as_mut().unwrap().observed_at_ms = 200;
+        store.commit_refresh(id, 1, &record).unwrap();
+        assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 100);
+        record.detected_plan.as_mut().unwrap().tier = Some("plus".into());
+        store.commit_refresh(id, 2, &record).unwrap();
+        assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 200);
+    }
+
     fn reserved(module: &str) -> subc_protocol::Principal {
         subc_protocol::Principal::Reserved {
             module_id: module.to_owned(),
@@ -12379,6 +12489,8 @@ mod tests {
             (
                 id.to_string(),
                 RecordMeta {
+                    incarnation: None,
+                    plan_tier_observed_at_ms: None,
                     record_version: 1,
                     key_id_hex: "00".repeat(8),
                     state,

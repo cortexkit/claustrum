@@ -152,6 +152,11 @@ pub const SECRET_RELEASE_RECEIPT_SCHEMA_VERSION: u32 = 31;
 /// The migration that adds extended scopes while preserving legacy scope columns.
 pub const SECRET_SCOPE_SCHEMA_VERSION: u32 = 35;
 
+/// The migration that records when each plan tier first took effect, so a
+/// listing can say how long the current tier has applied. Existing rows stay
+/// unknown rather than guessed.
+pub const PLAN_TIER_OBSERVED_SCHEMA_VERSION: u32 = 36;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -1025,6 +1030,14 @@ const MIGRATIONS: &[Migration] = &[
                      DROP TABLE agent_secrets; \
                      ALTER TABLE agent_secrets_v35 RENAME TO agent_secrets;",
     },
+    // No backfill: neither the last record write nor the last tier observation
+    // proves when an existing value first took effect.
+    Migration {
+        version: PLAN_TIER_OBSERVED_SCHEMA_VERSION,
+        statements: "ALTER TABLE credential_plan_tiers ADD COLUMN observed_at_ms INTEGER; \
+                     ALTER TABLE remote_record_plan_tiers ADD COLUMN observed_at_ms INTEGER; \
+                     ALTER TABLE remote_records ADD COLUMN detected_plan_tier_observed_at_ms INTEGER;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1138,6 +1151,9 @@ fn credential_incarnation_matches(
 /// plaintext columns). Used by rotation scans, status, and CAS pre-checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordMeta {
+    pub incarnation: Option<String>,
+    /// Commit time of the current operator assertion; absent on older rows.
+    pub plan_tier_observed_at_ms: Option<i64>,
     /// The stored record's monotonic version.
     pub record_version: u64,
     /// Hex fingerprint of the master key this row is sealed under.
@@ -1157,6 +1173,9 @@ pub struct RecordMeta {
     /// Operator-asserted subscription tier, unknown when absent.
     pub plan_tier: Option<String>,
 }
+
+pub type DetectedPlanListing =
+    std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan, Option<i64>)>;
 
 /// The operation a principal-scoped credential-prefix grant permits.
 ///
@@ -1342,6 +1361,8 @@ pub struct ScopedCoverage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedListRow {
+    pub incarnation: String,
+    pub plan_tier_observed_at_ms: Option<i64>,
     pub id: String,
     pub categories: Vec<String>,
     pub state: RecordState,
@@ -2469,15 +2490,19 @@ impl EncryptedStore {
         self.store
             .with_conn(|conn| {
                 let meta = conn.query_row(
-                    "SELECT record_version, key_id, state, stale_pending, \
+                    &format!("SELECT record_version, key_id, state, stale_pending, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category\
-                     )), ''), created_by \
+                     )), ''), created_by, {}, {} \
                      FROM credentials WHERE credential_id = ?1",
+                     if read_schema_version(conn)? >= 33 { "incarnation" } else { "NULL" },
+                     plan_tier_observed_column(read_schema_version(conn)?)),
                     rusqlite::params![credential_id],
                     |row| {
                         let categories: String = row.get(4)?;
                         Ok(RecordMeta {
+                            incarnation: row.get(6)?,
+                            plan_tier_observed_at_ms: row.get(7)?,
                             record_version: row.get::<_, i64>(0)? as u64,
                             key_id_hex: row.get(1)?,
                             state: RecordState::from_str(&row.get::<_, String>(2)?),
@@ -3810,8 +3835,10 @@ impl EncryptedStore {
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                      )), ''), {}, {} FROM credentials ORDER BY credential_id",
-                    provider_ids_column(schema_version), plan_tier_column(schema_version)
+                      )), ''), {}, {}, {}, {} FROM credentials ORDER BY credential_id",
+                    provider_ids_column(schema_version), plan_tier_column(schema_version),
+                    if schema_version >= 33 { "incarnation" } else { "''" },
+                    plan_tier_observed_column(schema_version)
                 ))?;
                 let candidates = stmt
                     .query_map([], |row| {
@@ -3823,6 +3850,8 @@ impl EncryptedStore {
                             split_categories(row.get::<_, String>(4)?),
                             split_provider_ids(row.get::<_, String>(5)?),
                             row.get::<_, Option<String>>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, Option<i64>>(8)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3830,7 +3859,7 @@ impl EncryptedStore {
 
                 let mut rows = Vec::new();
                 let mut keys = Vec::new();
-                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier) in
+                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier, incarnation, operator_observed_at_ms) in
                     candidates
                 {
                     if crate::agent_secret::is_deposit_key(&id) {
@@ -3899,20 +3928,26 @@ impl EncryptedStore {
                         if include_keys && record.kind.is_vault_held_key() {
                             keys.push((id.clone(), record_version));
                         }
-                        disclose_identity.then_some((record.identity, record.refresh_adapter, auth_method, record.detected_plan))
+                        disclose_identity.then_some((record.identity, record.refresh_adapter, auth_method, record.detected_plan, record.detected_plan_tier_observed_at_ms))
                     } else {
                         None
                     };
-                    let (identity, refresh_adapter, auth_method, detected_plan) = match decoded_record {
-                        Some((identity, adapter, auth_method, detected_plan)) => {
-                            (Some(identity), adapter, auth_method, detected_plan)
+                    let (identity, refresh_adapter, auth_method, detected_plan, detected_observed_at_ms) = match decoded_record {
+                        Some((identity, adapter, auth_method, detected_plan, observed)) => {
+                            (Some(identity), adapter, auth_method, detected_plan, observed)
                         }
-                        None => (None, None, None, None),
+                        None => (None, None, None, None, None),
                     };
                     let (plan_tier, plan_tier_source) = crate::plan_detection::effective_plan(
                         identity.as_ref().and(plan_tier), detected_plan.as_ref(),
                     );
                     rows.push(ScopedListRow {
+                        incarnation,
+                        plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
+                            Some("operator") => operator_observed_at_ms,
+                            Some("detected") => detected_observed_at_ms,
+                            _ => None,
+                        },
                         id,
                         categories,
                         state,
@@ -4181,12 +4216,7 @@ impl EncryptedStore {
         })?
     }
 
-    pub fn detected_plans(
-        &self,
-    ) -> Result<
-        std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
-        StoreOpError,
-    > {
+    pub fn detected_plans(&self) -> Result<DetectedPlanListing, StoreOpError> {
         self.store
             .with_conn(|conn| detected_plans_from_conn(conn, &self.key))
             .map_err(StoreOpError::from)
@@ -4457,6 +4487,7 @@ impl EncryptedStore {
         }
         validate_record_identity(&record)?;
         record.record_version = 1;
+        retain_detected_plan(&mut record, None);
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
@@ -6059,6 +6090,8 @@ impl EncryptedStore {
     ) -> Result<u64, StoreOpError> {
         let next_version = expected_version.saturating_add(1);
         let mut new_record = new_record.clone();
+        let old_record = self.get(credential_id)?;
+        retain_detected_plan(&mut new_record, Some(&old_record));
         new_record.record_version = next_version;
         let blob = self.seal_record(credential_id, &new_record)?;
         let key_id_hex = self.key_id.to_hex();
@@ -6493,7 +6526,8 @@ impl EncryptedStore {
             .ok_or(StoreOpError::NotFound)
     }
 
-    /// Internal identity of a local row, not a credential address or wire value.
+    /// Lifetime identity of a local row, also exposed by scoped inventory.
+    /// This is not a credential address or an access capability.
     pub fn credential_incarnation(&self, credential_id: &str) -> Result<String, StoreOpError> {
         self.store
             .with_conn(|c| {
@@ -6506,6 +6540,20 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?
             .ok_or(StoreOpError::NotFound)
+    }
+
+    /// Fix storage identity before serializing deterministic test vectors.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_credential_incarnation_for_test(&self, id: &str, incarnation: &str) {
+        assert_eq!(incarnation.len(), 32);
+        assert!(incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        self.fenced_write(|tx| {
+            tx.execute(
+                "UPDATE credentials SET incarnation=?1 WHERE credential_id=?2",
+                rusqlite::params![incarnation, id],
+            )
+        })
+        .unwrap();
     }
 
     /// Record a freshly minted handle for a credential, storing only its hash, AND
@@ -7395,6 +7443,14 @@ fn plan_tier_column(schema_version: u32) -> &'static str {
     }
 }
 
+fn plan_tier_observed_column(schema_version: u32) -> &'static str {
+    if schema_version >= PLAN_TIER_OBSERVED_SCHEMA_VERSION {
+        "(SELECT observed_at_ms FROM credential_plan_tiers WHERE credential_id = credentials.credential_id)"
+    } else {
+        "NULL"
+    }
+}
+
 fn plan_tier_from_conn(
     conn: &rusqlite::Connection,
     id: &str,
@@ -7451,13 +7507,23 @@ fn write_plan_tier_in_tx(
         [id],
     )?;
     if let Some(tier) = tier {
-        tx.execute(
-            &format!(
-                "INSERT INTO {} (credential_id, plan_tier) VALUES (?1, ?2)",
-                tables.plan_tiers()
-            ),
-            rusqlite::params![id, tier],
-        )?;
+        if read_schema_version(tx)? >= PLAN_TIER_OBSERVED_SCHEMA_VERSION {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (credential_id, plan_tier, observed_at_ms) VALUES (?1, ?2, ?3)",
+                    tables.plan_tiers()
+                ),
+                rusqlite::params![id, tier, now_ms()],
+            )?;
+        } else {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (credential_id, plan_tier) VALUES (?1, ?2)",
+                    tables.plan_tiers()
+                ),
+                rusqlite::params![id, tier],
+            )?;
+        }
     }
     append_audit_tx(
         tx,
@@ -7494,23 +7560,27 @@ fn clear_plan_on_account_change_tx(
 }
 
 fn retain_detected_plan(incoming: &mut VaultRecord, old: Option<&VaultRecord>) {
+    let same_account = old.is_some_and(|old| {
+        old.identity.clone().normalized().account_id == incoming.identity.account_id
+    });
     if let Some(old) = old {
-        if old.identity.clone().normalized().account_id != incoming.identity.account_id {
-            // A copied record may still carry the old account's observation. A fresh
-            // login observation belongs to the incoming tokens and can be retained.
-            if incoming.detected_plan == old.detected_plan {
-                incoming.detected_plan = None;
-            }
-            return;
-        }
-    }
-    if incoming.detected_plan.is_none() {
-        if let Some(old) = old.filter(|old| {
-            old.identity.clone().normalized().account_id == incoming.identity.account_id
-        }) {
+        if !same_account && incoming.detected_plan == old.detected_plan {
+            // A copied observation does not belong to a different account.
+            incoming.detected_plan = None;
+        } else if same_account && incoming.detected_plan.is_none() {
             incoming.detected_plan = old.detected_plan.clone();
         }
     }
+    incoming.detected_plan_tier_observed_at_ms = incoming.detected_plan.as_ref().and_then(|plan| {
+        let tier = plan.tier.as_ref()?;
+        match old.filter(|old| {
+            same_account && old.detected_plan.as_ref().and_then(|p| p.tier.as_ref()) == Some(tier)
+        }) {
+            // Preserve unknown for legacy records, even if a refresh sees the same tier.
+            Some(old) => old.detected_plan_tier_observed_at_ms,
+            None => Some(plan.observed_at_ms),
+        }
+    });
 }
 
 /// Read sealed observations without a lease, mutations, or quarantine side effects.
@@ -7518,10 +7588,7 @@ fn retain_detected_plan(incoming: &mut VaultRecord, old: Option<&VaultRecord>) {
 pub fn detected_plans_read_only(
     path: &std::path::Path,
     key: &MasterKey,
-) -> Result<
-    std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
-    StoreOpError,
-> {
+) -> Result<DetectedPlanListing, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
     let conn =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -7532,8 +7599,7 @@ pub fn detected_plans_read_only(
 fn detected_plans_from_conn(
     conn: &rusqlite::Connection,
     key: &MasterKey,
-) -> rusqlite::Result<std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>>
-{
+) -> rusqlite::Result<DetectedPlanListing> {
     let mut stmt =
         conn.prepare("SELECT credential_id, record_version, envelope FROM credentials")?;
     let rows = stmt.query_map([], |row| {
@@ -7556,9 +7622,12 @@ fn detected_plans_from_conn(
         )
         .ok()
         .and_then(|plain| VaultRecord::decode(&plain).ok())
-        .and_then(|record| record.detected_plan)
-        {
-            plans.insert(id, (version, plan));
+        .and_then(|record| {
+            record
+                .detected_plan
+                .map(|plan| (plan, record.detected_plan_tier_observed_at_ms))
+        }) {
+            plans.insert(id, (version, plan.0, plan.1));
         }
     }
     Ok(plans)
@@ -7802,8 +7871,14 @@ fn list_meta_from_conn(
     let sql = sql.replace(
         "FROM credentials ORDER BY",
         &format!(
-            ", {creator}, {providers}, {} FROM credentials ORDER BY",
-            plan_tier_column(schema_version)
+            ", {creator}, {providers}, {}, {}, {} FROM credentials ORDER BY",
+            plan_tier_column(schema_version),
+            if schema_version >= 33 {
+                "incarnation"
+            } else {
+                "NULL"
+            },
+            plan_tier_observed_column(schema_version)
         ),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -7821,6 +7896,8 @@ fn list_meta_from_conn(
                     created_by: row.get(6)?,
                     provider_ids: split_provider_ids(row.get(7)?),
                     plan_tier: row.get(8)?,
+                    incarnation: row.get(9)?,
+                    plan_tier_observed_at_ms: row.get(10)?,
                 },
             ))
         })?
@@ -13420,7 +13497,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            35,
+            36,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

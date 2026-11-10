@@ -16,6 +16,66 @@ const HOME: &str = "fed-computer:0123456789abcdef0123456789abcdef";
 const OTHER: &str = "fed-computer:fedcba9876543210fedcba9876543210";
 const ACTOR: &str = "route-admin";
 
+#[test]
+fn remote_plan_value_time_survives_same_tier_fetches_and_moves_on_changes() {
+    let (_root, store) = rig("remote-plan-value-time", 191);
+    let id = "oauth:anthropic:remote";
+    let first = add_remote(&store, id);
+    assert_eq!(
+        first.detected_plan_tier_observed_at_ms,
+        Some(1_700_000_000_000)
+    );
+    let mut success = crate::federation::RemoteHomeSuccess {
+        home_version: 5,
+        refresh_adapter: first.refresh_adapter.clone(),
+        detected_plan: first.detected_plan.clone(),
+        identity: first.identity.clone(),
+        recheck_pending: false,
+    };
+    success.detected_plan.as_mut().unwrap().observed_at_ms += 100;
+    store
+        .remote_record_apply_success(id, &first.incarnation, &success)
+        .unwrap();
+    assert_eq!(
+        store
+            .remote_record(id)
+            .unwrap()
+            .unwrap()
+            .detected_plan_tier_observed_at_ms,
+        first.detected_plan_tier_observed_at_ms
+    );
+    success.detected_plan.as_mut().unwrap().tier = Some("max_5x".into());
+    store
+        .remote_record_apply_success(id, &first.incarnation, &success)
+        .unwrap();
+    assert_eq!(
+        store
+            .remote_record(id)
+            .unwrap()
+            .unwrap()
+            .detected_plan_tier_observed_at_ms,
+        Some(1_700_000_000_100)
+    );
+    store
+        .set_plan_audited(id, Some("pro"), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    let row = store.remote_inventory().unwrap().remove(0);
+    assert!(row.plan_tier_observed_at_ms.is_some());
+    store.with_raw_conn(|conn| conn.execute("UPDATE remote_records SET detected_plan_tier_observed_at_ms=NULL WHERE credential_id=?1", [id])).unwrap();
+    success.detected_plan.as_mut().unwrap().observed_at_ms += 100;
+    store
+        .remote_record_apply_success(id, &first.incarnation, &success)
+        .unwrap();
+    assert_eq!(
+        store
+            .remote_record(id)
+            .unwrap()
+            .unwrap()
+            .detected_plan_tier_observed_at_ms,
+        None
+    );
+}
+
 fn new_remote(id: &str) -> NewRemoteRecord {
     NewRemoteRecord {
         credential_id: id.to_string(),
@@ -179,7 +239,14 @@ fn release_2_migrations_follow_release_1_and_keep_existing_rows_and_grants() {
         );
     }
     assert_eq!(store.list_read_grants().unwrap(), grants_before);
-    assert_eq!(store.list_meta().unwrap(), metas_before);
+    let mut metas_after = store.list_meta().unwrap();
+    // Migration 33 assigned row identities; the inventory now exposes them.
+    // Every pre-existing metadata field must still compare byte-for-byte.
+    for (_, meta) in &mut metas_after {
+        assert_eq!(meta.incarnation.as_deref().unwrap().len(), 32);
+        meta.incarnation = None;
+    }
+    assert_eq!(metas_after, metas_before);
     assert_eq!(store.read_audit(None).unwrap(), audit_before);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }

@@ -154,10 +154,10 @@ fn every_cli_command_runs_in_the_isolated_home() {
     isolated_cli::assert_isolated(&cli());
 }
 
-/// The nine keys every `--json` row carries, in the documented order. Pinned
+/// The twelve keys every `--json` row carries, in the documented order. Pinned
 /// literally so a later field (a handle, a token, an email) cannot slip into
 /// the script surface without reddening here first.
-const JSON_ROW_KEYS: [&str; 9] = [
+const JSON_ROW_KEYS: [&str; 12] = [
     "id",
     "state",
     "record_version",
@@ -167,6 +167,9 @@ const JSON_ROW_KEYS: [&str; 9] = [
     "plan_tier",
     "plan_tier_source",
     "creator",
+    "provider",
+    "incarnation",
+    "plan_tier_observed_at_ms",
 ];
 
 fn seed_three_credentials(vault: &JsonVault) {
@@ -195,12 +198,12 @@ fn seed_three_credentials(vault: &JsonVault) {
         .status
         .success());
 }
-/// Every row carries exactly the nine documented keys, rows arrive sorted by
+/// Every row carries exactly the twelve documented keys, rows arrive sorted by
 /// id, and the top-level version is 1. The exact-set assertion is the secret
 /// guard: a new field lands here first, and anything secret (a token, handle,
 /// or email) fails this test before it can reach a script.
 #[test]
-fn list_json_reports_the_exact_nine_key_set_sorted_by_id() {
+fn list_json_reports_the_exact_twelve_key_set_sorted_by_id() {
     let vault = JsonVault::new("list-json-keys");
     seed_three_credentials(&vault);
 
@@ -261,6 +264,13 @@ fn list_json_reports_the_exact_nine_key_set_sorted_by_id() {
         by_id["apikey:deepseek"]["creator"],
         serde_json::json!("operator")
     );
+    assert_eq!(by_id["apikey:deepseek"]["provider"], "deepseek");
+    assert_eq!(by_id["oauth:anthropic"]["provider"], "anthropic");
+    assert!(by_id["opaque:notes"]["provider"].is_null());
+    for row in &rows {
+        assert_eq!(row["incarnation"].as_str().unwrap().len(), 32);
+        assert!(row["plan_tier_observed_at_ms"].is_null());
+    }
     let db = vault.data_dir.join("store.db");
     let conn = rusqlite::Connection::open(&db).expect("open store for creator probe");
     conn.execute(
@@ -434,6 +444,16 @@ fn list_json_carries_provider_ids_and_plan_tier_when_set() {
     );
     assert_eq!(zai["plan_tier"], serde_json::json!("pro_200"));
     assert_eq!(zai["plan_tier_source"], serde_json::json!("operator"));
+    assert!(zai["plan_tier_observed_at_ms"].as_i64().is_some());
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    let committed: i64 = conn
+        .query_row(
+            "SELECT observed_at_ms FROM credential_plan_tiers WHERE credential_id='apikey:zai'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(zai["plan_tier_observed_at_ms"], committed);
 
     let plain = by_id["apikey:plain"];
     assert_eq!(

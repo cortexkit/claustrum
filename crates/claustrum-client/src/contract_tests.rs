@@ -1,5 +1,55 @@
 use super::*;
 
+#[test]
+fn provider_catalog_client_decodes_real_new_rows_and_old_or_null_metadata() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../credentials-module/tests/vectors/list-scoped-v2.json");
+    let vector: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let reply = vector["cases"][0]["reply"].clone();
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    let kimi = listing
+        .credentials
+        .iter()
+        .find(|row| row.id == "apikey:kimi-for-coding")
+        .unwrap();
+    assert_eq!(kimi.provider.as_deref(), Some("kimi-for-coding"));
+    assert_eq!(
+        kimi.incarnation.as_deref(),
+        Some("00000000000000000000000000000002")
+    );
+    assert_eq!(kimi.plan_tier_observed_at_ms, Some(1_700_000_000_000));
+    for null in [false, true] {
+        let mut older = reply.clone();
+        for row in older["result"]["credentials"].as_array_mut().unwrap() {
+            for field in ["provider", "incarnation", "plan_tier_observed_at_ms"] {
+                if null {
+                    row[field] = Value::Null;
+                } else {
+                    row.as_object_mut().unwrap().remove(field);
+                }
+            }
+        }
+        let listing = decode_list_scoped_reply(older).unwrap();
+        assert_eq!(listing.credentials.len(), 4);
+        assert!(listing.credentials.iter().all(|row| row.provider.is_none()
+            && row.incarnation.is_none()
+            && row.plan_tier_observed_at_ms.is_none()));
+    }
+    for (field, malformed) in [
+        ("provider", json!(1)),
+        ("incarnation", json!([])),
+        ("plan_tier_observed_at_ms", json!("yesterday")),
+    ] {
+        let mut broken = reply.clone();
+        broken["result"]["credentials"][0][field] = malformed;
+        let listing = decode_list_scoped_reply(broken).unwrap();
+        assert_eq!(listing.credentials.len(), 3);
+        assert_eq!(listing.undecodable_credentials.len(), 1);
+        assert!(listing.undecodable_credentials[0].contains(field));
+    }
+}
+
 fn producer_operation(op: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../credentials-module/tests/fixtures/enrollment_wire_contract.json");
@@ -71,6 +121,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
         ScopedCredentialListing {
             credentials: vec![
                 ListedCredential {
+                    provider: Some("antigravity".into()),
+                    incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                    plan_tier_observed_at_ms: None,
                     id: "antigravity:google".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -88,6 +141,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_source: None,
                 },
                 ListedCredential {
+                    provider: Some("openrouter".into()),
+                    incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                    plan_tier_observed_at_ms: None,
                     id: "apikey:openrouter".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "apikey".into(),
@@ -125,6 +181,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_source: None,
                 },
                 ListedCredential {
+                    provider: Some("openai".into()),
+                    incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                    plan_tier_observed_at_ms: None,
                     id: "chatgpt:openai".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -142,6 +201,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_source: Some("detected".into()),
                 },
                 ListedCredential {
+                    provider: None,
+                    incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                    plan_tier_observed_at_ms: None,
                     id: "github_app:plex-alfonso".into(),
                     categories: vec!["github-app-native".into()],
                     credential_type: "github_app".into(),
@@ -159,6 +221,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_source: None,
                 },
                 ListedCredential {
+                    provider: Some("anthropic".into()),
+                    incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                    plan_tier_observed_at_ms: None,
                     id: "oauth:anthropic".into(),
                     categories: vec!["anthropic-native".into(), "llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -188,7 +253,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "z6YPRoaEbsvZCVjeHcMgtww8l+K7efcxytUM+ysoaDI=".into(),
+            view: "+hVsGpurYe8HLf5URcObYYtmrde+iBAkEGnKYWo4WKM=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }
@@ -203,6 +268,9 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
         listing,
         ScopedCredentialListing {
             credentials: vec![ListedCredential {
+                provider: Some("anthropic".into()),
+                incarnation: Some("0123456789abcdef0123456789abcdef".into()),
+                plan_tier_observed_at_ms: None,
                 id: "oauth:anthropic".into(),
                 categories: vec!["llm-provider".into()],
                 credential_type: "oauth".into(),
@@ -224,7 +292,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 selector: "llm-provider".into(),
                 operation: "list".into()
             }],
-            view: "0GMjpr28i6Slz1xMqyevm73ZGL6qMU/yR0DehAT6OsA=".into(),
+            view: "uwFwpdF/kjLYzixwV6c44qDX41GonCY4TorjPAG/E+M=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

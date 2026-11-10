@@ -9,6 +9,107 @@ use crate::store::taxonomy_tests::{api_record, rig, sqlite};
 
 const ID: &str = "apikey:plan";
 
+#[test]
+fn plan_observed_time_tracks_value_changes_not_refreshes_and_clear_restores_detection_time() {
+    let (_root, store) = rig("plan-value-time", 189);
+    let mut incoming = record(Some("account"));
+    let detect = |tier: &str, at| crate::plan_detection::DetectedPlan {
+        tier: Some(tier.into()),
+        raw: Some(tier.into()),
+        observed_at_ms: at,
+    };
+    incoming.detected_plan = Some(detect("plus", 100));
+    store.create(ID, &incoming).unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "reader",
+            SelectorKind::Exact,
+            ID,
+            GrantOperation::List,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let row = || {
+        store
+            .list_scoped_snapshot("reserved", "reader")
+            .unwrap()
+            .rows
+            .remove(0)
+    };
+    assert_eq!(row().plan_tier_observed_at_ms, Some(100));
+    let incarnation = row().incarnation;
+    incoming.detected_plan = Some(detect("plus", 200));
+    store.commit_refresh(ID, 1, &incoming).unwrap();
+    assert_eq!(row().plan_tier_observed_at_ms, Some(100));
+    incoming.detected_plan = Some(detect("pro_200", 300));
+    store.commit_refresh(ID, 2, &incoming).unwrap();
+    assert_eq!(row().plan_tier_observed_at_ms, Some(300));
+    set(&store, ID, Some("max_20x"));
+    let operator_time = store.meta(ID).unwrap().plan_tier_observed_at_ms.unwrap();
+    assert_eq!(row().plan_tier_observed_at_ms, Some(operator_time));
+    set(&store, ID, Some("max_20x"));
+    assert_eq!(row().plan_tier_observed_at_ms, Some(operator_time));
+    set(&store, ID, None);
+    assert_eq!(row().plan_tier_observed_at_ms, Some(300));
+    assert_eq!(row().incarnation, incarnation);
+
+    // Simulate an existing envelope written before current-value times existed.
+    let mut legacy = store.get(ID).unwrap();
+    legacy.detected_plan_tier_observed_at_ms = None;
+    let blob = store.seal_record(ID, &legacy).unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE credentials SET envelope=?1 WHERE credential_id=?2",
+                rusqlite::params![blob, ID],
+            )
+        })
+        .unwrap();
+    incoming.detected_plan = Some(detect("pro_200", 400));
+    store.commit_refresh(ID, 3, &incoming).unwrap();
+    assert_eq!(row().plan_tier_observed_at_ms, None);
+    incoming.detected_plan = Some(detect("plus", 500));
+    store.commit_refresh(ID, 4, &incoming).unwrap();
+    assert_eq!(row().plan_tier_observed_at_ms, Some(500));
+    store
+        .overwrite_unconditional_audited(ID, &incoming, AuditCtx::admin(AuditOp::Overwrite))
+        .unwrap();
+    assert_eq!(row().incarnation, incarnation);
+    store
+        .remove_audited(ID, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    store.create(ID, &record(None)).unwrap();
+    assert_ne!(row().incarnation, incarnation);
+    assert_eq!(row().plan_tier_observed_at_ms, None);
+}
+
+#[test]
+fn migration_36_does_not_invent_operator_observation_times() {
+    let (_root, sqlite) = sqlite("plan-time-migration", 190);
+    migrate_through_for_test(&sqlite, crate::store::SECRET_SCOPE_SCHEMA_VERSION).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([190; 32])).unwrap();
+    store.create(ID, &record(None)).unwrap();
+    set(&store, ID, Some("plus"));
+    let before = store.get(ID).unwrap();
+    let audit = store.read_audit(None).unwrap();
+    migrate_through_for_test(
+        &store.store,
+        crate::store::PLAN_TIER_OBSERVED_SCHEMA_VERSION,
+    )
+    .unwrap();
+    assert_eq!(store.meta(ID).unwrap().plan_tier_observed_at_ms, None);
+    assert_eq!(
+        store.get(ID).unwrap().encode().unwrap(),
+        before.encode().unwrap()
+    );
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+    set(&store, ID, Some("plus"));
+    assert_eq!(store.meta(ID).unwrap().plan_tier_observed_at_ms, None);
+    set(&store, ID, Some("pro_200"));
+    assert!(store.meta(ID).unwrap().plan_tier_observed_at_ms.is_some());
+}
+
 fn record(account: Option<&str>) -> VaultRecord {
     let mut record = api_record();
     record.identity.account_id = account.map(str::to_owned);
@@ -79,7 +180,7 @@ fn migration_16_adds_only_an_empty_tier_table_and_behind_readers_tolerate_absenc
     assert_eq!(store.list_meta().unwrap(), before);
     assert_eq!(store.read_audit(None).unwrap(), audit_before);
     assert_eq!(audit.len(), 1);
-    assert_eq!(newest_migration_version(), 35);
+    assert_eq!(newest_migration_version(), 36);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 

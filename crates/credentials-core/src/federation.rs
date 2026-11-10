@@ -242,6 +242,7 @@ pub struct NewRemoteRecord {
 /// One `remote_records` row. Nothing in it is secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRecord {
+    pub detected_plan_tier_observed_at_ms: Option<i64>,
     pub credential_id: String,
     pub home_member: String,
     /// 32 lowercase hex, new on every `remote add`.
@@ -294,6 +295,7 @@ pub struct RemoteHomeSuccess {
 /// provider ids, operator plan tier), read from one snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteInventoryRow {
+    pub plan_tier_observed_at_ms: Option<i64>,
     pub record: RemoteRecord,
     pub categories: Vec<String>,
     pub provider_ids: Vec<String>,

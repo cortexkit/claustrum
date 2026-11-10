@@ -242,6 +242,10 @@ pub struct VaultRecord {
     /// Additive JSON metadata: older decoders ignore this field under schema 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_plan: Option<crate::plan_detection::DetectedPlan>,
+    /// First observation of the current detected tier, not the latest refresh.
+    /// Old records remain unknown until the tier changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_plan_tier_observed_at_ms: Option<i64>,
     /// Opt-in signature history for signing keys. Sealed with the key so policy
     /// cannot be changed independently of the credential; old records default off.
     #[serde(default, skip_serializing_if = "signature_audit_disabled")]
@@ -325,6 +329,7 @@ impl VaultRecord {
             payload: payload.into(),
             identity: RecordIdentity::default(),
             detected_plan,
+            detected_plan_tier_observed_at_ms: None,
             audit_each_signature: false,
             operator_sign: false,
         }
@@ -382,6 +387,7 @@ impl VaultRecord {
             payload: payload.into(),
             identity: RecordIdentity::default(),
             detected_plan: None,
+            detected_plan_tier_observed_at_ms: None,
             audit_each_signature: false,
             operator_sign: false,
         }

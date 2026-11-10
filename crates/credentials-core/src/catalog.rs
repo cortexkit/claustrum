@@ -15,6 +15,7 @@ pub enum CredentialCategory {
     /// model consumer is granted `llm-provider`, and a search key filed there would reach
     /// all of them.
     WebSearch,
+    MediaProvider,
 }
 
 impl CredentialCategory {
@@ -23,6 +24,7 @@ impl CredentialCategory {
         Self::DataWarehouse,
         Self::CloudInfrastructure,
         Self::WebSearch,
+        Self::MediaProvider,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -31,6 +33,7 @@ impl CredentialCategory {
             Self::DataWarehouse => "data-warehouse",
             Self::CloudInfrastructure => "cloud-infrastructure",
             Self::WebSearch => "web-search",
+            Self::MediaProvider => "media-provider",
         }
     }
 }
@@ -99,6 +102,10 @@ impl ModelVendor {
 }
 
 const LLM: &[CredentialCategory] = &[CredentialCategory::LlmProvider];
+const LLM_AND_MEDIA: &[CredentialCategory] = &[
+    CredentialCategory::LlmProvider,
+    CredentialCategory::MediaProvider,
+];
 const LLM_AND_WEB_SEARCH: &[CredentialCategory] = &[
     CredentialCategory::LlmProvider,
     CredentialCategory::WebSearch,
@@ -198,6 +205,7 @@ pub struct AccountIdPrompt {
 #[derive(Debug, Clone)]
 pub struct ApiKeyProvider {
     pub key: &'static str,
+    pub default_provider_ids: &'static [&'static str],
     pub display_name: &'static str,
     pub default_id: &'static str,
     pub dashboard_url: &'static str,
@@ -218,6 +226,7 @@ use ModelVendor::{
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     ApiKeyProvider {
         key: "kiro",
+        default_provider_ids: &[],
         display_name: "Kiro",
         default_id: "apikey:kiro",
         dashboard_url: "https://app.kiro.dev",
@@ -234,6 +243,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "zai",
+        default_provider_ids: &["zai-coding-plan"],
         display_name: "Z.AI (GLM Coding Plan)",
         default_id: "apikey:zai",
         dashboard_url: "https://z.ai/manage-apikey/apikey-list",
@@ -248,6 +258,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openrouter",
+        default_provider_ids: &["openrouter"],
         display_name: "OpenRouter",
         default_id: "apikey:openrouter",
         dashboard_url: "https://openrouter.ai/keys",
@@ -262,6 +273,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "deepseek",
+        default_provider_ids: &["deepseek"],
         display_name: "DeepSeek",
         default_id: "apikey:deepseek",
         dashboard_url: "https://platform.deepseek.com/api_keys",
@@ -276,6 +288,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "cerebras",
+        default_provider_ids: &["cerebras"],
         display_name: "Cerebras",
         default_id: "apikey:cerebras",
         dashboard_url: "https://cloud.cerebras.ai",
@@ -290,6 +303,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "fireworks-ai",
+        default_provider_ids: &["fireworks-ai"],
         display_name: "Fireworks AI",
         default_id: "apikey:fireworks-ai",
         dashboard_url: "https://app.fireworks.ai/settings/users/api-keys",
@@ -313,6 +327,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "groq",
+        default_provider_ids: &["groq"],
         display_name: "Groq",
         default_id: "apikey:groq",
         dashboard_url: "https://console.groq.com/keys",
@@ -327,6 +342,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "mistral",
+        default_provider_ids: &["mistral"],
         display_name: "Mistral",
         default_id: "apikey:mistral",
         dashboard_url: "https://console.mistral.ai/api-keys",
@@ -341,6 +357,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "together",
+        default_provider_ids: &["togetherai"],
         display_name: "Together AI",
         default_id: "apikey:together",
         dashboard_url: "https://api.together.ai/settings/api-keys",
@@ -355,6 +372,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "perplexity",
+        default_provider_ids: &["perplexity"],
         display_name: "Perplexity",
         default_id: "apikey:perplexity",
         dashboard_url: "https://www.perplexity.ai/settings/api",
@@ -369,6 +387,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "moonshot",
+        default_provider_ids: &["moonshotai"],
         display_name: "Moonshot",
         default_id: "apikey:moonshot",
         dashboard_url: "https://platform.moonshot.ai/console/api-keys",
@@ -383,6 +402,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "huggingface",
+        default_provider_ids: &["huggingface"],
         display_name: "Hugging Face",
         default_id: "apikey:huggingface",
         dashboard_url: "https://huggingface.co/settings/tokens",
@@ -397,6 +417,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "nvidia",
+        default_provider_ids: &["nvidia"],
         display_name: "NVIDIA",
         default_id: "apikey:nvidia",
         dashboard_url: "https://build.nvidia.com",
@@ -411,6 +432,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "xai",
+        default_provider_ids: &["xai"],
         display_name: "xAI (API Key)",
         default_id: "apikey:xai",
         dashboard_url: "https://console.x.ai",
@@ -425,6 +447,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "openai",
+        default_provider_ids: &["openai"],
         display_name: "OpenAI (API Key)",
         default_id: "apikey:openai",
         dashboard_url: "https://platform.openai.com/api-keys",
@@ -433,12 +456,13 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             url: "https://api.openai.com/v1/models",
             auth_header: AuthHeaderScheme::Bearer,
         },
-        categories: LLM,
+        categories: LLM_AND_MEDIA,
         serves: &[OpenAI],
         account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "google",
+        default_provider_ids: &["google"],
         display_name: "Google AI Studio (API Key)",
         default_id: "apikey:google",
         dashboard_url: "https://aistudio.google.com/apikey",
@@ -447,7 +471,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             url: "https://generativelanguage.googleapis.com/v1beta/models",
             auth_header: AuthHeaderScheme::XGoogApiKey,
         },
-        categories: LLM,
+        categories: LLM_AND_MEDIA,
         serves: &[Google],
         account_id_prompt: None,
     },
@@ -457,6 +481,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `anthropic-native`, which stays the subscription accounts' family.
     ApiKeyProvider {
         key: "anthropic",
+        default_provider_ids: &["anthropic-platform"],
         display_name: "Anthropic (API Key)",
         default_id: "apikey:anthropic",
         dashboard_url: "https://console.anthropic.com/settings/keys",
@@ -476,6 +501,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // prefix is undocumented, so the placeholder is generic.
     ApiKeyProvider {
         key: "inception",
+        default_provider_ids: &["inception"],
         display_name: "Inception (Mercury)",
         default_id: "apikey:inception",
         dashboard_url: "https://platform.inceptionlabs.ai/dashboard/api-keys",
@@ -503,6 +529,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // token, so it would not work here anyway.
     ApiKeyProvider {
         key: "cloudflare-workers-ai",
+        default_provider_ids: &["cloudflare-workers-ai"],
         display_name: "Cloudflare Workers AI",
         default_id: "apikey:cloudflare-workers-ai",
         dashboard_url: "https://dash.cloudflare.com/profile/api-tokens",
@@ -535,6 +562,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/abliteration.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "abliteration",
+        default_provider_ids: &["abliteration-ai"],
         display_name: "Abliteration",
         default_id: "apikey:abliteration",
         dashboard_url: "https://abliteration.ai/console",
@@ -550,6 +578,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "aiand",
+        default_provider_ids: &["aiand"],
         display_name: "ai&",
         default_id: "apikey:aiand",
         dashboard_url: "https://console.aiand.com/api-keys",
@@ -565,6 +594,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "baseten",
+        default_provider_ids: &["baseten"],
         display_name: "Baseten",
         default_id: "apikey:baseten",
         dashboard_url: "https://app.baseten.co/settings/api_keys",
@@ -584,6 +614,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/charm-hyper.kdl names: GLM (default model), Kimi and Gemma.
     ApiKeyProvider {
         key: "charm-hyper",
+        default_provider_ids: &["hyper"],
         display_name: "Charm Hyper",
         default_id: "apikey:charm-hyper",
         dashboard_url: "https://hyper.charm.land/",
@@ -599,6 +630,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "cline-pass",
+        default_provider_ids: &[],
         display_name: "ClinePass",
         default_id: "apikey:cline-pass",
         dashboard_url: "https://app.cline.bot/dashboard/account",
@@ -613,6 +645,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "commandcode",
+        default_provider_ids: &["commandcode"],
         display_name: "Command Code",
         default_id: "apikey:commandcode",
         dashboard_url: "https://commandcode.ai/studio",
@@ -629,6 +662,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // endpoint is public and would accept any string as a key.
     ApiKeyProvider {
         key: "deepinfra",
+        default_provider_ids: &["deepinfra"],
         display_name: "DeepInfra",
         default_id: "apikey:deepinfra",
         dashboard_url: "https://deepinfra.com/dash/api_keys",
@@ -646,6 +680,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // `/v1/models`, so the probe is a chat request to a router model.
     ApiKeyProvider {
         key: "firepass",
+        default_provider_ids: &[],
         display_name: "Fire Pass (Fireworks subscription)",
         default_id: "apikey:firepass",
         dashboard_url: "https://app.fireworks.ai/settings/users/api-keys",
@@ -661,6 +696,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "gmi-cloud",
+        default_provider_ids: &["gmicloud"],
         display_name: "GMI Cloud",
         default_id: "apikey:gmi-cloud",
         dashboard_url: "https://console.gmicloud.ai",
@@ -676,6 +712,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/meta.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "meta",
+        default_provider_ids: &[],
         display_name: "Meta Model API",
         default_id: "apikey:meta",
         dashboard_url: "https://developer.meta.com/ai/",
@@ -691,6 +728,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code",
+        default_provider_ids: &["minimax-coding-plan"],
         display_name: "MiniMax Token Plan (International)",
         default_id: "apikey:minimax-code",
         dashboard_url: "https://platform.minimax.io/subscribe/token-plan",
@@ -706,12 +744,13 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "minimax-code-cn",
+        default_provider_ids: &["minimax-cn-coding-plan"],
         display_name: "MiniMax Token Plan (China)",
         default_id: "apikey:minimax-code-cn",
         dashboard_url: "https://platform.minimaxi.com/subscribe/token-plan",
         placeholder: "sk-...",
         validation: KeyValidation::OpenAiChat {
-            base_url: "https://api.minimaxi.com/v1",
+            base_url: "https://api.minimax.cn/v1",
             model: "MiniMax-M3",
         },
         categories: LLM,
@@ -722,6 +761,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "nanogpt",
+        default_provider_ids: &["nano-gpt"],
         display_name: "NanoGPT",
         default_id: "apikey:nanogpt",
         dashboard_url: "https://nano-gpt.com/api",
@@ -739,6 +779,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Balance permission some team roles lack, which rejected their valid keys.
     ApiKeyProvider {
         key: "novita",
+        default_provider_ids: &["novita-ai"],
         display_name: "Novita",
         default_id: "apikey:novita",
         dashboard_url: "https://novita.ai/settings/key-management",
@@ -754,6 +795,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "ollama-cloud",
+        default_provider_ids: &["ollama-cloud"],
         display_name: "Ollama Cloud",
         default_id: "apikey:ollama-cloud",
         dashboard_url: "https://ollama.com/settings/keys",
@@ -768,6 +810,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-go",
+        default_provider_ids: &["opencode-go"],
         display_name: "OpenCode Go",
         default_id: "apikey:opencode-go",
         dashboard_url: "https://opencode.ai/auth",
@@ -782,6 +825,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "opencode-zen",
+        default_provider_ids: &["opencode"],
         display_name: "OpenCode Zen",
         default_id: "apikey:opencode-zen",
         dashboard_url: "https://opencode.ai/auth",
@@ -799,6 +843,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // chat probe here treats every 401 as a bad key, so it would refuse valid keys.
     ApiKeyProvider {
         key: "qianfan",
+        default_provider_ids: &[],
         display_name: "Qianfan",
         default_id: "apikey:qianfan",
         dashboard_url: "https://console.bce.baidu.com/qianfan/ais/console/apiKey",
@@ -815,6 +860,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // the operator's own vendor rather than read off model ids.
     ApiKeyProvider {
         key: "qwen-portal",
+        default_provider_ids: &[],
         display_name: "Qwen Portal",
         default_id: "apikey:qwen-portal",
         dashboard_url: "https://chat.qwen.ai",
@@ -831,6 +877,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves Sakana's own models only, and Sakana is not a vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "sakana",
+        default_provider_ids: &["sakana"],
         display_name: "Sakana AI",
         default_id: "apikey:sakana",
         dashboard_url: "https://console.sakana.ai/api-keys",
@@ -848,6 +895,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi's providers/siliconflow.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow",
+        default_provider_ids: &["siliconflow"],
         display_name: "SiliconFlow",
         default_id: "apikey:siliconflow",
         dashboard_url: "https://cloud.siliconflow.com/account/ak",
@@ -865,6 +913,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // in oh-my-pi's providers/siliconflow-cn.kdl, not the full catalog.
     ApiKeyProvider {
         key: "siliconflow-cn",
+        default_provider_ids: &["siliconflow-cn"],
         display_name: "SiliconFlow (China)",
         default_id: "apikey:siliconflow-cn",
         dashboard_url: "https://cloud.siliconflow.cn/account/ak",
@@ -882,6 +931,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // providers/singularityapi-dev.kdl names (DeepSeek, Kimi, GLM), not the full catalog.
     ApiKeyProvider {
         key: "singularityapi-dev",
+        default_provider_ids: &[],
         display_name: "SingularityAPI",
         default_id: "apikey:singularityapi-dev",
         dashboard_url: "https://app.singularityapi.dev",
@@ -899,6 +949,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // deployment routes requests only to DeepSeek models.
     ApiKeyProvider {
         key: "singularityapi-tech",
+        default_provider_ids: &[],
         display_name: "SingularityAPI Reserved Lanes",
         default_id: "apikey:singularityapi-tech",
         dashboard_url: "https://app.singularityapi.tech/compute/billing",
@@ -914,6 +965,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "stepfun",
+        default_provider_ids: &["stepfun"],
         display_name: "StepFun",
         default_id: "apikey:stepfun",
         dashboard_url: "https://platform.stepfun.ai/interface-key",
@@ -929,6 +981,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "synthetic",
+        default_provider_ids: &["synthetic"],
         display_name: "Synthetic",
         default_id: "apikey:synthetic",
         dashboard_url: "https://dev.synthetic.new/docs/api/overview",
@@ -945,6 +998,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // Serves TypeSafe's own judgment models only, which match no vendor in `ModelVendor`.
     ApiKeyProvider {
         key: "typesafe",
+        default_provider_ids: &["typesafe"],
         display_name: "TypeSafe",
         default_id: "apikey:typesafe",
         dashboard_url: "https://console.typesafe.ai/",
@@ -959,6 +1013,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/umans.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "umans",
+        default_provider_ids: &["umans-ai-coding-plan"],
         display_name: "Umans AI Coding Plan",
         default_id: "apikey:umans",
         dashboard_url: "https://app.umans.ai/billing",
@@ -974,6 +1029,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/venice.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "venice",
+        default_provider_ids: &["venice"],
         display_name: "Venice",
         default_id: "apikey:venice",
         dashboard_url: "https://venice.ai/settings/api",
@@ -990,6 +1046,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // A broad aggregator: its catalog carries models from every vendor listed here.
     ApiKeyProvider {
         key: "vercel-ai-gateway",
+        default_provider_ids: &["vercel"],
         display_name: "Vercel AI Gateway",
         default_id: "apikey:vercel-ai-gateway",
         dashboard_url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
@@ -1004,6 +1061,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "wafer-serverless",
+        default_provider_ids: &[],
         display_name: "Wafer Serverless (pay-as-you-go)",
         default_id: "apikey:wafer-serverless",
         dashboard_url: "https://app.wafer.ai/usage",
@@ -1019,6 +1077,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-ams",
+        default_provider_ids: &["xiaomi-token-plan-ams"],
         display_name: "Xiaomi Token Plan (Europe)",
         default_id: "apikey:xiaomi-token-plan-ams",
         dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
@@ -1034,6 +1093,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-cn",
+        default_provider_ids: &["xiaomi-token-plan-cn"],
         display_name: "Xiaomi Token Plan (China)",
         default_id: "apikey:xiaomi-token-plan-cn",
         dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
@@ -1049,6 +1109,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "xiaomi-token-plan-sgp",
+        default_provider_ids: &["xiaomi-token-plan-sgp"],
         display_name: "Xiaomi Token Plan (Singapore)",
         default_id: "apikey:xiaomi-token-plan-sgp",
         dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
@@ -1064,6 +1125,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "yolo-auto",
+        default_provider_ids: &[],
         display_name: "Yolo-Auto",
         default_id: "apikey:yolo-auto",
         dashboard_url: "https://yolo-auto.com/app",
@@ -1079,6 +1141,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zenmux",
+        default_provider_ids: &["zenmux"],
         display_name: "ZenMux",
         default_id: "apikey:zenmux",
         dashboard_url: "https://zenmux.ai/settings/keys",
@@ -1094,6 +1157,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
     ApiKeyProvider {
         key: "zhipu-coding-plan",
+        default_provider_ids: &["zhipuai-coding-plan"],
         display_name: "Zhipu Coding Plan (智谱)",
         default_id: "apikey:zhipu-coding-plan",
         dashboard_url: "https://bigmodel.cn/coding-plan/personal/overview",
@@ -1108,7 +1172,36 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
     ApiKeyProvider {
+        key: "kimi-for-coding",
+        default_provider_ids: &["kimi-code-plan-global"],
+        display_name: "Kimi for Coding",
+        default_id: "apikey:kimi-for-coding",
+        dashboard_url: "https://www.kimi.com/code/console",
+        placeholder: "sk-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "No known endpoint reliably rejects an invalid key without cost.",
+        },
+        categories: LLM_AND_WEB_SEARCH,
+        serves: &[Moonshot],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "muse",
+        default_provider_ids: &[],
+        display_name: "Muse",
+        default_id: "apikey:muse",
+        dashboard_url: "",
+        placeholder: "...",
+        validation: KeyValidation::Unvalidated {
+            reason: "No known endpoint reliably rejects an invalid key without cost.",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
         key: "tavily",
+        default_provider_ids: &[],
         display_name: "Tavily",
         default_id: "apikey:tavily",
         dashboard_url: "https://app.tavily.com/home",
@@ -1123,6 +1216,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kagi",
+        default_provider_ids: &[],
         display_name: "Kagi",
         default_id: "apikey:kagi",
         dashboard_url: "https://kagi.com/settings/api",
@@ -1137,6 +1231,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "exa",
+        default_provider_ids: &[],
         display_name: "Exa",
         default_id: "apikey:exa",
         dashboard_url: "https://dashboard.exa.ai/api-keys",
@@ -1151,6 +1246,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "parallel",
+        default_provider_ids: &[],
         display_name: "Parallel",
         default_id: "apikey:parallel",
         dashboard_url: "https://platform.parallel.ai/settings?tab=api-keys",
@@ -1168,6 +1264,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://api-dashboard.search.brave.com/api-reference/web/search/get
     ApiKeyProvider {
         key: "brave",
+        default_provider_ids: &[],
         display_name: "Brave Search",
         default_id: "apikey:brave",
         dashboard_url: "https://api-dashboard.search.brave.com/app/keys",
@@ -1185,6 +1282,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.firecrawl.dev/api-reference/errors
     ApiKeyProvider {
         key: "firecrawl",
+        default_provider_ids: &[],
         display_name: "Firecrawl",
         default_id: "apikey:firecrawl",
         dashboard_url: "https://www.firecrawl.dev/app/api-keys",
@@ -1201,6 +1299,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.jina.ai/embedding-api
     ApiKeyProvider {
         key: "jina",
+        default_provider_ids: &[],
         display_name: "Jina AI",
         default_id: "apikey:jina",
         dashboard_url: "https://jina.ai/?sui=apikey",
@@ -1218,6 +1317,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.tinyfish.ai/error-codes
     ApiKeyProvider {
         key: "tinyfish",
+        default_provider_ids: &[],
         display_name: "TinyFish",
         default_id: "apikey:tinyfish",
         dashboard_url: "https://agent.tinyfish.ai/api-keys",
@@ -1232,6 +1332,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
     ApiKeyProvider {
         key: "searxng",
+        default_provider_ids: &[],
         display_name: "SearXNG",
         default_id: "apikey:searxng",
         dashboard_url: "https://docs.searxng.org/admin/settings/settings.html",
@@ -1699,18 +1800,24 @@ pub fn serves_for(credential_id: &str) -> &'static [ModelVendor] {
         .unwrap_or_default()
 }
 
-/// The catalog provider ids a fresh `ck auth login` stores when the operator
+/// The catalog provider ids a fresh `ck auth login` or `put` stores when the operator
 /// passes no `--provider-id`.
 ///
-/// Only the five subscription rows the live vault already carries ids for name
-/// one here (anthropic, openai, xai, meta, antigravity-to-google); every other
-/// row, including all API-key rows, returns empty so those logins stay as today.
 /// Labeled accounts share their provider's default through the same catalog
 /// match that stamps categories, not through string matching on the id.
 pub fn default_provider_ids(credential_id: &str) -> &'static [&'static str] {
     match catalog_match(credential_id) {
+        Some(CatalogEntry::ApiKey(entry)) => entry.default_provider_ids,
         Some(CatalogEntry::Login(entry)) => entry.default_provider_ids,
-        _ => &[],
+        None => &[],
+    }
+}
+
+/// The service name, not a routing provider id, from the category catalog match.
+pub fn provider(credential_id: &str) -> Option<&'static str> {
+    match catalog_match(credential_id)? {
+        CatalogEntry::ApiKey(entry) => Some(entry.key),
+        CatalogEntry::Login(entry) => Some(entry.key),
     }
 }
 
@@ -1924,10 +2031,115 @@ mod tests {
     }
 
     #[test]
+    fn api_key_routing_ids_match_the_reviewed_table() {
+        let expected: &[(&str, &[&str])] = &[
+            ("kiro", &[]),
+            ("zai", &["zai-coding-plan"]),
+            ("openrouter", &["openrouter"]),
+            ("deepseek", &["deepseek"]),
+            ("cerebras", &["cerebras"]),
+            ("fireworks-ai", &["fireworks-ai"]),
+            ("groq", &["groq"]),
+            ("mistral", &["mistral"]),
+            ("together", &["togetherai"]),
+            ("perplexity", &["perplexity"]),
+            ("moonshot", &["moonshotai"]),
+            ("huggingface", &["huggingface"]),
+            ("nvidia", &["nvidia"]),
+            ("xai", &["xai"]),
+            ("openai", &["openai"]),
+            ("google", &["google"]),
+            ("anthropic", &["anthropic-platform"]),
+            ("inception", &["inception"]),
+            ("cloudflare-workers-ai", &["cloudflare-workers-ai"]),
+            ("abliteration", &["abliteration-ai"]),
+            ("aiand", &["aiand"]),
+            ("baseten", &["baseten"]),
+            ("charm-hyper", &["hyper"]),
+            ("cline-pass", &[]),
+            ("commandcode", &["commandcode"]),
+            ("deepinfra", &["deepinfra"]),
+            ("firepass", &[]),
+            ("gmi-cloud", &["gmicloud"]),
+            ("meta", &[]),
+            ("minimax-code", &["minimax-coding-plan"]),
+            ("minimax-code-cn", &["minimax-cn-coding-plan"]),
+            ("nanogpt", &["nano-gpt"]),
+            ("novita", &["novita-ai"]),
+            ("ollama-cloud", &["ollama-cloud"]),
+            ("opencode-go", &["opencode-go"]),
+            ("opencode-zen", &["opencode"]),
+            ("qianfan", &[]),
+            ("qwen-portal", &[]),
+            ("sakana", &["sakana"]),
+            ("siliconflow", &["siliconflow"]),
+            ("siliconflow-cn", &["siliconflow-cn"]),
+            ("singularityapi-dev", &[]),
+            ("singularityapi-tech", &[]),
+            ("stepfun", &["stepfun"]),
+            ("synthetic", &["synthetic"]),
+            ("typesafe", &["typesafe"]),
+            ("umans", &["umans-ai-coding-plan"]),
+            ("venice", &["venice"]),
+            ("vercel-ai-gateway", &["vercel"]),
+            ("wafer-serverless", &[]),
+            ("xiaomi-token-plan-ams", &["xiaomi-token-plan-ams"]),
+            ("xiaomi-token-plan-cn", &["xiaomi-token-plan-cn"]),
+            ("xiaomi-token-plan-sgp", &["xiaomi-token-plan-sgp"]),
+            ("yolo-auto", &[]),
+            ("zenmux", &["zenmux"]),
+            ("zhipu-coding-plan", &["zhipuai-coding-plan"]),
+            ("kimi-for-coding", &["kimi-code-plan-global"]),
+            ("muse", &[]),
+            ("tavily", &[]),
+            ("kagi", &[]),
+            ("exa", &[]),
+            ("parallel", &[]),
+            ("brave", &[]),
+            ("firecrawl", &[]),
+            ("jina", &[]),
+            ("tinyfish", &[]),
+            ("searxng", &[]),
+        ];
+        assert_eq!(
+            API_KEY_PROVIDERS
+                .iter()
+                .map(|row| row.key)
+                .collect::<Vec<_>>(),
+            expected.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
+        for (key, ids) in expected {
+            for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
+                assert_eq!(default_provider_ids(&id), *ids, "{id}");
+                assert_eq!(provider(&id), Some(*key));
+                let categories = category_defaults(&id);
+                assert_eq!(
+                    categories
+                        .iter()
+                        .any(|category| category == "media-provider"),
+                    matches!(*key, "openai" | "google"),
+                    "{id}"
+                );
+            }
+        }
+        assert_eq!(provider("apikey:unknown"), None);
+        assert_eq!(provider("chatgpt:openai:work"), Some("openai"));
+        assert_eq!(provider("copilot:github"), Some("github-copilot"));
+        assert!(matches!(
+            api_key_provider("minimax-code-cn").unwrap().validation,
+            KeyValidation::OpenAiChat {
+                base_url: "https://api.minimax.cn/v1",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, the Anthropic API key, Inception, Cloudflare Workers AI, and 9 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 65);
+        // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding, Muse,
+        // and 9 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 67);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1971,7 +2183,8 @@ mod tests {
                 "llm-provider",
                 "data-warehouse",
                 "cloud-infrastructure",
-                "web-search"
+                "web-search",
+                "media-provider"
             ]
         );
         assert_eq!(
@@ -2071,8 +2284,14 @@ mod tests {
     ];
 
     /// Catalogued keys used by both model and web-search consumers.
-    /// `kimi-for-coding` is a separately managed vault id with no catalog row.
-    const DUAL_USE_KEYS: &[&str] = &["deepseek", "ollama-cloud", "perplexity", "synthetic", "zai"];
+    const DUAL_USE_KEYS: &[&str] = &[
+        "deepseek",
+        "ollama-cloud",
+        "perplexity",
+        "synthetic",
+        "zai",
+        "kimi-for-coding",
+    ];
 
     /// oh-my-pi providers deliberately NOT in this table:
     /// - local servers whose "key" is a localhost placeholder, so there is no secret;
@@ -2117,11 +2336,17 @@ mod tests {
             &"anthropic",
             &"inception",
             &"cloudflare-workers-ai",
+            &"muse",
         ]) {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
-                assert_eq!(category_defaults(&id), ["llm-provider"], "{id}");
+                let expected = if matches!(*key, "openai" | "google") {
+                    vec!["llm-provider", "media-provider"]
+                } else {
+                    vec!["llm-provider"]
+                };
+                assert_eq!(category_defaults(&id), expected, "{id}");
             }
         }
         // Every row must be listed somewhere, so a new row cannot land uncategorised
@@ -2135,7 +2360,8 @@ mod tests {
                     || entry.key == "kiro"
                     || entry.key == "anthropic"
                     || entry.key == "inception"
-                    || entry.key == "cloudflare-workers-ai",
+                    || entry.key == "cloudflare-workers-ai"
+                    || entry.key == "muse",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -2223,6 +2449,8 @@ mod tests {
                 "qianfan",
                 "typesafe",
                 "vercel-ai-gateway",
+                "kimi-for-coding",
+                "muse",
                 "tavily",
                 "kagi",
                 "exa",
@@ -2260,7 +2488,8 @@ mod tests {
                 "llm-provider",
                 "data-warehouse",
                 "cloud-infrastructure",
-                "web-search"
+                "web-search",
+                "media-provider"
             ]
         );
         assert_eq!(
@@ -2719,6 +2948,8 @@ mod source_ownership_tests {
                     ]
                 ),
                 ("zhipu-coding-plan", vec!["zhipu"]),
+                ("kimi-for-coding", vec!["moonshot"]),
+                ("muse", vec![]),
                 ("tavily", vec![]),
                 ("kagi", vec![]),
                 ("exa", vec![]),

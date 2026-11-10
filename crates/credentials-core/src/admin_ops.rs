@@ -1856,6 +1856,8 @@ pub fn apply(
                     serde_json::json!({
                         "credential_id": record.credential_id,
                         "home": record.home_member,
+                        "source": record.source.as_str(),
+                        "home_pairing_id": record.home_pairing_id,
                         "incarnation": record.incarnation,
                         "last_home_version": record.last_home_version,
                         "last_home_state": record.last_home_state.as_str(),

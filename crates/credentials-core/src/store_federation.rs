@@ -15,10 +15,10 @@ use crate::federation::{
     MemberGrantOperation, MemberGrantSelector, MemberGrantSource, NewIncomingTransfer,
     NewOutgoingTransfer, NewRemoteRecord, OutgoingTransfer, OutgoingTransferState,
     PendingTransferCounts, RecoveredIncoming, RecoveredOutgoing, RemoteHomeState,
-    RemoteHomeSuccess, RemoteInventoryRow, RemoteRecord, RemoteRecordWrite, SealedTransfer,
-    TransferAcceptOutcome, TransferAcceptance, TransferKeyRecovery, VaultSharingMember,
-    MEMBER_MAPPING_SETTING, REJECT_REMOTE_SEAL_INVALID, REJECT_SENDER_KEY_REPLACED,
-    SELF_MEMBER_SETTING, TRANSFER_RETENTION_MS,
+    RemoteHomeSuccess, RemoteInventoryRow, RemoteRecord, RemoteRecordSource, RemoteRecordWrite,
+    SealedTransfer, TransferAcceptOutcome, TransferAcceptance, TransferKeyRecovery,
+    VaultSharingMember, MEMBER_MAPPING_SETTING, REJECT_REMOTE_SEAL_INVALID,
+    REJECT_SENDER_KEY_REPLACED, SELF_MEMBER_SETTING, TRANSFER_RETENTION_MS,
 };
 
 /// The longest fetch-outcome code stored. Outcomes are refusal codes this vault
@@ -83,6 +83,17 @@ fn remote_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteRec
             format!("unknown remote home state {state:?}").into(),
         )
     })?;
+    let source: String = match row.get("source") {
+        Err(rusqlite::Error::InvalidColumnName(_)) => "operator".into(),
+        value => value?,
+    };
+    let source = RemoteRecordSource::from_stored(&source).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown remote record source {source:?}").into(),
+        )
+    })?;
     Ok(RemoteRecord {
         detected_plan_tier_observed_at_ms: match row.get("detected_plan_tier_observed_at_ms") {
             Err(rusqlite::Error::InvalidColumnName(_)) => None,
@@ -90,6 +101,11 @@ fn remote_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteRec
         },
         credential_id: row.get("credential_id")?,
         home_member: row.get("home_member")?,
+        source,
+        home_pairing_id: match row.get("home_pairing_id") {
+            Err(rusqlite::Error::InvalidColumnName(_)) => None,
+            value => value?,
+        },
         incarnation: row.get("incarnation")?,
         refresh_adapter: row.get("refresh_adapter")?,
         detected_plan,

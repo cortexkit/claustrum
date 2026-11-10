@@ -7,7 +7,7 @@ use crate::admin_ops::{
 use crate::federation::{
     federation_gate_payload_hash, federation_self_payload_hash, member_grant_payload_hash,
     remote_membership_payload_hash, MemberGrantOperation, MemberGrantSelector, NewRemoteRecord,
-    RemoteHomeState,
+    RemoteHomeState, RemoteRecordSource,
 };
 use crate::secret::Secret;
 use crate::store::taxonomy_tests::{api_record, rig, sqlite};
@@ -2292,6 +2292,161 @@ fn sharing_source_migration_preserves_operator_rows_and_constrains_sources() {
     assert!(store
         .with_raw_conn(|conn| conn.execute("UPDATE member_grants SET source = NULL", []))
         .is_err());
+}
+
+#[test]
+fn remote_record_source_readers_default_to_operator_at_schema_38() {
+    let (_root, sqlite) = sqlite("remote-source-behind", 242);
+    migrate_through_for_test(&sqlite, 38).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([242; 32])).unwrap();
+    let second = add_remote(&store, "oauth:anthropic:z");
+    let first = add_remote(&store, "oauth:anthropic:a");
+    let expected = vec![first, second];
+    for record in &expected {
+        assert_eq!(record.source, RemoteRecordSource::Operator);
+        assert_eq!(record.home_pairing_id, None);
+        assert_eq!(
+            store.remote_record(&record.credential_id).unwrap().as_ref(),
+            Some(record)
+        );
+    }
+    let audit = store.read_audit(None).unwrap();
+    assert_eq!(store.list_remote_records().unwrap(), expected);
+    let inventory = store.remote_inventory().unwrap();
+    assert_eq!(
+        inventory
+            .iter()
+            .map(|row| row.record.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 38);
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+
+    EncryptedStore::migrate(&store.store).unwrap();
+    assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 39);
+    assert_eq!(newest_migration_version(), 39);
+    for record in &expected {
+        assert_eq!(
+            store.remote_record(&record.credential_id).unwrap().as_ref(),
+            Some(record)
+        );
+    }
+    assert_eq!(store.list_remote_records().unwrap(), expected);
+    assert_eq!(store.remote_inventory().unwrap(), inventory);
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+    let stored: Vec<(String, Option<String>)> = store
+        .with_raw_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT source, home_pairing_id FROM remote_records")?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(stored, vec![("operator".into(), None); 2]);
+}
+
+#[test]
+fn remote_record_source_migration_constrains_source_and_pairing_together() {
+    let (_root, store) = rig("remote-source-checks", 243);
+    let id = "oauth:anthropic:remote";
+    let before = add_remote(&store, id);
+    assert_eq!(before.source, RemoteRecordSource::Operator);
+    assert_eq!(before.home_pairing_id, None);
+    let audit = store.read_audit(None).unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE remote_records SET source = 'home_watch', home_pairing_id = 'pair-1'",
+                [],
+            )
+        })
+        .unwrap();
+    let mut watched = before.clone();
+    watched.source = RemoteRecordSource::HomeWatch;
+    watched.home_pairing_id = Some("pair-1".into());
+    assert_eq!(store.remote_record(id).unwrap(), Some(watched.clone()));
+    assert_eq!(store.list_remote_records().unwrap(), vec![watched.clone()]);
+    assert_eq!(store.remote_inventory().unwrap()[0].record, watched);
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE remote_records SET source = 'operator', home_pairing_id = NULL",
+                [],
+            )
+        })
+        .unwrap();
+    for (source, pairing) in [
+        (Some("other"), None),
+        (None, None),
+        (Some("home_watch"), None),
+        (Some("operator"), Some("pair-1")),
+    ] {
+        let result = store.with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE remote_records SET source = ?1, home_pairing_id = ?2",
+                rusqlite::params![source, pairing],
+            )
+        });
+        assert!(
+            result.is_err(),
+            "source={source:?}, pairing={pairing:?}: {result:?}"
+        );
+        assert_eq!(store.remote_record(id).unwrap(), Some(before.clone()));
+    }
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+}
+
+#[test]
+fn remote_list_includes_source_and_home_pairing_id_for_each_record() {
+    let (_root, store) = rig("remote-list-source", 244);
+    let operator = add_remote(&store, "oauth:anthropic:operator");
+    let watched = add_remote(&store, "oauth:anthropic:watched");
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE remote_records SET source = 'home_watch', home_pairing_id = 'pair-2' \
+                 WHERE credential_id = ?1",
+                [&watched.credential_id],
+            )
+        })
+        .unwrap();
+    let listed = apply(
+        &store,
+        AdminOpBody::RemoteList {
+            v: ADMIN_OP_SCHEMA_V2,
+        },
+        ACTOR,
+    )
+    .unwrap();
+    assert_eq!(
+        listed,
+        serde_json::json!({ "remote_records": [
+            {
+                "credential_id": operator.credential_id,
+                "home": HOME,
+                "source": "operator",
+                "home_pairing_id": null,
+                "incarnation": operator.incarnation,
+                "last_home_version": 4,
+                "last_home_state": "active",
+                "last_home_error": null,
+                "last_fetch_outcome": null,
+            },
+            {
+                "credential_id": watched.credential_id,
+                "home": HOME,
+                "source": "home_watch",
+                "home_pairing_id": "pair-2",
+                "incarnation": watched.incarnation,
+                "last_home_version": 4,
+                "last_home_state": "active",
+                "last_home_error": null,
+                "last_fetch_outcome": null,
+            }
+        ] })
+    );
 }
 
 #[test]

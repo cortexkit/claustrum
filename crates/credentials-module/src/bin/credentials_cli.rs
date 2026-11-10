@@ -403,7 +403,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "revoke-grant" => cmd_revoke_grant(&global, &args),
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global, &args),
-        "provider-report" => cmd_provider_report(&global),
+        "provider-report" => cmd_provider_report(&global, options),
         "grants" => cmd_grants(&global),
         "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
@@ -572,6 +572,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
+        "provider-report" => &["--missing"],
         "enroll" => &["--keep-grants", "--clear"],
         _ => &[],
     };
@@ -679,7 +680,7 @@ fn usage_short() -> String {
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
-       provider-report     compare stored provider ids with catalog defaults\n\
+       provider-report     compare routing ids or list uncovered providers\n\
        provider            list, set or remove operator provider defaults\n\
        grants              principal-scoped grants (no secrets)\n\
        enroll              approve, label, list or revoke consumer enrollments\n\
@@ -814,13 +815,18 @@ fn help_verb(verb: &str) -> String {
              The next interactive put for this service asks again."
         }
         "provider-report" => {
-            "ck auth provider-report\n\
+            "ck auth provider-report [--missing]\n\
+             \n\
+             \x20 --missing    list uncovered embedded provider ids, then reviewed skips\n\
              \n\
              NOTES\n\
              List catalog-matched credentials whose stored routing provider ids differ\n\
              from the table, with ID, STORED and TABLE columns (JSON arrays of ids).\n\
              Unmapped rows with no stored ids are not differences. Unknown services\n\
-             are not compared. Read-only and lease-free: no records are changed."
+             are not compared. Read-only and lease-free: no records are changed.\n\
+             With --missing, no vault or key is needed. Print ids in provider-id order\n\
+             when no API-key row carries them and no reviewed skip holds them, then\n\
+             print skipped ids and reasons under 'Skipped:'."
         }
         "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
@@ -5951,7 +5957,28 @@ fn format_ts_ms(ts_ms: i64) -> String {
     format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
-fn cmd_provider_report(global: &GlobalArgs) -> Result<(), CliError> {
+fn missing_provider_report_lines(
+    missing: &[&credentials_core::fusiform_providers::FusiformProvider],
+    skips: &[(&str, &str)],
+) -> Vec<String> {
+    let mut lines: Vec<_> = missing.iter().map(|provider| provider.id.clone()).collect();
+    lines.push("Skipped:".to_owned());
+    let mut skips = skips.to_vec();
+    skips.sort_by_key(|(id, _)| *id);
+    lines.extend(skips.iter().map(|(id, reason)| format!("{id}\t{reason}")));
+    lines
+}
+
+fn cmd_provider_report(global: &GlobalArgs, options: ParsedOptions) -> Result<(), CliError> {
+    if options.has_flag("--missing") {
+        for line in missing_provider_report_lines(
+            &credentials_core::catalog::missing_fusiform_providers(),
+            credentials_core::catalog::FUSIFORM_PROVIDER_SKIPS,
+        ) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     let result = request_admin_status(global)?;
     println!("ID\tSTORED\tTABLE");
     for (_, _, id, _, mut stored) in parse_inventory(&result)? {
@@ -9060,6 +9087,30 @@ mod explicit_route_regressions {
 #[cfg(test)]
 mod provider_cli_tests {
     use super::*;
+
+    #[test]
+    fn provider_missing_report_places_skips_and_reasons_after_uncovered_ids() {
+        let provider = &credentials_core::fusiform_providers::fusiform_providers()[0];
+        assert_eq!(
+            missing_provider_report_lines(
+                &[provider],
+                &[
+                    ("z-skip", "OAuth only"),
+                    ("a-skip", "no API key in its documentation")
+                ],
+            ),
+            [
+                provider.id.as_str(),
+                "Skipped:",
+                "a-skip\tno API key in its documentation",
+                "z-skip\tOAuth only"
+            ]
+        );
+        assert_eq!(missing_provider_report_lines(&[], &[]), ["Skipped:"]);
+        let options = reject_unknown_args("provider-report", &["--missing".to_owned()]).unwrap();
+        assert!(options.has_flag("--missing"));
+        assert!(reject_unknown_args("provider-report", &["--missng".to_owned()]).is_err());
+    }
 
     #[test]
     fn provider_set_body_is_v3_and_canonical() {

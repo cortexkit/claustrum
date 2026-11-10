@@ -2069,6 +2069,34 @@ pub fn login_provider(key: &str) -> Option<&'static LoginProvider> {
     LOGIN_PROVIDERS.iter().find(|entry| entry.key == key)
 }
 
+/// Published providers still awaiting a reviewed row or skip, ordered by provider id.
+/// Any API-key row carrying an id covers it, independent of its routing defaults.
+pub fn missing_fusiform_providers() -> Vec<&'static crate::fusiform_providers::FusiformProvider> {
+    uncovered_fusiform_providers(
+        crate::fusiform_providers::fusiform_providers(),
+        API_KEY_PROVIDERS,
+        FUSIFORM_PROVIDER_SKIPS,
+    )
+}
+
+fn uncovered_fusiform_providers<'a>(
+    providers: &'a [crate::fusiform_providers::FusiformProvider],
+    rows: &[ApiKeyProvider],
+    skips: &[(&str, &str)],
+) -> Vec<&'a crate::fusiform_providers::FusiformProvider> {
+    let mut missing: Vec<_> = providers
+        .iter()
+        .filter(|provider| {
+            !rows
+                .iter()
+                .any(|row| row.fusiform_provider_id == Some(provider.id.as_str()))
+                && !skips.iter().any(|(id, _)| *id == provider.id)
+        })
+        .collect();
+    missing.sort_by(|left, right| left.id.cmp(&right.id));
+    missing
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CatalogEntry {
     ApiKey(&'static ApiKeyProvider),
@@ -2252,6 +2280,35 @@ pub fn valid_category_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fusiform_gaps_exclude_any_carried_id_and_reviewed_skips() {
+        let mut providers = crate::fusiform_providers::fusiform_providers()[..4].to_vec();
+        for (provider, id) in providers
+            .iter_mut()
+            .zip(["z-gap", "covered", "skipped", "a-gap"])
+        {
+            provider.id = id.to_owned();
+        }
+        let mut pending = API_KEY_PROVIDERS[0].clone();
+        pending.fusiform_provider_id = None;
+        // Neither a matching row key nor routing defaults stand in for the display id.
+        pending.key = "z-gap";
+        pending.default_provider_ids = &["a-gap"];
+        let mut carried = API_KEY_PROVIDERS[0].clone();
+        carried.fusiform_provider_id = Some("covered");
+        carried.default_provider_ids = &[];
+        let rows = [pending, carried.clone(), carried];
+        let missing = uncovered_fusiform_providers(&providers, &rows, &[("skipped", "OAuth only")]);
+        assert_eq!(
+            missing
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-gap", "z-gap"]
+        );
+        assert!(uncovered_fusiform_providers(&[], &rows, &[]).is_empty());
+    }
+
     fn assert_published_fusiform_ids(rows: &[ApiKeyProvider], pending: &[(&str, &str)]) {
         let published_ids: std::collections::BTreeSet<_> =
             crate::fusiform_providers::fusiform_providers()

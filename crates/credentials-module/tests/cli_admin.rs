@@ -9177,6 +9177,88 @@ fn provider_catalog_api_key_login_applies_defaults_and_replace_preserves_stored_
 }
 
 #[test]
+fn provider_catalog_report_missing_is_exact_without_a_vault_or_key() {
+    use credentials_core::catalog::{API_KEY_PROVIDERS, FUSIFORM_PROVIDER_SKIPS};
+    use credentials_core::fusiform_providers::FUSIFORM_PROVIDERS_JSON;
+    use std::collections::BTreeSet;
+
+    let vault = GrantCliVault::new("provider-report-missing-no-vault");
+    let out = vault.run(&["provider-report", "--missing"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty());
+    let output = String::from_utf8(out.stdout).unwrap();
+    let (missing, skipped) = output.split_once("Skipped:\n").expect("skipped section");
+
+    // Decode the vendored bytes independently of the report's gap helper.
+    let vendored: serde_json::Value = serde_json::from_slice(FUSIFORM_PROVIDERS_JSON).unwrap();
+    let mut expected: BTreeSet<_> = vendored["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|provider| provider["id"].as_str().unwrap())
+        .collect();
+    for row in API_KEY_PROVIDERS {
+        if let Some(id) = row.fusiform_provider_id {
+            expected.remove(id);
+        }
+    }
+    for (id, _) in FUSIFORM_PROVIDER_SKIPS {
+        expected.remove(id);
+    }
+    assert_eq!(
+        missing.lines().collect::<Vec<_>>(),
+        expected.into_iter().collect::<Vec<_>>()
+    );
+    let mut expected_skips = FUSIFORM_PROVIDER_SKIPS.to_vec();
+    expected_skips.sort();
+    assert_eq!(
+        skipped.lines().collect::<Vec<_>>(),
+        expected_skips
+            .iter()
+            .map(|(id, reason)| format!("{id}\t{reason}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(!vault.data_dir.join("store.db").exists());
+    assert!(!vault.key_path.exists());
+    assert_eq!(std::fs::read_dir(&vault.data_dir).unwrap().count(), 0);
+}
+
+#[test]
+fn provider_catalog_report_missing_takes_no_lease_and_changes_no_records() {
+    let vault = GrantCliVault::new("provider-report-missing-held-lease");
+    vault.bootstrap();
+    assert!(vault
+        .run(&[
+            "put",
+            "--id",
+            "apikey:openai",
+            "--payload-file",
+            &payload_file("report-key")
+        ])
+        .status
+        .success());
+    let before = vault.run(&["list", "--json"]).stdout;
+    let audit = vault.run(&["audit"]).stdout;
+    let unheld = vault.run(&["provider-report", "--missing"]);
+    assert!(unheld.status.success());
+    let _held = open_leased_store(&vault.data_dir, &vault.key_path);
+    let held = vault.run(&["provider-report", "--missing"]);
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    assert!(held.stderr.is_empty());
+    assert_eq!(held.stdout, unheld.stdout);
+    assert_eq!(vault.run(&["list", "--json"]).stdout, before);
+    assert_eq!(vault.run(&["audit"]).stdout, audit);
+}
+
+#[test]
 fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() {
     let vault = GrantCliVault::new("provider-report");
     vault.bootstrap();

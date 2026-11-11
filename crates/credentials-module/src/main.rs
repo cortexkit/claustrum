@@ -18187,12 +18187,16 @@ mod tests {
     ///             challenge, upstream body or signer material
     ///   info!     unsigned desktop development admission for a connectors read:
     ///             fixed admission name only, never request or credential fields
+    ///   warn/info! member watch failure/recovery: home member id and ending code or
+    ///             fixed kind only; repeated failures remain debug-only
+    ///   warn/debug! member watch reconciliation and disconnect diagnostics:
+    ///             existing fixed text, row/home ids, and error or ending values
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the nine source files linked
+    /// the one shape every secret read must take. Covers ten source files linked
     /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -18209,6 +18213,10 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connectors.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/member_watch.rs"
+            )),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18225,7 +18233,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 6, 0),
+            (1, 2, 15, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18244,6 +18252,17 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[9], &shapes), vec![
+            ("debug".into(), "target: \"federation\", ?ending, \"home watch ended; inventory retained\"".into()),
+            ("debug".into(), "target: \"federation\", ?error, \"home watch disconnected\"".into()),
+            ("info".into(), "target: \"federation\", home, \"home watch recovered\"".into()),
+            ("warn".into(), "target: \"federation\", home, ending = ending.kind(), \"home watch ended; retrying\"".into()),
+            ("warn".into(), "target: \"federation\", home, %id, \"home watch id already held; existing holder wins\"".into()),
+            ("warn".into(), "target: \"federation\", ?error, \"home watch apply failed; retaining snapshot for retry\"".into()),
+            ("warn".into(), "target: \"federation\", home, id = %row.credential_id, %error, \"home watch row rejected; existing row unchanged\"".into()),
+            ("warn".into(), "target: \"federation\", ?error, home = %fp, \"home watch removal failed; retaining removal for retry\"".into()),
+            ("warn".into(), "target: \"federation\", %error, \"home watch startup inventory unavailable\"".into()),
+        ]);
         assert_eq!(output_site_arguments(sources[8], &shapes), vec![("info".into(), "target: \"connectors\", \"unsigned_desktop_development_admission admitted connectors read\"".into())]);
         assert_eq!(account_sites, vec![("warn".into(), "\"account worker exchange refused permanently; signer or contract vector may be wrong\"".into())]);
         let mut sites = 0;

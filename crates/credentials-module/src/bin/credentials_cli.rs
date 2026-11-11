@@ -690,7 +690,7 @@ fn usage_short() -> String {
      usage: ck auth <verb> [flags]\n\
      \n\
      verbs:\n\
-           login               OAuth/device/api-key login; picker includes custom keys\n\
+           login               OAuth/device/API-key login; picker also enrolls gateways\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
@@ -916,6 +916,11 @@ fn help_verb(verb: &str) -> String {
              api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
+             After API-key providers, Company AI gateway enrolls a LiteLLM, Portkey,\n\
+             Cloudflare or custom gateway. It asks for settings and a hidden key,\n\
+             never replaces, and confirms with default No. It does not check the key.\n\
+             Gateway enrollment is picker-only; scripts use ck auth put with\n\
+             --gateway-base-url, --gateway-auth-header and --gateway-auth-scheme.\n\
              The picker ends with Other API key provider… for a named API key.\n\
              Enter a provider name or provider:label; existing ids ask Replace it?\n\
              with default No before provider settings or the hidden key prompt.\n\
@@ -2473,7 +2478,7 @@ fn put_gateway_settings(
     args: &[String],
     options: &ParsedOptions,
 ) -> Result<Option<credentials_core::gateway::GatewaySettings>, CliError> {
-    use credentials_core::gateway::{GatewayAuth, GatewayHeader, GatewaySettings};
+    use credentials_core::gateway::{GatewayAuth, GatewaySettings};
 
     if !has_gateway_flags(options) {
         return Ok(None);
@@ -2486,9 +2491,47 @@ fn put_gateway_settings(
     let base_url = options.required("--gateway-base-url")?;
     let auth_header = options.required("--gateway-auth-header")?;
     let auth_scheme = options.required("--gateway-auth-scheme")?;
+    let base_url = normalize_gateway_base_url(&base_url);
+    let mut headers = Vec::new();
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        if flag == "--replace" {
+            continue;
+        }
+        let value = args.next();
+        if flag == "--gateway-header" {
+            headers.push(parse_gateway_header(
+                value.map(String::as_str).unwrap_or_default(),
+            )?);
+        }
+    }
+    headers.sort_by(|a, b| a.name.cmp(&b.name));
+    // Do not deduplicate: the shared validator refuses repeated names, including
+    // names that become equal after lowercasing.
+    Ok(Some(GatewaySettings {
+        base_url,
+        auth: GatewayAuth {
+            header: auth_header.to_ascii_lowercase(),
+            scheme: auth_scheme,
+        },
+        headers,
+    }))
+}
+
+fn parse_gateway_header(value: &str) -> Result<credentials_core::gateway::GatewayHeader, CliError> {
+    let (name, value) = value
+        .split_once('=')
+        .ok_or_else(|| CliError::Usage("--gateway-header needs name=value".into()))?;
+    Ok(credentials_core::gateway::GatewayHeader {
+        name: name.to_ascii_lowercase(),
+        value: value.trim().to_string(),
+    })
+}
+
+fn normalize_gateway_base_url(base_url: &str) -> String {
     // Preserve the path and explicit port spelling: URL parsers can repair invalid
     // paths or discard default ports before the core validator sees them.
-    let base_url = match base_url.split_once("://") {
+    match base_url.split_once("://") {
         Some((scheme, rest)) => {
             let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
             let path = if path.is_empty() {
@@ -2503,38 +2546,10 @@ fn put_gateway_settings(
                 path
             )
         }
-        None => base_url,
+        None => base_url.to_string(),
     }
     .trim_end_matches('/')
-    .to_string();
-    let mut headers = Vec::new();
-    let mut args = args.iter();
-    while let Some(flag) = args.next() {
-        if flag == "--replace" {
-            continue;
-        }
-        let value = args.next();
-        if flag == "--gateway-header" {
-            let (name, value) = value
-                .and_then(|value| value.split_once('='))
-                .ok_or_else(|| CliError::Usage("--gateway-header needs name=value".into()))?;
-            headers.push(GatewayHeader {
-                name: name.to_ascii_lowercase(),
-                value: value.trim().to_string(),
-            });
-        }
-    }
-    headers.sort_by(|a, b| a.name.cmp(&b.name));
-    // Do not deduplicate: the shared validator refuses repeated names, including
-    // names that become equal after lowercasing.
-    Ok(Some(GatewaySettings {
-        base_url,
-        auth: GatewayAuth {
-            header: auth_header.to_ascii_lowercase(),
-            scheme: auth_scheme,
-        },
-        headers,
-    }))
+    .to_string()
 }
 
 fn cmd_put(
@@ -3241,9 +3256,10 @@ fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option
 }
 
 const OTHER_API_KEY_PROVIDER: &str = "__other_api_key__";
+const COMPANY_AI_GATEWAY: &str = "__company_ai_gateway__";
 
 /// Every row the interactive login picker offers, as (provider key, display name,
-/// default id): OAuth/device logins, API-key catalog rows, then a custom provider.
+/// default id): OAuth/device logins, API-key catalog rows, gateway, then custom.
 fn login_picker_rows() -> Vec<(String, String, String)> {
     let mut rows = Vec::new();
     for &(key, name) in LOGIN_PICKER_ROWS {
@@ -3261,6 +3277,11 @@ fn login_picker_rows() -> Vec<(String, String, String)> {
             provider.default_id.to_string(),
         ));
     }
+    rows.push((
+        COMPANY_AI_GATEWAY.to_string(),
+        "Company AI gateway (LiteLLM, Portkey, Cloudflare)".to_string(),
+        String::new(),
+    ));
     rows.push((
         OTHER_API_KEY_PROVIDER.to_string(),
         "Other API key provider…".to_string(),
@@ -3302,7 +3323,7 @@ fn pick_login_interactively(
             ))
         })?;
     let (provider, _, default_id) = &combined_rows[pick];
-    if provider == OTHER_API_KEY_PROVIDER {
+    if provider == OTHER_API_KEY_PROVIDER || provider == COMPANY_AI_GATEWAY {
         return Ok(InteractiveChoice {
             provider: provider.clone(),
             id_override: None,
@@ -3637,6 +3658,194 @@ fn cmd_other_api_key_login(
     Ok(())
 }
 
+const GATEWAY_KINDS: &[(&str, &str, &str)] = &[
+    ("LiteLLM", "authorization", "bearer"),
+    ("Portkey", "x-portkey-api-key", "raw"),
+    ("Cloudflare AI Gateway", "cf-aig-authorization", "bearer"),
+    ("Other", "", ""),
+];
+
+fn print_unchecked_api_key_note(reason: &str) {
+    println!("NOTE: storing this API key without checking it: {reason}.");
+}
+
+fn gateway_login_vendors() -> Vec<&'static str> {
+    let mut ids: Vec<_> = credentials_core::catalog::MODEL_VENDOR_FUSIFORM_IDS
+        .iter()
+        .map(|(_, id)| *id)
+        .collect();
+    ids.sort_by_key(|id| (*id != "anthropic", *id));
+    ids
+}
+
+fn cmd_gateway_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    use credentials_core::gateway::{validate_gateway_settings, GatewayAuth, GatewaySettings};
+    use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
+
+    if !args.is_empty() {
+        return Err(CliError::Usage(
+            "gateway login uses the interactive prompts, not login flags; \
+             use `ck auth put` for scripted gateway enrollment"
+                .into(),
+        ));
+    }
+    let cancelled = |e| CliError::Usage(format!("interactive gateway login cancelled: {e}"));
+    let theme = ColorfulTheme::default();
+    let kind = Select::with_theme(&theme)
+        .with_prompt("Gateway kind")
+        .items(GATEWAY_KINDS.iter().map(|(name, _, _)| *name))
+        .default(0)
+        .interact()
+        .map_err(cancelled)?;
+    let (_, header, scheme) = GATEWAY_KINDS[kind];
+    let mut settings = GatewaySettings {
+        base_url: "http://localhost".into(),
+        auth: GatewayAuth {
+            header: header.into(),
+            scheme: scheme.into(),
+        },
+        headers: Vec::new(),
+    };
+    // Use a valid placeholder id until the vendor and name prompts. Every field
+    // is checked by the store's validator, including partially collected settings.
+    let preview_id = "apikey:anthropic-gw-preview";
+    let preview_providers = vec!["anthropic-gw-preview".to_string()];
+    if header.is_empty() {
+        settings.auth.scheme = "bearer".into();
+        let header: String = Input::with_theme(&theme)
+            .with_prompt("Key header name")
+            .validate_with(|value: &String| {
+                let mut candidate = settings.clone();
+                candidate.auth.header = value.to_ascii_lowercase();
+                validate_gateway_settings(preview_id, &candidate, &preview_providers).map(|_| ())
+            })
+            .interact_text()
+            .map_err(cancelled)?;
+        settings.auth.header = header.to_ascii_lowercase();
+        let schemes = ["bearer", "raw"];
+        let scheme = Select::with_theme(&theme)
+            .with_prompt("Key header scheme")
+            .items(schemes)
+            .default(0)
+            .interact()
+            .map_err(cancelled)?;
+        settings.auth.scheme = schemes[scheme].into();
+    }
+    let base_url: String = Input::with_theme(&theme)
+        .with_prompt("Gateway base URL")
+        .validate_with(|value: &String| {
+            let mut candidate = settings.clone();
+            candidate.base_url = normalize_gateway_base_url(value);
+            validate_gateway_settings(preview_id, &candidate, &preview_providers).map(|_| ())
+        })
+        .interact_text()
+        .map_err(cancelled)?;
+    settings.base_url = normalize_gateway_base_url(&base_url);
+    println!("Fixed headers must be non-secret; enter name=value, or an empty line to finish.");
+    loop {
+        let mut candidate = settings.clone();
+        let line: String = Input::with_theme(&theme)
+            .with_prompt("Fixed header (empty to finish)")
+            .allow_empty(true)
+            .validate_with(|value: &String| {
+                if value.is_empty() {
+                    return Ok(());
+                }
+                let mut next = settings.clone();
+                next.headers.push(parse_gateway_header(value)?);
+                next.headers.sort_by(|a, b| a.name.cmp(&b.name));
+                validate_gateway_settings(preview_id, &next, &preview_providers)
+                    .map_err(CliError::Store)?;
+                candidate = next;
+                Ok::<_, CliError>(())
+            })
+            .interact_text()
+            .map_err(cancelled)?;
+        if line.is_empty() {
+            break;
+        }
+        settings = candidate;
+    }
+    let vendors = gateway_login_vendors();
+    let vendor = Select::with_theme(&theme)
+        .with_prompt("Whose models does the gateway serve?")
+        .items(&vendors)
+        .default(0)
+        .interact()
+        .map_err(cancelled)?;
+    let (id, provider_ids, preflighted_key) = loop {
+        let name: String = Input::with_theme(&theme)
+            .with_prompt("Gateway name (lowercase letters, digits, hyphens; starts with a letter)")
+            .validate_with(|name: &String| {
+                let provider = format!("{}-gw-{name}", vendors[vendor]);
+                validate_gateway_settings(&format!("apikey:{provider}"), &settings, &[provider])
+                    .map(|_| ())
+            })
+            .interact_text()
+            .map_err(cancelled)?;
+        let provider = format!("{}-gw-{name}", vendors[vendor]);
+        let id = format!("apikey:{provider}");
+        match preflight_login(
+            global,
+            &id,
+            false,
+            format!("{id} already exists; choose another name."),
+        ) {
+            Ok(key) => break (id, vec![provider], key),
+            Err(CliError::Usage(message)) => println!("{message}"),
+            Err(error) => return Err(error),
+        }
+    };
+    println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
+    let key = Password::new()
+        .with_prompt("Enter gateway API key")
+        .interact()
+        .map_err(|e| CliError::Io(format!("reading gateway API key: {e}")))?;
+    println!("Credential: {id}");
+    println!("Base URL: {}", settings.base_url);
+    println!(
+        "Key auth: {} ({})",
+        settings.auth.header, settings.auth.scheme
+    );
+    println!("Category: llm-gateway");
+    for header in &settings.headers {
+        println!("Fixed header: {}={}", header.name, header.value);
+    }
+    if !Confirm::with_theme(&theme)
+        .with_prompt("Store this gateway credential?")
+        .default(false)
+        .interact()
+        .map_err(cancelled)?
+    {
+        println!("Gateway login cancelled; nothing stored.");
+        return Ok(());
+    }
+    let record = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "login",
+        key.trim().as_bytes().to_vec(),
+        None,
+    );
+    print_unchecked_api_key_note("company gateways have no shared free key-check endpoint");
+    commit_admin_with_key(
+        global,
+        AdminOpBody::GatewayCreate {
+            v: ADMIN_OP_SCHEMA_V2,
+            id: id.clone(),
+            record: Box::new(record),
+            audit_op: AdminAuditOp::Put,
+            base_url: settings.base_url,
+            auth_header: settings.auth.header,
+            auth_scheme: settings.auth.scheme,
+            headers: settings.headers,
+            provider_ids,
+        },
+        Some(preflighted_key),
+    )?;
+    println!("logged in and stored {id}");
+    Ok(())
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let explicit_ids = provider_id_flags(args)?;
     check_deposit_provider_flags(optional(args, "--id").as_deref(), &explicit_ids)?;
@@ -3660,6 +3869,9 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         None => pick_login_interactively(global, args)?,
     };
+    if optional(args, "--provider").is_none() && interactive.provider == COMPANY_AI_GATEWAY {
+        return cmd_gateway_login(global, args);
+    }
     let from_other =
         optional(args, "--provider").is_none() && interactive.provider == OTHER_API_KEY_PROVIDER;
     let other = if from_other {
@@ -3833,7 +4045,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 println!("WARNING: API key validation could not be completed: {warn}. Storing the key anyway.");
             }
             api_key_login::ValidationOutcome::Unchecked(reason) => {
-                println!("NOTE: storing this API key without checking it: {reason}.");
+                print_unchecked_api_key_note(reason);
             }
         }
 
@@ -9285,6 +9497,43 @@ mod login_regressions {
         assert!(login_replace(&["--replace".into()], false));
     }
 
+    #[test]
+    fn gateway_login_vendor_menu_and_kind_presets_match_the_contract() {
+        assert_eq!(
+            gateway_login_vendors(),
+            [
+                "anthropic",
+                "alibaba",
+                "deepseek",
+                "google",
+                "inception",
+                "meta",
+                "minimax",
+                "mistral",
+                "moonshotai",
+                "nvidia",
+                "openai",
+                "perplexity",
+                "stepfun-ai",
+                "xai",
+                "xiaomi",
+                "zhipuai",
+            ]
+        );
+        assert_eq!(
+            GATEWAY_KINDS,
+            [
+                ("LiteLLM", "authorization", "bearer"),
+                ("Portkey", "x-portkey-api-key", "raw"),
+                ("Cloudflare AI Gateway", "cf-aig-authorization", "bearer"),
+                ("Other", "", ""),
+            ]
+        );
+        let help = help_verb("login");
+        assert!(help.contains("Gateway enrollment is picker-only"));
+        assert!(usage_short().contains("picker also enrolls gateways"));
+    }
+
     /// The picker is the only way an operator who runs a bare `ck auth login` reaches a
     /// provider, so a catalog row it does not list is unreachable interactively.
     #[test]
@@ -9319,7 +9568,15 @@ mod login_regressions {
                 )
             }))
             .collect();
-        assert_eq!(&rows[..rows.len() - 1], expected);
+        assert_eq!(&rows[..rows.len() - 2], expected);
+        assert_eq!(
+            rows[rows.len() - 2],
+            (
+                COMPANY_AI_GATEWAY.to_string(),
+                "Company AI gateway (LiteLLM, Portkey, Cloudflare)".to_string(),
+                String::new(),
+            )
+        );
         assert!(rows.contains(&(
             "elevenlabs".into(),
             "ElevenLabs".into(),

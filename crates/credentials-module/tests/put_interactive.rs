@@ -1150,6 +1150,226 @@ fn seed_login_key(fixture: &Fixture, id: &str) {
     );
 }
 
+const GATEWAY_KIND: &str = "Gateway kind";
+const GATEWAY_URL: &str = "Gateway base URL";
+const GATEWAY_HEADER: &str = "Fixed header (empty to finish)";
+const GATEWAY_VENDOR: &str = "Whose models does the gateway serve?";
+const GATEWAY_NAME: &str =
+    "Gateway name (lowercase letters, digits, hyphens; starts with a letter)";
+const GATEWAY_KEY: &str = "Enter gateway API key";
+const GATEWAY_CONFIRM: &str = "Store this gateway credential?";
+const GATEWAY_NOTE: &str = "NOTE: storing this API key without checking it: company gateways have no shared free key-check endpoint.";
+
+#[test]
+fn gateway_login_default_no_stores_nothing() {
+    let fixture = Fixture::new();
+    let before = fixture.store().audit_tip().unwrap();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Company AI gateway\r", false),
+            (GATEWAY_KIND, b"\r", false),
+            (GATEWAY_URL, b"http://localhost:4000\r", false),
+            (GATEWAY_HEADER, b"\r", false),
+            (GATEWAY_VENDOR, b"\r", false),
+            (GATEWAY_NAME, b"acme\r", false),
+            (GATEWAY_KEY, format!("{VALUE}\r").as_bytes(), true),
+            (GATEWAY_CONFIRM, b"\r", false),
+        ],
+    );
+    let mut position = 0;
+    for prompt in [
+        LOGIN_PICKER,
+        GATEWAY_KIND,
+        GATEWAY_URL,
+        GATEWAY_HEADER,
+        GATEWAY_VENDOR,
+        GATEWAY_NAME,
+        NO_FREE_CHECK,
+        GATEWAY_KEY,
+        "Credential: apikey:anthropic-gw-acme",
+        "Base URL: http://localhost:4000",
+        "Key auth: authorization (bearer)",
+        GATEWAY_CONFIRM,
+        "Gateway login cancelled; nothing stored.",
+    ] {
+        position += screen[position..]
+            .find(prompt)
+            .unwrap_or_else(|| panic!("missing ordered prompt {prompt}: {screen}"))
+            + prompt.len();
+    }
+    assert!(!screen.contains("Validating API key"), "{screen}");
+    let store = fixture.store();
+    assert!(store.list_meta().unwrap().is_empty());
+    assert!(store.registered_providers().unwrap().is_empty());
+    assert!(store
+        .gateway_settings("apikey:anthropic-gw-acme")
+        .unwrap()
+        .is_none());
+    assert_eq!(store.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn gateway_login_invalid_url_and_headers_are_reasked_with_shared_reasons() {
+    let fixture = Fixture::new();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Company AI gateway\r", false),
+            (GATEWAY_KIND, b"\x1b[B\r", false),
+            (GATEWAY_URL, b"localhost:4000\r", false),
+            (
+                "rule=base_url",
+                b"\x15http://localhost/v1/messages\r",
+                false,
+            ),
+            (
+                "rule=base_url_path",
+                b"\x15HTTP://LOCALHOST:80/v1///\r",
+                false,
+            ),
+            (GATEWAY_HEADER, b"missing-equals\r", false),
+            ("needs name=value", b"\x15authorization=forbidden\r", false),
+            ("rule=header_name", b"\x15x-route={}\r", false),
+            ("rule=header_value", b"\x15X-Z-Route= team=west \r", false),
+            (GATEWAY_HEADER, b"x-z-route=duplicate\r", false),
+            ("rule=header_name", b"\x15X-A-Route= first \r", false),
+            (GATEWAY_HEADER, b"\r", false),
+            (GATEWAY_VENDOR, b"\r", false),
+            (GATEWAY_NAME, b"acme\r", false),
+            (GATEWAY_KEY, format!("{VALUE}\r").as_bytes(), true),
+            (GATEWAY_CONFIRM, b"y\r", false),
+        ],
+    );
+    assert!(screen.contains(GATEWAY_NOTE), "{screen}");
+    assert!(!screen.contains("Validating API key"), "{screen}");
+    assert!(screen.contains("Fixed header: x-a-route=first"), "{screen}");
+    assert!(
+        screen.contains("Fixed header: x-z-route=team=west"),
+        "{screen}"
+    );
+    let store = fixture.store();
+    let id = "apikey:anthropic-gw-acme";
+    let record = store.get(id).unwrap();
+    assert_eq!(record.kind, CredentialKind::ApiKey);
+    assert_eq!(record.payload.expose(), VALUE.as_bytes());
+    assert_eq!(store.categories(id).unwrap(), ["llm-gateway"]);
+    assert_eq!(store.provider_ids(id).unwrap(), ["anthropic-gw-acme"]);
+    let settings = store.gateway_settings(id).unwrap().unwrap().settings;
+    assert_eq!(settings.base_url, "http://localhost:80/v1");
+    assert_eq!(settings.auth.header, "x-portkey-api-key");
+    assert_eq!(settings.auth.scheme, "raw");
+    assert_eq!(settings.headers.len(), 2);
+    assert_eq!(settings.headers[0].name, "x-a-route");
+    assert_eq!(settings.headers[0].value, "first");
+    assert_eq!(settings.headers[1].name, "x-z-route");
+    assert_eq!(settings.headers[1].value, "team=west");
+    assert!(store.registered_providers().unwrap().is_empty());
+    drop(store);
+    let audit = fixture.command(&["audit"]).output().unwrap();
+    assert!(audit.status.success());
+    let audit = String::from_utf8(audit.stdout).unwrap();
+    assert_eq!(audit.matches("gateway_create").count(), 1, "{audit}");
+    assert!(!audit.contains("set_providers"), "{audit}");
+}
+
+#[test]
+fn gateway_login_existing_id_reasks_name_without_replacing() {
+    let fixture = Fixture::new();
+    let existing = "apikey:anthropic-gw-taken";
+    seed_login_key(&fixture, existing);
+    let before = fixture.store().meta(existing).unwrap();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Company AI gateway\r", false),
+            (GATEWAY_KIND, b"\x1b[B\x1b[B\r", false),
+            (GATEWAY_URL, b"http://localhost:4000\r", false),
+            (GATEWAY_HEADER, b"\r", false),
+            (GATEWAY_VENDOR, b"\r", false),
+            (GATEWAY_NAME, b"taken\r", false),
+            ("already exists; choose another name.", b"fresh\r", false),
+            (GATEWAY_KEY, format!("{VALUE}\r").as_bytes(), true),
+            (GATEWAY_CONFIRM, b"y\r", false),
+        ],
+    );
+    assert!(!screen.contains("Replace it?"), "{screen}");
+    let collision = screen.find("already exists; choose another name.").unwrap();
+    assert!(screen[..collision].contains(GATEWAY_NAME), "{screen}");
+    assert!(screen[collision..].contains(GATEWAY_NAME), "{screen}");
+    let store = fixture.store();
+    assert_eq!(store.list_meta().unwrap().len(), 2);
+    assert_eq!(
+        store.meta(existing).unwrap().record_version,
+        before.record_version
+    );
+    assert_eq!(
+        store.meta(existing).unwrap().incarnation,
+        before.incarnation
+    );
+    assert_eq!(
+        store.get(existing).unwrap().payload.expose(),
+        b"initial-login-test-value"
+    );
+    assert!(store.gateway_settings(existing).unwrap().is_none());
+    let settings = store
+        .gateway_settings("apikey:anthropic-gw-fresh")
+        .unwrap()
+        .unwrap()
+        .settings;
+    assert_eq!(settings.auth.header, "cf-aig-authorization");
+    assert_eq!(settings.auth.scheme, "bearer");
+}
+
+#[test]
+fn gateway_login_other_auth_and_nondefault_vendor_are_stored() {
+    let fixture = Fixture::new();
+    let screen = fixture.terminal(
+        &["login"],
+        &[
+            (LOGIN_PICKER, b"Company AI gateway\r", false),
+            (GATEWAY_KIND, b"\x1b[B\x1b[B\x1b[B\r", false),
+            ("Key header name", b"X-Company-Key\r", false),
+            ("Key header scheme", b"\x1b[B\r", false),
+            (GATEWAY_URL, b"http://localhost:4000\r", false),
+            (GATEWAY_HEADER, b"\r", false),
+            (GATEWAY_VENDOR, b"\x1b[B\r", false),
+            (GATEWAY_NAME, b"9bad\r", false),
+            ("rule=provider_id", b"\x15custom\r", false),
+            (GATEWAY_KEY, format!("{VALUE}\r").as_bytes(), true),
+            (GATEWAY_CONFIRM, b"y\r", false),
+        ],
+    );
+    assert!(screen.contains(GATEWAY_NOTE), "{screen}");
+    let store = fixture.store();
+    assert_eq!(
+        store.provider_ids("apikey:alibaba-gw-custom").unwrap(),
+        ["alibaba-gw-custom"]
+    );
+    let settings = store
+        .gateway_settings("apikey:alibaba-gw-custom")
+        .unwrap()
+        .unwrap()
+        .settings;
+    assert_eq!(settings.auth.header, "x-company-key");
+    assert_eq!(settings.auth.scheme, "raw");
+}
+
+#[test]
+fn gateway_login_cannot_be_selected_by_provider_flag() {
+    let fixture = Fixture::new();
+    for provider in ["__company_ai_gateway__", "Company AI gateway", "gateway"] {
+        let output = fixture
+            .command(&["login", "--provider", provider])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("unknown --provider"), "{error}");
+    }
+    assert!(fixture.store().list_meta().unwrap().is_empty());
+}
+
 #[test]
 fn login_other_new_provider_stores_registration_defaults_like_put_and_reuses_them() {
     let fixture = Fixture::new();

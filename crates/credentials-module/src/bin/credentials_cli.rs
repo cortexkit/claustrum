@@ -679,7 +679,7 @@ fn usage_short() -> String {
      usage: ck auth <verb> [flags]\n\
      \n\
      verbs:\n\
-       login               OAuth/device/api-key login; picker includes custom keys\n\
+           login               OAuth/device/api-key login; preflight routing ids\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
@@ -690,7 +690,7 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-          put                 store a secret or company AI gateway key\n\
+           put                 store a secret or gateway key; preflight routing ids\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
@@ -909,6 +909,9 @@ fn help_verb(verb: &str) -> String {
               provider ids when no --provider-id is given. An explicit\n\
              --provider-id replaces the default; --replace keeps an existing\n\
              set and only fills a credential that holds none.\n\
+             Provider ids containing -gw- are reserved for gateway creation. If a\n\
+             registered default contains it, login refuses before storing; repair\n\
+             the default with ck auth provider set --service <service>.\n\
              \n\
              Providers: anthropic, openai, xai, google, gmail, antigravity, github-copilot,\n\
              kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
@@ -1213,7 +1216,11 @@ fn help_verb(verb: &str) -> String {
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
               default. A cookie:<domain> id always creates a session-cookie record.\n\
               Catalog ids store the table's routing provider ids by default. Explicit\n\
-              --provider-id wins; --replace keeps a stored set, as login does.\n\
+               --provider-id wins; --replace keeps a stored set, as login does.\n\
+               Without gateway flags, provider ids containing -gw- refuse before\n\
+               storing. Repair a registered default with ck auth provider set.\n\
+               If the id's service contains -gw-, no defaults are inherited and\n\
+               --provider-id is a usage error; use ck auth set-providers instead.\n\
               Use ck auth login to add a provider key, with a check where available.\n\
               Unknown API-key providers ask once for groups and routing ids before\n\
               reading the value. No groups or routing ids is valid; confirmation\n\
@@ -1597,7 +1604,7 @@ fn commit_login_admin(
     // fails still applies). An explicit flag always wins; a `--replace` that
     // already carries provider ids keeps
     // them, and the default lands only on a credential that holds none.
-    let ids = deposit_provider_ids(global, &id, explicit);
+    let ids = deposit_provider_ids(global, &id, explicit)?;
     let result = commit_login_deposit(global, op, preflighted_key, &id, &ids)?;
     if ids.is_empty() {
         print_missing_provider_note(global, &id);
@@ -1605,7 +1612,35 @@ fn commit_login_admin(
     Ok(result)
 }
 
-fn deposit_provider_ids(global: &GlobalArgs, id: &str, explicit: Vec<String>) -> Vec<String> {
+fn check_deposit_provider_flags(id: Option<&str>, ids: &[String]) -> Result<(), CliError> {
+    if !ids.is_empty() && id.is_some_and(|id| parse_credential_id(id).provider.contains("-gw-")) {
+        return Err(CliError::Usage(
+            "without gateway flags, an id whose service contains -gw- cannot take --provider-id; use ck auth set-providers instead".into(),
+        ));
+    }
+    if let Some(value) = ids.iter().find(|id| id.contains("-gw-")) {
+        return Err(CliError::Usage(
+            StoreOpError::InvalidProviderId {
+                rule: credentials_core::provider_ids::ProviderIdRule::Reserved,
+                value: value.clone(),
+            }
+            .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn deposit_provider_ids(
+    global: &GlobalArgs,
+    id: &str,
+    explicit: Vec<String>,
+) -> Result<Vec<String>, CliError> {
+    check_deposit_provider_flags(Some(id), &explicit)?;
+    // A marker in the service does not prove the record has gateway settings.
+    // Leave all provider-id changes for these records to the atomic store check.
+    if parse_credential_id(id).provider.contains("-gw-") {
+        return Ok(Vec::new());
+    }
     if explicit.is_empty() {
         let registered =
             credentials_core::store::registered_providers_read_only(&store_path(global))
@@ -1620,12 +1655,22 @@ fn deposit_provider_ids(global: &GlobalArgs, id: &str, explicit: Vec<String>) ->
                         .collect()
                 });
         if defaults.is_empty() || !stored_login_provider_ids(global, id).is_empty() {
-            Vec::new()
+            Ok(Vec::new())
         } else {
-            defaults
+            if let Some(value) = defaults.iter().find(|id| id.contains("-gw-")) {
+                let service = parse_credential_id(id).provider;
+                let error = StoreOpError::InvalidProviderId {
+                    rule: credentials_core::provider_ids::ProviderIdRule::Reserved,
+                    value: value.clone(),
+                };
+                return Err(CliError::Usage(format!(
+                    "{error}; registered service {service} has a reserved default provider id; repair it with ck auth provider set --service {service} before depositing"
+                )));
+            }
+            Ok(defaults)
         }
     } else {
-        explicit
+        Ok(explicit)
     }
 }
 
@@ -2481,7 +2526,9 @@ fn cmd_put(
     let explicit_ids = if gateway.is_some() {
         provider_id_values(args)?
     } else {
-        provider_id_flags(args)?
+        let ids = provider_id_flags(args)?;
+        check_deposit_provider_flags(options.optional("--id").as_deref(), &ids)?;
+        ids
     };
     if !put_prompt::prepare(global, &mut options)? {
         return Ok(());
@@ -2490,6 +2537,8 @@ fn cmd_put(
     if let Some(settings) = &gateway {
         credentials_core::gateway::validate_gateway_settings(&id, settings, &explicit_ids)
             .map_err(CliError::Store)?;
+    } else {
+        check_deposit_provider_flags(Some(&id), &explicit_ids)?;
     }
     if options
         .optional("--kind")
@@ -2498,6 +2547,13 @@ fn cmd_put(
     {
         return Ok(());
     }
+    // The provider prompt can register defaults. Resolve them after it returns,
+    // but before storing the key, so a refused metadata write leaves no key behind.
+    let ids = if gateway.is_some() {
+        explicit_ids
+    } else {
+        deposit_provider_ids(global, &id, explicit_ids)?
+    };
     let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
@@ -2629,7 +2685,7 @@ fn cmd_put(
                 auth_header: settings.auth.header,
                 auth_scheme: settings.auth.scheme,
                 headers: settings.headers,
-                provider_ids: explicit_ids,
+                provider_ids: ids,
             },
         )?;
         println!("created {id}");
@@ -2718,7 +2774,6 @@ fn cmd_put(
             }
         }
     }
-    let ids = deposit_provider_ids(global, &id, explicit_ids);
     finish_provider_deposit(global, &id, &ids)?;
     Ok(())
 }
@@ -3563,7 +3618,8 @@ fn cmd_other_api_key_login(
 }
 
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    provider_id_flags(args)?;
+    let explicit_ids = provider_id_flags(args)?;
+    check_deposit_provider_flags(optional(args, "--id").as_deref(), &explicit_ids)?;
     use credentials_core::oauth_login::{
         decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
         extract_chatgpt_account_id, generate_pkce, generate_state,
@@ -9223,6 +9279,36 @@ mod explicit_route_regressions {
 #[cfg(test)]
 mod provider_cli_tests {
     use super::*;
+
+    #[test]
+    fn ordinary_deposit_provider_flag_usage_checks_only_the_service_marker() {
+        let ordinary = vec!["openai".to_string()];
+        for id in ["apikey:openai", "apikey:openai:label-gw-x"] {
+            check_deposit_provider_flags(Some(id), &ordinary).unwrap();
+        }
+        for id in ["apikey:anthropic-gw-x", "apikey:anthropic-gw-x:team"] {
+            assert!(matches!(
+                check_deposit_provider_flags(Some(id), &ordinary),
+                Err(CliError::Usage(message)) if message.contains("ck auth set-providers")
+            ));
+            check_deposit_provider_flags(Some(id), &[]).unwrap();
+        }
+        assert!(matches!(
+            check_deposit_provider_flags(None, &["anthropic-gw-x".to_string()]),
+            Err(CliError::Usage(message)) if message.contains("rule=reserved")
+        ));
+    }
+
+    #[test]
+    fn ordinary_deposit_help_explains_reserved_ids_and_default_repairs() {
+        for verb in ["put", "login"] {
+            let help = help_verb(verb);
+            assert!(help.contains("-gw-"));
+            assert!(help.contains("ck auth provider set"));
+            assert!(help.contains("before storing") || help.contains("before\nstoring"));
+        }
+        assert!(help_verb("put").contains("--provider-id is a usage error"));
+    }
 
     #[test]
     fn provider_missing_report_places_skips_and_reasons_after_uncovered_ids() {

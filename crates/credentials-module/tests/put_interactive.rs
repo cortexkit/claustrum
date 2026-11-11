@@ -468,6 +468,85 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
 }
 
 #[test]
+fn ordinary_deposit_preflight_uses_defaults_registered_at_the_terminal_prompt() {
+    let fixture = Fixture::new();
+    let file = fixture.0.join("preflight-key");
+    std::fs::write(&file, VALUE).unwrap();
+    let screen = fixture.terminal(
+        &[
+            "put",
+            "--id",
+            "apikey:preflightvendor:work",
+            "--payload-file",
+            file.to_str().unwrap(),
+        ],
+        &[
+            ("Groups for this provider", b"\r", false),
+            (MODELS, b"prompt-route\r", false),
+            (ADDRESSES, b"\r", false),
+            (
+                "Which provider is this in Fusiform's list? Leave empty if unsure.",
+                b"\r",
+                false,
+            ),
+            ("Save these provider settings and continue?", b"y\r", false),
+        ],
+    );
+    assert!(
+        screen.contains("created apikey:preflightvendor:work"),
+        "{screen}"
+    );
+    let store = fixture.store();
+    assert_eq!(
+        store.registered_providers().unwrap()[0].provider_ids,
+        ["prompt-route"]
+    );
+    assert_eq!(
+        store.provider_ids("apikey:preflightvendor:work").unwrap(),
+        ["prompt-route"]
+    );
+    assert_eq!(
+        store
+            .get("apikey:preflightvendor:work")
+            .unwrap()
+            .payload
+            .expose(),
+        VALUE.as_bytes()
+    );
+}
+
+#[test]
+fn ordinary_deposit_preflight_usage_errors_precede_terminal_provider_and_value_prompts() {
+    let fixture = Fixture::new();
+    let tip = fixture.store().audit_tip().unwrap();
+    for (id, provider, reason) in [
+        ("apikey:unregistered", "anthropic-gw-x", "rule=reserved"),
+        (
+            "apikey:anthropic-gw-ordinary",
+            "openai",
+            "ck auth set-providers",
+        ),
+    ] {
+        let (status, screen) = terminal_cli::run(
+            fixture.command(&["put", "--id", id, "--provider-id", provider]),
+            &[],
+        );
+        assert_eq!(status.code(), Some(1), "{screen}");
+        assert!(screen.contains(reason), "{screen}");
+        for prompt in [
+            "Groups for this provider",
+            "Value (hidden)",
+            "Unknown provider",
+        ] {
+            assert!(!screen.contains(prompt), "{screen}");
+        }
+    }
+    let store = fixture.store();
+    assert!(store.list_meta().unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), tip);
+}
+
+#[test]
 fn registered_provider_default_no_stores_nothing_and_never_reads_the_value() {
     let fixture = Fixture::new();
     let before = fixture.store().audit_tip().unwrap();

@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(unix)]
+#[path = "terminal_cli.rs"]
+mod terminal_cli;
+
 const ID: &str = "apikey:anthropic-gw-acme";
 const PROVIDER: &str = "anthropic-gw-acme";
 
@@ -481,5 +485,325 @@ fn gateway_put_help_lists_settings_and_keeps_lines_under_eighty_columns() {
     assert!(
         help.lines().all(|line| line.chars().count() <= 80),
         "{help}"
+    );
+}
+
+#[test]
+fn ordinary_deposit_reserved_flags_refuse_before_any_op_and_preserve_state() {
+    for online in [false, true] {
+        let vault = GrantCliVault::new("ordinary-reserved-flags");
+        vault.bootstrap();
+        succeeded(vault.run(&put_args(ID, &payload_file("original-gateway-key"))));
+        let ordinary = "apikey:ordinary";
+        let marker = "apikey:openai-gw-plain";
+        for id in [ordinary, marker] {
+            succeeded(vault.run(&[
+                "put",
+                "--id",
+                id,
+                "--payload-file",
+                &payload_file("original-key"),
+            ]));
+        }
+        let snapshot = || {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            (
+                store.audit_tip().unwrap(),
+                [ID, ordinary, marker].map(|id| {
+                    let meta = store.meta(id).unwrap();
+                    (
+                        store.get(id).unwrap().payload.expose().to_vec(),
+                        meta.record_version,
+                        meta.incarnation,
+                        meta.categories,
+                        meta.provider_ids,
+                        store.gateway_settings(id).unwrap(),
+                    )
+                }),
+            )
+        };
+        let before = snapshot();
+        let peer = online.then(|| ProviderRoutePeer::start(&vault));
+        let file = payload_file("replacement-key");
+        let hash: String = credentials_core::store::payload_hash(b"original-gateway-key")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        for (id, mode, provider, reason) in [
+            (
+                "apikey:ordinary:new",
+                vec![],
+                "anthropic-gw-x",
+                "rule=reserved",
+            ),
+            (
+                ordinary,
+                vec!["--replace"],
+                "anthropic-gw-x",
+                "rule=reserved",
+            ),
+            (ID, vec!["--replace"], "openai", "ck auth set-providers"),
+            (
+                ID,
+                vec!["--expected-hash", &hash],
+                "openai",
+                "ck auth set-providers",
+            ),
+            (marker, vec!["--replace"], "openai", "ck auth set-providers"),
+            (
+                "apikey:openai-gw-new:team",
+                vec![],
+                "openai",
+                "ck auth set-providers",
+            ),
+        ] {
+            let mut args = vec![
+                "put",
+                "--id",
+                id,
+                "--payload-file",
+                &file,
+                "--provider-id",
+                provider,
+            ];
+            args.extend(mode);
+            let output = run(&vault, peer.as_ref(), &args);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(reason), "{stderr}");
+        }
+        if let Some(peer) = &peer {
+            assert!(peer.observed.lock().unwrap().is_empty());
+        }
+        drop(peer);
+        assert_eq!(snapshot(), before);
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        for id in ["apikey:ordinary:new", "apikey:openai-gw-new:team"] {
+            assert!(matches!(
+                store.get(id),
+                Err(credentials_core::store::StoreOpError::NotFound)
+            ));
+        }
+    }
+}
+
+#[test]
+fn ordinary_deposit_legacy_registered_gateway_defaults_refuse_before_any_op() {
+    for online in [false, true] {
+        let vault = GrantCliVault::new("ordinary-legacy-default");
+        vault.bootstrap();
+        // Seed a row an older build could write; current provider registration
+        // refuses reserved defaults, so the CLI cannot create this fixture.
+        let before = {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap().execute(
+                "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms) VALUES ('legacyvendor', '[\"llm-provider\"]', '[\"anthropic-gw-legacy\"]', 1)",
+                [],
+            ).unwrap();
+            (
+                store.audit_tip().unwrap(),
+                store.registered_providers().unwrap(),
+            )
+        };
+        let peer = online.then(|| ProviderRoutePeer::start(&vault));
+        let file = payload_file("legacy-default-key");
+        for mode in [vec![], vec!["--replace"], vec!["--expected-hash", "00"]] {
+            let mut args = vec![
+                "put",
+                "--id",
+                "apikey:legacyvendor:put",
+                "--payload-file",
+                &file,
+            ];
+            args.extend(mode);
+            let output = run(&vault, peer.as_ref(), &args);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(
+                credentials_core::store::list_meta_read_only(&vault.data_dir.join("store.db"))
+                    .unwrap()
+                    .is_empty(),
+                "deposit stored a key before refusing its inherited default"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for reason in [
+                "rule=reserved",
+                "registered service legacyvendor",
+                "ck auth provider set --service legacyvendor",
+            ] {
+                assert!(stderr.contains(reason), "{stderr}");
+            }
+        }
+        if let Some(peer) = &peer {
+            assert!(peer.observed.lock().unwrap().is_empty());
+        }
+        drop(peer);
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert!(store.list_meta().unwrap().is_empty());
+        assert_eq!(store.audit_tip().unwrap(), before.0);
+        assert_eq!(store.registered_providers().unwrap(), before.1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_deposit_login_legacy_registered_gateway_default_refuses_before_store() {
+    for online in [false, true] {
+        let vault = GrantCliVault::new("ordinary-login-legacy-default");
+        vault.bootstrap();
+        let before = {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap().execute(
+                "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms) VALUES ('legacyvendor', '[]', '[\"anthropic-gw-legacy\"]', 1)",
+                [],
+            ).unwrap();
+            (
+                store.audit_tip().unwrap(),
+                store.registered_providers().unwrap(),
+            )
+        };
+        let peer = online.then(|| ProviderRoutePeer::start(&vault));
+        let mut command = cli();
+        isolated_cli::assert_isolated(&command);
+        command
+            .args(["login", "--data-dir"])
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path);
+        if let Some(peer) = &peer {
+            command.arg("--subc").arg(&peer.connection);
+        }
+        let (status, screen) = terminal_cli::run(
+            command,
+            &[
+                (
+                    "Select provider to login (type to search)",
+                    b"Other API key provider\r",
+                    false,
+                ),
+                (
+                    "Provider name (optionally provider:label)",
+                    b"legacyvendor:login\r",
+                    false,
+                ),
+                (
+                    "Enter API key for legacyvendor:login",
+                    b"legacy-login-test-key\r",
+                    true,
+                ),
+            ],
+        );
+        assert_eq!(status.code(), Some(1), "{screen}");
+        assert!(!screen.contains("legacy-login-test-key"));
+        for reason in [
+            "rule=reserved",
+            "registered service legacyvendor",
+            "ck auth provider set --service legacyvendor",
+        ] {
+            assert!(screen.contains(reason), "{screen}");
+        }
+        assert!(!screen.contains("Groups for this provider"), "{screen}");
+        if let Some(peer) = &peer {
+            assert!(peer
+                .observed
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|op| op["op"] == "admin.status"));
+        }
+        drop(peer);
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert!(store.list_meta().unwrap().is_empty());
+        assert_eq!(store.audit_tip().unwrap(), before.0);
+        assert_eq!(store.registered_providers().unwrap(), before.1);
+    }
+}
+
+#[test]
+fn ordinary_deposit_marker_service_inherits_nothing_and_sends_no_second_op() {
+    for online in [false, true] {
+        let vault = GrantCliVault::new("ordinary-marker-default");
+        vault.bootstrap();
+        let id = "apikey:openai-gw-legacy:team";
+        {
+            let _store = open_leased_store(&vault.data_dir, &vault.key_path);
+            rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap().execute(
+                "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms) VALUES ('openai-gw-legacy', '[]', '[\"openai\"]', 1)",
+                [],
+            ).unwrap();
+        }
+        let peer = online.then(|| ProviderRoutePeer::start(&vault));
+        let file = payload_file("ordinary-marker-key");
+        succeeded(run(
+            &vault,
+            peer.as_ref(),
+            &["put", "--id", id, "--payload-file", &file],
+        ));
+        if let Some(peer) = &peer {
+            let ops = peer.observed.lock().unwrap();
+            let writes: Vec<_> = ops.iter().filter(|op| op["op"] != "admin.status").collect();
+            assert_eq!(writes.len(), 1, "{writes:?}");
+            assert_eq!(writes[0]["op"], "admin.store");
+        }
+        drop(peer);
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert_eq!(
+            store.get(id).unwrap().payload.expose(),
+            b"ordinary-marker-key"
+        );
+        assert!(store.provider_ids(id).unwrap().is_empty());
+        assert!(store.gateway_settings(id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn ordinary_deposit_second_op_carries_the_effective_defaults_or_explicit_override() {
+    let vault = GrantCliVault::new("ordinary-effective-list");
+    vault.bootstrap();
+    {
+        let _store = open_leased_store(&vault.data_dir, &vault.key_path);
+        rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap().execute(
+            "INSERT INTO registered_providers (service, categories_json, provider_ids_json, created_at_ms) VALUES ('effective-provider', '[]', '[\"aa\",\"bb\"]', 1)",
+            [],
+        ).unwrap();
+    }
+    let peer = ProviderRoutePeer::start(&vault);
+    let file = payload_file("effective-provider-key");
+    for (id, explicit, expected) in [
+        (
+            "apikey:effective-provider:defaults",
+            vec![],
+            vec!["aa", "bb"],
+        ),
+        (
+            "apikey:effective-provider:explicit",
+            vec!["--provider-id", "cc"],
+            vec!["cc"],
+        ),
+    ] {
+        peer.observed.lock().unwrap().clear();
+        let mut args = vec!["put", "--id", id, "--payload-file", &file];
+        args.extend(explicit);
+        succeeded(run(&vault, Some(&peer), &args));
+        let ops = peer.observed.lock().unwrap();
+        let writes: Vec<_> = ops.iter().filter(|op| op["op"] != "admin.status").collect();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes[0]["op"], "admin.store");
+        assert_eq!(writes[1]["op"], "admin.set_providers");
+        assert_eq!(writes[1]["provider_ids"], serde_json::json!(expected));
+    }
+    drop(peer);
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    assert_eq!(
+        store
+            .provider_ids("apikey:effective-provider:defaults")
+            .unwrap(),
+        ["aa", "bb"]
+    );
+    assert_eq!(
+        store
+            .provider_ids("apikey:effective-provider:explicit")
+            .unwrap(),
+        ["cc"]
     );
 }

@@ -1569,6 +1569,10 @@ pub enum StoreOpError {
     InvalidGatewaySettings {
         rule: crate::gateway::GatewaySettingsRule,
     },
+    /// The requested change would alter gateway metadata fixed at creation.
+    GatewayFixed {
+        rule: crate::gateway::GatewayFixedRule,
+    },
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
     /// Approval would hand existing name-bound grants to a new consumer without consent.
@@ -1687,6 +1691,7 @@ fn refuse_short_term_bedrock_key(record: &VaultRecord) -> Result<(), StoreOpErro
 
 enum IdentityPolicyOverwriteOutcome {
     NotFound,
+    GatewayFixedKind,
     AccountMismatch {
         retained_account_id: String,
         incoming_account_id: String,
@@ -1735,7 +1740,7 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
-            StoreOpError::InvalidServiceName { service } => write!(f, "Provider service {service:?} is invalid; use a non-empty name without colons, whitespace, control characters or '|'."),
+            StoreOpError::InvalidServiceName { service } => write!(f, "Provider service {service:?} is invalid; use a non-empty name without colons, whitespace, control characters, '|' or the reserved '-gw-' marker."),
             StoreOpError::ServiceInProviderCatalog { service } => write!(f, "Provider service {service:?} is in the fixed provider catalog and cannot be registered."),
             StoreOpError::InvalidDisplayName => f.write_str("invalid_params/permanent: invalid display_name"),
             StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31}"),
@@ -1746,6 +1751,9 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidGatewaySettings { rule } => {
                 write!(f, "invalid_gateway_settings/permanent: rule={rule}")
+            }
+            StoreOpError::GatewayFixed { rule } => {
+                write!(f, "gateway_fixed/permanent: rule={rule}")
             }
             StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
             StoreOpError::EnrollmentNameHasGrants { name } => write!(
@@ -1840,6 +1848,7 @@ impl StoreOpError {
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidGatewaySettings { .. } => Some("invalid_gateway_settings"),
+            StoreOpError::GatewayFixed { .. } => Some("gateway_fixed"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
             StoreOpError::EnrollmentNameHasGrants { .. } => Some("enrollment_name_has_grants"),
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
@@ -4163,6 +4172,11 @@ impl EncryptedStore {
             if resulting == current {
                 return Ok(Ok(false));
             }
+            if tables == MetadataTables::Local && gateway::has_settings(tx, credential_id)? {
+                return Ok(Err(StoreOpError::GatewayFixed {
+                    rule: crate::gateway::GatewayFixedRule::Category,
+                }));
+            }
             tx.execute(
                 &format!(
                     "DELETE FROM {} WHERE credential_id = ?1",
@@ -4225,7 +4239,8 @@ impl EncryptedStore {
     ///
     /// Checks run in a fixed order and only the first failure is reported:
     /// `charset` then `length` for each requested id in request order, then
-    /// `duplicate`, then the credential's existence, then `count` on the RESULTING set.
+    /// `duplicate`, then the credential's existence, gateway restrictions, and `count`
+    /// on the RESULTING set.
     /// The stored-state checks, the mapping write and the audit row share one
     /// transaction, so a refusal changes nothing.
     ///
@@ -4256,6 +4271,7 @@ impl EncryptedStore {
                 })?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?;
             drop(stmt);
+            let mut over_limit = None;
             let resulting = match mode {
                 SetProvidersMode::Remove => {
                     let mut resulting = current.clone();
@@ -4273,16 +4289,33 @@ impl EncryptedStore {
                     // whose addition crosses the cap (31 stored + `n1 n2` names `n2`).
                     for id in provider_ids {
                         resulting.insert(id.clone());
-                        if resulting.len() > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL {
-                            return Ok(Err(StoreOpError::InvalidProviderId {
-                                rule: crate::provider_ids::ProviderIdRule::Count,
-                                value: id.clone(),
-                            }));
+                        if over_limit.is_none()
+                            && resulting.len()
+                                > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL
+                        {
+                            over_limit = Some(id.clone());
                         }
                     }
                     resulting
                 }
             };
+            if tables == MetadataTables::Local && gateway::has_settings(tx, credential_id)? {
+                if resulting != current {
+                    return Ok(Err(StoreOpError::GatewayFixed {
+                        rule: crate::gateway::GatewayFixedRule::ProviderId,
+                    }));
+                }
+            } else if mode != SetProvidersMode::Remove {
+                if let Err(error) = crate::provider_ids::check_reserved_provider_ids(provider_ids) {
+                    return Ok(Err(error));
+                }
+            }
+            if let Some(value) = over_limit {
+                return Ok(Err(StoreOpError::InvalidProviderId {
+                    rule: crate::provider_ids::ProviderIdRule::Count,
+                    value,
+                }));
+            }
             let resulting: Vec<String> = resulting.into_iter().collect();
             if resulting.iter().eq(current.iter()) {
                 return Ok(Ok(resulting));
@@ -4410,6 +4443,9 @@ impl EncryptedStore {
             };
             let mut changed = 0usize;
             for credential_id in ids {
+                if gateway::has_settings(tx, &credential_id)? {
+                    continue;
+                }
                 let defaults: BTreeSet<String> =
                     crate::catalog::category_defaults(&credential_id)
                         .into_iter()
@@ -4752,6 +4788,11 @@ impl EncryptedStore {
         // version we read, so a concurrent writer that already bumped it leaves zero
         // rows changed (no error-string matching). Zero changed => CasMismatch.
         let changed = self.fenced_write(|tx| {
+            if (record.kind != CredentialKind::ApiKey || record.refresh_adapter.is_some())
+                && gateway::has_settings(tx, credential_id)?
+            {
+                return Ok(None);
+            }
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
@@ -4791,12 +4832,15 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(n)
+            Ok(Some(n))
         })?;
-        if changed == 0 {
-            return Err(StoreOpError::CasMismatch);
+        match changed {
+            None => Err(StoreOpError::GatewayFixed {
+                rule: crate::gateway::GatewayFixedRule::Kind,
+            }),
+            Some(0) => Err(StoreOpError::CasMismatch),
+            Some(_) => Ok(()),
         }
-        Ok(())
     }
 
     /// Overwrite an existing record UNCONDITIONALLY (no CAS), re-sealing it at
@@ -4893,6 +4937,11 @@ impl EncryptedStore {
             let Some((current_version, existing_envelope)) = existing else {
                 return Ok(IdentityPolicyOverwriteOutcome::NotFound);
             };
+            if (incoming.kind != CredentialKind::ApiKey || incoming.refresh_adapter.is_some())
+                && gateway::has_settings(tx, credential_id)?
+            {
+                return Ok(IdentityPolicyOverwriteOutcome::GatewayFixedKind);
+            }
             let next_version = (current_version as u64).saturating_add(1);
 
             let existing_record = envelope::open(
@@ -4975,6 +5024,9 @@ impl EncryptedStore {
         })?;
         match outcome {
             IdentityPolicyOverwriteOutcome::NotFound => Err(StoreOpError::NotFound),
+            IdentityPolicyOverwriteOutcome::GatewayFixedKind => Err(StoreOpError::GatewayFixed {
+                rule: crate::gateway::GatewayFixedRule::Kind,
+            }),
             IdentityPolicyOverwriteOutcome::AccountMismatch {
                 retained_account_id,
                 incoming_account_id,
@@ -18276,6 +18328,10 @@ mod gateway;
 #[cfg(test)]
 #[path = "gateway_create_tests.rs"]
 mod gateway_create_tests;
+
+#[cfg(test)]
+#[path = "gateway_fixed_tests.rs"]
+mod gateway_fixed_tests;
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, valid_provider_header_name,
     validate_registered_provider_service, validate_registered_provider_settings,

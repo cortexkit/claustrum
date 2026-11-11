@@ -55,6 +55,30 @@ pub enum GatewaySettingsRule {
     ProviderId,
 }
 
+/// Stable tokens for changes to gateway properties fixed at creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayFixedRule {
+    Kind,
+    Category,
+    ProviderId,
+}
+
+impl GatewayFixedRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Category => "category",
+            Self::ProviderId => "provider_id",
+        }
+    }
+}
+
+impl std::fmt::Display for GatewayFixedRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl GatewaySettingsRule {
     pub fn as_str(self) -> &'static str {
         match self {

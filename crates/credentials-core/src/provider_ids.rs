@@ -34,6 +34,8 @@ pub enum ProviderIdRule {
     /// The request names the same id twice. An id that is already stored is not a
     /// duplicate.
     Duplicate,
+    /// The id contains the marker reserved for gateway credentials.
+    Reserved,
     /// The resulting set would hold more than [`MAX_PROVIDER_IDS_PER_CREDENTIAL`] ids.
     Count,
 }
@@ -45,6 +47,7 @@ impl ProviderIdRule {
             ProviderIdRule::Charset => "charset",
             ProviderIdRule::Length => "length",
             ProviderIdRule::Duplicate => "duplicate",
+            ProviderIdRule::Reserved => "reserved",
             ProviderIdRule::Count => "count",
         }
     }
@@ -67,6 +70,18 @@ fn charset_ok(id: &str) -> bool {
 
 fn length_ok(id: &str) -> bool {
     (MIN_PROVIDER_ID_LEN..=MAX_PROVIDER_ID_LEN).contains(&id.len())
+}
+
+/// Check reserved markers separately so writers can apply this after shape and
+/// existence checks, but before the set cap.
+pub(crate) fn check_reserved_provider_ids(ids: &[String]) -> Result<(), StoreOpError> {
+    if let Some(value) = ids.iter().find(|id| id.contains("-gw-")) {
+        return Err(StoreOpError::InvalidProviderId {
+            rule: ProviderIdRule::Reserved,
+            value: value.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Check a requested provider-id list against the rules that need no stored state.

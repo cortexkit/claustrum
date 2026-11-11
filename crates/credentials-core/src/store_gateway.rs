@@ -3,6 +3,20 @@ use crate::gateway::{
     gateway_settings_digest, validate_gateway_settings, GatewaySettings, GatewaySettingsRule,
 };
 
+pub(super) fn has_settings(
+    conn: &rusqlite::Connection,
+    credential_id: &str,
+) -> rusqlite::Result<bool> {
+    if read_schema_version(conn)? < GATEWAY_SETTINGS_SCHEMA_VERSION {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credential_gateway_settings WHERE credential_id = ?1)",
+        [credential_id],
+        |row| row.get(0),
+    )
+}
+
 impl EncryptedStore {
     /// Create a gateway key and its fixed metadata atomically under the writer lease,
     /// refusing a writer superseded by a newer lease holder.

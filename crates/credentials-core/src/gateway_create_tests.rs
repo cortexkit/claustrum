@@ -6,7 +6,7 @@ use crate::gateway::{GatewayAuth, GatewayHeader, GatewaySettings, GatewaySetting
 const ID: &str = "apikey:anthropic-gw-acme:eu";
 const PROVIDER: &str = "anthropic-gw-acme";
 
-fn settings() -> GatewaySettings {
+pub(super) fn settings() -> GatewaySettings {
     GatewaySettings {
         base_url: "http://localhost:4000/v1".into(),
         auth: GatewayAuth {

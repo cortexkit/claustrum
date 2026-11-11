@@ -88,7 +88,7 @@ pub use enrollment::{
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use gateway::{
     gateway_provider_vendor, gateway_settings_digest, validate_gateway_settings, GatewayAuth,
-    GatewayHeader, GatewaySettings, GatewaySettingsRule, ValidatedGateway,
+    GatewayFixedRule, GatewayHeader, GatewaySettings, GatewaySettingsRule, ValidatedGateway,
 };
 pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;

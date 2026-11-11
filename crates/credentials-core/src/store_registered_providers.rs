@@ -120,7 +120,7 @@ pub fn api_key_service(id: &str) -> Option<&str> {
 
 /// Validate before either CLI preflight or a store write, so both routes refuse alike.
 pub fn validate_registered_provider_service(service: &str) -> Result<(), StoreOpError> {
-    if !crate::credential_id::valid_api_key_service_name(service) {
+    if service.contains("-gw-") || !crate::credential_id::valid_api_key_service_name(service) {
         return Err(StoreOpError::InvalidServiceName {
             service: service.to_owned(),
         });
@@ -241,6 +241,7 @@ impl EncryptedStore {
             return Err(StoreOpError::InvalidCategoryName);
         }
         crate::provider_ids::check_provider_ids(provider_ids)?;
+        crate::provider_ids::check_reserved_provider_ids(provider_ids)?;
         if provider_ids.len() > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL {
             return Err(StoreOpError::InvalidProviderId {
                 rule: crate::provider_ids::ProviderIdRule::Count,

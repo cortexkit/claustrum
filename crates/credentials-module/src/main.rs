@@ -2536,6 +2536,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.deposit_keys".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.deposit".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "manifest.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.list".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -2875,7 +2876,7 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+    fn the_manifest_declares_every_secret_manifest_and_permissions_op_with_its_kind() {
         let m = manifest("claustrum", None);
         let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
             panic!("management surface")
@@ -5824,6 +5825,15 @@ mod tests {
                         "{home}"
                     );
                     assert_eq!(home, list);
+                    let approve = routed_json(
+                        &surface,
+                        &admin,
+                        90,
+                        "manifest.approve",
+                        json!({"envelope_b64url":"AA","signature_b64url":"AA"}),
+                    )
+                    .await;
+                    assert_eq!(approve, list);
                 }
             }
         }
@@ -6115,7 +6125,7 @@ mod tests {
         )
     }
 
-    /// On a vault whose secrets live on another member, each of the seven phone ops is
+    /// On a vault whose secrets live on another member, each of the phone ops is
     /// refused `secret_home_elsewhere` naming the home, for a registered phone and for a
     /// paired phone that never registered here, and none of them writes anything. The
     /// same requests are served again once the setting is cleared, so the refusal comes
@@ -6144,6 +6154,10 @@ mod tests {
             ("secret.deposit", deposit.clone()),
             (
                 "secret.approve",
+                json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
+            ),
+            (
+                "manifest.approve",
                 json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
             ),
             ("secret.list", json!({})),

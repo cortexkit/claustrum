@@ -329,8 +329,8 @@ pub struct ListScopedCredential {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_tier_source: Option<String>,
     /// How this credential authenticates, from the closed set `apikey`, `chatgpt`,
-    /// `antigravity`, `oauth`. Derived only from the unsealed record's kind and refresh
-    /// adapter (`credentials_core::list_auth_method`), never from the id.
+    /// `antigravity`, `oauth`, `gateway`. A gateway settings row takes precedence;
+    /// otherwise derived from the unsealed record's kind and refresh adapter, not its id.
     ///
     /// Absent, not null and not `""`, on a row the caller can only `sign`/`open` (the
     /// record is not unsealed for it) and on a record whose kind and adapter map to no
@@ -662,7 +662,7 @@ pub struct GetResult {
     /// limits from), when captured at login. NON-secret display metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
-    /// Read-time catalog or registry metadata, only for `credential.get_scoped`.
+    /// Read-time gateway, catalog or registry metadata, only for `credential.get_scoped`.
     /// Grouping the fields keeps an absent descriptor distinct from absent evidence.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub scoped_descriptor: Option<Box<ScopedKeyDescriptor>>,
@@ -674,6 +674,10 @@ pub struct ScopedKeyDescriptor {
     hosts: Vec<String>,
     // A descriptor with no observed bogus-key refusal still emits explicit null.
     invalid_key: Option<credentials_core::catalog::InvalidKeyEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -694,6 +698,26 @@ impl GetResult {
 }
 
 impl ScopedKeyDescriptor {
+    fn for_gateway(gateway: &credentials_core::StoredGatewaySettings) -> Box<Self> {
+        Box::new(Self {
+            auth: ScopedKeyAuth {
+                header: gateway.settings.auth.header.clone(),
+                scheme: gateway.settings.auth.scheme.clone(),
+            },
+            hosts: vec![gateway.host.clone()],
+            invalid_key: None,
+            base_url: Some(gateway.settings.base_url.clone()),
+            headers: Some(
+                gateway
+                    .settings
+                    .headers
+                    .iter()
+                    .map(|header| (header.name.clone(), header.value.clone()))
+                    .collect(),
+            ),
+        })
+    }
+
     fn for_id(
         credential_id: &str,
         providers: &[credentials_core::store::RegisteredProvider],
@@ -714,6 +738,8 @@ impl ScopedKeyDescriptor {
                     },
                     hosts: row.hosts.iter().map(|host| (*host).into()).collect(),
                     invalid_key: row.invalid_key,
+                    base_url: None,
+                    headers: None,
                 }))
             })
             .or_else(|| {
@@ -729,6 +755,8 @@ impl ScopedKeyDescriptor {
                     },
                     hosts: row.hosts.clone(),
                     invalid_key: None,
+                    base_url: None,
+                    headers: None,
                 }))
             })
     }
@@ -769,6 +797,307 @@ mod get_scoped_tests {
 
     fn registered_descriptor() -> Value {
         json!({"auth": {"header": "x-api-key", "scheme": "raw"}, "hosts": ["api.example.com"], "invalid_key": null})
+    }
+
+    fn gateway_settings(base_url: &str, with_headers: bool) -> credentials_core::GatewaySettings {
+        credentials_core::GatewaySettings {
+            base_url: base_url.into(),
+            auth: credentials_core::GatewayAuth {
+                header: "x-portkey-api-key".into(),
+                scheme: "raw".into(),
+            },
+            headers: if with_headers {
+                vec![
+                    credentials_core::GatewayHeader {
+                        name: "x-route".into(),
+                        value: "company".into(),
+                    },
+                    credentials_core::GatewayHeader {
+                        name: "x-team".into(),
+                        value: "engineering".into(),
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn create_gateway(
+        store: &credentials_core::EncryptedStore,
+        id: &str,
+        settings: &credentials_core::GatewaySettings,
+        payload: &[u8],
+    ) {
+        let provider_id = id.split(':').nth(1).unwrap().to_string();
+        store
+            .gateway_create_audited(
+                id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", payload.to_vec(), None),
+                settings,
+                &[provider_id],
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+    }
+
+    fn category_grants(store: &credentials_core::EncryptedStore, principal: &str, category: &str) {
+        for operation in [GrantOperation::Read, GrantOperation::List] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    principal,
+                    SelectorKind::Category,
+                    category,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_scoped_descriptors_and_lists_use_per_credential_settings() {
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(215);
+        category_grants(&store, "gateway-reader", "llm-gateway");
+        category_grants(&store, "provider-reader", "llm-provider");
+        let principal = Principal::Reserved {
+            module_id: "gateway-reader".into(),
+        };
+        let provider_principal = Principal::Reserved {
+            module_id: "provider-reader".into(),
+        };
+        let cases = [
+            (
+                "apikey:anthropic-gw-company",
+                "https://api.example.com:8443/prefix",
+                "api.example.com",
+                "anthropic",
+                true,
+            ),
+            (
+                "apikey:moonshotai-gw-x:work",
+                "http://[::1]:4000/v1",
+                "[::1]",
+                "moonshot",
+                false,
+            ),
+            (
+                "apikey:openai-gw-local",
+                "http://localhost:4000",
+                "localhost",
+                "openai",
+                false,
+            ),
+        ];
+        for (id, base_url, host, vendor, with_headers) in cases {
+            let settings = gateway_settings(base_url, with_headers);
+            create_gateway(&store, id, &settings, b"k");
+            let params = GetScopedParams {
+                credential_id: id.into(),
+                min_ttl_ms: None,
+                enrollment_token: None,
+            };
+            let expected_headers = if with_headers {
+                json!({"x-route": "company", "x-team": "engineering"})
+            } else {
+                json!({})
+            };
+            assert_eq!(
+                serde_json::to_value(surface.get_scoped(Some(&principal), &params).await).unwrap(),
+                golden_reply(
+                    id,
+                    1,
+                    json!({
+                        "auth": {"header": "x-portkey-api-key", "scheme": "raw"},
+                        "hosts": [host],
+                        "invalid_key": null,
+                        "base_url": base_url,
+                        "headers": expected_headers,
+                    })
+                ),
+            );
+            let list_params = ListScopedParams {
+                enrollment_token: None,
+            };
+            let list = surface.list_scoped(Some(&principal), &list_params).unwrap();
+            let row = list.credentials.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.auth_method.as_deref(), Some("gateway"));
+            assert_eq!(row.provider_ids, [id.split(':').nth(1).unwrap()]);
+            assert_eq!(row.serves, [vendor]);
+            assert_eq!(row.hosts, Some(vec![host.into()]));
+            assert_eq!(row.categories, ["llm-gateway"]);
+            assert!(row.fusiform_provider_id.is_none());
+            assert!(serde_json::to_value(row)
+                .unwrap()
+                .get("fusiform_provider_id")
+                .is_none());
+            assert_eq!(
+                surface
+                    .watch_scoped(Some(&principal), &list_params)
+                    .unwrap()
+                    .0,
+                list.view
+            );
+            assert!(surface
+                .list_scoped(Some(&provider_principal), &list_params)
+                .unwrap()
+                .credentials
+                .is_empty());
+            assert!(matches!(
+                surface.get_scoped(Some(&provider_principal), &params).await,
+                GetOutcome::Err {
+                    error: ErrorBody {
+                        code: ReadError::NotFound,
+                        ..
+                    }
+                }
+            ));
+        }
+
+        let id = "apikey:openai";
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .unwrap();
+        store
+            .set_categories_audited(
+                id,
+                credentials_core::SetCategoryMode::Set,
+                &["llm-gateway".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        let list = surface
+            .list_scoped(
+                Some(&principal),
+                &ListScopedParams {
+                    enrollment_token: None,
+                },
+            )
+            .unwrap();
+        let ordinary = list.credentials.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(ordinary.auth_method.as_deref(), Some("apikey"));
+        let reply = serde_json::to_value(
+            surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await,
+        )
+        .unwrap();
+        assert_eq!(reply, golden_reply(id, 1, openai_descriptor()));
+        assert!(reply.get("base_url").is_none());
+        assert!(reply.get("headers").is_none());
+    }
+
+    #[tokio::test]
+    async fn gateway_scoped_read_refuses_recreation_before_settings_lookup() {
+        for point in ["admitted", "gateway_settings"] {
+            let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(216);
+            const ID: &str = "apikey:anthropic-gw-company";
+            create_gateway(
+                &store,
+                ID,
+                &gateway_settings("http://localhost:4000", false),
+                b"old-key",
+            );
+            category_grants(&store, "gateway-reader", "llm-gateway");
+            let writer = Arc::clone(&store);
+            surface.set_incarnation_hook(point, move || {
+                writer
+                    .remove_audited(ID, AuditCtx::admin(AuditOp::Remove))
+                    .unwrap();
+                create_gateway(
+                    &writer,
+                    ID,
+                    &gateway_settings("http://[::1]:5000/v1", true),
+                    b"new-key",
+                );
+            });
+            let principal = Principal::Reserved {
+                module_id: "gateway-reader".into(),
+            };
+            let params = GetScopedParams {
+                credential_id: ID.into(),
+                min_ttl_ms: None,
+                enrollment_token: None,
+            };
+            assert!(
+                matches!(
+                    surface.get_scoped(Some(&principal), &params).await,
+                    GetOutcome::Err {
+                        error: ErrorBody {
+                            code: ReadError::NotFound,
+                            ..
+                        }
+                    }
+                ),
+                "{point}"
+            );
+            let replacement =
+                serde_json::to_value(surface.get_scoped(Some(&principal), &params).await).unwrap();
+            assert_eq!(replacement["payload"], json!(b"new-key"));
+            assert_eq!(replacement["base_url"], "http://[::1]:5000/v1");
+            assert_eq!(
+                replacement["headers"],
+                json!({"x-route": "company", "x-team": "engineering"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_scoped_read_and_list_refuse_mismatched_stored_incarnation() {
+        let (surface, store, db, _root) = crate::tests::tmp_surface_with_store(217);
+        const ID: &str = "apikey:anthropic-gw-company";
+        create_gateway(
+            &store,
+            ID,
+            &gateway_settings("http://localhost:4000", false),
+            b"k",
+        );
+        category_grants(&store, "gateway-reader", "llm-gateway");
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE credential_gateway_settings SET incarnation = ?1 WHERE credential_id = ?2",
+                ["00000000000000000000000000000000", ID],
+            )
+            .unwrap();
+        let principal = Principal::Reserved {
+            module_id: "gateway-reader".into(),
+        };
+        let params = GetScopedParams {
+            credential_id: ID.into(),
+            min_ttl_ms: None,
+            enrollment_token: None,
+        };
+        assert!(matches!(
+            surface.get_scoped(Some(&principal), &params).await,
+            GetOutcome::Err {
+                error: ErrorBody {
+                    code: ReadError::NotFound,
+                    ..
+                }
+            }
+        ));
+        assert!(surface
+            .list_scoped(
+                Some(&principal),
+                &ListScopedParams {
+                    enrollment_token: None
+                }
+            )
+            .unwrap()
+            .credentials
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1543,12 +1872,13 @@ pub(crate) fn list_scoped_view(
 
 #[cfg(test)]
 pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
-    project_list_scoped_with_providers(snapshot, &[])
+    project_list_scoped_with_providers(snapshot, &[], &HashMap::new())
 }
 
 fn project_list_scoped_with_providers(
     snapshot: ScopedListSnapshot,
     providers: &[credentials_core::store::RegisteredProvider],
+    gateways: &HashMap<String, credentials_core::StoredGatewaySettings>,
 ) -> ListScopedResult {
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
@@ -1566,12 +1896,15 @@ fn project_list_scoped_with_providers(
         .rows
         .into_iter()
         .map(|row| {
+            let gateway = gateways.get(&row.id);
             let (account_id, email, org_name) = row
                 .identity
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
-                fusiform_provider_id: if let Some(provider) =
+                fusiform_provider_id: if gateway.is_some() {
+                    None
+                } else if let Some(provider) =
                     credentials_core::catalog::api_key_provider_for_credential(&row.id)
                 {
                     provider.fusiform_provider_id.map(str::to_owned)
@@ -1579,16 +1912,23 @@ fn project_list_scoped_with_providers(
                     credentials_core::store::RegisteredProvider::for_id(providers, &row.id)
                         .and_then(|provider| provider.fusiform_provider_id.clone())
                 },
-                hosts: ScopedKeyDescriptor::for_id(&row.id, providers)
+                hosts: gateway
+                    .map(ScopedKeyDescriptor::for_gateway)
+                    .or_else(|| ScopedKeyDescriptor::for_id(&row.id, providers))
                     .map(|descriptor| descriptor.hosts),
                 provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
                 credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
-                serves: credentials_core::catalog::serves_for(&row.id)
-                    .iter()
-                    .map(|vendor| vendor.as_str().to_string())
-                    .collect(),
+                serves: gateway.map_or_else(
+                    || {
+                        credentials_core::catalog::serves_for(&row.id)
+                            .iter()
+                            .map(|vendor| vendor.as_str().to_string())
+                            .collect()
+                    },
+                    |gateway| vec![gateway.vendor.as_str().to_string()],
+                ),
                 refresh_adapter: row.refresh_adapter.clone(),
                 id: row.id,
                 categories: row.categories,
@@ -3001,13 +3341,14 @@ impl ReadSurface {
                 },
             )
         });
+        let gateways = self.scoped_gateway_settings(&mut snapshot)?;
         let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
         let providers = self
             .engine
             .store()
             .registered_providers()
             .map_err(|_| ReadError::StoreError)?;
-        let result = project_list_scoped_with_providers(snapshot, &providers);
+        let result = project_list_scoped_with_providers(snapshot, &providers, &gateways);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -3075,7 +3416,8 @@ impl ReadSurface {
             .store()
             .registered_providers()
             .map_err(|_| ReadError::StoreError)?;
-        let view = project_list_scoped_with_providers(snapshot, &providers).view;
+        let gateways = self.scoped_gateway_settings(&mut snapshot)?;
+        let view = project_list_scoped_with_providers(snapshot, &providers, &gateways).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
         input.push(1);
@@ -3093,6 +3435,33 @@ impl ReadSurface {
 
     pub(crate) fn subscribe_writes(&self) -> tokio::sync::watch::Receiver<()> {
         self.engine.store().subscribe_writes()
+    }
+
+    fn scoped_gateway_settings(
+        &self,
+        snapshot: &mut ScopedListSnapshot,
+    ) -> Result<HashMap<String, credentials_core::StoredGatewaySettings>, ReadError> {
+        let mut gateways = HashMap::new();
+        let mut rows = Vec::with_capacity(snapshot.rows.len());
+        for row in std::mem::take(&mut snapshot.rows) {
+            if row.auth_method == Some(credentials_core::ListAuthMethod::Gateway) {
+                let gateway = self
+                    .engine
+                    .store()
+                    .gateway_settings(&row.id)
+                    .map_err(|error| map_store_error(&error))?;
+                // A snapshot row must not borrow settings from a replacement record.
+                let Some(gateway) =
+                    gateway.filter(|gateway| gateway.incarnation == row.incarnation)
+                else {
+                    continue;
+                };
+                gateways.insert(row.id.clone(), gateway);
+            }
+            rows.push(row);
+        }
+        snapshot.rows = rows;
+        Ok(gateways)
     }
 
     /// Add the rows for every remote record the snapshot's grants reach, read from this
@@ -3357,22 +3726,39 @@ impl ReadSurface {
                     _ => None,
                 }
                 .or_else(|| record.identity.account_id.clone());
-                GetOutcome::Ok(
-                    GetResult {
-                        payload: record.payload.into_inner().to_vec(),
-                        expires_at_ms: record.expires_at_ms,
-                        record_version: record.record_version,
-                        // The principal supplied this id; echo it after the successful read so
-                        // scoped and handle-authorized success bodies keep one shape.
-                        credential_id: Some(params.credential_id.clone()),
-                        project_id,
-                        account_id,
-                        email: record.identity.email.clone(),
-                        org_name: record.identity.org_name.clone(),
-                        scoped_descriptor: None,
+                #[cfg(test)]
+                self.run_incarnation_hook("gateway_settings");
+                let gateway = match self.engine.store().gateway_settings(&params.credential_id) {
+                    Ok(gateway) => gateway,
+                    Err(error) => return err(map_store_error(&error)),
+                };
+                let descriptor = match gateway {
+                    Some(gateway) => {
+                        if gateway.incarnation != refreshed.incarnation {
+                            self.record_scoped_refusal(
+                                principal,
+                                &params.credential_id,
+                                ScopedReadRefusal::NotFound,
+                            );
+                            return err(ReadError::NotFound);
+                        }
+                        Some(ScopedKeyDescriptor::for_gateway(&gateway))
                     }
-                    .with_scoped_descriptor(&params.credential_id, &providers),
-                )
+                    None => ScopedKeyDescriptor::for_id(&params.credential_id, &providers),
+                };
+                GetOutcome::Ok(GetResult {
+                    payload: record.payload.into_inner().to_vec(),
+                    expires_at_ms: record.expires_at_ms,
+                    record_version: record.record_version,
+                    // The principal supplied this id; echo it after the successful read so
+                    // scoped and handle-authorized success bodies keep one shape.
+                    credential_id: Some(params.credential_id.clone()),
+                    project_id,
+                    account_id,
+                    email: record.identity.email.clone(),
+                    org_name: record.identity.org_name.clone(),
+                    scoped_descriptor: descriptor,
+                })
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
                 self.record_scoped_refusal(
@@ -4774,6 +5160,61 @@ mod list_scoped_tests {
         }
     }
 
+    #[test]
+    fn gateway_settings_override_catalog_and_registry_without_changing_ordinary_views() {
+        let providers = vec![credentials_core::store::RegisteredProvider {
+            service: "custom".into(),
+            categories: vec![],
+            provider_ids: vec![],
+            created_at_ms: 1,
+            hosts: vec!["api.example.com".into()],
+            auth_header: Some("authorization".into()),
+            auth_scheme: Some("bearer".into()),
+            fusiform_provider_id: Some("openai".into()),
+        }];
+        let mut gateways = HashMap::new();
+        // Real gateway ids cannot collide with catalog or registry services. These
+        // projection-only rows force both collisions to pin descriptor precedence.
+        for id in ["apikey:openai", "apikey:custom"] {
+            let mut source = scoped_row_with_adapter(id, None);
+            source.auth_method = Some(credentials_core::ListAuthMethod::Gateway);
+            source.provider_ids = vec!["moonshotai-gw-x".into()];
+            let gateway = credentials_core::StoredGatewaySettings {
+                incarnation: source.incarnation.clone(),
+                settings: credentials_core::GatewaySettings {
+                    base_url: "http://[::1]:4000/v1".into(),
+                    auth: credentials_core::GatewayAuth {
+                        header: "x-portkey-api-key".into(),
+                        scheme: "raw".into(),
+                    },
+                    headers: vec![],
+                },
+                host: "[::1]".into(),
+                vendor: credentials_core::catalog::ModelVendor::Moonshot,
+            };
+            let snapshot = ScopedListSnapshot {
+                rows: vec![source],
+                grants: vec![],
+            };
+            let before =
+                project_list_scoped_with_providers(snapshot.clone(), &providers, &HashMap::new());
+            gateways.insert(id.into(), gateway);
+            let after = project_list_scoped_with_providers(snapshot, &providers, &gateways);
+            assert_eq!(after.credentials[0].hosts, Some(vec!["[::1]".into()]));
+            assert_eq!(after.credentials[0].serves, ["moonshot"]);
+            assert_eq!(after.credentials[0].fusiform_provider_id, None);
+            assert_ne!(after.view, before.view);
+        }
+        let ordinary = ScopedListSnapshot {
+            rows: vec![scoped_row_with_adapter("apikey:brave", None)],
+            grants: vec![],
+        };
+        assert_eq!(
+            project_list_scoped_with_providers(ordinary.clone(), &providers, &gateways),
+            project_list_scoped_with_providers(ordinary, &providers, &HashMap::new()),
+        );
+    }
+
     /// SERVES AND THE ADAPTER ANSWER DIFFERENT QUESTIONS, AND A CONSUMER NEEDS BOTH.
     ///
     /// Measured on the live vault: filtering `serves` for "anthropic" returns EIGHT rows,
@@ -5206,7 +5647,7 @@ mod list_scoped_tests {
                 .collect(),
             grants: vec![],
         };
-        let result = project_list_scoped_with_providers(snapshot(), &providers);
+        let result = project_list_scoped_with_providers(snapshot(), &providers, &HashMap::new());
         for (id, expected) in cases {
             let credential = result.credentials.iter().find(|row| row.id == id).unwrap();
             assert_eq!(credential.fusiform_provider_id.as_deref(), expected, "{id}");
@@ -5219,7 +5660,7 @@ mod list_scoped_tests {
             .unwrap();
         assert_eq!(custom.hosts, None, "an id does not require a descriptor");
         providers[0].fusiform_provider_id = None;
-        let cleared = project_list_scoped_with_providers(snapshot(), &providers);
+        let cleared = project_list_scoped_with_providers(snapshot(), &providers, &HashMap::new());
         assert_eq!(
             cleared
                 .credentials

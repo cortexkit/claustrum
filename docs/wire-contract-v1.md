@@ -3761,3 +3761,4 @@ integers use decimal text.
 | `gh_manifest_store` | Stored version; `gh-manifest\|<version>` | Framed `source, manifest_sha256` |
 | `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
 | `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |
+| `gh_manifest_one_tap_set` | A real change to `manifest.one_tap`; no subject | Framed `true` or `false` |

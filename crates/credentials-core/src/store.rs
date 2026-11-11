@@ -18475,9 +18475,15 @@ mod store_agent_secrets;
 
 #[path = "store_gh_manifests.rs"]
 mod gh_manifests;
+#[path = "store_gh_proposals.rs"]
+mod gh_proposals;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
 pub use gh_manifests::{GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID};
+pub use gh_proposals::{
+    manifest_one_tap_status_read_only, GhManifestProposal, GhManifestProposalError,
+    GhManifestProposalInput, PreparedGhManifestProposal, MANIFEST_ONE_TAP_SETTING,
+};
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, validate_registered_provider_service,
     RegisteredProvider,

@@ -66,6 +66,7 @@ pub enum AuditOp {
     GhManifestStore,
     GhManifestActivation,
     GhManifestRetire,
+    GhManifestOneTapSet,
 
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
@@ -234,6 +235,7 @@ impl AuditOp {
             AuditOp::GhManifestStore => "gh_manifest_store",
             AuditOp::GhManifestActivation => "gh_manifest_activation",
             AuditOp::GhManifestRetire => "gh_manifest_retire",
+            AuditOp::GhManifestOneTapSet => "gh_manifest_one_tap_set",
 
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
@@ -914,6 +916,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GhManifestStore => AuditOp::GhManifestStore.as_str(),
                 AuditOp::GhManifestActivation => AuditOp::GhManifestActivation.as_str(),
                 AuditOp::GhManifestRetire => AuditOp::GhManifestRetire.as_str(),
+                AuditOp::GhManifestOneTapSet => AuditOp::GhManifestOneTapSet.as_str(),
 
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
@@ -1011,6 +1014,7 @@ mod vocabulary_documentation_tests {
             AuditOp::GhManifestStore,
             AuditOp::GhManifestActivation,
             AuditOp::GhManifestRetire,
+            AuditOp::GhManifestOneTapSet,
         ] {
             assert!(WIRE_CONTRACT.contains(value(op)));
         }

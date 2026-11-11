@@ -14,9 +14,31 @@ are unchanged.
 
 | row | url | date | status | error_code | code field |
 | --- | --- | --- | --- | --- | --- |
+| 302ai | https://api.302.ai/v1/models | 2026-11-11 | 401 | - | - |
+| abacus | https://routellm.abacus.ai/v1/chat/completions | 2026-11-11 | 403 | GenericPermissionDeniedError | /errorType |
 | abliteration | https://api.abliteration.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| above | https://api.above.dev/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| agnes | https://apihub.agnes-ai.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| ai-router | https://api.ai-router.dev/models | 2026-11-11 | 401 | INVALID_API_KEY | /code |
+| ai21 | https://api.ai21.com/studio/v1/library/files | 2026-11-11 | 401 | - | - |
 | aiand | https://api.aiand.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| aihubmix | https://aihubmix.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| aimlapi | https://api.aimlapi.com/v2/billing | 2026-11-11 | 401 | UnauthorizedException | /error/name |
+| ainetcafe | https://microquickjs.com/v1/models | 2026-11-11 | 401 | - | - |
+| aixy | https://api.aixy-gateway.com/v1/models | 2026-11-11 | 401 | invalid_gateway_api_key | /error/code |
+| aki-io | https://aki.io/openai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba | https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-cn | https://dashscope.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-coding-plan | https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-coding-plan-cn | https://coding.dashscope.aliyuncs.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-token-plan | https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | InvalidApiKey | /code |
+| alibaba-token-plan-cn | https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | InvalidApiKey | /code |
+| ambient | https://api.ambient.xyz/v1/assistants | 2026-11-11 | 401 | authentication_error | /error/type |
+| amd | https://developer.amd.com.cn/radeon/api/v1/models | 2026-11-11 | 401 | - | - |
 | anthropic | https://api.anthropic.com/v1/models | 2026-11-10 | 401 | authentication_error | /error/type |
+| anyapi | https://api.anyapi.ai/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| arcee | https://api.arcee.ai/api/v1/models | 2026-11-11 | 401 | - | - |
+| auriko | https://api.auriko.ai/v1/me | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | baseten | https://inference.baseten.co/v1/models | 2026-11-10 | 401 | - | - |
 | charm-hyper | https://hyper.charm.land/v1/credits | 2026-11-10 | 401 | authentication_error | /error/type |
 | cloudflare-workers-ai | https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/models/search?per_page=1 | 2026-11-10 | 400 | - | - |
@@ -63,6 +85,76 @@ The authentication documentation at
 <https://elevenlabs.io/docs/api-reference/authentication> specifies the header and
 the fixed `api.elevenlabs.io` host. The read-only user endpoint is documented at
 <https://elevenlabs.io/docs/api-reference/user/get>.
+
+## Rows added from the Fusiform provider list
+
+On 2026-11-11 a network-enabled Linux build server sent each new row's key check by
+hand with curl, redirects not followed: the check's method and URL, the row's
+`Authorization: Bearer` header carrying a deliberately bogus key, and for chat checks
+the login check's one-token request body. Keys for `above` (`sk-gw-`) and `aixy`
+(`gak_`) carried the documented prefix; an unprefixed key got a format refusal
+(`above`) or a missing-key code (`aixy`) instead. Generic error types that every API
+error carries (302.AI `api_error`, AIHubMix `Aihubmix_api_error`, Agnes AI
+`AgnesAI_error`) and empty `code` strings (Agnes AI, ainetcafe) are not recorded as
+codes. A request without any key was also sent; where it got the same reply as the
+bogus key (`anyapi`, `ambient`, `auriko`, `ainetcafe`), the line still records only
+the bogus-key reply.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `302ai`: <https://help.302.ai/docs/ji-cheng-dao-OpenAI-guan-fang-SDK> sets
+  `https://api.302.ai/v1` as the OpenAI SDK base URL; key page
+  <https://dash.302.ai/apis/list>.
+- `abacus`: <https://abacus.ai/help/route-llm/> documents the self-serve
+  `routellm.abacus.ai` host and Bearer keys. Enterprise workspaces use a
+  per-workspace host that the row does not cover. `/v1/models` answered a bogus
+  key with 200, so the check is a `route-llm` chat.
+- `above`: <https://above.dev/docs>. `/v1/models` answered a bogus key with 200,
+  so the check is a chat.
+- `agentrouter`: <https://agentrouter.org/docs/opencode.html> documents
+  `agentrouter.org` and Bearer keys for the OpenAI protocol. Its Claude app guide
+  sends users to <https://ps.air-outer.com/console/token> for tokens. Every probe,
+  with or without a key, got 401 `unauthorized_client_error` ("unauthorized client
+  detected"), so the row is stored unchecked and has no evidence line.
+- `agnes`: <https://agnes-ai.com/doc> documents `apihub.agnes-ai.com` and Bearer
+  keys. `/v1/models` answered a bogus key with 200, so the check is a chat.
+- `ai-router`: <https://ai-router.dev/docs/getting-started/first-request/> documents
+  `https://api.ai-router.dev/models` (no `/v1`) with a Bearer key.
+- `ai21`: <https://docs.ai21.com/reference/authentication> documents Bearer keys for
+  `api.ai21.com`. `/studio/v1/models` answered a bogus key with 200 and an empty
+  list, so the check is the documented library file list.
+- `aihubmix`: <https://docs.aihubmix.com/cn/quick-start> documents `aihubmix.com` and
+  the `api.inferera.com` fallback. `/v1/models` answered a bogus key with 200, so
+  the check is a chat.
+- `aimlapi`: <https://docs.aimlapi.com/readme-1> documents `api.aimlapi.com`. Its
+  model list answered a bogus key with 200, so the check is the documented
+  `/v2/billing` balance read.
+- `ainetcafe`: <https://ainetcafe.com/k3/guides/> and
+  <https://ainetcafe.com/k3/guides/codewhale.html> send `sk-` keys to
+  `microquickjs.com`.
+- `aixy`: <https://docs.aixy-gateway.com/integrations/overview>.
+- `aki-io`: <https://aki.io/docs/compatibility/openai-api-compatibility/> documents
+  the `https://aki.io/openai/v1/models` request.
+- `alibaba`, `alibaba-cn`, `alibaba-coding-plan`, `alibaba-coding-plan-cn`,
+  `alibaba-token-plan` and `alibaba-token-plan-cn`:
+  <https://www.alibabacloud.com/help/en/model-studio/base-url> and
+  <https://help.aliyun.com/zh/model-studio/base-url> list the Singapore and Beijing
+  hosts; <https://www.alibabacloud.com/help/en/model-studio/coding-plan> and
+  <https://help.aliyun.com/zh/model-studio/coding-plan> list the Coding Plan hosts.
+  Model Studio keys belong to one region; keys from other regions and
+  workspace-specific hosts are not covered. Coding Plan `/v1/models` answered a bogus
+  key with 200, so those checks are chats.
+- `ambient`: <https://ambient.xyz/docs/build/api> documents that `/v1/models` needs
+  no key, so the check is the documented assistant list.
+- `amd`: <https://amd-aim.github.io/radeon-cloud-docs/api/authentication/> and
+  <https://amd-aim.github.io/radeon-cloud-docs/guides/token-factory/> document `rc-`
+  keys sent as Bearer to `https://developer.amd.com.cn/radeon/api/v1`. Without a key
+  the model list answered 401 "Login required"; with a bogus key, "Invalid bearer
+  token".
+- `anyapi`: <https://docs.anyapi.ai/guides/authentication>.
+- `arcee`: <https://docs.arcee.ai/api-reference/your-first-api-call>.
+- `auriko`: <https://docs.auriko.ai/api-reference/authentication>; the check is the
+  documented key-identity read `/v1/me`.
 
 ## Probes without a response
 
@@ -117,9 +209,15 @@ No scheme was added: the descriptor supports only Bearer and raw header values.
 
 ## Fusiform provider skips
 
-This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. No providers have a
-reviewed skip yet. An uncovered provider stays a gap until its documentation is
-reviewed; an empty key-variable list alone is not a reason to skip it.
+This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
+stays a gap until its documentation is reviewed; an empty key-variable list alone is
+not a reason to skip it.
+
+- `amazon-bedrock`: Bedrock API keys are bound to the AWS Region they were created
+  in, and each Region has its own `bedrock-runtime` host. See
+  <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html>.
+- `atomic-chat`: <https://atomic.chat> describes a local desktop app that works
+  offline with no cloud service, so there is no hosted API key.
 
 Only these reasons are permitted:
 
@@ -130,6 +228,8 @@ Only these reasons are permitted:
 
 | Fusiform id | reason |
 | --- | --- |
+| amazon-bedrock | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| atomic-chat | no API key in its documentation |
 
 ## Hosts without provider documentation
 

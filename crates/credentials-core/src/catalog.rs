@@ -281,7 +281,16 @@ pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[
 
 /// Reviewed Fusiform ids deliberately not carried by an API-key row, paired with
 /// one of the reasons below. Unreviewed providers remain gaps, not automatic skips.
-pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[];
+pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
+    // Bedrock API keys are bound to the AWS Region they were created in, and each Region
+    // has its own bedrock-runtime host.
+    (
+        "amazon-bedrock",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // Atomic Chat is a local desktop app with no hosted API or API key.
+    ("atomic-chat", "no API key in its documentation"),
+];
 
 /// The permitted dispositions for a provider researched but not added to the catalog.
 pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
@@ -1753,6 +1762,490 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    // Rows below were taken from each provider's own documentation, starting from the
+    // `ckdev_provider_rows` proposal for its Fusiform id. Checks that answered a
+    // deliberately bogus key are recorded in docs/provider-key-evidence.md.
+    //
+    // 302.AI's OpenAI SDK guide sets this base URL with the key as the SDK's API key,
+    // which the SDK sends as a Bearer token.
+    ApiKeyProvider {
+        key: "302ai",
+        fusiform_provider_id: Some("302ai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.302.ai"],
+        hosts_doc: "https://help.302.ai/docs/ji-cheng-dao-OpenAI-guan-fang-SDK",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["302ai"],
+        display_name: "302.AI",
+        default_id: "apikey:302ai",
+        dashboard_url: "https://dash.302.ai/apis/list",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.302.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Abacus.AI's self-serve RouteLLM host; Enterprise workspaces use a per-workspace
+    // host that this row does not cover. Its model list is public, so the check is a chat.
+    ApiKeyProvider {
+        key: "abacus",
+        fusiform_provider_id: Some("abacus"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["routellm.abacus.ai"],
+        hosts_doc: "https://abacus.ai/help/route-llm/",
+        invalid_key: Some(InvalidKeyEvidence { status: 403, error_code: Some("GenericPermissionDeniedError"), error_code_field: Some("/errorType") }),
+        default_provider_ids: &["abacus"],
+        display_name: "Abacus",
+        default_id: "apikey:abacus",
+        dashboard_url: "https://abacus.ai/app/route-llm-apis",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://routellm.abacus.ai/v1",
+            model: "route-llm",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // above.dev's model list is public, so the check is a chat.
+    ApiKeyProvider {
+        key: "above",
+        fusiform_provider_id: Some("above"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.above.dev"],
+        hosts_doc: "https://above.dev/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["above"],
+        display_name: "above.dev",
+        default_id: "apikey:above",
+        dashboard_url: "https://above.dev/dashboard",
+        placeholder: "sk-gw-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.above.dev/v1",
+            model: "deepseek-v4.1-flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AgentRouter's own Claude app guide sends users to ps.air-outer.com to create tokens.
+    ApiKeyProvider {
+        key: "agentrouter",
+        fusiform_provider_id: Some("agentrouter"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["agentrouter.org"],
+        hosts_doc: "https://agentrouter.org/docs/opencode.html",
+        invalid_key: None,
+        default_provider_ids: &["agentrouter"],
+        display_name: "AgentRouter",
+        default_id: "apikey:agentrouter",
+        dashboard_url: "https://ps.air-outer.com/console/token",
+        placeholder: "sk-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "AgentRouter answers 401 \"unauthorized client detected\" to requests from clients it does not recognise, with or without a key, so a check cannot tell a bad key from a good one",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Agnes AI's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "agnes",
+        fusiform_provider_id: Some("agnes"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["apihub.agnes-ai.com"],
+        hosts_doc: "https://agnes-ai.com/doc",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["agnes"],
+        display_name: "Agnes AI",
+        default_id: "apikey:agnes",
+        dashboard_url: "https://agnes-ai.com",
+        placeholder: "sk-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://apihub.agnes-ai.com/v1",
+            model: "agnes-3.0-flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AI-ROUTER documents its API without a /v1 prefix.
+    ApiKeyProvider {
+        key: "ai-router",
+        fusiform_provider_id: Some("ai-router"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.ai-router.dev"],
+        hosts_doc: "https://ai-router.dev/docs/getting-started/first-request/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("INVALID_API_KEY"), error_code_field: Some("/code") }),
+        default_provider_ids: &["ai-router"],
+        display_name: "AI-ROUTER",
+        default_id: "apikey:ai-router",
+        dashboard_url: "https://ai-router.dev",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.ai-router.dev/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AI21's model list answers any key, so the check lists the account's library files.
+    ApiKeyProvider {
+        key: "ai21",
+        fusiform_provider_id: Some("ai21"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.ai21.com"],
+        hosts_doc: "https://docs.ai21.com/reference/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["ai21"],
+        display_name: "AI21 Labs",
+        default_id: "apikey:ai21",
+        dashboard_url: "https://studio.ai21.com/v2?tab=maestro",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.ai21.com/studio/v1/library/files",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AIHubMix documents api.inferera.com as a fallback for aihubmix.com. Its model list
+    // answers any key, so the check is a chat.
+    ApiKeyProvider {
+        key: "aihubmix",
+        fusiform_provider_id: Some("aihubmix"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["aihubmix.com", "api.inferera.com"],
+        hosts_doc: "https://docs.aihubmix.com/cn/quick-start",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["aihubmix"],
+        display_name: "AIHubMix",
+        default_id: "apikey:aihubmix",
+        dashboard_url: "https://console.aihubmix.com/workspaces/default/keys",
+        placeholder: "sk-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://aihubmix.com/v1",
+            model: "gpt-4o-mini",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AI/ML API's model list is public, so the check reads the account balance.
+    ApiKeyProvider {
+        key: "aimlapi",
+        fusiform_provider_id: Some("aimlapi"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.aimlapi.com"],
+        hosts_doc: "https://docs.aimlapi.com/readme-1",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("UnauthorizedException"), error_code_field: Some("/error/name") }),
+        default_provider_ids: &["aimlapi"],
+        display_name: "AI/ML API",
+        default_id: "apikey:aimlapi",
+        dashboard_url: "https://aimlapi.com/app/keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.aimlapi.com/v2/billing",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // ainetcafe's K3 guides send keys to its API host, microquickjs.com.
+    ApiKeyProvider {
+        key: "ainetcafe",
+        fusiform_provider_id: Some("ainetcafe"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["microquickjs.com"],
+        hosts_doc: "https://ainetcafe.com/k3/guides/codewhale.html",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["ainetcafe"],
+        display_name: "ainetcafe",
+        default_id: "apikey:ainetcafe",
+        dashboard_url: "https://microquickjs.com",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://microquickjs.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "aixy",
+        fusiform_provider_id: Some("aixy"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.aixy-gateway.com"],
+        hosts_doc: "https://docs.aixy-gateway.com/integrations/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_gateway_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["aixy"],
+        display_name: "Aixy",
+        default_id: "apikey:aixy",
+        dashboard_url: "https://docs.aixy-gateway.com/quickstart",
+        placeholder: "gak_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.aixy-gateway.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "aki-io",
+        fusiform_provider_id: Some("aki-io"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["aki.io"],
+        hosts_doc: "https://aki.io/docs/compatibility/openai-api-compatibility/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["aki-io"],
+        display_name: "AKI.IO",
+        default_id: "apikey:aki-io",
+        dashboard_url: "https://aki.io/admin/user",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://aki.io/openai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Alibaba Cloud Model Studio, Singapore region. Keys belong to one region; keys from
+    // other regions and workspace-specific hosts are not covered by this row.
+    ApiKeyProvider {
+        key: "alibaba",
+        fusiform_provider_id: Some("alibaba"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["dashscope-intl.aliyuncs.com"],
+        hosts_doc: "https://www.alibabacloud.com/help/en/model-studio/base-url",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["alibaba"],
+        display_name: "Alibaba",
+        default_id: "apikey:alibaba",
+        dashboard_url: "https://modelstudio.console.alibabacloud.com/ap-southeast-1/settings/api-key",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Alibaba Cloud Model Studio, Beijing region; workspace-specific hosts are not covered.
+    ApiKeyProvider {
+        key: "alibaba-cn",
+        fusiform_provider_id: Some("alibaba-cn"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["dashscope.aliyuncs.com"],
+        hosts_doc: "https://help.aliyun.com/zh/model-studio/base-url",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["alibaba-cn"],
+        display_name: "Alibaba (China)",
+        default_id: "apikey:alibaba-cn",
+        dashboard_url: "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Coding Plan keys are for interactive coding tools. The plan's model list answers
+    // any key, so the check is a chat.
+    ApiKeyProvider {
+        key: "alibaba-coding-plan",
+        fusiform_provider_id: Some("alibaba-coding-plan"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["coding-intl.dashscope.aliyuncs.com"],
+        hosts_doc: "https://www.alibabacloud.com/help/en/model-studio/coding-plan",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["alibaba-coding-plan"],
+        display_name: "Alibaba Coding Plan",
+        default_id: "apikey:alibaba-coding-plan",
+        dashboard_url: "https://modelstudio.console.alibabacloud.com/ap-southeast-1/subscription/coding-plan",
+        placeholder: "sk-sp-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+            model: "qwen3.5-plus",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // The China Coding Plan; its model list answers any key, so the check is a chat.
+    ApiKeyProvider {
+        key: "alibaba-coding-plan-cn",
+        fusiform_provider_id: Some("alibaba-coding-plan-cn"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["coding.dashscope.aliyuncs.com"],
+        hosts_doc: "https://help.aliyun.com/zh/model-studio/coding-plan",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["alibaba-coding-plan-cn"],
+        display_name: "Alibaba Coding Plan (China)",
+        default_id: "apikey:alibaba-coding-plan-cn",
+        dashboard_url: "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan",
+        placeholder: "sk-sp-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://coding.dashscope.aliyuncs.com/v1",
+            model: "qwen3.5-plus",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "alibaba-token-plan",
+        fusiform_provider_id: Some("alibaba-token-plan"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["token-plan.ap-southeast-1.maas.aliyuncs.com"],
+        hosts_doc: "https://www.alibabacloud.com/help/en/model-studio/base-url",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("InvalidApiKey"), error_code_field: Some("/code") }),
+        default_provider_ids: &["alibaba-token-plan"],
+        display_name: "Alibaba Token Plan",
+        default_id: "apikey:alibaba-token-plan",
+        dashboard_url: "https://modelstudio.console.alibabacloud.com/subscription/token-plan/personal",
+        placeholder: "sk-sp-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "alibaba-token-plan-cn",
+        fusiform_provider_id: Some("alibaba-token-plan-cn"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["token-plan.cn-beijing.maas.aliyuncs.com"],
+        hosts_doc: "https://help.aliyun.com/zh/model-studio/base-url",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("InvalidApiKey"), error_code_field: Some("/code") }),
+        default_provider_ids: &["alibaba-token-plan-cn"],
+        display_name: "Alibaba Token Plan (China)",
+        default_id: "apikey:alibaba-token-plan-cn",
+        dashboard_url: "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal",
+        placeholder: "sk-sp-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Ambient's model list needs no key, so the check lists the account's assistants.
+    ApiKeyProvider {
+        key: "ambient",
+        fusiform_provider_id: Some("ambient"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.ambient.xyz"],
+        hosts_doc: "https://ambient.xyz/docs/build/api",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["ambient"],
+        display_name: "Ambient",
+        default_id: "apikey:ambient",
+        dashboard_url: "https://app.ambient.xyz/keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.ambient.xyz/v1/assistants",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // AMD Radeon Cloud Token Factory, served from AMD's China developer site.
+    ApiKeyProvider {
+        key: "amd",
+        fusiform_provider_id: Some("amd"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["developer.amd.com.cn"],
+        hosts_doc: "https://amd-aim.github.io/radeon-cloud-docs/api/authentication/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["amd"],
+        display_name: "AMD",
+        default_id: "apikey:amd",
+        dashboard_url: "https://developer.amd.com.cn/radeon/tokenfactory",
+        placeholder: "rc-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://developer.amd.com.cn/radeon/api/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "anyapi",
+        fusiform_provider_id: Some("anyapi"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.anyapi.ai"],
+        hosts_doc: "https://docs.anyapi.ai/guides/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("401"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["anyapi"],
+        display_name: "AnyAPI",
+        default_id: "apikey:anyapi",
+        dashboard_url: "https://dash.anyapi.ai/?page=api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.anyapi.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "arcee",
+        fusiform_provider_id: Some("arcee"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.arcee.ai"],
+        hosts_doc: "https://docs.arcee.ai/api-reference/your-first-api-call",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["arcee"],
+        display_name: "Arcee",
+        default_id: "apikey:arcee",
+        dashboard_url: "https://platform.arcee.ai/api/api-keys",
+        placeholder: "rcai-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.arcee.ai/api/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "auriko",
+        fusiform_provider_id: Some("auriko"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.auriko.ai"],
+        hosts_doc: "https://docs.auriko.ai/api-reference/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["auriko"],
+        display_name: "Auriko",
+        default_id: "apikey:auriko",
+        dashboard_url: "https://auriko.ai/dashboard?tab=api-keys",
+        placeholder: "ak_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.auriko.ai/v1/me",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2484,6 +2977,34 @@ mod tests {
                 "Fusiform links GitHub documentation; gateway requests use vercel.sh",
             ),
             ("typesafe", "TypeSafe has no fixed receiving hosts yet"),
+            (
+                "ainetcafe",
+                "ainetcafe's guides send K3 keys to its API host, microquickjs.com",
+            ),
+            (
+                "alibaba",
+                "Alibaba Cloud documents Model Studio on alibabacloud.com; APIs use aliyuncs.com",
+            ),
+            (
+                "alibaba-cn",
+                "Alibaba Cloud documents Model Studio on alibabacloud.com; APIs use aliyuncs.com",
+            ),
+            (
+                "alibaba-coding-plan",
+                "Alibaba Cloud documents Coding Plan on alibabacloud.com; APIs use aliyuncs.com",
+            ),
+            (
+                "alibaba-coding-plan-cn",
+                "Alibaba Cloud documents Coding Plan on aliyun.com; APIs use aliyuncs.com",
+            ),
+            (
+                "alibaba-token-plan",
+                "Alibaba Cloud documents Token Plan on alibabacloud.com; APIs use aliyuncs.com",
+            ),
+            (
+                "alibaba-token-plan-cn",
+                "Alibaba Cloud documents Token Plan on alibabacloud.com; APIs use aliyuncs.com",
+            ),
         ];
         let mut unchecked_exemptions = std::collections::BTreeSet::new();
         for &(key, reason) in EXEMPTIONS {
@@ -3378,6 +3899,29 @@ mod tests {
             ("tinyfish", &[]),
             ("searxng", &[]),
             ("elevenlabs", &["elevenlabs"]),
+            ("302ai", &["302ai"]),
+            ("abacus", &["abacus"]),
+            ("above", &["above"]),
+            ("agentrouter", &["agentrouter"]),
+            ("agnes", &["agnes"]),
+            ("ai-router", &["ai-router"]),
+            ("ai21", &["ai21"]),
+            ("aihubmix", &["aihubmix"]),
+            ("aimlapi", &["aimlapi"]),
+            ("ainetcafe", &["ainetcafe"]),
+            ("aixy", &["aixy"]),
+            ("aki-io", &["aki-io"]),
+            ("alibaba", &["alibaba"]),
+            ("alibaba-cn", &["alibaba-cn"]),
+            ("alibaba-coding-plan", &["alibaba-coding-plan"]),
+            ("alibaba-coding-plan-cn", &["alibaba-coding-plan-cn"]),
+            ("alibaba-token-plan", &["alibaba-token-plan"]),
+            ("alibaba-token-plan-cn", &["alibaba-token-plan-cn"]),
+            ("ambient", &["ambient"]),
+            ("amd", &["amd"]),
+            ("anyapi", &["anyapi"]),
+            ("arcee", &["arcee"]),
+            ("auriko", &["auriko"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -3395,7 +3939,8 @@ mod tests {
                     category_defaults(&id)
                         .iter()
                         .any(|category| category == "media-provider"),
-                    matches!(*key, "openai" | "google" | "elevenlabs"),
+                    matches!(*key, "openai" | "google" | "elevenlabs")
+                        || FUSIFORM_LLM_AND_MEDIA_KEYS.contains(key),
                     "{id}"
                 );
             }
@@ -3416,8 +3961,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, and ElevenLabs for media.
-        assert_eq!(API_KEY_PROVIDERS.len(), 67);
+        // 9 search APIs, ElevenLabs for media, and 23 rows proposed from Fusiform's
+        // provider list.
+        assert_eq!(API_KEY_PROVIDERS.len(), 90);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -3563,6 +4109,46 @@ mod tests {
 
     const MEDIA_ONLY_KEYS: &[&str] = &["elevenlabs"];
 
+    /// Model providers added from Fusiform's provider list, each under its Fusiform id.
+    const FUSIFORM_LLM_KEYS: &[&str] = &[
+        "302ai",
+        "abacus",
+        "above",
+        "agentrouter",
+        "agnes",
+        "ai-router",
+        "ai21",
+        "aihubmix",
+        "aimlapi",
+        "ainetcafe",
+        "aixy",
+        "aki-io",
+        "alibaba",
+        "alibaba-cn",
+        "alibaba-coding-plan",
+        "alibaba-coding-plan-cn",
+        "alibaba-token-plan",
+        "alibaba-token-plan-cn",
+        "ambient",
+        "amd",
+        "anyapi",
+        "arcee",
+        "auriko",
+    ];
+
+    /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
+    /// video output, so they default to `media-provider` as well.
+    const FUSIFORM_LLM_AND_MEDIA_KEYS: &[&str] = &[
+        "302ai",
+        "abacus",
+        "aihubmix",
+        "aimlapi",
+        "alibaba",
+        "alibaba-cn",
+        "alibaba-token-plan",
+        "alibaba-token-plan-cn",
+    ];
+
     /// Catalogued keys used by both model and web-search consumers.
     const DUAL_USE_KEYS: &[&str] = &[
         "deepseek",
@@ -3573,7 +4159,7 @@ mod tests {
         "kimi-for-coding",
     ];
 
-    /// oh-my-pi providers deliberately NOT in this table:
+    /// Providers whose keys cannot be stored as a plain pasted key, so they have no row:
     /// - local servers whose "key" is a localhost placeholder, so there is no secret;
     /// - keys usable only with per-deployment settings a row cannot carry (litellm needs
     ///   the proxy's base URL, coreweave an OpenAI-Project header);
@@ -3585,8 +4171,6 @@ mod tests {
         "vllm",
         "litellm",
         "coreweave",
-        "alibaba-coding-plan",
-        "alibaba-token-plan",
         "cloudflare-ai-gateway",
         "kilo",
         "xiaomi",
@@ -3611,16 +4195,23 @@ mod tests {
     /// for the bare id and for a labeled account, since both are stamped at creation.
     #[test]
     fn every_model_provider_row_is_stamped_llm_provider() {
-        for key in ORIGINAL_LLM_KEYS.iter().chain(MIRRORED_LLM_KEYS).chain([
-            &"kiro",
-            &"anthropic",
-            &"inception",
-            &"cloudflare-workers-ai",
-        ]) {
+        for key in ORIGINAL_LLM_KEYS
+            .iter()
+            .chain(MIRRORED_LLM_KEYS)
+            .chain(FUSIFORM_LLM_KEYS)
+            .chain([
+                &"kiro",
+                &"anthropic",
+                &"inception",
+                &"cloudflare-workers-ai",
+            ])
+        {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
-                let expected = if matches!(*key, "openai" | "google") {
+                let expected = if matches!(*key, "openai" | "google")
+                    || FUSIFORM_LLM_AND_MEDIA_KEYS.contains(key)
+                {
                     vec!["llm-provider", "media-provider"]
                 } else {
                     vec!["llm-provider"]
@@ -3634,6 +4225,7 @@ mod tests {
             assert!(
                 ORIGINAL_LLM_KEYS.contains(&entry.key)
                     || MIRRORED_LLM_KEYS.contains(&entry.key)
+                    || FUSIFORM_LLM_KEYS.contains(&entry.key)
                     || DUAL_USE_KEYS.contains(&entry.key)
                     || SEARCH_KEYS.contains(&entry.key)
                     || MEDIA_ONLY_KEYS.contains(&entry.key)
@@ -3781,6 +4373,7 @@ mod tests {
                 "brave",
                 "jina",
                 "searxng",
+                "agentrouter",
             ]
         );
     }
@@ -4282,6 +4875,29 @@ mod source_ownership_tests {
                 ("tinyfish", vec![]),
                 ("searxng", vec![]),
                 ("elevenlabs", vec![]),
+                ("302ai", vec![]),
+                ("abacus", vec![]),
+                ("above", vec![]),
+                ("agentrouter", vec![]),
+                ("agnes", vec![]),
+                ("ai-router", vec![]),
+                ("ai21", vec![]),
+                ("aihubmix", vec![]),
+                ("aimlapi", vec![]),
+                ("ainetcafe", vec![]),
+                ("aixy", vec![]),
+                ("aki-io", vec![]),
+                ("alibaba", vec![]),
+                ("alibaba-cn", vec![]),
+                ("alibaba-coding-plan", vec![]),
+                ("alibaba-coding-plan-cn", vec![]),
+                ("alibaba-token-plan", vec![]),
+                ("alibaba-token-plan-cn", vec![]),
+                ("ambient", vec![]),
+                ("amd", vec![]),
+                ("anyapi", vec![]),
+                ("arcee", vec![]),
+                ("auriko", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

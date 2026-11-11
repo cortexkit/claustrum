@@ -19,6 +19,9 @@ brief.
   whole crate's suite, the workspace suite, `scripts/fast-check.sh` or `scripts/gate.sh`:
   the head runs the full suite once, over several merged deliveries. If a test outside your
   change fails, rerun that one test by name on your base commit, never the suite.
+- To format, run `cargo fmt --all` on the build server with `return_paths` listing every
+  Rust file you changed, so the formatted files come back; a build-server job's file
+  changes are otherwise discarded. Don't format on the Mac.
 - Before you deliver, also run: `cargo fmt --all -- --check`; clippy with
   `--features credentials-core/test-support --all-targets -- -D warnings` for every crate
   you touched; `python3 scripts/endpoint-hosts.py`; the script tests in

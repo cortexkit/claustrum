@@ -9016,6 +9016,13 @@ mod login_regressions {
             "ElevenLabs".into(),
             "apikey:elevenlabs".into(),
         )));
+        for (key, name) in [
+            ("iteracompute", "IteraCompute"),
+            ("kilo", "Kilo Gateway"),
+            ("minimax-cn", "MiniMax (minimax.cn)"),
+        ] {
+            assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
+        }
         assert_eq!(
             rows.last().unwrap(),
             &(

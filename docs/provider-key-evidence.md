@@ -85,8 +85,28 @@ are unchanged.
 | inference | https://api.inference.net/v1/chat/completions | 2026-11-11 | 401 | InvalidApiKey | /error/type |
 | infomaniak | https://api.infomaniak.com/1/ai | 2026-11-11 | 401 | not_authorized | /error/code |
 | io-net | https://api.intelligence.io.solutions/api/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| iteracompute | https://api.iteracompute.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| jalapeno | https://api.jalapeno-cloud.ai/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| jiekou | https://api.jiekou.ai/openai/v1/chat/completions | 2026-11-11 | 401 | FAILED_TO_AUTH | /reason |
+| kenari | https://kenari.id/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| kilo | https://ai-gateway.kilo.ai/api/v1/chat/completions | 2026-11-11 | 401 | INVALID_TOKEN | /error/code |
+| kimi-code-plan-cn | https://api.kimi.com/coding/v1/models | 2026-11-11 | 401 | invalid_authentication_error | /error/type |
 | kiro | https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR | 2026-11-10 | 403 | - | - |
+| klokintegration | https://ai.klok.ipaas.se/proxy/kloker-key/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| kosmik | https://api.koscompute.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| liquid | https://router.inference.ai.exchange/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmgateway | https://api.llmgateway.io/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmgateway-providers | https://api.llmgateway.io/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmtr | https://llmtr.com/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
+| longcat | https://api.longcat.chat/openai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| lowrouter | https://api.lowrouter.ai/v1/chat/completions | 2026-11-11 | 401 | api_key_not_registered | /error/code |
+| lucidquery | https://api.lucidquery.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| meganova | https://api.meganova.ai/v1/chat/completions | 2026-11-11 | 401 | token_not_found | /error/type |
+| melious | https://api.melious.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| merge-gateway | https://api-gateway.merge.dev/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/type |
 | meta | https://api.meta.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| minimax | https://api.minimax.io/v1/models | 2026-11-11 | 401 | authorized_error | /error/type |
+| minimax-cn | https://api.minimax.cn/v1/models | 2026-11-11 | 401 | authorized_error | /error/type |
 | minimax-code | https://api.minimax.io/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | minimax-code-cn | https://api.minimax.cn/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | mistral | https://api.mistral.ai/v1/models | 2026-11-10 | 401 | - | - |
@@ -472,6 +492,133 @@ Each of these rows keeps `invalid_key: None`. Their checks are not changed here.
 
 No scheme was added: the descriptor supports only Bearer and raw header values.
 
+## Fourth batch from the Fusiform provider list
+
+After the third batch, `ck auth provider-report --missing` printed 114 ids. The
+fourth batch left the earlier gaps (`clarifai`, `ebcloud`, `hetzner`) for separate
+review and took the next 25, `iteracompute` through `minimax-cn`. 20 got rows and
+2 are recorded skips (`lmstudio`, `lynkr`, listed below). Three remain uncovered:
+`kuae-cloud-coding-plan`, `lilac`, `llmtech`. The report now prints 92 uncovered ids.
+
+On 2026-11-11 a network-enabled Linux build server sent the new rows' checks using
+Python's HTTP client with redirects disabled. Every request used the row's
+`Authorization: Bearer` header with a deliberately bogus key; chat requests used the
+login check's one-token body. All 20 returned 401. A no-key request was also sent.
+Documented prefixes were used for Kenari (`kn-`), Liquid (`sk-liquid-`), LLM Gateway
+(`llmgtwy_`), LLMTR (`llmtr-`), LowRouter (`sk-lr-`), LucidQuery
+(`sk_lucidquery_`), Melious (`sk-mel-`) and Merge (`mg_`). LowRouter's fabricated
+key body had the documented 43 characters and Melious's had 121 after the prefix,
+so those checks reached unknown-key refusals rather than only format checks.
+Jalapeno's numeric `code` and message-valued `type` are not recorded as an error
+code. Meganova's structured `token_not_found` type is recorded instead of its
+status-like `"401"` code. Kenari's refusal is plain text.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `iteracompute`: <https://iteracompute.com/docs.html> documents
+  `https://api.iteracompute.com/v1`, Bearer keys, the key page and free `Auto` chat.
+  The model list is public, so the check is a chat.
+- `jalapeno`: <https://www.jalapeno-cloud.ai/docs/> documents
+  `https://api.jalapeno-cloud.ai/v1`, Bearer keys, the key page and `DeepSeek-V4-Pro`.
+  The model-list route returned a generic 403 access block with or without a key;
+  the documented chat route instead returned an authentication refusal.
+- `jiekou`: <https://docs.jiekou.ai/docs/model/llm.md> documents Bearer keys, the
+  compatible chat API and `deepseek/deepseek-r1`;
+  <https://docs.jiekou.ai/docs/announcement/announcement.md> names the fixed domestic
+  `api.highwayapi.ai` and original/overseas `api.jiekou.ai` hosts. The model list
+  answered bogus and missing keys alike with 200, so the check is a chat.
+- `kenari`: <https://kenari.id/docs/quickstart> documents `https://kenari.id/v1`,
+  `kn-` Bearer keys and the free `step-3-7-flash:free` model. Authentication docs
+  (<https://kenari.id/docs/authentication>) identify the model list as public.
+- `kilo`: <https://docs.kilo.ai/docs/gateway/authentication> documents
+  `https://ai-gateway.kilo.ai/api/v1` and Bearer keys from the personal profile at
+  <https://app.kilo.ai>. The models guide
+  (<https://docs.kilo.ai/docs/gateway/models-and-providers>) documents `kilo-auto/free`.
+  Its catalog and free chat accept no key, but a supplied bogus key was refused by
+  the chat. The old exclusion of `kilo` as a custom-login-only provider no longer
+  describes this documented Gateway key flow.
+- `kimi-code-plan-cn`: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+  pairs `https://api.kimi.com/coding/v1` with `experimental_bearer_token`; the Code
+  overview (<https://www.kimi.com/code/docs/en/>) links the key console and identifies
+  this as the China endpoint. The model-list read refused a bogus Bearer key.
+  This row is separate from the existing global Coding Plan row, which is unchanged.
+- `klokintegration`: <https://klokintegration.se/docs/ai-api> documents
+  `https://ai.klok.ipaas.se/proxy/kloker-key/v1`, the older fixed alias
+  `api-gw.klok.ipaas.se`, Bearer keys and `GET /models` when enabled on the key.
+  The check uses the documented `Kloker` chat instead, so optional model-list access
+  is not required. The docs direct users to the platform for a token, without a
+  direct key-page URL.
+- `kosmik`: <https://api.koscompute.com/docs/overview/quickstart/> documents
+  `https://api.koscompute.com/v1` with Bearer keys; the docs home
+  (<https://api.koscompute.com/docs/>) uses `qwen/qwen3.8-27b` for chat. The model
+  list is public without a key (though a bogus key is refused), so the check is a
+  chat. No key-creation page is given; the row links to the quickstart.
+- `liquid`: <https://inference.ai.exchange/docs/api.md> documents
+  `router.inference.ai.exchange` with `sk-liquid-` Bearer keys or raw `x-api-key`.
+  The quickstart (<https://inference.ai.exchange/docs/quickstart>) uses
+  `gpt-oss-120b`. Its model list is public, so the check is a chat. The row links to
+  the quickstart's workspace/key instructions rather than guessing a dashboard path.
+- `llmgateway` and `llmgateway-providers`:
+  <https://docs.llmgateway.io/developers/devpass-usage> documents
+  `GET https://api.llmgateway.io/v1/key` with `llmgtwy_` Bearer keys, and explicitly
+  says it works for both DevPass and pay-as-you-go keys, even when usage is exhausted.
+  Both offerings keep their own Fusiform id and routing default. The quickstart
+  (<https://docs.llmgateway.io/quick-start>) describes the dashboard and project key
+  flow without a direct key-page URL, so the rows link to the API-key guide.
+- `llmtr`: <https://llmtr.com/docs/en/quickstart/> documents `https://llmtr.com/v1`,
+  `llmtr-` Bearer keys and chat model `openai/gpt-6-luna`. Its model list is public;
+  the row links to the API-key instructions, which name the dashboard's API Keys page.
+- `longcat`: <https://longcat.chat/platform/docs/> documents
+  `https://api.longcat.chat/openai/v1/chat/completions`, Bearer keys, the key page and
+  `LongCat-2.5`. Its model list answered a bogus key with 200, so the check is a chat.
+- `lowrouter`: <https://lowrouter.ai/docs/integrations/openai-compatible> documents
+  `https://api.lowrouter.ai/v1` with `sk-lr-` Bearer keys; the first-completion guide
+  (<https://lowrouter.ai/docs/getting-started/first-completion>) uses
+  `auto/mistralai/mistral-large-2512`. Its model list is public without a key, so the
+  check is a chat. The key guide links <https://lowrouter.ai/app/keys>.
+- `lucidquery`: <https://lucidquery.com/docs> documents `https://api.lucidquery.com/v1`,
+  Bearer keys, the key page and `lucidquery-agi-01-swift`. The auth section names
+  `sk_lucidquery_` keys, while an SDK example uses `lq_live_`; the probe followed the
+  auth section. Its model list is public, so the check is a chat.
+- `meganova`: <https://docs.meganova.ai/inference-models.md> documents
+  `https://api.meganova.ai/v1` and Bearer keys from <https://console.meganova.ai>;
+  <https://docs.meganova.ai/enterprise/enterprise-endpoint.md> documents the same key
+  at `enterprise.api.meganova.ai`. The free-model guide names `meganova-ai/manta-mini-1.0`.
+  Its model list is public, so the check is a chat.
+- `melious`: <https://melious.ai/docs/get-started/quickstart> documents
+  `https://api.melious.ai/v1`, Bearer keys and the key page. The authentication guide
+  (<https://melious.ai/docs/concepts/authentication>) gives the `sk-mel-` key shape.
+  Chat requires `inference.chat`, while model listing needs a separate
+  `inference.models` scope; the check uses the chat reference's `qwen3.6-35b-a3b`
+  example (<https://melious.ai/docs/reference/chat-completions>) rather than
+  rejecting an inference key that cannot list models.
+- `merge-gateway`: <https://docs.merge.dev/merge-gateway/api-overview> documents
+  `api-gateway.merge.dev`, `mg_` Bearer inference keys and `GET /v1/models`. The
+  separate management key and optional credentials supplied for an upstream provider
+  are not needed for ordinary inference.
+- `minimax` and `minimax-cn`: the OpenAI model-list references
+  (<https://platform.minimax.io/docs/api-reference/models/openai/list-models>,
+  <https://platform.minimaxi.com/docs/api-reference/models/openai/list-models>)
+  document Bearer keys at `api.minimax.io` and `api.minimax.cn` respectively and
+  `GET /v1/models`. The quickstarts link their respective key pages. These ordinary
+  API-key offerings are separate from the existing Coding Plan rows.
+
+Three ids from this batch have neither a row nor a skip; `--missing` still prints them:
+
+- `kuae-cloud-coding-plan`: the provider's page
+  <https://docs.mthreads.com/kuaecloud/kuaecloud-doc-online/coding_plan/> yielded only
+  a heading and footer, not an API host or key presentation. Published Markdown URL
+  variants did not yield instructions either. No third-party host was substituted.
+- `lilac`: its provider-owned quickstart and model guide still document Bearer keys
+  at `api.getlilac.com`, but the model-list endpoint returned HTTP 410,
+  `Lilac inference has been discontinued.`, with bogus and missing keys alike.
+  No row was added for the discontinued service, and the docs do not support one of
+  the approved skip reasons.
+- `llmtech`: <https://llmtech.eu/docs/> still documents Bearer keys at
+  `api.llmtech.eu`, but its model-list endpoint returned HTTP 410 with
+  `error.code: service_closed`, saying the API shut down on 31 October 2026 and
+  keys no longer work. No row or invented skip reason was added.
+
 ## Fusiform provider skips
 
 This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
@@ -515,6 +662,16 @@ not a reason to skip it.
   with Google Cloud credentials. See
   <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
   and <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude>.
+- `lmstudio`: LM Studio serves models at the user's own local server address and
+  configurable port (default `http://localhost:1234`), not a fixed provider API host.
+  Its optional Bearer token is created in that local server's token manager. See
+  <https://lmstudio.ai/docs/developer/core/server/settings> and
+  <https://lmstudio.ai/docs/developer/core/authentication>.
+- `lynkr`: the provider's self-hosted proxy docs use `http://localhost:8081` for
+  development and `https://your-domain.com` for production. They say any `sk-`
+  placeholder works and real authentication happens between Lynkr and its configured
+  upstream provider. No Lynkr provider API key is documented. See
+  <https://github.com/Fast-Editor/Lynkr/blob/main/documentation/api.md>.
 
 Only these reasons are permitted:
 
@@ -534,6 +691,8 @@ Only these reasons are permitted:
 | github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| lmstudio | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| lynkr | no API key in its documentation |
 
 ## Hosts without provider documentation
 

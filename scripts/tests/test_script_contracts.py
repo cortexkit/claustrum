@@ -288,7 +288,7 @@ class ScriptContracts(unittest.TestCase):
         result = self.run_shell(block)
         self.assertIn('cannot name its revision', result.stdout)
 
-    def audit_store(self, corrupt=False, other_key=False, quoted=False):
+    def audit_store(self, corrupt=False, other_key=False, quoted=False, stored_manifest=False, missing_payload=False, broken_manifests=False):
         data = self.root / ("data'quoted" if quoted else 'data')
         payloads = data / 'signed-payloads'
         payloads.mkdir(parents=True)
@@ -305,8 +305,15 @@ class ScriptContracts(unittest.TestCase):
             db.execute('INSERT INTO audit_log VALUES (1,0,?,?,?)', ('approval', key, digest))
             if other_key:
                 db.execute('INSERT INTO audit_log VALUES (2,0,?,?,?)', ('approval', 'signing:gh-manifest-root:1', 'deadbeef'))
+            if stored_manifest:
+                db.execute('CREATE TABLE gh_manifests (version INTEGER PRIMARY KEY, manifest_bytes BLOB, manifest_sha256 TEXT)')
+                db.execute('INSERT INTO gh_manifests VALUES (1,?,?)', (payload.read_bytes(), digest))
+            if broken_manifests:
+                db.execute('CREATE TABLE gh_manifests (wrong_column TEXT)')
             db.commit()
             db.close()
+            if missing_payload:
+                payload.unlink()
         return subprocess.run(['bash', 'scripts/audit-signed-payloads.sh', os.fspath(data)], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def test_unreadable_store_cannot_report_clean(self):
@@ -323,6 +330,29 @@ class ScriptContracts(unittest.TestCase):
     def test_payload_filename_is_passed_as_data(self):
         result = self.audit_store(quoted=True)
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_payload_retained_in_manifest_row_needs_no_file(self):
+        result = self.audit_store(stored_manifest=True, missing_payload=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('gh_manifests version 1', result.stdout)
+        self.assertNotIn('BYTES NOT RETAINED', result.stdout)
+
+    def test_payload_missing_from_legacy_store_is_still_a_finding(self):
+        result = self.audit_store(missing_payload=True)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('BYTES NOT RETAINED', result.stdout)
+
+    def test_payload_unmatched_approval_is_not_hidden_by_manifest_table(self):
+        result = self.audit_store(stored_manifest=True, other_key=True, missing_payload=True)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('BYTES NOT RETAINED', result.stdout)
+        self.assertNotIn('gh_manifests version 1', result.stdout)
+
+    def test_payload_unreadable_manifest_rows_cannot_report_clean(self):
+        result = self.audit_store(broken_manifests=True)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn('REFUSING:', result.stdout)
+        self.assertNotIn('CLEAN:', result.stdout)
 
     def test_trigger_probe_survives_transient_gh_failure_and_cleans_branch(self):
         self.executable('gh', 'if [ ! -e "$HOME/seen" ]; then touch "$HOME/seen"; exit 1; fi; echo 123')

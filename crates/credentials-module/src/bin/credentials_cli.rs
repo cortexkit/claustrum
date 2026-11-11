@@ -329,10 +329,11 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         // `help <verb>` → the verb's page; bare `help` → the short table.
         match args.first() {
             Some(verb)
-                if verb == "provider"
+                if (verb == "provider"
                     && args
                         .get(1)
-                        .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")) =>
+                        .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
+                    || (verb == "manifest" && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
             }
@@ -342,12 +343,13 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        let page = if command == "provider"
+        let page = if (command == "provider"
             && args
                 .first()
-                .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove"))
+                .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
+            || (command == "manifest" && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
-            format!("provider {}", args[0])
+            format!("{command} {}", args[0])
         } else {
             command.clone()
         };
@@ -416,6 +418,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
         "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
         "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
+        "manifest" => cli_support::manifest_cli::cmd_manifest(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -476,6 +479,9 @@ impl ParsedOptions {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    if command == "manifest" {
+        return cli_support::manifest_cli::guard_args(args).map(|()| ParsedOptions::default());
+    }
     // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
     // the generic scan below cannot judge it. `secret_cli` does, against the table for the
     // verb actually named, and that is the only argument check that runs for this verb.
@@ -681,6 +687,7 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
+       manifest            import, sign and track GitHub routing manifests\n\
           put                 store a secret from a file or hidden prompt\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
@@ -737,6 +744,9 @@ fn usage_short() -> String {
 /// overrides — so they stay discoverable without dumping on every invocation.
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
+    if verb == "manifest" || verb.starts_with("manifest ") {
+        return cli_support::manifest_cli::help_text(verb.strip_prefix("manifest "));
+    }
     let body = match verb {
         "provider" => {
             "ck auth provider list\n\

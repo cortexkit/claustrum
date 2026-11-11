@@ -50,6 +50,9 @@ mod isolated_cli;
 #[path = "support/secret_multi_host_cli.rs"]
 mod secret_multi_host_cli;
 
+#[path = "support/manifest_cli.rs"]
+mod manifest_cli;
+
 fn cli() -> Command {
     let mut command = cli_binary();
     isolated_cli::isolate(&mut command);
@@ -1618,6 +1621,21 @@ fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
 }
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
+    if verb == "manifest" {
+        let source = include_str!("../src/bin/cli_support/manifest_cli.rs");
+        let table = source
+            .split_once("fn value_flags(")
+            .unwrap()
+            .1
+            .split_once("pub fn guard_args(")
+            .unwrap()
+            .0;
+        return table
+            .split('"')
+            .filter(|token| token.starts_with("--"))
+            .map(str::to_string)
+            .collect();
+    }
     // `secret` keeps its per-verb flag tables beside the parser that reads them, keyed by
     // the sub-verb name rather than by the whole two-word verb, so they are read there:
     // `put_flags` and `REVOKE_FLAGS` are exactly the set its page must document.
@@ -5771,8 +5789,8 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // and provider-report.
     assert_eq!(
         verbs.len(),
-        40,
-        "the rendered verb-table scan narrowed; sign is a public verb"
+        41,
+        "the rendered verb-table scan narrowed; manifest is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

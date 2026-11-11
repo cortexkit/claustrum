@@ -1,0 +1,32 @@
+{
+  "artifact_id": "gh-routing-manifest",
+  "manifest_version": 28,
+  "schema_floor": 1,
+  "issued_at_unix_secs": 1794355200,
+  "detectors": [
+    {
+      "name": "café 🦀",
+      "enabled": true,
+      "fallback": null,
+      "weight": 1.5
+    }
+  ],
+  "tiers": {
+    "write": [
+      "push"
+    ],
+    "read": []
+  },
+  "api_rules": [],
+  "canonicalization": {
+    "z_last": false,
+    "a_first": "line\nfeed"
+  },
+  "repository_sections": [],
+  "bindings": {
+    "Zulu/Existing": "agent_1111111111111111",
+    "Alpha/Other": "agent_2222222222222222",
+    "cortexkit/opencode-sidebar": "agent_3333333333333333"
+  },
+  "worker_reads": []
+}

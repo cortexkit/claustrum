@@ -457,7 +457,7 @@ fn gateway_fixed_provider_registration_refuses_reserved_defaults_and_services_at
         assert!(matches!(
             store.set_registered_provider_audited(
                 service,
-                &ids(&["llm-gateway"]),
+                &ids(&["llm-provider"]),
                 &[],
                 AuditCtx::admin(AuditOp::ProviderSet)
             ),
@@ -480,7 +480,7 @@ fn gateway_fixed_provider_registration_refuses_reserved_defaults_and_services_at
         assert_refused(&store, "invalid_provider_id", "reserved", || {
             store.set_registered_provider_settings_audited(
                 service,
-                &ids(&["llm-gateway"]),
+                &ids(&["llm-provider"]),
                 &ids(&["openai", "openai-gw-acme"]),
                 None,
                 AuditCtx::admin(AuditOp::ProviderSet),

@@ -230,8 +230,11 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
     }
     let theme = ColorfulTheme::default();
     eprintln!("Provider {service} is unknown. Its keys reach only modules granted the groups you choose now.");
+    // `llm-gateway` is not offered: gateway keys get it from `admin.gateway_create`,
+    // and the registry refuses it as a default for ordinary keys.
     let groups: Vec<_> = credentials_core::catalog::CredentialCategory::ALL
         .iter()
+        .filter(|category| **category != credentials_core::catalog::CredentialCategory::LlmGateway)
         .map(|category| category.as_str())
         .collect();
     let selected = MultiSelect::with_theme(&theme)

@@ -12,6 +12,7 @@
 
 #[path = "federation/mod.rs"]
 pub mod federation;
+pub mod manifest_active_report;
 pub mod manifest_identity;
 #[cfg(not(test))]
 pub mod manifest_propose;

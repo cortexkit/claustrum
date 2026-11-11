@@ -62,6 +62,16 @@ impl Drop for CloseOnDrop {
     }
 }
 
+#[derive(Clone)]
+enum Inventory {
+    Scoped {
+        principal: Option<Principal>,
+        params: Arc<ListScopedParams>,
+    },
+    Connectors(Arc<crate::admin_surface::AdminSurface>),
+    Manifest,
+}
+
 fn process_epoch() -> &'static str {
     static EPOCH: OnceLock<String> = OnceLock::new();
     EPOCH.get_or_init(|| {
@@ -146,7 +156,15 @@ impl WatchHub {
         principal: Option<Principal>,
         params: ListScopedParams,
     ) -> bool {
-        self.open_inventory(surface, writer, header, principal, Some(params), None)
+        self.open_inventory(
+            surface,
+            writer,
+            header,
+            Inventory::Scoped {
+                principal,
+                params: Arc::new(params),
+            },
+        )
     }
 
     pub(crate) fn open_connectors(
@@ -156,7 +174,16 @@ impl WatchHub {
         header: subc_protocol::EnvelopeHeader,
         admin: Arc<crate::admin_surface::AdminSurface>,
     ) -> bool {
-        self.open_inventory(surface, writer, header, None, None, Some(admin))
+        self.open_inventory(surface, writer, header, Inventory::Connectors(admin))
+    }
+
+    pub(crate) fn open_manifest(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+    ) -> bool {
+        self.open_inventory(surface, writer, header, Inventory::Manifest)
     }
 
     fn open_inventory(
@@ -164,9 +191,7 @@ impl WatchHub {
         surface: Arc<ReadSurface>,
         writer: mpsc::Sender<Frame>,
         header: subc_protocol::EnvelopeHeader,
-        principal: Option<Principal>,
-        params: Option<ListScopedParams>,
-        connector_admin: Option<Arc<crate::admin_surface::AdminSurface>>,
+        inventory: Inventory,
     ) -> bool {
         let (stop, stopped) = watch::channel(Stop::Running);
         let (finished, done) = oneshot::channel();
@@ -201,9 +226,7 @@ impl WatchHub {
                 surface,
                 writer,
                 header,
-                principal,
-                params: params.map(Arc::new),
-                connector_admin,
+                inventory,
                 stopped,
                 writes,
                 snapshots,
@@ -272,9 +295,7 @@ struct Subscription {
     surface: Arc<ReadSurface>,
     writer: mpsc::Sender<Frame>,
     header: subc_protocol::EnvelopeHeader,
-    principal: Option<Principal>,
-    params: Option<Arc<ListScopedParams>>,
-    connector_admin: Option<Arc<crate::admin_surface::AdminSurface>>,
+    inventory: Inventory,
     stopped: watch::Receiver<Stop>,
     writes: watch::Receiver<()>,
     snapshots: Arc<Semaphore>,
@@ -311,35 +332,41 @@ impl Subscription {
             let surface = Arc::clone(&self.surface);
             let writer = self.writer.clone();
             let header = self.header;
-            let principal = self.principal.clone();
-            let params = self.params.clone();
-            let connectors = params.is_none();
+            let inventory = self.inventory.clone();
             let snapshots = Arc::clone(&self.snapshots);
-            let connector_admin = self.connector_admin.clone();
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
                 result = async {
-                    if let Some(admin) = connector_admin {
-                        if !crate::connectors::admit(header, &writer, &admin, false).await? {
+                    if let Inventory::Connectors(admin) = &inventory {
+                        if !crate::connectors::admit(header, &writer, admin, false).await? {
                             return Ok(false);
                         }
                     }
-                    let snapshot = snapshot(snapshots, move || match params {
-                        Some(params) => surface.watch_scoped(principal.as_ref(), &params),
-                        None => crate::connectors::list(surface.store()).and_then(|reply| {
-                            reply["version"].as_str().map(|version| (version.to_owned(), String::new())).ok_or(ReadError::StoreError)
+                    let snapshot = snapshot(snapshots, move || match inventory {
+                        Inventory::Scoped { principal, params } => surface.watch_scoped(principal.as_ref(), &params)
+                            .map(|(view, keys)| json!({"view":view, "keys":keys})),
+                        Inventory::Connectors(_) => crate::connectors::list(surface.store()).and_then(|reply| {
+                            reply["version"].as_str().map(|version| json!({"version":version})).ok_or(ReadError::StoreError)
                         }),
+                        Inventory::Manifest => {
+                            let reply = crate::manifest::watch_snapshot(surface.store());
+                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
+                        }
                     }).await;
                     match snapshot {
                         Ok(values) => {
+                            if values.get("error").is_some() {
+                                let body = serde_json::to_vec(&wrap_result(values)).map_err(ModuleError::Json)?;
+                                emit(&writer, header, FrameType::Response, body).await?;
+                                return Ok(false);
+                            }
                             if last.as_ref() != Some(&values) {
                                 seq += 1;
-                                let notice = if connectors {
-                                    json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "version":values.0})
-                                } else {
-                                    json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "view":values.0, "keys":values.1})
-                                };
+                                let mut notice = values.clone();
+                                notice["kind"] = json!("changed");
+                                notice["epoch"] = json!(process_epoch());
+                                notice["seq"] = json!(seq);
                                 let body = serde_json::to_vec(&notice).map_err(ModuleError::Json)?;
                                 emit(&writer, header, FrameType::StreamData, body).await?;
                                 last = Some(values);

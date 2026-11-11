@@ -24,6 +24,8 @@ mod admin_surface;
 mod connectors;
 mod federation;
 mod limiter;
+mod manifest;
+mod manifest_active_report;
 mod manifest_identity;
 mod manifest_propose;
 mod read_surface;
@@ -1100,9 +1102,12 @@ async fn handle_frame(
                 return Ok(true);
             }
             if let federation::RouteCaller::Principal(principal) = &caller {
-                if serde_json::from_slice::<ReadRequest>(&frame.body)
-                    .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
-                {
+                if serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                    request.method == OP_WATCH_SCOPED
+                        || (request.method == manifest::OP_WATCH
+                            && manifest::admitted(&request.method, principal.as_ref())
+                            && request.params.as_object().is_some_and(|p| p.is_empty()))
+                }) {
                     let principal = principal.clone();
                     handle_read_request(frame, &route, &surface, &admin, principal).await?;
                     return Ok(true);
@@ -1399,6 +1404,12 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if let Some(request) = method.as_ref().filter(|r| manifest::is_op(&r.method)) {
+        if !matches!(&caller, federation::RouteCaller::Principal(principal) if manifest::admitted(&request.method, principal.as_ref()))
+        {
+            return send_route_result(writer, header, uniform_not_found()).await;
+        }
+    }
     if method
         .as_ref()
         .is_some_and(|request| request.method == manifest_propose::OP_PROPOSE_BINDING)
@@ -1651,6 +1662,17 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        method if manifest::is_op(method) => {
+            return manifest::serve(
+                frame.header,
+                writer,
+                surface,
+                principal.as_ref(),
+                method,
+                &request.params,
+            )
+            .await;
+        }
         manifest_propose::OP_PROPOSE_BINDING => {
             match manifest_propose::serve(
                 Arc::clone(surface.store()),
@@ -2372,7 +2394,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .operation_delivery(BTreeMap::from([(
         federation::ingress::OP_REMOTE_WATCH.to_owned(),
         OperationDelivery::WATCH,
-    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH)]))
+    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH)]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2545,6 +2567,10 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: manifest_propose::OP_PROPOSE_BINDING.into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: manifest::OP_LATEST.into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: manifest::OP_WATCH.into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: manifest::OP_REPORT_ACTIVE.into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: manifest::OP_ACTIVE_STATUS.into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
@@ -2885,6 +2911,10 @@ mod tests {
             "secret.home",
             "secret.use",
             manifest_propose::OP_PROPOSE_BINDING,
+            "manifest.latest",
+            "manifest.watch",
+            "manifest.report_active",
+            "manifest.active_status",
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
             "permissions.list",
@@ -2901,7 +2931,13 @@ mod tests {
             );
             let kind = if matches!(
                 name,
-                "secret.deposit_keys" | "secret.list" | "secret.home" | "permissions.list"
+                "secret.deposit_keys"
+                    | "secret.list"
+                    | "secret.home"
+                    | "permissions.list"
+                    | "manifest.latest"
+                    | "manifest.watch"
+                    | "manifest.active_status"
             ) {
                 ManagementOperationKind::Query
             } else {
@@ -2909,6 +2945,10 @@ mod tests {
             };
             assert_eq!(matches[0].kind, kind, "wrong relay kind for {name}");
         }
+        assert_eq!(
+            m.operation_delivery.get("manifest.watch"),
+            Some(&OperationDelivery::WATCH)
+        );
     }
 
     #[test]
@@ -18437,12 +18477,14 @@ mod tests {
     ///             fixed kind only; repeated failures remain debug-only
     ///   warn/debug! member watch reconciliation and disconnect diagnostics:
     ///             existing fixed text, row/home ids, and error or ending values
+    ///   warn!     manifest activation downgrade: member id and two version integers,
+    ///             never manifest bytes, hashes or the caller's reason
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers ten source files linked
+    /// the one shape every secret read must take. Covers twelve source files linked
     /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -18463,6 +18505,11 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/federation/member_watch.rs"
             )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/manifest_active_report.rs"
+            )),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/manifest.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18479,7 +18526,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 15, 0),
+            (1, 2, 16, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18498,6 +18545,7 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[10], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![("warn".into(), "member_id, reported = lower.reported, active = lower.active, \"lower manifest version reported\"".into())]);
         assert_eq!(output_site_arguments(sources[9], &shapes), vec![
             ("debug".into(), "target: \"federation\", ?ending, \"home watch ended; inventory retained\"".into()),
             ("debug".into(), "target: \"federation\", ?error, \"home watch disconnected\"".into()),

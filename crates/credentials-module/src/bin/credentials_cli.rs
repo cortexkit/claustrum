@@ -9020,6 +9020,23 @@ mod login_regressions {
             ("iteracompute", "IteraCompute"),
             ("kilo", "Kilo Gateway"),
             ("minimax-cn", "MiniMax (minimax.cn)"),
+            ("mixlayer", "Mixlayer"),
+            ("moark", "Moark"),
+            ("model-oracle-ai", "Model Oracle AI"),
+            ("modular", "Modular"),
+            ("moonshotai-cn", "Moonshot AI (China)"),
+            ("morph", "Morph"),
+            ("munito", "Munito AI"),
+            ("munito-eu", "Munito AI (EU)"),
+            ("nan", "NaN"),
+            ("nearai", "NEAR AI Cloud"),
+            ("nebius", "Nebius Token Factory"),
+            ("neuralwatt", "Neuralwatt"),
+            ("ofox", "Ofox"),
+            ("opper", "Opper"),
+            ("orcarouter", "OrcaRouter"),
+            ("ovhcloud", "OVHcloud AI Endpoints"),
+            ("pareto", "Pareto Inference"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

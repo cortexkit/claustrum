@@ -110,9 +110,26 @@ are unchanged.
 | minimax-code | https://api.minimax.io/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | minimax-code-cn | https://api.minimax.cn/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | mistral | https://api.mistral.ai/v1/models | 2026-11-10 | 401 | - | - |
+| mixlayer | https://mixlayer.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| moark | https://api.moark.com/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| model-oracle-ai | https://api.modeloracle.com/api/v1/chat/completions | 2026-11-11 | 401 | Unauthorized | /error/type |
+| modular | https://api.modular.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
 | moonshot | https://api.moonshot.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_authentication_error | /error/type |
+| moonshotai-cn | https://api.moonshot.cn/v1/models | 2026-11-11 | 401 | invalid_authentication_error | /error/type |
+| morph | https://api.morphllm.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| munito | https://api.munito.ai/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| munito-eu | https://api.eu.munito.ai/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| nan | https://api.nan.builders/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| nearai | https://cloud-api.near.ai/v1/attestation/report | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| nebius | https://api.tokenfactory.nebius.com/v1/models | 2026-11-11 | 401 | - | - |
+| neuralwatt | https://api.neuralwatt.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| ofox | https://api.ofox.ai/v1/user/balance | 2026-11-11 | 401 | unauthorized | /error |
 | openai | https://api.openai.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | openrouter | https://openrouter.ai/api/v1/auth/key | 2026-11-10 | 401 | - | - |
+| opper | https://api.opper.ai/v3/compat/models | 2026-11-11 | 401 | - | - |
+| orcarouter | https://api.orcarouter.ai/v1/models | 2026-11-11 | 401 | orcarouter_api_error | /error/type |
+| ovhcloud | https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions | 2026-11-11 | 403 | - | - |
+| pareto | https://api.paretoinference.com/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
 | perplexity | https://api.perplexity.ai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
 | qwen-portal | https://portal.qwen.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | siliconflow | https://api.siliconflow.com/v1/models | 2026-11-10 | 401 | - | - |
@@ -619,6 +636,119 @@ Three ids from this batch have neither a row nor a skip; `--missing` still print
   `error.code: service_closed`, saying the API shut down on 31 October 2026 and
   keys no longer work. No row or invented skip reason was added.
 
+## Fifth batch from the Fusiform provider list
+
+The selected 25 ids are `mixlayer` through `pareto`, sorted by provider id from
+`ck auth provider-report --missing`. The six earlier gaps (`clarifai`, `ebcloud`,
+`hetzner`, `kuae-cloud-coding-plan`, `lilac` and `llmtech`), whose documentation or
+service limitations are recorded above, are excluded from this batch and remain
+visible in `--missing`.
+Seventeen selected ids now have rows, four have the documented skips below, and
+four remain gaps. All new rows use Bearer authentication. Their bogus-key requests
+ran on a network-enabled Linux build server on 2026-11-11 with redirects disabled;
+chat probes requested at most one output token. No real provider key was used.
+
+The provider-owned sources for the row fields and checks are:
+
+- `mixlayer`: <https://docs.mixlayer.com/quickstart> gives `https://mixlayer.ai/v1`,
+  an explicit `Authorization: Bearer` example and the console's API-key page.
+  <https://docs.mixlayer.com/models> documents `GET /v1/models`; that read rejected
+  the bogus key.
+- `moark`: <https://moark.com/docs/getting-started> shows Bearer authentication at
+  `api.moark.com` and the `DeepSeek-R1` chat example used for the check. The
+  token guide (<https://moark.com/docs/account/access-token>) describes free
+  experience tokens; <https://moark.com/docs/products/apis> links the token page.
+- `model-oracle-ai`: <https://modeloracle.com/setup/> documents the hosted
+  `https://api.modeloracle.com/api/v1` URL, Bearer platform key and `auto` chat
+  request. The row covers that hosted offering, not private deployments. Upstream
+  provider keys managed inside the dashboard are not additional client headers.
+- `modular`: <https://docs.modular.com/quickstart> documents the common API at
+  `api.modular.com`, Bearer authentication, the key page and `minimax/minimax-m3`.
+  <https://docs.modular.com/administration/api-keys> gives the `sk-mod-` format.
+  The check is a one-token chat, not an undocumented key-status route.
+- `moonshotai-cn`: <https://platform.moonshot.cn/docs/get-api-key.md> documents
+  `api.moonshot.cn`, a literal Bearer example and the key-page link at
+  `platform.kimi.com`. <https://platform.moonshot.cn/docs/api/list-models.md>
+  documents the authenticated `GET /v1/models` read and warns that keys from
+  the China and international platforms are not interchangeable.
+- `morph`: <https://docs.morphllm.com/general-inference> documents
+  `api.morphllm.com`, Bearer authentication and `morph-glm53-744b`. The key page
+  is linked from <https://docs.morphllm.com/endpoints.md>. Although its model
+  list returned HTTP 200 for the bogus key, the documented chat rejected it, so
+  the check uses chat. Deployment-specific dedicated endpoints are not included.
+- `munito` and `munito-eu`: <https://docs.munito.ai/quickstart> documents Bearer
+  inference keys and their creation page. <https://docs.munito.ai/regions> lists
+  the fixed global, EU and US hosts (`api.munito.ai`, `api.eu.munito.ai`,
+  `api.us.munito.ai`) and says the same key works across regions. Both rows include
+  those hosts; their checks use their respective global or EU base URL.
+  <https://docs.munito.ai/api/listModels> says a supplied invalid key gets 401
+  even though anonymous callers can list public models. Admin keys are separate
+  from these inference keys.
+- `nan`: <https://nan.builders/docs/getting-started> documents `api.nan.builders`,
+  Bearer `sk-` keys, the key portal and `GET /v1/models`. That read rejected the
+  bogus key. Its pinned Fusiform output modalities also assign the media group.
+- `nearai`: <https://docs.near.ai/cloud/quickstart.md> documents
+  `cloud-api.near.ai`, Bearer authentication and the key dashboard.
+  <https://docs.near.ai/api-reference/attestation/get-attestation-report.md>
+  explicitly describes the attestation read as non-billable and says a supplied
+  key must be valid. The live refusal confirms that it can check a bogus key
+  without inference. Its pinned Fusiform modalities also assign the media group.
+- `nebius`: <https://docs.tokenfactory.nebius.com/quickstart> documents
+  `api.tokenfactory.nebius.com` and Bearer keys; the introduction links the key
+  page. <https://docs.tokenfactory.nebius.com/api-reference/models/list-models.md>
+  documents the authenticated model-list route used for the check.
+- `neuralwatt`: <https://portal.neuralwatt.com/docs> documents
+  `api.neuralwatt.com`, Bearer keys and `glm-5.3`. The key guide is
+  <https://docs.neuralwatt.com/authentication.md>. Because the docs allow anonymous
+  model listing, the check uses the documented chat instead.
+- `ofox`: <https://ofox.ai/docs/develop/authentication> and
+  <https://ofox.ai/docs/api> document the unified key at `api.ofox.ai` and its
+  Bearer presentation for the OpenAI-compatible API. The key page and
+  `GET /v1/user/balance` are documented at
+  <https://ofox.ai/docs/api/openapi/balance>. The live bogus-key request returned
+  HTTP 401 rather than a successful balance response.
+- `opper`: <https://docs.opper.ai/overview/quickstart> documents Bearer runtime
+  keys, their creation page and `api.opper.ai`.
+  <https://docs.opper.ai/build/gateway/drop-in-sdks> also documents the same key at
+  `gw.opper.ai` and `eu.gw.opper.ai`.
+  <https://docs.opper.ai/v3-api-reference/compatibility/list-models> requires
+  authentication on `GET /v3/compat/models`; the public `/v3/models` and health
+  routes would not check a key. The organization management key is not used.
+- `orcarouter`: <https://docs.orcarouter.ai/getting-started/get-api-key> documents
+  `api.orcarouter.ai`, `sk-orca-` Bearer keys and the console. The model-list guide
+  and <https://docs.orcarouter.ai/routing/free-models> say a supplied key is
+  authenticated strictly even when anonymous model-list reads are permitted.
+  The observed `/error/code` was empty; the evidence records the nonempty
+  `/error/type` instead of inventing a code.
+- `ovhcloud`: the official model example at
+  <https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/qwen-guard-gen-06b/>
+  documents Bearer access tokens at `oai.endpoints.kepler.ai.cloud.ovh.net` and
+  `Qwen3Guard-Gen-0.6B`. The catalog marks that model free. The key-creation guide
+  (<https://help.ovhcloud.com/csm/en-public-cloud-ai-endpoints-getting-started?id=kb_article_view&sysparm_article=KB0062908>)
+  describes the Public Cloud project's AI Endpoints API-keys tab. The check sends
+  the key even though the service also permits limited anonymous calls.
+- `pareto`: <https://docs.paretoinference.com/> links the key dashboard and gives
+  the fixed base URL. <https://docs.paretoinference.com/api-reference> documents
+  Bearer authentication and `z-ai/glm-5.3-flash`. Its model list is public, so
+  the check uses the documented one-token chat request instead.
+
+Four selected ids remain uncovered rather than receiving invented skip reasons:
+
+- `modelis`: <https://modelishub.com/pricing> documents direct Bearer keys at
+  `https://modelishub.com/v1` and `modelis-auto`, but two live bogus-key chat
+  probes returned HTTP 502, not an authentication refusal. The separate RapidAPI
+  offering uses a different key and was not substituted for the direct offering.
+- `modelscope`: <https://modelscope.cn/docs/model-service/API-Inference/intro.md>
+  documents `https://api-inference.modelscope.cn/v1/` and an Access Token passed
+  as the OpenAI SDK's `api_key`, but the inspected documentation did not give the
+  literal HTTP key header. SDK compatibility alone was not used to infer it.
+- `neosmith`: <https://neosmith.ai/docs> documents Bearer keys at
+  `https://router.neosmith.ai/v1`, but two live requests could not resolve that
+  hostname. No invalid-key observation was obtained.
+- `nova`: <https://nova.amazon.com/dev/documentation>, its Markdown variant and
+  the quickstart yielded no readable API instructions; `/llms.txt` returned an
+  Amazon sign-in page. No host or key header was inferred from other AWS products.
+
 ## Fusiform provider skips
 
 This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
@@ -672,6 +802,26 @@ not a reason to skip it.
   placeholder works and real authentication happens between Lynkr and its configured
   upstream provider. No Lynkr provider API key is documented. See
   <https://github.com/Fast-Editor/Lynkr/blob/main/documentation/api.md>.
+- `modal`: <https://modal.com/docs/guide/webhook-proxy-auth> requires a proxy token
+  ID and token secret, either in separate headers or combined as a Bearer value.
+  <https://modal.com/docs/guide/endpoints> also documents dedicated inference
+  endpoint URLs chosen per deployment. The combined two-component token is not
+  represented as a single pasted API-key row.
+- `neon`: <https://neon.com/docs/ai-gateway/get-started.md> documents an AI Gateway
+  URL scoped to a branch, with the pattern
+  `br-<name>-api.ai.<cell>.<region>.aws.neon.tech`. A runtime token is not usable
+  without that branch's base URL, so no provider-wide host is substituted.
+- `oci`: <https://docs.oracle.com/en-us/iaas/Content/generative-ai/api-keys.htm>
+  documents GenAI Bearer keys bound to a region, with the regional inference host
+  `inference.generativeai.<region-identifier>.oci.oraclecloud.com`. As with Bedrock,
+  a regional key is not represented by a single fixed-host row. The two alternate
+  secrets Oracle issues for a key are interchangeable, not two required headers.
+- `openreason`: the current site explicitly says "OpenReason is not a proxy" and
+  model requests go straight to Anthropic and OpenAI. Its only documented key is
+  `OR_API_KEY` (`or_ingest_...`) for telemetry ingestion at
+  `api.openreason.app/otlp`, not a model API key. It must not be catalogued as an
+  LLM-provider key. See <https://openreason.app>, <https://docs.openreason.app>
+  and <https://docs.openreason.app/quickstart/or-otel>.
 
 Only these reasons are permitted:
 
@@ -693,6 +843,10 @@ Only these reasons are permitted:
 | google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | lmstudio | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | lynkr | no API key in its documentation |
+| modal | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| neon | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| oci | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| openreason | no API key in its documentation |
 
 ## Hosts without provider documentation
 

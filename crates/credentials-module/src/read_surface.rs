@@ -922,6 +922,113 @@ mod get_scoped_tests {
     }
 
     #[tokio::test]
+    async fn elevenlabs_existing_records_keep_assignments_and_use_catalog_descriptor() {
+        use credentials_core::store::{SetCategoryMode, SetProvidersMode};
+
+        let (surface, store, db_path, _root) = crate::tests::tmp_surface_with_store(216);
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+                )
+                .unwrap();
+            // Reproduce assignments saved before ElevenLabs had a catalog row.
+            store
+                .set_categories_audited(
+                    id,
+                    SetCategoryMode::Set,
+                    &["web-search".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+            store
+                .set_providers_audited(
+                    id,
+                    SetProvidersMode::Set,
+                    &["legacy-route".into()],
+                    AuditCtx::admin(AuditOp::SetProviders),
+                )
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "descriptor-reader",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+
+        // An older binary could register ElevenLabs; current setters must refuse it.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO registered_providers \
+             (service, categories_json, provider_ids_json, created_at_ms, hosts_json, \
+              auth_header, auth_scheme, fusiform_provider_id) \
+             VALUES ('elevenlabs', '[\"llm-provider\"]', '[\"registered-route\"]', 123, \
+                     '[\"api.openai.com\"]', 'authorization', 'bearer', 'openai')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let registration = store.registered_providers().unwrap();
+
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            let record = store.get(id).unwrap().encode().unwrap();
+            let reply = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                golden_reply(
+                    id,
+                    1,
+                    json!({
+                        "auth": {"header": "xi-api-key", "scheme": "raw"},
+                        "hosts": ["api.elevenlabs.io"],
+                        "invalid_key": {
+                            "status": 401,
+                            "error_code": "unauthorized",
+                            "error_code_field": "/detail/code"
+                        }
+                    })
+                )
+            );
+            assert_eq!(store.categories(id).unwrap(), ["web-search"]);
+            assert_eq!(store.provider_ids(id).unwrap(), ["legacy-route"]);
+            assert_eq!(store.get(id).unwrap().encode().unwrap(), record);
+        }
+        store
+            .create(
+                "apikey:elevenlabs:new",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .unwrap();
+        assert_eq!(
+            store.categories("apikey:elevenlabs:new").unwrap(),
+            ["media-provider"]
+        );
+        assert!(store
+            .provider_ids("apikey:elevenlabs:new")
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.registered_providers().unwrap(), registration);
+    }
+
+    #[tokio::test]
     async fn registered_provider_v2_v3_sequence_projects_current_descriptor_for_every_key() {
         use credentials_core::admin_ops::{apply, AdminOpBody};
         let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(215);

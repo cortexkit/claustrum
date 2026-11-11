@@ -539,8 +539,9 @@ replacement preserves an existing set. Existing records are never automatically
 remapped. The vault never derives these ids at read time from the credential id,
 catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
 current table without changing any record, taking no writer lease.
-Only the OpenAI and Google API-key rows default to both `llm-provider` and
-`media-provider`; no other row gets the media group. Routing stops choosing a media key
+The OpenAI and Google API-key rows default to both `llm-provider` and
+`media-provider`; ElevenLabs defaults to `media-provider` alone. These are the media
+rows. Routing stops choosing a media key
 its consumer reported unfunded, and lifts that after a successful run. Category
 defaults apply to creation, not existing records or replacements with stored categories.
 Consumers join on exact provider-id equality, with no fallback. `serves` answers which

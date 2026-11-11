@@ -207,6 +207,9 @@ crates/credentials-core/src/catalog.rs INLINE_179 agent.tinyfish.ai
 crates/credentials-core/src/catalog.rs INLINE_180 api.tinyfish.ai
 crates/credentials-core/src/catalog.rs INLINE_181 docs.searxng.org
 crates/credentials-core/src/catalog.rs INLINE_182 docs.searxng.org
+crates/credentials-core/src/catalog.rs INLINE_183 elevenlabs.io
+crates/credentials-core/src/catalog.rs INLINE_184 elevenlabs.io
+crates/credentials-core/src/catalog.rs INLINE_185 api.elevenlabs.io
 crates/credentials-core/src/device_flow.rs INLINE_001 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_002 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_003 auth.openai.com

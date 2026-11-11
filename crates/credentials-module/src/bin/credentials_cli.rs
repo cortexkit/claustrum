@@ -9011,6 +9011,11 @@ mod login_regressions {
             }))
             .collect();
         assert_eq!(&rows[..rows.len() - 1], expected);
+        assert!(rows.contains(&(
+            "elevenlabs".into(),
+            "ElevenLabs".into(),
+            "apikey:elevenlabs".into(),
+        )));
         assert_eq!(
             rows.last().unwrap(),
             &(

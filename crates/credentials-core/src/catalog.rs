@@ -127,6 +127,7 @@ const LLM_AND_MEDIA: &[CredentialCategory] = &[
     CredentialCategory::LlmProvider,
     CredentialCategory::MediaProvider,
 ];
+const MEDIA: &[CredentialCategory] = &[CredentialCategory::MediaProvider];
 const LLM_AND_WEB_SEARCH: &[CredentialCategory] = &[
     CredentialCategory::LlmProvider,
     CredentialCategory::WebSearch,
@@ -1729,6 +1730,26 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             reason: "SearXNG is self-hosted, so there is no shared endpoint to check a key against; a wrong key shows up on first use",
         },
         categories: WEB_SEARCH,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "elevenlabs",
+        fusiform_provider_id: Some("elevenlabs"),
+        auth: Some(AuthDescriptor { header: "xi-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.elevenlabs.io"],
+        hosts_doc: "https://elevenlabs.io/docs/api-reference/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("unauthorized"), error_code_field: Some("/detail/code") }),
+        default_provider_ids: &[],
+        display_name: "ElevenLabs",
+        default_id: "apikey:elevenlabs",
+        dashboard_url: "https://elevenlabs.io/app/settings/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.elevenlabs.io/v1/user",
+            extra_headers: &[],
+        },
+        categories: MEDIA,
         serves: &[],
         account_id_prompt: None,
     },
@@ -3356,6 +3377,7 @@ mod tests {
             ("jina", &[]),
             ("tinyfish", &[]),
             ("searxng", &[]),
+            ("elevenlabs", &[]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -3368,13 +3390,12 @@ mod tests {
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
                 assert_eq!(default_provider_ids(&id), *ids, "{id}");
                 assert_eq!(provider(&id), Some(*key));
-                // Only the two speech and media vendors colliculus uses get the
-                // media group; routing parks an unfunded key for media jobs.
+                // Media consumers receive only the rows assigned to their group.
                 assert_eq!(
                     category_defaults(&id)
                         .iter()
                         .any(|category| category == "media-provider"),
-                    matches!(*key, "openai" | "google"),
+                    matches!(*key, "openai" | "google" | "elevenlabs"),
                     "{id}"
                 );
             }
@@ -3395,11 +3416,11 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // and 9 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 66);
+        // 9 search APIs, and ElevenLabs for media.
+        assert_eq!(API_KEY_PROVIDERS.len(), 67);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
-        // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
-        // the two category tests below, which also require every row to be listed.
+        // The category tests below pin the model, search and media rows and require
+        // every row to be listed.
         let login_categories: Vec<_> = LOGIN_PROVIDERS
             .iter()
             .map(|entry| {
@@ -3540,6 +3561,8 @@ mod tests {
         "searxng",
     ];
 
+    const MEDIA_ONLY_KEYS: &[&str] = &["elevenlabs"];
+
     /// Catalogued keys used by both model and web-search consumers.
     const DUAL_USE_KEYS: &[&str] = &[
         "deepseek",
@@ -3613,6 +3636,7 @@ mod tests {
                     || MIRRORED_LLM_KEYS.contains(&entry.key)
                     || DUAL_USE_KEYS.contains(&entry.key)
                     || SEARCH_KEYS.contains(&entry.key)
+                    || MEDIA_ONLY_KEYS.contains(&entry.key)
                     || entry.key == "kiro"
                     || entry.key == "anthropic"
                     || entry.key == "inception"
@@ -3640,7 +3664,52 @@ mod tests {
             .filter(|entry| !entry.categories.contains(&CredentialCategory::LlmProvider))
             .map(|entry| entry.key)
             .collect();
-        assert_eq!(without_llm, SEARCH_KEYS);
+        assert_eq!(
+            without_llm,
+            SEARCH_KEYS
+                .iter()
+                .chain(MEDIA_ONLY_KEYS)
+                .copied()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn media_only_keys_have_no_llm_routes_or_model_vendors() {
+        for key in MEDIA_ONLY_KEYS {
+            let row = api_key_provider(key).unwrap();
+            assert_eq!(row.default_id, format!("apikey:{key}"));
+            assert!(row.serves.is_empty());
+            for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
+                assert_eq!(category_defaults(&id), ["media-provider"], "{id}");
+                assert!(default_provider_ids(&id).is_empty(), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn elevenlabs_checks_the_authenticated_read_only_user_endpoint() {
+        let row = api_key_provider("elevenlabs").unwrap();
+        assert_eq!(row.fusiform_provider_id, Some("elevenlabs"));
+        assert!(matches!(
+            row.validation,
+            KeyValidation::GetEndpoint {
+                url: "https://api.elevenlabs.io/v1/user",
+                extra_headers: [],
+            }
+        ));
+        assert_eq!(
+            row.hosts_doc,
+            "https://elevenlabs.io/docs/api-reference/authentication"
+        );
+        assert_eq!(
+            row.auth,
+            Some(AuthDescriptor {
+                header: "xi-api-key",
+                scheme: AuthScheme::Raw
+            })
+        );
+        assert_eq!(row.hosts, ["api.elevenlabs.io"]);
     }
 
     #[test]
@@ -4212,6 +4281,7 @@ mod source_ownership_tests {
                 ("jina", vec![]),
                 ("tinyfish", vec![]),
                 ("searxng", vec![]),
+                ("elevenlabs", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

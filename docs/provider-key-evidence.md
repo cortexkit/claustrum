@@ -22,6 +22,7 @@ are unchanged.
 | cloudflare-workers-ai | https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/models/search?per_page=1 | 2026-11-10 | 400 | - | - |
 | deepinfra | https://api.deepinfra.com/v1/openai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | deepseek | https://api.deepseek.com/chat/completions | 2026-11-10 | 401 | invalid_request_error | /error/code |
+| elevenlabs | https://api.elevenlabs.io/v1/user | 2026-11-11 | 401 | unauthorized | /detail/code |
 | firecrawl | https://api.firecrawl.dev/v2/team/credit-usage | 2026-11-10 | 401 | - | - |
 | fireworks-ai | https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1 | 2026-11-10 | 401 | UNAUTHORIZED | /error/code |
 | google | https://generativelanguage.googleapis.com/v1beta/models | 2026-11-10 | 400 | API_KEY_INVALID | /error/details/0/reason |
@@ -51,6 +52,17 @@ are unchanged.
 | xiaomi-token-plan-sgp | https://token-plan-sgp.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | zai | https://api.z.ai/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | zhipu-coding-plan | https://open.bigmodel.cn/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+
+## ElevenLabs key check
+
+On 2026-11-11 a network-enabled Linux build server sent a deliberately bogus key
+in the raw `xi-api-key` header to `GET https://api.elevenlabs.io/v1/user`. The
+response was HTTP 401 with `detail.code` equal to `unauthorized`,
+`detail.status` equal to `invalid_api_key`, and the message `Invalid API key`.
+The authentication documentation at
+<https://elevenlabs.io/docs/api-reference/authentication> specifies the header and
+the fixed `api.elevenlabs.io` host. The read-only user endpoint is documented at
+<https://elevenlabs.io/docs/api-reference/user/get>.
 
 ## Probes without a response
 

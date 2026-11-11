@@ -9259,6 +9259,78 @@ fn provider_catalog_report_missing_takes_no_lease_and_changes_no_records() {
 }
 
 #[test]
+fn elevenlabs_provider_report_compares_only_stored_ids_and_provider_set_is_refused() {
+    let vault = GrantCliVault::new("elevenlabs-provider-report");
+    vault.bootstrap();
+    assert!(vault
+        .run(&[
+            "put",
+            "--id",
+            "apikey:elevenlabs",
+            "--payload-file",
+            &payload_file("report-key"),
+        ])
+        .status
+        .success());
+    // A legacy category differs from the new row but must not appear in this report.
+    assert!(vault
+        .run(&["set-category", "apikey:elevenlabs", "--set", "web-search"])
+        .status
+        .success());
+    for (ids, expected) in [
+        (vec![], "ID\tSTORED\tTABLE\n"),
+        (
+            vec!["legacy-route"],
+            "ID\tSTORED\tTABLE\napikey:elevenlabs\t[\"legacy-route\"]\t[]\n",
+        ),
+    ] {
+        let mut args = vec!["set-providers", "--id", "apikey:elevenlabs", "--set"];
+        args.extend(ids);
+        assert!(vault.run(&args).status.success());
+        let before = vault.run(&["list", "--json"]).stdout;
+        let audit = vault.run(&["audit"]).stdout;
+        let registrations = vault.run(&["provider", "list"]).stdout;
+        {
+            let store = open_leased_store(&vault.data_dir, &vault.key_path);
+            let record = store.get("apikey:elevenlabs").unwrap().encode().unwrap();
+            let out = vault.run(&["provider-report"]);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
+            assert_eq!(
+                store.get("apikey:elevenlabs").unwrap().encode().unwrap(),
+                record
+            );
+            assert_eq!(
+                store.categories("apikey:elevenlabs").unwrap(),
+                ["web-search"]
+            );
+        }
+        let refused = vault.run(&[
+            "provider",
+            "set",
+            "--service",
+            "elevenlabs",
+            "--category",
+            "llm-provider",
+        ]);
+        assert!(!refused.status.success());
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("Provider service \"elevenlabs\""),
+            "{stderr}"
+        );
+        assert!(stderr.contains("fixed provider catalog"), "{stderr}");
+        assert_eq!(vault.run(&["list", "--json"]).stdout, before);
+        assert_eq!(vault.run(&["audit"]).stdout, audit);
+        assert_eq!(vault.run(&["provider", "list"]).stdout, registrations);
+    }
+}
+
+#[test]
 fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() {
     let vault = GrantCliVault::new("provider-report");
     vault.bootstrap();

@@ -34,6 +34,7 @@ pub mod enrollment;
 pub mod envelope;
 pub mod federation;
 pub mod fusiform_providers;
+pub mod gateway;
 pub mod google_login;
 pub mod health;
 pub mod http;
@@ -85,6 +86,10 @@ pub use enrollment::{
     ENROLLMENT_PENDING_TTL_MS,
 };
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
+pub use gateway::{
+    gateway_provider_vendor, gateway_settings_digest, validate_gateway_settings, GatewayAuth,
+    GatewayHeader, GatewaySettings, GatewaySettingsRule, ValidatedGateway,
+};
 pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;
 pub use key::{KeyId, MasterKey};

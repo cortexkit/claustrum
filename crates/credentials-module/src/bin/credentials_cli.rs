@@ -694,7 +694,7 @@ fn usage_short() -> String {
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
-       list                credential ids + lifecycle state (no secrets)\n\
+        list                credential inventory + gateway settings (no secrets)\n\
        provider-report     compare routing ids or list uncovered providers\n\
        provider            list, set or remove operator provider defaults\n\
        grants              principal-scoped grants (no secrets)\n\
@@ -984,14 +984,16 @@ fn help_verb(verb: &str) -> String {
              find which credential a health probe flagged needs_reauth. The human table\n\
              is not a stable format; scripts must use --json. --json prints one JSON\n\
              document on stdout: {\"v\":1,\"credentials\":[...]} with rows sorted by id.\n\
-             Each row carries exactly id, state, record_version, categories,\n\
+             Each row carries id, state, record_version, categories,\n\
               provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
               Rows also carry provider (service name), incarnation and\n\
               plan_tier_observed_at_ms (null when the tier's start is unknown).\n\
-             auth_method is apikey, chatgpt, antigravity or oauth, and null when the\n\
+             auth_method is apikey, chatgpt, antigravity, oauth or gateway, and null when the\n\
              credential has no subscription or API plane. plan_tier and plan_tier_source\n\
              are null when unset; creator is null when none. No payloads, tokens,\n\
-             handles or emails are ever printed."
+             handles or emails are ever printed. Gateway rows also carry base_url and\n\
+             headers (a name-to-value object, empty when unset). The human table shows\n\
+             gateway's base URL and header names only, never header values."
         }
         "grants" => {
             "ck auth grants\n\
@@ -4806,12 +4808,11 @@ fn render_inventory_row(
     (state, version, id, categories, providers): &InventoryRow,
     result: &serde_json::Value,
 ) -> String {
-    let creator = result["credentials"]
-        .as_array()
-        .and_then(|rows| {
-            rows.iter()
-                .find(|row| row["id"].as_str() == Some(id.as_str()))
-        })
+    let entry = result["credentials"].as_array().and_then(|rows| {
+        rows.iter()
+            .find(|row| row["id"].as_str() == Some(id.as_str()))
+    });
+    let creator = entry
         .and_then(|row| row["created_by"].as_str())
         .filter(|by| by.starts_with("reserved:") || by.starts_with("enrolled:"));
     let categories = if categories.is_empty() {
@@ -4840,7 +4841,23 @@ fn render_inventory_row(
     } else {
         String::new()
     };
-    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{plan}{creator}")
+    let gateway = entry
+        .and_then(|row| row["base_url"].as_str().map(|base_url| (row, base_url)))
+        .map(|(row, base_url)| {
+            let mut names: Vec<&str> = row["headers"]
+                .as_object()
+                .map(|headers| headers.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            names.sort_unstable();
+            let headers = if names.is_empty() {
+                "-".into()
+            } else {
+                names.join(",")
+            };
+            format!("  method=gateway  base_url={base_url}  headers={headers}")
+        })
+        .unwrap_or_default();
+    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{plan}{creator}{gateway}")
 }
 
 fn inventory_has_plan(result: &serde_json::Value) -> bool {
@@ -6230,12 +6247,11 @@ fn cmd_list(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// Print the stable machine-readable inventory for operator scripts.
 ///
 /// One JSON document on stdout, `{"v":1,"credentials":[...]}`, rows sorted by
-/// id. Each row carries exactly nine keys (`id`, `state`, `record_version`,
-/// `categories`, `provider_ids`, `auth_method`, `plan_tier`, `plan_tier_source`,
-/// `creator`); absent optionals render null, never omitted, so a script can pin
-/// the key set. Nothing secret is read and nothing secret is printed: the rows
+/// id. The existing keys keep their order and absent optionals render null.
+/// Only gateway rows add `base_url` and a name-to-value `headers` object;
+/// ordinary rows omit both keys. Nothing secret is printed: the rows
 /// come from the same `admin.status` report the human table renders, plus the
-/// `auth_method` derived below without opening any payload.
+/// `auth_method` derived below without exposing any payload.
 fn print_inventory_json(result: &serde_json::Value, global: &GlobalArgs) -> Result<(), CliError> {
     let rows = inventory_json_rows(result, global)?;
     println!("{}", serde_json::json!({ "v": 1, "credentials": rows }));
@@ -6283,7 +6299,7 @@ fn inventory_json_rows(
                     .copied()
                     .flatten()
                     .map(|method| method.as_str());
-                serde_json::json!({
+                let mut row = serde_json::json!({
                     "id": id,
                     "state": state,
                     "record_version": version,
@@ -6296,7 +6312,12 @@ fn inventory_json_rows(
                     "incarnation": entry.and_then(|row| row.get("incarnation")).cloned().unwrap_or(serde_json::Value::Null),
                     "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,
-                })
+                });
+                if let Some(gateway) = entry.filter(|row| row.get("base_url").is_some()) {
+                    row["base_url"] = gateway["base_url"].clone();
+                    row["headers"] = gateway["headers"].clone();
+                }
+                row
             },
         )
         .collect();
@@ -6305,7 +6326,8 @@ fn inventory_json_rows(
 }
 
 /// Map each inventory id to its listed `auth_method`, derived without seeing a
-/// payload: the unsealed record's kind and stored refresh adapter through the
+/// payload: gateway metadata takes precedence; otherwise the record's kind and
+/// refresh adapter (the stored choice of token-refresh flow) select through the
 /// same [`credentials_core::list_auth_method::list_auth_method`] table that
 /// `credential.list_scoped` rows use, never parsed from the credential id.
 ///

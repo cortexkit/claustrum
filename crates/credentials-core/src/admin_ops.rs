@@ -2253,7 +2253,7 @@ pub fn status_result(
     let credentials: Vec<serde_json::Value> = metas
         .iter()
         .map(|(id, m)| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "id": id,
                 "state": m.state.as_str(),
                 "record_version": m.record_version,
@@ -2263,7 +2263,17 @@ pub fn status_result(
                 "incarnation": m.incarnation,
                 "plan_tier_observed_at_ms": m.plan_tier_observed_at_ms,
                 "provider": crate::catalog::provider(id),
-            })
+            });
+            if let Some(gateway) = &m.gateway {
+                row["base_url"] = serde_json::json!(gateway.settings.base_url);
+                row["headers"] = serde_json::json!(gateway
+                    .settings
+                    .headers
+                    .iter()
+                    .map(|header| (&header.name, &header.value))
+                    .collect::<std::collections::BTreeMap<_, _>>());
+            }
+            row
         })
         .collect();
     // Both source lists are SQL-sorted, and the filter retains credential order.
@@ -2369,6 +2379,89 @@ pub enum StoreMode {
 mod tests {
     use super::*;
     use crate::record::CredentialKind;
+
+    fn inventory_meta() -> RecordMeta {
+        RecordMeta {
+            incarnation: Some("fixture-incarnation".into()),
+            plan_tier_observed_at_ms: None,
+            record_version: 1,
+            key_id_hex: "00".into(),
+            state: crate::record::RecordState::Active,
+            stale_pending: false,
+            categories: vec!["llm-gateway".into()],
+            created_by: Some("operator".into()),
+            provider_ids: vec![],
+            plan_tier: None,
+            gateway: None,
+        }
+    }
+
+    #[test]
+    fn status_inventory_non_gateway_row_keeps_its_exact_bytes() {
+        // Category membership alone must not add gateway fields to an ordinary key.
+        let result = status_result(&[("apikey:custom".into(), inventory_meta())], &[], 0, false);
+        assert_eq!(
+            serde_json::to_string(&result["credentials"][0]).unwrap(),
+            r#"{"categories":["llm-gateway"],"id":"apikey:custom","incarnation":"fixture-incarnation","plan_tier":null,"plan_tier_observed_at_ms":null,"provider":null,"provider_ids":[],"record_version":1,"state":"active"}"#
+        );
+    }
+
+    #[test]
+    fn status_inventory_gateway_fields_match_the_scoped_descriptor_shape() {
+        use crate::gateway::{GatewayAuth, GatewayHeader, GatewaySettings};
+        use crate::store::StoredGatewaySettings;
+
+        for headers in [
+            vec![],
+            vec![
+                GatewayHeader {
+                    name: "x-a".into(),
+                    value: "first".into(),
+                },
+                GatewayHeader {
+                    name: "x-z".into(),
+                    value: "last".into(),
+                },
+            ],
+        ] {
+            let mut meta = inventory_meta();
+            meta.gateway = Some(StoredGatewaySettings {
+                incarnation: "fixture-incarnation".into(),
+                settings: GatewaySettings {
+                    base_url: "http://[::1]:4000/v1".into(),
+                    auth: GatewayAuth {
+                        header: "authorization".into(),
+                        scheme: "bearer".into(),
+                    },
+                    headers: headers.clone(),
+                },
+                host: "[::1]".into(),
+                vendor: crate::catalog::ModelVendor::Anthropic,
+            });
+            let result = status_result(&[("apikey:anthropic-gw-acme".into(), meta)], &[], 0, false);
+            let row = &result["credentials"][0];
+            assert_eq!(row["base_url"], "http://[::1]:4000/v1");
+            let expected = if headers.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({"x-a": "first", "x-z": "last"})
+            };
+            assert_eq!(row["headers"], expected);
+            assert_eq!(
+                row["headers"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                if headers.is_empty() {
+                    vec![]
+                } else {
+                    vec!["x-a", "x-z"]
+                }
+            );
+        }
+    }
 
     /// A capability handle never reaches a `Debug` rendering.
     ///

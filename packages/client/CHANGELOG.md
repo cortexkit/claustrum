@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.18.0
+
+- `enrollPropose` takes an optional `requestedGrants`: up to four `read` or `list`
+  grants, each on one exact credential id or one category, for example
+  `{ selector: { category: 'llm-provider' }, operation: 'read' }`. The person sees
+  them when approving the program, and one approval applies them, with no separate
+  grant step. Re-proposing keeps the first request's list; it cannot widen it. It
+  needs a vault built from claustrum commit b720df20 or later, the build that added
+  one-step plugin approval. An older vault refuses the field as
+  `invalid_params`, and the client never drops it for you: retry without it only if
+  that is what you want, since malformed grants are refused with the same code.
+- `listScoped` rows may carry `provider` (the vault's service name for the key, not
+  a routing provider id), `incarnation` (changes when a credential id is re-created,
+  so an old login is never mistaken for a new one under the same id) and
+  `planTierObservedAtMs` (when the current plan tier was first seen). Each is absent
+  when the vault does not send it.
+
 ## 0.17.0
 
 - `enrollPropose` takes an optional `displayName`, a name the person sees and

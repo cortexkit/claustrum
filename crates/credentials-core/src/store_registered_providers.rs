@@ -24,6 +24,14 @@ pub struct RegisteredProviderSettings {
 
 pub const MAX_REGISTERED_PROVIDER_HOSTS: usize = 8;
 
+/// Lowercase HTTP token grammar shared by registry and gateway auth headers.
+pub fn valid_provider_header_name(header: &str) -> bool {
+    !header.is_empty()
+        && header.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
+        })
+}
+
 /// Shared by CLI preflight and store writes; the store never repairs signed input.
 pub fn validate_registered_provider_settings(
     settings: &RegisteredProviderSettings,
@@ -62,11 +70,7 @@ pub fn validate_registered_provider_settings(
     ) {
         (true, None, None) => {}
         (false, Some(header), Some(scheme)) => {
-            if header.is_empty()
-                || !header.bytes().all(|b| {
-                    b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
-                })
-            {
+            if !valid_provider_header_name(header) {
                 return Err(invalid("auth_header", format!("{header:?}")));
             }
             if !matches!(scheme.as_str(), "bearer" | "raw") {

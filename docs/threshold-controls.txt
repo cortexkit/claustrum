@@ -103,6 +103,12 @@ MAX_SECRET_API_KEY_BYTES crates/credentials-core/src/agent_secret_validation.rs 
 MIN_SECRET_TOTP_PERIOD crates/credentials-core/src/agent_secret_validation.rs secret_shared_validators_pin_material_and_header_boundaries
 MAX_SECRET_TOTP_PERIOD crates/credentials-core/src/agent_secret_validation.rs secret_shared_validators_pin_material_and_header_boundaries
 
+MAX_GATEWAY_BASE_URL_BYTES crates/credentials-core/src/gateway.rs gateway_base_url_accepts_512_bytes_and_refuses_513
+MAX_GATEWAY_HEADERS crates/credentials-core/src/gateway.rs gateway_header_count_accepts_eight_and_refuses_nine
+MAX_GATEWAY_HEADER_NAME_BYTES crates/credentials-core/src/gateway.rs gateway_header_name_accepts_64_bytes_and_refuses_65
+MAX_GATEWAY_HEADER_VALUE_BYTES crates/credentials-core/src/gateway.rs gateway_header_value_accepts_1024_bytes_and_refuses_1025
+MAX_GATEWAY_SLUG_BYTES crates/credentials-core/src/gateway.rs gateway_provider_slug_accepts_32_bytes_and_refuses_33
+
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.
 MAX_EXACT crates/credentials-module/src/federation/ingress.rs the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call

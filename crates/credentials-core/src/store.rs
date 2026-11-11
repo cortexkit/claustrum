@@ -1550,6 +1550,11 @@ pub enum StoreOpError {
         rule: crate::provider_ids::ProviderIdRule,
         value: String,
     },
+    /// Gateway settings are not in the accepted normal form. No supplied values
+    /// are carried here, so a refusal cannot disclose fixed header values.
+    InvalidGatewaySettings {
+        rule: crate::gateway::GatewaySettingsRule,
+    },
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
     /// Approval would hand existing name-bound grants to a new consumer without consent.
@@ -1725,6 +1730,9 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidProviderId { rule, value } => {
                 write!(f, "invalid_provider_id/permanent: rule={rule} value={value}")
             }
+            StoreOpError::InvalidGatewaySettings { rule } => {
+                write!(f, "invalid_gateway_settings/permanent: rule={rule}")
+            }
             StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
             StoreOpError::EnrollmentNameHasGrants { name } => write!(
                 f,
@@ -1817,6 +1825,7 @@ impl StoreOpError {
             StoreOpError::InvalidDisplayName => Some("invalid_params"),
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
+            StoreOpError::InvalidGatewaySettings { .. } => Some("invalid_gateway_settings"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
             StoreOpError::EnrollmentNameHasGrants { .. } => Some("enrollment_name_has_grants"),
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
@@ -18240,9 +18249,9 @@ mod store_agent_secrets;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
 pub use registered_providers::{
-    api_key_service, registered_providers_read_only, validate_registered_provider_service,
-    validate_registered_provider_settings, RegisteredProvider, RegisteredProviderSettings,
-    MAX_REGISTERED_PROVIDER_HOSTS,
+    api_key_service, registered_providers_read_only, valid_provider_header_name,
+    validate_registered_provider_service, validate_registered_provider_settings,
+    RegisteredProvider, RegisteredProviderSettings, MAX_REGISTERED_PROVIDER_HOSTS,
 };
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{

@@ -1,11 +1,11 @@
 //! The `auth_method` a `credential.list_scoped` row reports.
 //!
-//! Derived on every read from two facts of the UNSEALED record, its
-//! [`CredentialKind`] and its stored `refresh_adapter`, and from nothing else: never
-//! stored, never parsed from the credential id, never read from the catalog, the
-//! categories or `serves`. The credential id is a name an operator chose, and the stored
-//! adapter can differ from what the id suggests, so only the record says how the
-//! credential authenticates.
+//! Derived on every local read from the presence of a gateway settings row first,
+//! then from two facts of the UNSEALED record: its [`CredentialKind`] and stored
+//! `refresh_adapter`. Never stored as a method, parsed from the credential id, or
+//! inferred from the catalog, categories or `serves`. An ordinary key in the
+//! `llm-gateway` category still uses the record-derived method. Remote records have
+//! no gateway settings and always use the record-derived table.
 //!
 //! Deliberately a separate type from [`crate::credential_id::AuthMethod`], which is the
 //! id-scheme segment parsed from a credential id and has a wider vocabulary. The set
@@ -29,6 +29,8 @@ pub enum ListAuthMethod {
     /// An OAuth record refreshed by one of the provider adapters whose tokens a consumer
     /// presents as an ordinary OAuth bearer.
     Oauth,
+    /// A credential with a per-credential gateway settings row.
+    Gateway,
 }
 
 impl ListAuthMethod {
@@ -39,12 +41,14 @@ impl ListAuthMethod {
             ListAuthMethod::Chatgpt => "chatgpt",
             ListAuthMethod::Antigravity => "antigravity",
             ListAuthMethod::Oauth => "oauth",
+            ListAuthMethod::Gateway => "gateway",
         }
     }
 }
 
-/// Map a record's kind and stored refresh adapter to its listed `auth_method`, or
-/// `None` when the wire key is to be omitted.
+/// Map a record without gateway settings to its listed `auth_method`, or `None`
+/// when the wire key is to be omitted. Local readers use [`list_auth_method_with_gateway`]
+/// so settings take precedence over this table.
 ///
 /// The table, where an adapter of `None` means the record stores none:
 ///
@@ -82,6 +86,20 @@ pub fn list_auth_method(
         | CredentialKind::Opaque
         | CredentialKind::SigningKey
         | CredentialKind::KemKey => None,
+    }
+}
+
+/// Derive a local credential's method. A settings row identifies a gateway before
+/// any kind or adapter rule; categories and provider-id spelling do not identify one.
+pub fn list_auth_method_with_gateway(
+    kind: CredentialKind,
+    refresh_adapter: Option<&str>,
+    has_gateway_settings: bool,
+) -> Option<ListAuthMethod> {
+    if has_gateway_settings {
+        Some(ListAuthMethod::Gateway)
+    } else {
+        list_auth_method(kind, refresh_adapter)
     }
 }
 
@@ -211,5 +229,26 @@ mod tests {
         assert_eq!(wire(CredentialKind::ApiKey, Some("openai")), Some("apikey"));
         assert_eq!(wire(CredentialKind::Oauth, None), None);
         assert_eq!(wire(CredentialKind::SigningKey, Some("openai")), None);
+    }
+
+    #[test]
+    fn gateway_settings_take_precedence_over_every_kind_and_adapter_rule() {
+        for kind in ALL_KINDS {
+            for adapter in OAUTH_TABLE.iter().map(|(name, _)| Some(*name)).chain([
+                None,
+                Some("not-an-adapter"),
+                Some(""),
+            ]) {
+                assert_eq!(
+                    list_auth_method_with_gateway(kind, adapter, true).map(ListAuthMethod::as_str),
+                    Some("gateway"),
+                    "{kind:?} + {adapter:?}"
+                );
+                assert_eq!(
+                    list_auth_method_with_gateway(kind, adapter, false),
+                    list_auth_method(kind, adapter)
+                );
+            }
+        }
     }
 }

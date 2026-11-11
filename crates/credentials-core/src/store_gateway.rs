@@ -1,7 +1,68 @@
 use super::*;
 use crate::gateway::{
-    gateway_settings_digest, validate_gateway_settings, GatewaySettings, GatewaySettingsRule,
+    gateway_settings_digest, validate_gateway_settings, GatewayAuth, GatewaySettings,
+    GatewaySettingsRule,
 };
+
+/// Plaintext gateway metadata with the identity of the record it was written for.
+/// Readers must compare `incarnation` with the record they serve, not a later lookup
+/// of the same credential id: removal and recreation can change all settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGatewaySettings {
+    pub incarnation: String,
+    pub settings: GatewaySettings,
+    /// Exact base-URL host, without a port and with IPv6 brackets preserved.
+    pub host: String,
+    /// Derived from the stored provider id's prefix, never from a catalog offering.
+    pub vendor: crate::catalog::ModelVendor,
+}
+
+pub(super) fn from_conn(
+    conn: &rusqlite::Connection,
+    credential_id: &str,
+    schema_version: u32,
+) -> rusqlite::Result<Option<StoredGatewaySettings>> {
+    if schema_version < GATEWAY_SETTINGS_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT incarnation, base_url, auth_header, auth_scheme, headers_json, \
+         COALESCE((SELECT group_concat(provider_id, ',') FROM (\
+             SELECT provider_id FROM credential_provider_ids WHERE credential_id = ?1 ORDER BY provider_id\
+         )), '') FROM credential_gateway_settings WHERE credential_id = ?1",
+        [credential_id],
+        |row| {
+            let invalid = || {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid stored gateway settings",
+                    )),
+                )
+            };
+            let settings = GatewaySettings {
+                base_url: row.get(1)?,
+                auth: GatewayAuth {
+                    header: row.get(2)?,
+                    scheme: row.get(3)?,
+                },
+                headers: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|_| invalid())?,
+            };
+            let providers = split_provider_ids(row.get(5)?);
+            let validated = validate_gateway_settings(credential_id, &settings, &providers)
+                .map_err(|_| invalid())?;
+            Ok(StoredGatewaySettings {
+                incarnation: row.get(0)?,
+                settings,
+                host: validated.host,
+                vendor: validated.vendor,
+            })
+        },
+    )
+    .optional()
+}
 
 pub(super) fn has_settings(
     conn: &rusqlite::Connection,
@@ -18,6 +79,18 @@ pub(super) fn has_settings(
 }
 
 impl EncryptedStore {
+    /// Read gateway metadata without unsealing the key. `None` means no settings row
+    /// (including stores predating the gateway migration). The stored incarnation is
+    /// returned unchanged so a read surface can refuse a removed-and-recreated id.
+    pub fn gateway_settings(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<StoredGatewaySettings>, StoreOpError> {
+        self.store
+            .with_conn(|conn| from_conn(conn, credential_id, read_schema_version(conn)?))
+            .map_err(StoreOpError::from)
+    }
+
     /// Create a gateway key and its fixed metadata atomically under the writer lease,
     /// refusing a writer superseded by a newer lease holder.
     /// Unlike an ordinary deposit, catalog and registry category defaults do not apply.

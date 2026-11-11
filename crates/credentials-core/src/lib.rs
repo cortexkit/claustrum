@@ -93,7 +93,7 @@ pub use gateway::{
 pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;
 pub use key::{KeyId, MasterKey};
-pub use list_auth_method::{list_auth_method, ListAuthMethod};
+pub use list_auth_method::{list_auth_method, list_auth_method_with_gateway, ListAuthMethod};
 pub use oauth::OAuthCredential;
 pub use provider_ids::{
     check_provider_ids, ProviderIdRule, MAX_PROVIDER_IDS_PER_CREDENTIAL, MAX_PROVIDER_ID_LEN,
@@ -123,6 +123,6 @@ pub use store::{
     handle_hash, mint_handle, payload_hash, refresh_token_hash, DepositCookieOutcome,
     EncryptedStore, GrantOperation, MintedHandle, ReadGrant, RecordMeta, RecordState,
     RefreshIntent, ScopedCoverage, ScopedListRow, ScopedListSnapshot, ScopedReadRefusal,
-    SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError, GATEWAY_SETTINGS_SCHEMA_VERSION,
-    PROVIDER_ID_SCHEMA_VERSION,
+    SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError, StoredGatewaySettings,
+    GATEWAY_SETTINGS_SCHEMA_VERSION, PROVIDER_ID_SCHEMA_VERSION,
 };

@@ -24,7 +24,9 @@ pub struct RegisteredProviderSettings {
 
 pub const MAX_REGISTERED_PROVIDER_HOSTS: usize = 8;
 
-/// Shared by CLI preflight and store writes; the store never repairs signed input.
+/// Shared by CLI preflight and store writes. Admin ops arrive MAC-authenticated over
+/// their exact bytes, so the store refuses a bad value instead of normalizing it:
+/// a repaired value would no longer be the one the operator authenticated.
 pub fn validate_registered_provider_settings(
     settings: &RegisteredProviderSettings,
 ) -> Result<(), StoreOpError> {

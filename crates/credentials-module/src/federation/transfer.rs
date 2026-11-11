@@ -4,7 +4,8 @@
 //! The sending vault encrypts the record to a key only the receiving vault holds (HPKE
 //! Auth mode, sealed with its own transfer key, under [`TRANSFER_INFO`]), both sides
 //! audit it, and the operator confirms on both ends. A rotating login never moves
-//! this way: [`transfer_eligibility`] is the one allowlist both ends apply.
+//! this way: [`transfer_eligibility`] is the one record allowlist both ends apply.
+//! The sender also refuses gateway credentials, whose settings stay in their vault.
 //!
 //! What is here, in the order a transfer meets it:
 //!
@@ -134,6 +135,8 @@ pub enum Ineligible {
     TransferKey,
     /// A rotating login whose home is another vault: this vault holds no material.
     RemoteRecord,
+    /// A gateway key whose settings and secret must remain in its home vault.
+    Gateway,
 }
 
 impl Ineligible {
@@ -145,6 +148,7 @@ impl Ineligible {
             Self::CookieExpiry => "cookie_expiry",
             Self::TransferKey => "transfer_key",
             Self::RemoteRecord => "remote_record",
+            Self::Gateway => "gateway",
         }
     }
 }
@@ -1272,6 +1276,14 @@ impl Transfers {
             .is_some()
         {
             return Err(TransferRefusal::ineligible(Ineligible::RemoteRecord));
+        }
+        if self
+            .store
+            .gateway_settings(credential_id)
+            .map_err(|_| TransferRefusal::store_error())?
+            .is_some()
+        {
+            return Err(TransferRefusal::ineligible(Ineligible::Gateway));
         }
         let record = match self.store.get(credential_id) {
             Ok(record) => record,

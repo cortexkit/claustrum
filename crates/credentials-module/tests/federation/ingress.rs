@@ -860,6 +860,80 @@ fn stale_and_version(rig: &Rig, id: &str) -> (i64, i64) {
 }
 
 #[tokio::test]
+async fn gateway_remote_reads_reports_and_watch_rows_are_excluded_under_each_grant() {
+    for selector in [
+        MemberGrantSelector::Exact("apikey:anthropic-gw-acme".into()),
+        MemberGrantSelector::Category("llm-gateway".into()),
+    ] {
+        let rig = Rig::new("ingress-gateway").await;
+        let id = "apikey:anthropic-gw-acme";
+        rig.store()
+            .gateway_create_audited(
+                id,
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"gateway-key".to_vec(),
+                    None,
+                ),
+                &credentials_core::GatewaySettings {
+                    base_url: "https://token.test".into(),
+                    auth: credentials_core::GatewayAuth {
+                        header: "authorization".into(),
+                        scheme: "bearer".into(),
+                    },
+                    headers: vec![],
+                },
+                &["anthropic-gw-acme".into()],
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        rig.grant(selector, PAIRING);
+        rig.add_login(TOKEN_ID, "llm-gateway");
+        rig.grant_exact(TOKEN_ID);
+        let before = rig.store().meta(id).unwrap();
+        assert_eq!(rig.fetch(id).await, not_found());
+        let answer = reply(
+            rig.call(
+                OP_REPORT_AUTH_FAILURE,
+                json!({"credential_id": id, "record_version": 1, "provider_status": 401}),
+            )
+            .await,
+        );
+        assert_eq!(answer["error"], not_found()["error"]);
+        assert_eq!(answer["accepted"], false);
+        let events: Vec<_> = rig
+            .store()
+            .recent_auth_events(100)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.credential_id == id)
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.detail.as_deref() == Some("ineligible")));
+        assert_eq!(rig.store().meta(id).unwrap().state, before.state);
+        assert_eq!(
+            rig.store().meta(id).unwrap().record_version,
+            before.record_version
+        );
+        assert!(rig.audit_ops("remote_issue").is_empty());
+        let rows = rig
+            .home
+            .remote_watch_projection(&rig.requester(), PAIRING)
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.credential_id.as_str())
+                .collect::<Vec<_>>(),
+            [TOKEN_ID]
+        );
+        assert!(rig.served_token(TOKEN_ID).await["payload"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn a_member_cannot_report_a_static_key_it_reaches_by_category() {
     let rig = Rig::new("ingress-report-static").await;
     rig.store()

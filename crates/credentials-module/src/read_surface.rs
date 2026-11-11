@@ -1237,23 +1237,28 @@ mod get_scoped_tests {
 
     #[test]
     fn remote_get_scoped_descriptor_comes_from_local_catalog() {
-        let outcome = remote_get_outcome(
-            "apikey:openai:remote",
-            crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
-                payload: b"k".to_vec(),
-                expires_at_ms: None,
-                record_version: 7,
-                project_id: None,
-                account_id: None,
-                email: None,
-                org_name: None,
-            }),
-            &[],
-        );
-        assert_eq!(
-            serde_json::to_value(outcome).unwrap(),
-            golden_reply("apikey:openai:remote", 7, openai_descriptor())
-        );
+        for (id, descriptor) in [
+            ("apikey:openai:remote", openai_descriptor()),
+            ("apikey:anthropic-gw-acme:remote", json!({})),
+        ] {
+            let outcome = remote_get_outcome(
+                id,
+                crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
+                    payload: b"k".to_vec(),
+                    expires_at_ms: None,
+                    record_version: 7,
+                    project_id: None,
+                    account_id: None,
+                    email: None,
+                    org_name: None,
+                }),
+                &[],
+            );
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                golden_reply(id, 7, descriptor)
+            );
+        }
     }
 
     #[tokio::test]

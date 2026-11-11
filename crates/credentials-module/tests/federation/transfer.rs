@@ -941,6 +941,63 @@ async fn send_refuses_logins_and_vault_held_keys() {
     assert!(rig.deliveries().is_empty());
 }
 
+#[tokio::test]
+async fn gateway_transfer_is_refused_before_lookup_or_sealing() {
+    let rig = Rig::new("transfer-gateway-ineligible").await;
+    let store = rig.a.store();
+    let id = "apikey:anthropic-gw-acme";
+    rig.api_key_on_a(id, b"ordinary-key");
+    let plan = rig
+        .a
+        .transfers
+        .send_prepare(id, &rig.b.member)
+        .await
+        .unwrap();
+    store
+        .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    store
+        .gateway_create_audited(
+            id,
+            &VaultRecord::new_static(
+                CredentialKind::ApiKey,
+                "test",
+                b"gateway-key".to_vec(),
+                None,
+            ),
+            &credentials_core::GatewaySettings {
+                base_url: "https://token.test".into(),
+                auth: credentials_core::GatewayAuth {
+                    header: "authorization".into(),
+                    scheme: "bearer".into(),
+                },
+                headers: vec![],
+            },
+            &["anthropic-gw-acme".into()],
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    let audit = store.audit_tip().unwrap();
+    // No outbound client is attached: reaching peer lookup would refuse for transport,
+    // not for gateway eligibility.
+    let transfers = Transfers::new(Arc::clone(&rig.a.home_store.store));
+    let refused = transfers.send(id, &rig.b.member).await.unwrap_err();
+    assert_eq!(
+        refused.body(),
+        json!({"code": "transfer_ineligible", "class": "permanent", "reason": "gateway"})
+    );
+    // A plan prepared for the earlier ordinary key must recheck store state before
+    // it seals the replacement gateway key.
+    assert_eq!(
+        rig.a.transfers.send_commit(&plan).unwrap_err().body(),
+        refused.body()
+    );
+    assert!(store.list_outgoing_transfers().unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), audit);
+    assert!(rig.deliveries().is_empty());
+    assert!(rig.b.incoming().is_empty());
+}
+
 /// Hand-sealed, validly encrypted bodies that are not eligible are refused at delivery
 /// as `transfer_body_invalid`, with no pending row and no record.
 #[tokio::test]

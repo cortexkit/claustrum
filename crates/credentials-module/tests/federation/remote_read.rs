@@ -2191,6 +2191,39 @@ async fn a_home_re_create_resets_the_version_and_a_delayed_old_reply_does_not_re
 // ---------------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
+async fn remote_listing_keeps_login_auth_method_in_gateway_category() {
+    let rig = Rig::new("remote-gateway-category").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let store = &rig.b.store;
+    store
+        .set_categories_audited(
+            TOKEN_ID,
+            SetCategoryMode::Set,
+            &["llm-gateway".into()],
+            AuditCtx::admin(AuditOp::SetCategory),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "broca",
+            SelectorKind::Category,
+            "llm-gateway",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    assert!(store.gateway_settings(TOKEN_ID).unwrap().is_none());
+    let row = rig.b_row(TOKEN_ID);
+    assert_eq!(row.auth_method.map(|method| method.as_str()), Some("oauth"));
+    assert_eq!(row.refresh_adapter.as_deref(), Some("anthropic"));
+    assert_eq!(row.categories, ["llm-gateway"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_it() {
     let rig = Rig::new("remote-metadata").await;
     rig.login(

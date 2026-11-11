@@ -11,6 +11,8 @@ use rusqlite::{types::Value as SqlValue, Connection};
 use std::{collections::BTreeMap, sync::Mutex};
 use subc_protocol::{Flags, Priority, PROTOCOL_VERSION};
 
+use crate::tests::federation_fixture_support as federation_support;
+
 const SELF: &str = "fed-computer:22222222222222222222222222222222";
 const OTHER: &str = "fed-computer:33333333333333333333333333333333";
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -643,4 +645,390 @@ fn manifest_lower_version_report_logs_exactly_one_bounded_warning_after_commit()
             ("message".into(), "lower manifest version reported".into()),
         ])
     );
+}
+
+struct FederationRig {
+    member: Rig,
+    home_store: federation_support::HomeStore,
+    home: Arc<claustrum_module_probe::federation::HomeVault>,
+    vaults: federation_support::TwoVaults,
+    _root: credentials_core::test_support::TestTempDir,
+}
+
+impl FederationRig {
+    async fn new() -> Self {
+        use federation_support::{HomeStore, TwoVaults};
+        let root = federation_support::temp_root("manifest-forwarding");
+        let vaults = TwoVaults::new(&root).await;
+        let home_store = HomeStore::open(&vaults.a.data_dir);
+        home_store
+            .store
+            .set_federation_self_member_audited(
+                vaults.home_member(),
+                AuditCtx::admin(AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+        Connection::open(vaults.a.store_path()).unwrap().execute_batch(
+            "INSERT OR REPLACE INTO settings(name,value,updated_at_ms) VALUES('secrets.home_member','self',0)"
+        ).unwrap();
+        home_store
+            .store
+            .set_federation_member_mapping_audited(
+                true,
+                AuditCtx::admin(AuditOp::FederationGateSet),
+            )
+            .unwrap();
+        let home = Arc::new(claustrum_module_probe::federation::HomeVault::new(
+            Arc::clone(&home_store.engine),
+        ));
+        home.attach_outbound(vaults.a.outbound.clone());
+        vaults
+            .callosum
+            .set_pairing(vaults.requester_member(), Some("manifest-pair"));
+        home_store
+            .store
+            .create_member_grant_audited(
+                vaults.requester_member(),
+                credentials_core::federation::MemberGrantOperation::SecretUse,
+                &credentials_core::federation::MemberGrantSelector::None,
+                "manifest-pair",
+            )
+            .unwrap();
+        let member = Rig::new();
+        member
+            .store
+            .set_federation_self_member_audited(
+                vaults.requester_member(),
+                AuditCtx::admin(AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+        member.sql(&format!("INSERT OR REPLACE INTO settings(name,value,updated_at_ms) VALUES('secrets.home_member','{}',0)", vaults.home_member()));
+        member
+            .surface
+            .remote()
+            .attach_outbound(crate::federation::OutboundClient::for_daemon(
+                &vaults.b.connection_file,
+                "claustrum",
+                Some("harness-launch-nonce"),
+            ));
+        Self {
+            member,
+            home_store,
+            home,
+            vaults,
+            _root: root,
+        }
+    }
+
+    fn route(&self, method: &'static str, hold: Option<federation_support::Held>) {
+        use federation_support::{Reply, Responder};
+        let home = Arc::clone(&self.home);
+        let member = self.vaults.requester_member().to_owned();
+        let hold = Arc::new(Mutex::new(hold));
+        self.vaults.callosum.answer(
+            "claustrum",
+            method,
+            Reply::Handler(Responder(Arc::new(move |params| {
+                let home = Arc::clone(&home);
+                let member = member.clone();
+                let hold = Arc::clone(&hold);
+                Box::pin(async move {
+                    match home.serve(&member, method, &params).await {
+                        claustrum_module_probe::federation::HomeAnswer::Reply(reply) => {
+                            if let Some(held) = hold.lock().unwrap().take() {
+                                assert_eq!(reply["status"], "recorded");
+                                Reply::Hold(held)
+                            } else {
+                                Reply::Ok(reply)
+                            }
+                        }
+                        claustrum_module_probe::federation::HomeAnswer::InvalidParams(_) => {
+                            Reply::RouteRefusal("invalid_params".into())
+                        }
+                    }
+                })
+            }))),
+        );
+    }
+
+    fn target(&self) -> String {
+        format!(
+            "fed:{}:claustrum",
+            self.vaults
+                .home_member()
+                .strip_prefix("fed-computer:")
+                .unwrap()
+        )
+    }
+
+    fn store_version(&self, version: i64) {
+        let bytes = format!("{{\n  \"manifest_version\": {version}\n}}\n");
+        self.home_store
+            .store
+            .store_gh_manifest(
+                &GhManifestVersion {
+                    version,
+                    manifest_bytes: bytes.as_bytes(),
+                    manifest_sha256: HASH,
+                    key_id: "0123456789abcdef",
+                    signature: &[7; 64],
+                    signed_at_ms: 10,
+                    source: GhManifestSource::Import,
+                    approval_audit_seq: None,
+                },
+                AuditCtx::admin(AuditOp::GhManifestStore),
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn manifest_federation_latest_recovers_missed_notice_and_report_retry_deduplicates() {
+    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
+    use federation_support::{wait_for_signal, Held, Reply};
+    let mut rig = FederationRig::new().await;
+    rig.store_version(28);
+    rig.store_version(29);
+    rig.route(OP_MANIFEST_LATEST, None);
+    let latest = wait_for_signal(rig.member.call("aft", OP_LATEST, json!({}))).await;
+    assert_eq!(latest["version"], 29);
+    assert_eq!(
+        latest["envelope"]["manifest_bytes"],
+        "{\n  \"manifest_version\": 29\n}\n"
+    );
+    assert!(rig.member.store.latest_gh_manifest().unwrap().is_none());
+    let held = Held::new();
+    rig.route(OP_MANIFEST_REPORT_ACTIVE, Some(held.clone()));
+    let losing = async {
+        held.arrived().await;
+        wait_for_signal(rig.vaults.callosum.close_connections(false)).await;
+        held.release(Reply::Stall);
+    };
+    let (lost, ()) = tokio::join!(rig.member.call("aft", OP_REPORT_ACTIVE, report(29)), losing);
+    assert_eq!(lost, refusal("home_unavailable", "transient"));
+    let audits = || {
+        rig.home_store
+            .store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.op == "gh_manifest_activation")
+            .count()
+    };
+    assert_eq!(
+        audits(),
+        1,
+        "the home committed before its reply was dropped"
+    );
+    let retried = wait_for_signal(rig.member.call("aft", OP_REPORT_ACTIVE, report(29))).await;
+    assert_eq!(
+        retried,
+        json!({"status":"recorded","member_id":rig.vaults.requester_member(),"version":29})
+    );
+    assert_eq!(audits(), 1);
+    let conn = Connection::open(rig.vaults.a.store_path()).unwrap();
+    let member: String = conn
+        .query_row("SELECT member_id FROM gh_manifest_activations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(member, rig.vaults.requester_member());
+    assert_eq!(
+        rig.vaults
+            .callosum
+            .methods(&rig.target())
+            .iter()
+            .filter(|method| method.as_str() == OP_MANIFEST_REPORT_ACTIVE)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn manifest_federation_watch_shares_upstream_relays_and_ends_on_loss() {
+    use crate::federation::ingress::OP_MANIFEST_WATCH;
+    use federation_support::{wait_for_signal, HomeWatchRelay, Reply};
+    let mut rig = FederationRig::new().await;
+    rig.store_version(28);
+    let relay = HomeWatchRelay::new(Arc::clone(&rig.home), rig.vaults.requester_member());
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP_MANIFEST_WATCH,
+        Reply::HomeWatch(relay.clone()),
+    );
+    rig.member
+        .request(caller("aft"), OP_WATCH, json!({}), 7, 1)
+        .await;
+    let first = wait_for_signal(rig.member.notice(7, 1, 1)).await;
+    assert_eq!(first["version"], 28);
+    rig.member
+        .request(caller("plexus"), OP_WATCH, json!({}), 8, 2)
+        .await;
+    let second = wait_for_signal(rig.member.notice(8, 2, 1)).await;
+    assert_eq!(first["epoch"], second["epoch"]);
+    assert_eq!(
+        rig.vaults
+            .callosum
+            .methods(&rig.target())
+            .iter()
+            .filter(|method| method.as_str() == OP_MANIFEST_WATCH)
+            .count(),
+        1
+    );
+    let home_first = body(&relay.frames()[0]);
+    assert_ne!(
+        first["epoch"], home_first["epoch"],
+        "the member owns its notice sequence"
+    );
+    rig.store_version(29);
+    wait_for_signal(rig.home.remote_watches.waking_for_test()).await;
+    tokio::time::advance(std::time::Duration::from_millis(250)).await;
+    let mut channels = Vec::new();
+    for _ in 0..2 {
+        let frame = wait_for_signal(rig.member.rx.recv()).await.unwrap();
+        assert_eq!(frame.header.ty, FrameType::StreamData);
+        channels.push(frame.header.channel);
+        let value = body(&frame);
+        assert_eq!(value["seq"], 2);
+        assert_eq!(value["version"], 29);
+        assert_eq!(value["epoch"], first["epoch"]);
+    }
+    channels.sort();
+    assert_eq!(channels, [7, 8]);
+    wait_for_signal(rig.vaults.callosum.close_connections(false)).await;
+    for _ in 0..2 {
+        assert_eq!(
+            wait_for_signal(rig.member.rx.recv())
+                .await
+                .unwrap()
+                .header
+                .ty,
+            FrameType::StreamEnd
+        );
+    }
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP_MANIFEST_WATCH,
+        Reply::Permanent("fed_peer_unreachable".into()),
+    );
+    rig.member
+        .request(caller("aft"), OP_WATCH, json!({}), 9, 3)
+        .await;
+    let frame = wait_for_signal(rig.member.rx.recv()).await.unwrap();
+    assert_eq!(frame.header.ty, FrameType::Response);
+    assert_eq!(
+        body(&frame)["result"],
+        refusal("home_unavailable", "transient")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn manifest_federation_missing_grant_and_nonmember_watch_are_not_found() {
+    use crate::federation::ingress::{
+        OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE, OP_MANIFEST_WATCH,
+    };
+    use federation_support::{wait_for_signal, HomeWatchRelay, Reply};
+    let mut rig = FederationRig::new().await;
+    rig.store_version(28);
+    Connection::open(rig.vaults.a.store_path())
+        .unwrap()
+        .execute("DELETE FROM member_grants", [])
+        .unwrap();
+    let before = rig.home_store.store.read_audit(None).unwrap();
+    for (local, forwarded, params) in [
+        (OP_LATEST, OP_MANIFEST_LATEST, json!({})),
+        (OP_REPORT_ACTIVE, OP_MANIFEST_REPORT_ACTIVE, report(28)),
+    ] {
+        rig.route(forwarded, None);
+        assert_eq!(
+            wait_for_signal(rig.member.call("aft", local, params)).await,
+            refusal("not_found", "permanent")
+        );
+    }
+    let relay = HomeWatchRelay::new(Arc::clone(&rig.home), rig.vaults.requester_member());
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP_MANIFEST_WATCH,
+        Reply::HomeWatch(relay.clone()),
+    );
+    let mut upstream = wait_for_signal(rig.vaults.b.outbound.subscribe(
+        "manifest-denied",
+        claustrum_module_probe::federation::RouteCall {
+            target: claustrum_module_probe::federation::management_surface(&format!(
+                    "fed:{}:claustrum",
+                    rig.vaults
+                        .home_member()
+                        .strip_prefix("fed-computer:")
+                        .unwrap()
+                )),
+            prelude: None,
+            request: json!({"method":OP_MANIFEST_WATCH,"params":{}}),
+        },
+        std::time::Duration::from_secs(5),
+    ))
+    .await
+    .unwrap();
+    let event = wait_for_signal(upstream.next_event()).await.unwrap();
+    assert!(
+        matches!(event, claustrum_module_probe::federation::outbound::SubscriptionEvent::Error { ref code, .. } if code == "not_found"),
+        "{event:?}"
+    );
+    assert_eq!(
+        relay.frames()[0].header.ty,
+        FrameType::Error,
+        "Callosum preserves Error bodies, but drops terminal Response bodies"
+    );
+    assert_eq!(rig.home_store.store.read_audit(None).unwrap(), before);
+    for nonmember in [
+        caller("aft"),
+        crate::federation::RouteCaller::Refused,
+        crate::federation::RouteCaller::Phone("phone".into()),
+    ] {
+        rig.member
+            .request(nonmember, OP_MANIFEST_WATCH, json!({}), 10, 4)
+            .await;
+        let frame = rig.member.rx.recv().await.unwrap();
+        assert_eq!(frame.header.ty, FrameType::Error);
+        assert_eq!(body(&frame)["code"], "not_found");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn manifest_federation_setup_and_unreachable_refusals_are_explicit() {
+    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
+    use federation_support::{wait_for_signal, Reply};
+    let mut rig = FederationRig::new().await;
+    for (local, forwarded, params) in [
+        (OP_LATEST, OP_MANIFEST_LATEST, json!({})),
+        (OP_REPORT_ACTIVE, OP_MANIFEST_REPORT_ACTIVE, report(28)),
+    ] {
+        rig.vaults
+            .callosum
+            .answer("claustrum", forwarded, Reply::Drop);
+        assert_eq!(
+            wait_for_signal(rig.member.call("aft", local, params)).await,
+            refusal("home_unavailable", "transient")
+        );
+    }
+    rig.member.sql(&format!(
+        "UPDATE settings SET value='{}' WHERE name='secrets.home_member'",
+        rig.vaults.requester_member()
+    ));
+    let before = rig.member.snapshot();
+    for (op, params) in [(OP_LATEST, json!({})), (OP_REPORT_ACTIVE, report(28))] {
+        assert_eq!(
+            rig.member.call("aft", op, params).await,
+            json!({"error":{"code":"remote_setup_incomplete","class":"permanent","remedy_member":rig.vaults.requester_member()}})
+        );
+    }
+    rig.member
+        .request(caller("aft"), OP_WATCH, json!({}), 5, 1)
+        .await;
+    let frame = wait_for_signal(rig.member.rx.recv()).await.unwrap();
+    assert_eq!(frame.header.ty, FrameType::Response);
+    assert_eq!(
+        body(&frame)["result"],
+        json!({"error":{"code":"remote_setup_incomplete","class":"permanent","remedy_member":rig.vaults.requester_member()}})
+    );
+    assert_eq!(rig.member.snapshot(), before);
 }

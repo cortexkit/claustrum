@@ -1593,6 +1593,51 @@ fn retryable(outcome: &Result<Value, Failure>) -> bool {
 }
 
 impl RemoteReader {
+    pub fn outbound_client(&self) -> Option<OutboundClient> {
+        self.outbound.get().cloned()
+    }
+
+    pub async fn route_manifest_call(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<SecretForwardAnswer> {
+        let refusal = |code: &str, class: &str| {
+            SecretForwardAnswer::Reply(json!({"error":{"code":code,"class":class}}))
+        };
+        let home = match self.store.secret_home_role() {
+            SecretHomeRole::Single | SecretHomeRole::Home { .. } => return None,
+            SecretHomeRole::Remote { home_member } => home_member,
+            SecretHomeRole::RemoteSetupIncomplete { self_member } => {
+                return Some(SecretForwardAnswer::Reply(
+                    json!({"error":RemoteRefusal::new("remote_setup_incomplete", "permanent").remedy(self_member).body()}),
+                ))
+            }
+            SecretHomeRole::StoreError => return Some(refusal("store_error", "transient")),
+        };
+        let request = json!({"method":method,"params":params});
+        // A report is a mutation: do not hide an unknown outcome behind a transport
+        // retry. The caller may retry the idempotent activation report explicitly.
+        let reply = self
+            .call_route(
+                &format!("manifest:{home}"),
+                RouteCall {
+                    target: management_surface(&fed_provider_module(&home)),
+                    prelude: None,
+                    request,
+                },
+                SECRET_FORWARD_DEADLINE,
+            )
+            .await;
+        Some(match reply {
+            Ok(reply) if reply.get("code").and_then(Value::as_str) == Some("invalid_params") => {
+                SecretForwardAnswer::InvalidParams
+            }
+            Ok(reply) if reply.get("code").is_none() => SecretForwardAnswer::Reply(reply),
+            _ => refusal("home_unavailable", "transient"),
+        })
+    }
+
     /// Serve a sender's secret call by this vault's role, read on every call. A vault
     /// that serves its own secrets answers [`SecretRoute::Local`] and the caller serves
     /// it as before. A remote-role vault looks nothing up locally: it forwards the call

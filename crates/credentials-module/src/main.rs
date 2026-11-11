@@ -1085,9 +1085,13 @@ async fn handle_frame(
             // its new principal to an already-accepted request.
             let caller = admin.route_caller(frame.header.channel);
             let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
-                && serde_json::from_slice::<ReadRequest>(&frame.body)
-                    .is_ok_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
-            {
+                && serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                    matches!(
+                        request.method.as_str(),
+                        federation::ingress::OP_REMOTE_WATCH
+                            | federation::ingress::OP_MANIFEST_WATCH
+                    )
+                }) {
                 Some(admin.home().remote_watches.register(frame.header))
             } else {
                 None
@@ -1453,10 +1457,12 @@ async fn dispatch_route_request(
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
-    if method
-        .as_ref()
-        .is_some_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
-        && !matches!(caller, federation::RouteCaller::Member(_))
+    if method.as_ref().is_some_and(|request| {
+        matches!(
+            request.method.as_str(),
+            federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+        )
+    }) && !matches!(caller, federation::RouteCaller::Member(_))
     {
         let refusal = federation::home_watch::refusal(
             header,
@@ -1496,11 +1502,21 @@ async fn dispatch_route_request(
                 )
                 .await;
             };
-            if request.method == federation::ingress::OP_REMOTE_WATCH {
+            if matches!(
+                request.method.as_str(),
+                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+            ) {
                 let Some(pending) = remote_watch else {
                     return Ok(());
                 };
                 let home = admin.home();
+                if request.method == federation::ingress::OP_MANIFEST_WATCH {
+                    return home
+                        .remote_watches
+                        .open_manifest(home, pending, writer, header, &member, &request.params)
+                        .await
+                        .map_err(ModuleError::Message);
+                }
                 return home
                     .remote_watches
                     .open(home, pending, writer, header, &member, &request.params)
@@ -2387,6 +2403,9 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
                 federation::ingress::OP_REMOTE_WATCH,
+                federation::ingress::OP_MANIFEST_LATEST,
+                federation::ingress::OP_MANIFEST_WATCH,
+                federation::ingress::OP_MANIFEST_REPORT_ACTIVE,
             ],
             "peer_classes": ["computer"],
         }]))]),
@@ -2394,7 +2413,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .operation_delivery(BTreeMap::from([(
         federation::ingress::OP_REMOTE_WATCH.to_owned(),
         OperationDelivery::WATCH,
-    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH)]))
+    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH), (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH)]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2571,6 +2590,9 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "manifest.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "manifest.report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
@@ -2915,6 +2937,9 @@ mod tests {
             "manifest.watch",
             "manifest.report_active",
             "manifest.active_status",
+            "federation.manifest_latest",
+            "federation.manifest_watch",
+            "federation.manifest_report_active",
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
             "permissions.list",
@@ -2938,6 +2963,8 @@ mod tests {
                     | "manifest.latest"
                     | "manifest.watch"
                     | "manifest.active_status"
+                    | "federation.manifest_latest"
+                    | "federation.manifest_watch"
             ) {
                 ManagementOperationKind::Query
             } else {
@@ -3039,6 +3066,12 @@ mod tests {
                 ManagementOperationKind::Mutate,
             ),
             ("federation.remote_watch", ManagementOperationKind::Query),
+            ("federation.manifest_latest", ManagementOperationKind::Query),
+            ("federation.manifest_watch", ManagementOperationKind::Query),
+            (
+                "federation.manifest_report_active",
+                ManagementOperationKind::Mutate,
+            ),
         ] {
             assert!(federation::is_federation_op(op), "{op} must be allowlisted");
             assert!(
@@ -3051,6 +3084,10 @@ mod tests {
             manifest.operation_delivery.get("federation.remote_watch"),
             Some(&subc_protocol::manifest::OperationDelivery::WATCH),
             "remote inventory snapshots must be exposed as a watch"
+        );
+        assert_eq!(
+            manifest.operation_delivery.get("federation.manifest_watch"),
+            Some(&OperationDelivery::WATCH)
         );
         for op in ["connectors.list", "connectors.watch"] {
             assert!(declared
@@ -7555,7 +7592,10 @@ mod tests {
         for channel in [91, 92, 93, 94] {
             for op in ops {
                 let reply = routed_reply(&surface, &admin, channel, op, json!({})).await;
-                let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+                let expected = if matches!(
+                    op,
+                    federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+                ) {
                     (FrameType::Error, watch_not_found.clone())
                 } else {
                     (FrameType::Response, not_found.clone())
@@ -7569,7 +7609,10 @@ mod tests {
         for op in ops {
             let params = json!({ "credential_id": FORWARDED_TEST_ID });
             let reply = routed_reply(&surface, &admin, 91, op, params).await;
-            let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+            let expected = if matches!(
+                op,
+                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+            ) {
                 (FrameType::Error, watch_not_found.clone())
             } else {
                 (FrameType::Response, not_found.clone())

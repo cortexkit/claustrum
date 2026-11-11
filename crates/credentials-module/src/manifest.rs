@@ -1,4 +1,4 @@
-//! Local manifest delivery and activation reporting for the vault's own computer.
+//! Manifest delivery and activation reporting, local or forwarded to the secret home.
 
 use std::sync::Arc;
 
@@ -138,6 +138,31 @@ pub(crate) async fn serve(
             });
         }
         return Ok(());
+    }
+    let forwarded_method = match method {
+        OP_LATEST => Some(crate::federation::ingress::OP_MANIFEST_LATEST),
+        OP_REPORT_ACTIVE => Some(crate::federation::ingress::OP_MANIFEST_REPORT_ACTIVE),
+        _ => None,
+    };
+    if let Some(method) = forwarded_method {
+        if let Some(answer) = surface.remote().route_manifest_call(method, params).await {
+            return match answer {
+                crate::federation::remote_read::SecretForwardAnswer::Reply(reply) => {
+                    crate::send_route_result(writer, header, crate::wrap_result(reply)).await
+                }
+                crate::federation::remote_read::SecretForwardAnswer::InvalidParams => {
+                    crate::invalid_params(
+                        writer,
+                        header.ver,
+                        header.channel,
+                        header.epoch,
+                        header.corr,
+                        "invalid manifest parameters",
+                    )
+                    .await
+                }
+            };
+        }
     }
     let store = Arc::clone(surface.store());
     let method = method.to_owned();

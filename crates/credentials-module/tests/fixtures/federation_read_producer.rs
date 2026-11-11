@@ -1,5 +1,5 @@
 #[path = "../federation/support.rs"]
-mod federation_fixture_support;
+pub(crate) mod federation_fixture_support;
 
 mod federation_read_fixture {
     use super::federation_fixture_support as support;

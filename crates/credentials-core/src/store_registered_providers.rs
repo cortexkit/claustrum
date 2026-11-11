@@ -685,10 +685,9 @@ mod tests {
         assert_eq!(store.list_meta().unwrap(), meta);
         assert_eq!(store.read_audit(None).unwrap(), audit);
         assert!(store.registered_providers().unwrap().is_empty());
-        assert_eq!(
-            newest_migration_version(),
-            REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION
-        );
+        // The migrate above runs to the newest step, so it must cross the descriptor
+        // step this module adds. Later steps may follow it.
+        assert!(newest_migration_version() >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION);
     }
 
     #[test]

@@ -1011,20 +1011,6 @@ mod get_scoped_tests {
             assert_eq!(store.provider_ids(id).unwrap(), ["legacy-route"]);
             assert_eq!(store.get(id).unwrap().encode().unwrap(), record);
         }
-        store
-            .create(
-                "apikey:elevenlabs:new",
-                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
-            )
-            .unwrap();
-        assert_eq!(
-            store.categories("apikey:elevenlabs:new").unwrap(),
-            ["media-provider"]
-        );
-        assert!(store
-            .provider_ids("apikey:elevenlabs:new")
-            .unwrap()
-            .is_empty());
         assert_eq!(store.registered_providers().unwrap(), registration);
     }
 

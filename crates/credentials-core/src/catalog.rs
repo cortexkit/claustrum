@@ -1740,7 +1740,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         hosts: &["api.elevenlabs.io"],
         hosts_doc: "https://elevenlabs.io/docs/api-reference/authentication",
         invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("unauthorized"), error_code_field: Some("/detail/code") }),
-        default_provider_ids: &[],
+        default_provider_ids: &["elevenlabs"],
         display_name: "ElevenLabs",
         default_id: "apikey:elevenlabs",
         dashboard_url: "https://elevenlabs.io/app/settings/api-keys",
@@ -3377,7 +3377,7 @@ mod tests {
             ("jina", &[]),
             ("tinyfish", &[]),
             ("searxng", &[]),
-            ("elevenlabs", &[]),
+            ("elevenlabs", &["elevenlabs"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -3675,14 +3675,13 @@ mod tests {
     }
 
     #[test]
-    fn media_only_keys_have_no_llm_routes_or_model_vendors() {
+    fn media_only_keys_have_no_model_vendors() {
         for key in MEDIA_ONLY_KEYS {
             let row = api_key_provider(key).unwrap();
             assert_eq!(row.default_id, format!("apikey:{key}"));
             assert!(row.serves.is_empty());
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
                 assert_eq!(category_defaults(&id), ["media-provider"], "{id}");
-                assert!(default_provider_ids(&id).is_empty(), "{id}");
             }
         }
     }
@@ -3691,6 +3690,7 @@ mod tests {
     fn elevenlabs_checks_the_authenticated_read_only_user_endpoint() {
         let row = api_key_provider("elevenlabs").unwrap();
         assert_eq!(row.fusiform_provider_id, Some("elevenlabs"));
+        assert_eq!(row.default_provider_ids, ["elevenlabs"]);
         assert!(matches!(
             row.validation,
             KeyValidation::GetEndpoint {

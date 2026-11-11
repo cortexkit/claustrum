@@ -9262,26 +9262,49 @@ fn provider_catalog_report_missing_takes_no_lease_and_changes_no_records() {
 fn elevenlabs_provider_report_compares_only_stored_ids_and_provider_set_is_refused() {
     let vault = GrantCliVault::new("elevenlabs-provider-report");
     vault.bootstrap();
-    assert!(vault
-        .run(&[
+    // Seed a registration saved before the fixed catalog included ElevenLabs.
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    conn.execute(
+        "INSERT INTO registered_providers \
+         (service, categories_json, provider_ids_json, created_at_ms) \
+         VALUES ('elevenlabs', '[\"llm-provider\"]', '[\"registered-route\"]', 123)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    drop(store);
+    for id in ["apikey:elevenlabs", "apikey:elevenlabs:second"] {
+        let out = vault.run(&[
             "put",
             "--id",
-            "apikey:elevenlabs",
+            id,
             "--payload-file",
             &payload_file("report-key"),
-        ])
-        .status
-        .success());
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let store = open_leased_store(&vault.data_dir, &vault.key_path);
+        assert_eq!(store.categories(id).unwrap(), ["media-provider"]);
+        assert_eq!(store.provider_ids(id).unwrap(), ["elevenlabs"]);
+    }
     // A legacy category differs from the new row but must not appear in this report.
     assert!(vault
         .run(&["set-category", "apikey:elevenlabs", "--set", "web-search"])
         .status
         .success());
     for (ids, expected) in [
-        (vec![], "ID\tSTORED\tTABLE\n"),
+        (
+            vec![],
+            "ID\tSTORED\tTABLE\napikey:elevenlabs\t[]\t[\"elevenlabs\"]\n",
+        ),
+        (vec!["elevenlabs"], "ID\tSTORED\tTABLE\n"),
         (
             vec!["legacy-route"],
-            "ID\tSTORED\tTABLE\napikey:elevenlabs\t[\"legacy-route\"]\t[]\n",
+            "ID\tSTORED\tTABLE\napikey:elevenlabs\t[\"legacy-route\"]\t[\"elevenlabs\"]\n",
         ),
     ] {
         let mut args = vec!["set-providers", "--id", "apikey:elevenlabs", "--set"];

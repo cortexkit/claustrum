@@ -12,12 +12,27 @@
 //! Usage:
 //!   cargo run -p credentials-module --example vault_read_probe -- \
 //!     --subc <connection-file> --handle <ckh_...>
+//!   Prefer --handle-file <path> to keep the handle out of argv.
+//!
+//! Enrollment (add --subc <connection-file> to each invocation):
+//!   --enroll-propose <name> --enroll-secret-out <new-path>
+//!   --enroll-poll <id> --enroll-secret-file <path>
+//!     --enrollment-token-out <new-path>
+//!   --scoped-id <credential-id> --enrollment-token-file <path>
+//!
+//! Input files must be nonempty; one trailing newline is removed. Output files
+//! are created new with mode 0600. The legacy --enroll-secret <hex> and
+//! --enrollment-token <token> flags still work, but cannot be combined with their
+//! file forms. Without the output flags, enrollment secrets still go to stderr.
 //!
 //! It deliberately does NOT print the credential payload bytes (only its length),
 //! so running it against a real credential does not splash the
 //! token across a terminal or log.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde_json::{json, Value};
 use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget};
@@ -27,6 +42,95 @@ use tokio::{net::TcpStream, time::Instant};
 const MODULE_ID: &str = "claustrum";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn argument_error(error: String) -> ! {
+    eprintln!("vault_read_probe: {error}");
+    std::process::exit(2);
+}
+
+fn required_path(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
+    args.next()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{flag} needs a path"))
+}
+
+fn secret_input(
+    value: Option<String>,
+    path: Option<PathBuf>,
+    flag: &str,
+    file_flag: &str,
+) -> Result<Option<String>, String> {
+    match (value, path) {
+        // Silently choosing either form could send a different bearer secret
+        // than the caller intended, making a local mistake look like a vault refusal.
+        (Some(_), Some(_)) => Err(format!("pass {flag} OR {file_flag}, not both")),
+        (Some(value), None) => Ok(Some(value)),
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|error| format!("cannot read {file_flag} {}: {error}", path.display()))?;
+            // Accept one editor/shell line ending without changing other secret bytes.
+            let value = raw
+                .strip_suffix("\r\n")
+                .or_else(|| raw.strip_suffix('\n'))
+                .unwrap_or(&raw);
+            if value.is_empty() {
+                return Err(format!("{file_flag} {} is empty", path.display()));
+            }
+            Ok(Some(value.to_string()))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn write_secret_file(path: &Path, secret: &str) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    };
+    #[cfg(windows)]
+    let opened = subc_os::windows_acl::create_private_file(path);
+    let mut file =
+        opened.map_err(|error| format!("cannot create secret file {}: {error}", path.display()))?;
+    file.write_all(secret.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("cannot write secret file {}: {error}", path.display()))
+}
+
+fn request_secret_output(secret: &str, path: Option<&Path>) -> Result<String, String> {
+    if let Some(path) = path {
+        write_secret_file(path, secret)?;
+        Ok(format!(
+            "[probe] request_secret written to {}",
+            path.display()
+        ))
+    } else {
+        Ok(format!(
+            "[probe] request_secret (keep, needed to poll): {secret}"
+        ))
+    }
+}
+
+fn enrollment_poll_output(mut reply: Value, path: Option<&Path>) -> Result<String, String> {
+    if let Some(path) = path {
+        if let Some(token) = reply
+            .get_mut("result")
+            .and_then(|result| result.get_mut("token"))
+        {
+            let value = token
+                .as_str()
+                .ok_or("enroll_poll returned a non-string token")?;
+            write_secret_file(path, value)?;
+            *token = json!(format!("<written to {}>", path.display()));
+        }
+    }
+    Ok(serde_json::to_string(&reply).unwrap_or_default())
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -52,7 +156,11 @@ async fn main() {
     let mut enroll_propose: Option<String> = None;
     let mut enroll_poll: Option<String> = None;
     let mut enroll_secret: Option<String> = None;
+    let mut enroll_secret_file: Option<PathBuf> = None;
+    let mut enroll_secret_out: Option<PathBuf> = None;
     let mut enrollment_token: Option<String> = None;
+    let mut enrollment_token_file: Option<PathBuf> = None;
+    let mut enrollment_token_out: Option<PathBuf> = None;
     let mut scoped_min_ttl_ms: Option<i64> = None;
     let mut sign_payload: Option<String> = None;
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
@@ -168,6 +276,26 @@ async fn main() {
                 };
                 enroll_secret = Some(secret);
             }
+            "--enroll-secret-file" => {
+                enroll_secret_file = Some(
+                    required_path(&mut args, &arg).unwrap_or_else(|error| argument_error(error)),
+                );
+            }
+            "--enroll-secret-out" => {
+                enroll_secret_out = Some(
+                    required_path(&mut args, &arg).unwrap_or_else(|error| argument_error(error)),
+                );
+            }
+            "--enrollment-token-file" => {
+                enrollment_token_file = Some(
+                    required_path(&mut args, &arg).unwrap_or_else(|error| argument_error(error)),
+                );
+            }
+            "--enrollment-token-out" => {
+                enrollment_token_out = Some(
+                    required_path(&mut args, &arg).unwrap_or_else(|error| argument_error(error)),
+                );
+            }
             "--enrollment-token" => {
                 let Some(token) = args.next() else {
                     eprintln!("vault_read_probe: --enrollment-token needs a token");
@@ -257,48 +385,37 @@ async fn main() {
         eprintln!("vault_read_probe: --subc <connection-file> is required");
         std::process::exit(2);
     });
-    // Reject both rather than picking a winner: a caller who passes both has one of the
-    // two wrong, and silently preferring either can send a handle the caller did not mean
-    // -- against a vault, an unintended credential read.
-    if handle.is_some() && handle_file.is_some() {
-        eprintln!("vault_read_probe: pass --handle OR --handle-file, not both");
-        std::process::exit(2);
+    let enroll_secret = secret_input(
+        enroll_secret,
+        enroll_secret_file,
+        "--enroll-secret",
+        "--enroll-secret-file",
+    )
+    .unwrap_or_else(|error| argument_error(error));
+    let enrollment_token = secret_input(
+        enrollment_token,
+        enrollment_token_file,
+        "--enrollment-token",
+        "--enrollment-token-file",
+    )
+    .unwrap_or_else(|error| argument_error(error));
+    if enroll_secret_out.is_some() && enroll_propose.is_none() {
+        argument_error("--enroll-secret-out needs --enroll-propose".into());
     }
-    let handle = match (handle, handle_file) {
-        (Some(value), _) => value,
-        (None, Some(path)) => {
-            let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-                // Fail loud. An empty or unreadable handle file must not fall through to
-                // an empty handle, which the vault answers with the same uniform
-                // `not_found` it uses for a revoked one -- indistinguishable from a real
-                // authorization result, and the probe would report a vault verdict for
-                // what is actually a local file error.
-                eprintln!(
-                    "vault_read_probe: cannot read --handle-file {}: {err}",
-                    path.display()
-                );
-                std::process::exit(2);
-            });
-            // Trim: a handle written with `> file` or by an editor carries a trailing
-            // newline, and a handle with a newline in it is simply a different string.
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                eprintln!(
-                    "vault_read_probe: --handle-file {} is empty",
-                    path.display()
-                );
-                std::process::exit(2);
-            }
-            trimmed.to_string()
-        }
-        (None, None)
-            if scoped_id.is_some()
-                || status_ids.is_some()
-                || list_scoped
-                || open_fields.is_some()
-                || seal_fields.is_some()
-                || enroll_propose.is_some()
-                || enroll_poll.is_some() =>
+    if enrollment_token_out.is_some() && enroll_poll.is_none() {
+        argument_error("--enrollment-token-out needs --enroll-poll".into());
+    }
+    let handle = secret_input(handle, handle_file, "--handle", "--handle-file")
+        .unwrap_or_else(|error| argument_error(error));
+    let handle = match handle {
+        Some(value) => value,
+        None if scoped_id.is_some()
+            || status_ids.is_some()
+            || list_scoped
+            || open_fields.is_some()
+            || seal_fields.is_some()
+            || enroll_propose.is_some()
+            || enroll_poll.is_some() =>
         {
             // GRANT-ADDRESSED ARMS NEED NO HANDLE, and requiring one would misrepresent
             // the surface: `get_scoped` and scoped `status` are authorized by the
@@ -307,7 +424,7 @@ async fn main() {
             // have meant the only way to test the handle-free path was to hold a handle.
             String::new()
         }
-        (None, None) => {
+        None => {
             eprintln!(
                 "vault_read_probe: --handle <ckh_...> or --handle-file <path> is required \
                  (grant-addressed arms --scoped-id / --status-id need no handle)"
@@ -655,6 +772,10 @@ async fn main() {
             .expect("hash is 32 hex bytes");
             let hash = credentials_core::enrollment::enrollment_secret_hash(&secret_hex)
                 .expect("secret is 32 hex bytes");
+            // Save before sending the proposal, so a local file error cannot
+            // leave a pending enrollment whose request secret was never saved.
+            let secret_output = request_secret_output(&secret_hex, enroll_secret_out.as_deref())
+                .unwrap_or_else(|error| argument_error(error));
             let body = enroll_call(
                 &mut stream,
                 route_channel,
@@ -669,11 +790,13 @@ async fn main() {
                 "[probe] enroll_propose({name}) -> {}",
                 serde_json::to_string(&parsed).unwrap_or_default()
             );
-            eprintln!("[probe] request_secret (keep, needed to poll): {secret_hex}");
+            eprintln!("{secret_output}");
         }
         if let Some(request_id) = enroll_poll.as_ref() {
             let Some(secret) = enroll_secret.as_ref() else {
-                eprintln!("vault_read_probe: --enroll-poll needs --enroll-secret");
+                eprintln!(
+                    "vault_read_probe: --enroll-poll needs --enroll-secret or --enroll-secret-file"
+                );
                 std::process::exit(2);
             };
             let body = enroll_call(
@@ -688,7 +811,8 @@ async fn main() {
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
             eprintln!(
                 "[probe] enroll_poll -> {}",
-                serde_json::to_string(&parsed).unwrap_or_default()
+                enrollment_poll_output(parsed, enrollment_token_out.as_deref())
+                    .unwrap_or_else(|error| argument_error(error))
             );
         }
         if let Some(id) = scoped_id.as_ref() {
@@ -1824,6 +1948,174 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
 #[cfg(test)]
 mod tests {
     use super::describe_cookie_jwts;
+    use credentials_core::test_support::TestTempDir;
+
+    #[test]
+    fn enrollment_secret_inputs_refuse_both_forms_before_reading_files() {
+        let root = TestTempDir::new("probe-input-conflicts");
+        for (flag, file_flag) in [
+            ("--enroll-secret", "--enroll-secret-file"),
+            ("--enrollment-token", "--enrollment-token-file"),
+            ("--handle", "--handle-file"),
+        ] {
+            let error = super::secret_input(
+                Some("test-only-bearer".into()),
+                Some(root.join("missing")),
+                flag,
+                file_flag,
+            )
+            .unwrap_err();
+            assert_eq!(error, format!("pass {flag} OR {file_flag}, not both"));
+            assert!(!error.contains("test-only-bearer"));
+            assert_eq!(
+                super::secret_input(Some("test-only-bearer".into()), None, flag, file_flag)
+                    .unwrap(),
+                Some("test-only-bearer".into())
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_secret_files_refuse_empty_and_trim_only_one_line_ending() {
+        let root = TestTempDir::new("probe-input-files");
+        let path = root.join("input");
+        for file_flag in [
+            "--enroll-secret-file",
+            "--enrollment-token-file",
+            "--handle-file",
+        ] {
+            for raw in ["", "\n", "\r\n"] {
+                std::fs::write(&path, raw).unwrap();
+                let error = super::secret_input(None, Some(path.clone()), "--unused", file_flag)
+                    .unwrap_err();
+                assert_eq!(error, format!("{file_flag} {} is empty", path.display()));
+            }
+            for (raw, expected) in [
+                ("test-value\n", "test-value"),
+                ("test-value\r\n", "test-value"),
+                ("test-value\n\n", "test-value\n"),
+                (" test-value \n", " test-value "),
+                ("test-value", "test-value"),
+            ] {
+                std::fs::write(&path, raw).unwrap();
+                assert_eq!(
+                    super::secret_input(None, Some(path.clone()), "--unused", file_flag)
+                        .unwrap()
+                        .as_deref(),
+                    Some(expected)
+                );
+            }
+            assert!(
+                super::secret_input(None, Some(root.join("missing")), "--unused", file_flag)
+                    .unwrap_err()
+                    .contains("cannot read")
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_file_flags_require_paths() {
+        for flag in [
+            "--enroll-secret-file",
+            "--enrollment-token-file",
+            "--enroll-secret-out",
+            "--enrollment-token-out",
+        ] {
+            assert_eq!(
+                super::required_path(&mut std::iter::empty(), flag).unwrap_err(),
+                format!("{flag} needs a path")
+            );
+            assert_eq!(
+                super::required_path(&mut ["test-path".into()].into_iter(), flag).unwrap(),
+                std::path::PathBuf::from("test-path")
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_output_files_are_private_and_omit_secrets_from_messages() {
+        let root = TestTempDir::new("probe-output-private");
+        let secret_path = root.join("request-secret");
+        let message =
+            super::request_secret_output("test-request-secret", Some(&secret_path)).unwrap();
+        assert_eq!(
+            message,
+            format!(
+                "[probe] request_secret written to {}",
+                secret_path.display()
+            )
+        );
+        assert!(!message.contains("test-request-secret"));
+        assert_eq!(
+            std::fs::read_to_string(&secret_path).unwrap(),
+            "test-request-secret"
+        );
+
+        let token_path = root.join("enrollment-token");
+        let reply = serde_json::json!({"result": {"status": "approved", "name": "consumer", "token": "test-enrollment-token", "token_generation": 1}});
+        let output = super::enrollment_poll_output(reply.clone(), Some(&token_path)).unwrap();
+        assert!(!output.contains("test-enrollment-token"));
+        let mut expected = reply.clone();
+        expected["result"]["token"] =
+            serde_json::json!(format!("<written to {}>", token_path.display()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read_to_string(&token_path).unwrap(),
+            "test-enrollment-token"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&secret_path, &token_path] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(
+            super::request_secret_output("test-request-secret", None).unwrap(),
+            "[probe] request_secret (keep, needed to poll): test-request-secret"
+        );
+        assert_eq!(
+            super::enrollment_poll_output(reply.clone(), None).unwrap(),
+            serde_json::to_string(&reply).unwrap()
+        );
+    }
+
+    #[test]
+    fn enrollment_output_files_refuse_existing_files_without_overwriting() {
+        let root = TestTempDir::new("probe-output-exists");
+        let path = root.join("existing");
+        std::fs::write(&path, "keep-existing").unwrap();
+        assert!(super::request_secret_output("new-secret", Some(&path))
+            .unwrap_err()
+            .contains("cannot create secret file"));
+        let reply = serde_json::json!({"result": {"status": "approved", "token": "new-token"}});
+        assert!(super::enrollment_poll_output(reply, Some(&path))
+            .unwrap_err()
+            .contains("cannot create secret file"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep-existing");
+    }
+
+    #[test]
+    fn enrollment_poll_pending_does_not_create_a_token_file() {
+        let root = TestTempDir::new("probe-poll-pending");
+        let path = root.join("token");
+        for reply in [
+            serde_json::json!({"result": {"status": "pending"}}),
+            serde_json::json!({"error": {"code": "not_found"}}),
+        ] {
+            assert_eq!(
+                super::enrollment_poll_output(reply.clone(), Some(&path)).unwrap(),
+                serde_json::to_string(&reply).unwrap()
+            );
+            assert!(!path.exists());
+        }
+    }
 
     #[test]
     fn payload_diagnostics_show_length_only() {

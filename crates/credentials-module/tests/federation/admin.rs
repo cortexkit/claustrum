@@ -1521,6 +1521,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "limiter.rs",
         "manifest.rs",
         "manifest_active_report.rs",
+        "manifest_binding_vectors_tests.rs",
         "manifest_identity.rs",
         "manifest_propose.rs",
         "manifest_propose_tests.rs",

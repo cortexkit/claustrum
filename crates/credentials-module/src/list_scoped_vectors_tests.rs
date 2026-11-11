@@ -174,20 +174,34 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let sums = format!("{}  list-scoped-v2.json\n", hex_digest(&emitted));
+    // SHA256SUMS lists every vector file in the directory, one line each. This test
+    // owns only its own line, so other files' entries must not affect it.
+    let line = format!("{}  list-scoped-v2.json", hex_digest(&emitted));
+    let ours = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|entry| entry.ends_with("  list-scoped-v2.json"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let sums_path = directory.join("SHA256SUMS");
+    let sums = std::fs::read_to_string(&sums_path).expect("pinned vector hash");
     if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1") {
         std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
-        std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
-        println!("emitted five list-scoped v2 cases and SHA256SUMS");
+        let mut lines: Vec<String> = sums
+            .lines()
+            .filter(|entry| !entry.ends_with("  list-scoped-v2.json"))
+            .map(str::to_owned)
+            .chain([line])
+            .collect();
+        lines.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
+        std::fs::write(&sums_path, format!("{}\n", lines.join("\n"))).unwrap();
+        println!("emitted five list-scoped v2 cases and their SHA256SUMS line");
     } else {
         assert_eq!(
             emitted,
             std::fs::read(directory.join("list-scoped-v2.json"))
                 .expect("pinned list-scoped vectors")
         );
-        assert_eq!(
-            sums,
-            std::fs::read_to_string(directory.join("SHA256SUMS")).expect("pinned vector hash")
-        );
+        assert_eq!(ours(&sums), [line], "SHA256SUMS must list list-scoped-v2.json once, with this hash");
     }
 }

@@ -160,6 +160,13 @@ impl EncryptedStore {
             .unwrap_or(false)
     }
 
+    /// Preserve the distinction between an explicit off value and unreadable data.
+    pub fn manifest_one_tap_status(&self) -> String {
+        self.store
+            .with_conn(|conn| Ok(one_tap_status(conn).to_owned()))
+            .unwrap_or_else(|_| "unreadable".into())
+    }
+
     pub fn set_manifest_one_tap_audited(
         &self,
         enabled: bool,

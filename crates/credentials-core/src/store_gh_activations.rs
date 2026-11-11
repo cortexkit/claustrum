@@ -62,7 +62,8 @@ pub struct GhManifestActiveStatus {
     pub computers: Vec<GhManifestComputerStatus>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GhManifestHandoffEnvelope {
     pub key_id: String,
     pub manifest_bytes: String,

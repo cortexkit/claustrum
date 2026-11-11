@@ -18475,6 +18475,8 @@ mod store_agent_secrets;
 
 #[path = "store_gh_activations.rs"]
 mod gh_activations;
+#[path = "store_gh_admin.rs"]
+mod gh_admin;
 #[path = "store_gh_approval.rs"]
 mod gh_approval;
 #[path = "store_gh_manifests.rs"]

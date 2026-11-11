@@ -50,6 +50,33 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
     ) -> Result<crate::signing::Signature, StoreOpError> {
         let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
+        let record = self.gh_manifest_root_in_tx(tx)?;
+        let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
+        let prepared =
+            crate::signing::prepare_ed25519(pem, manifest_bytes).map_err(|e| match e {
+                crate::signing::SignError::TooLarge { .. } => StoreOpError::Encode(e.to_string()),
+                crate::signing::SignError::UnusableKey(_) => corrupt(),
+            })?;
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &GhManifestAudit::Sign {
+                manifest_sha256: &hex32(&payload_hash(manifest_bytes)),
+            }
+            .record(ctx.actor, ctx.alarm),
+        )
+        .map_err(sql_error)?;
+        Ok(prepared.sign())
+    }
+
+    // Import checks the same active root inside its writer transaction, but uses
+    // only the public half and never calls the signer.
+    pub(super) fn gh_manifest_root_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<VaultRecord, StoreOpError> {
+        let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
         let (version, state, blob): (i64, String, Vec<u8>) = tx
             .query_row(
                 "SELECT record_version, state, envelope FROM credentials WHERE credential_id = ?1",
@@ -78,23 +105,7 @@ impl EncryptedStore {
         if record.kind != CredentialKind::SigningKey {
             return Err(StoreOpError::NotFound);
         }
-        let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
-        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
-        let prepared =
-            crate::signing::prepare_ed25519(pem, manifest_bytes).map_err(|e| match e {
-                crate::signing::SignError::TooLarge { .. } => StoreOpError::Encode(e.to_string()),
-                crate::signing::SignError::UnusableKey(_) => corrupt(),
-            })?;
-        append_audit_tx(
-            tx,
-            &self.audit_key,
-            &GhManifestAudit::Sign {
-                manifest_sha256: &hex32(&payload_hash(manifest_bytes)),
-            }
-            .record(ctx.actor, ctx.alarm),
-        )
-        .map_err(sql_error)?;
-        Ok(prepared.sign())
+        Ok(record)
     }
 
     /// Store an already verified version, its audit row and all older pending

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens};
 use crate::oauth::OAuthCredential;
+use crate::secret::SecretString;
 
 /// GitHub REST API endpoint used to discover an App's current installations.
 pub const INSTALLATIONS_URL: &str = "https://api.github.com/app/installations";
@@ -40,6 +41,8 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 const USER_AGENT: &str = "claustrum";
 const JWT_BACKDATE_SECS: i64 = 60;
 const JWT_LIFETIME_SECS: i64 = 9 * 60;
+const MAX_INSTALLATION_REPOSITORIES: usize = 1_000;
+const MAX_REPOSITORY_PAGES: usize = 10;
 
 #[derive(Serialize)]
 struct AppJwtClaims<'a> {
@@ -53,6 +56,80 @@ struct Installation {
     id: u64,
     client_id: String,
     app_slug: Option<String>,
+    permissions: Option<serde_json::Value>,
+    suspended_at: Option<String>,
+    repository_selection: Option<String>,
+}
+
+enum InstallationDiscovery {
+    Found {
+        installation: Installation,
+        slug: String,
+    },
+    Check(GithubAppCheck),
+}
+
+/// An installation token held only in memory, with permissions from its installation
+/// record, not the possibly narrower permissions in the token-exchange response.
+#[derive(Debug)]
+pub struct GithubInstallationToken {
+    pub access_token: SecretString,
+    pub expires_at_ms: i64,
+    pub installation_permissions: BTreeMap<String, String>,
+    repository_selection: Option<String>,
+}
+
+struct MintedInstallation {
+    access_token: SecretString,
+    expires_at_ms: i64,
+    token_permissions: Option<BTreeMap<String, String>>,
+    installation: Installation,
+}
+
+enum InstallationMintOutcome {
+    Minted(MintedInstallation),
+    Check(GithubAppCheck),
+    Suspended,
+}
+
+/// Typed installation observations let callers distinguish configuration failures
+/// from request failures without interpreting refresh error messages.
+#[derive(Debug)]
+pub enum GithubInstallationOutcome {
+    Minted(GithubInstallationToken),
+    /// Only non-`Ok` checks are returned here.
+    Check(GithubAppCheck),
+    Suspended,
+}
+
+/// Request failures retain their stage so refresh can preserve its historical
+/// token-exchange error handling without applying it to installation discovery.
+#[derive(Debug)]
+pub enum GithubInstallationError {
+    Discovery(RefreshError),
+    TokenExchange(RefreshError),
+}
+
+impl GithubInstallationError {
+    pub fn into_refresh_error(self) -> RefreshError {
+        match self {
+            Self::Discovery(error) | Self::TokenExchange(error) => error,
+        }
+    }
+}
+
+/// Result of a read-only repository check. No bearer token leaves this check.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GithubRepositoryCheck {
+    Found {
+        full_name: String,
+        installation_permissions: BTreeMap<String, String>,
+    },
+    NotInstalled,
+    InstallationAll,
+    InstallationUnusable,
+    InstallationTooLarge,
+    GithubUnavailable,
 }
 
 /// Read-only observation from GitHub's authenticated installations list.
@@ -115,14 +192,21 @@ pub async fn check_github_app(
         .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
     let jwt = GithubAppAdapter::mint_app_jwt(cred, now_secs())?;
     let authorization = format!("Bearer {jwt}");
-    GithubAppAdapter::new()
-        .discover_installation_id(
+    match GithubAppAdapter::new()
+        .discover_installation(
             record_id,
             client_id,
             &GithubAppAdapter::auth_headers(&authorization),
             http,
         )
-        .await
+        .await?
+    {
+        InstallationDiscovery::Found { installation, slug } => Ok(GithubAppCheck::Ok {
+            installation_id: installation.id,
+            slug,
+        }),
+        InstallationDiscovery::Check(check) => Ok(check),
+    }
 }
 
 #[derive(Deserialize)]
@@ -201,13 +285,13 @@ impl GithubAppAdapter {
         Ok(format!("{signing_input}.{signature}"))
     }
 
-    async fn discover_installation_id(
+    async fn discover_installation(
         &self,
         record_id: &str,
         client_id: &str,
         headers: &[(&str, &str)],
         http: &dyn HttpTransport,
-    ) -> Result<GithubAppCheck, RefreshError> {
+    ) -> Result<InstallationDiscovery, RefreshError> {
         let response = http.get(INSTALLATIONS_URL, headers).await?;
         // A 401 HERE IS NOT A DEATH STATEMENT, so it must not become one.
         //
@@ -256,7 +340,9 @@ impl GithubAppAdapter {
         // remove the extra installations (or deposit a separate App per account), then
         // `ck auth reactivate`.
         if others > 0 {
-            return Ok(GithubAppCheck::SeveralInstallations(others + 1));
+            return Ok(InstallationDiscovery::Check(
+                GithubAppCheck::SeveralInstallations(others + 1),
+            ));
         }
         let Some(installation) = first else {
             // INVALID_GRANT, NOT DECODE, and the distinction is the difference
@@ -280,25 +366,23 @@ impl GithubAppAdapter {
             // `needs_reauth`, so an uninstalled App becomes visible in `ck auth list`
             // and in health instead of being discovered at rollout time, and the
             // repair after installing is `ck auth reactivate`.
-            return Ok(GithubAppCheck::NotInstalled);
+            return Ok(InstallationDiscovery::Check(GithubAppCheck::NotInstalled));
         };
         // Missing vendor data is retryable; it is not evidence of a wrong record id.
         let slug = installation
             .app_slug
+            .clone()
             .ok_or_else(|| RefreshError::Decode("GitHub installation has no app_slug".into()))?;
         let expected = record_id.strip_prefix("github_app:").ok_or_else(|| {
             RefreshError::Decode("GitHub App record id must start with github_app:".into())
         })?;
         if slug != expected {
-            return Ok(GithubAppCheck::Mismatch {
+            return Ok(InstallationDiscovery::Check(GithubAppCheck::Mismatch {
                 slug,
                 record_id: record_id.to_owned(),
-            });
+            }));
         }
-        Ok(GithubAppCheck::Ok {
-            installation_id: installation.id,
-            slug,
-        })
+        Ok(InstallationDiscovery::Found { installation, slug })
     }
 
     fn auth_headers(authorization: &str) -> [(&str, &str); 4] {
@@ -333,79 +417,269 @@ impl RefreshAdapter for GithubAppAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
-        let client_id = cred
-            .client_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
-        let jwt = Self::mint_app_jwt(cred, now_secs())?;
-        let authorization = format!("Bearer {jwt}");
-        let headers = Self::auth_headers(&authorization);
+        match mint_installation_token_inner(record_id, cred, http).await {
+            Ok(InstallationMintOutcome::Minted(token)) => Ok(RefreshedTokens {
+                access_token: token.access_token,
+                refresh_token: cred.refresh_token.clone(),
+                expires_at_ms: Some(token.expires_at_ms),
+                github_app_permissions: token.token_permissions,
+            }),
+            Ok(InstallationMintOutcome::Check(check)) => {
+                check.require_match()?;
+                unreachable!("mint returns only non-Ok checks")
+            }
+            Ok(InstallationMintOutcome::Suspended) => Err(suspended_refresh_error()),
+            // Preserve the refresh adapter's legacy suspension classification. Repository
+            // checks use the structured installation field and never inspect this text.
+            Err(GithubInstallationError::TokenExchange(RefreshError::Status(403, body))) => {
+                let suspended = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|body| {
+                        body.get("message")?
+                            .as_str()
+                            .map(|message| message.to_ascii_lowercase().contains("suspended"))
+                    })
+                    .unwrap_or(false);
+                if suspended {
+                    Err(suspended_refresh_error())
+                } else {
+                    Err(RefreshError::Status(403, body))
+                }
+            }
+            Err(error) => Err(error.into_refresh_error()),
+        }
+    }
+}
 
-        let installation_id = self
-            .discover_installation_id(record_id, client_id, &headers, http)
-            .await?
-            .require_match()?;
-        let url = format!("{ACCESS_TOKENS_URL_PREFIX}{installation_id}/access_tokens");
-        let response = http
-            .post(&url, &headers, "application/json", b"{}".to_vec())
-            .await?;
-        // Same reasoning as the discovery 401 above: transient, never InvalidGrant.
-        if response.status == 401 {
-            return Err(RefreshError::Status(
+fn suspended_refresh_error() -> RefreshError {
+    RefreshError::InvalidGrant(
+        "GitHub installation is suspended and requires operator repair".into(),
+    )
+}
+
+/// Discover and mint without the refresh engine, a store handle, or an audit write.
+/// The caller owns the ephemeral token; a suspended installation never mints one.
+pub async fn mint_installation_token(
+    record_id: &str,
+    cred: &OAuthCredential,
+    http: &dyn HttpTransport,
+) -> Result<GithubInstallationOutcome, GithubInstallationError> {
+    match mint_installation_token_inner(record_id, cred, http).await? {
+        InstallationMintOutcome::Minted(token) => {
+            // Approval must show the complete installation grant. Refresh does not
+            // consume this metadata, so malformed metadata must not stop token serving.
+            let installation_permissions =
+                canonical_permissions(token.installation.permissions.as_ref())
+                    .filter(|permissions| {
+                        permissions
+                            .values()
+                            .all(|level| matches!(level.as_str(), "read" | "write" | "admin"))
+                    })
+                    .ok_or_else(|| {
+                        GithubInstallationError::Discovery(RefreshError::Decode(
+                            "GitHub installation has invalid permissions".into(),
+                        ))
+                    })?;
+            Ok(GithubInstallationOutcome::Minted(GithubInstallationToken {
+                access_token: token.access_token,
+                expires_at_ms: token.expires_at_ms,
+                installation_permissions,
+                repository_selection: token.installation.repository_selection,
+            }))
+        }
+        InstallationMintOutcome::Check(check) => Ok(GithubInstallationOutcome::Check(check)),
+        InstallationMintOutcome::Suspended => Ok(GithubInstallationOutcome::Suspended),
+    }
+}
+
+async fn mint_installation_token_inner(
+    record_id: &str,
+    cred: &OAuthCredential,
+    http: &dyn HttpTransport,
+) -> Result<InstallationMintOutcome, GithubInstallationError> {
+    let client_id = cred
+        .client_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))
+        .map_err(GithubInstallationError::Discovery)?;
+    let jwt = GithubAppAdapter::mint_app_jwt(cred, now_secs())
+        .map_err(GithubInstallationError::Discovery)?;
+    let authorization = format!("Bearer {jwt}");
+    let headers = GithubAppAdapter::auth_headers(&authorization);
+
+    let installation = match GithubAppAdapter::new()
+        .discover_installation(record_id, client_id, &headers, http)
+        .await
+        .map_err(GithubInstallationError::Discovery)?
+    {
+        InstallationDiscovery::Found { installation, .. } => installation,
+        InstallationDiscovery::Check(check) => return Ok(InstallationMintOutcome::Check(check)),
+    };
+    if installation.suspended_at.is_some() {
+        return Ok(InstallationMintOutcome::Suspended);
+    }
+    let url = format!(
+        "{ACCESS_TOKENS_URL_PREFIX}{}/access_tokens",
+        installation.id
+    );
+    let response = http
+        .post(&url, &headers, "application/json", b"{}".to_vec())
+        .await
+        .map_err(GithubInstallationError::TokenExchange)?;
+    // Same reasoning as the discovery 401 above: transient, never InvalidGrant.
+    if response.status == 401 {
+        return Err(GithubInstallationError::TokenExchange(
+            RefreshError::Status(
                 401,
                 format!(
                     "GitHub rejected the App JWT at the token exchange: {}",
                     String::from_utf8_lossy(&response.body)
                 ),
-            ));
-        }
-        if response.status == 404 {
-            // An uninstall/reinstall can remove an installation between discovery and
-            // exchange. Keep 404 retryable: the next refresh discovers the new id.
-            return Err(RefreshError::Status(
-                response.status,
-                String::from_utf8_lossy(&response.body).into_owned(),
-            ));
-        }
-        if response.status == 403 {
-            // Rate limits also produce 403s. Only an explicit suspension needs a human;
-            // missing or malformed messages must keep the retryable classification.
-            let suspended = serde_json::from_slice::<serde_json::Value>(&response.body)
-                .ok()
-                .and_then(|body| {
-                    body.get("message")?
-                        .as_str()
-                        .map(|message| message.to_ascii_lowercase().contains("suspended"))
-                })
-                .unwrap_or(false);
-            if suspended {
-                return Err(RefreshError::InvalidGrant(
-                    "GitHub installation is suspended and requires operator repair".into(),
-                ));
-            }
-        }
-        if response.status != 201 {
-            return Err(RefreshError::Status(
-                response.status,
-                String::from_utf8_lossy(&response.body).into_owned(),
-            ));
-        }
-
-        let parsed: InstallationTokenResponse = serde_json::from_slice(&response.body)
-            .map_err(|error| RefreshError::Decode(error.to_string()))?;
-        let expires_at_ms = chrono::DateTime::parse_from_rfc3339(&parsed.expires_at)
-            .map_err(|error| RefreshError::Decode(format!("invalid GitHub token expiry: {error}")))?
-            .timestamp_millis();
-        let github_app_permissions = canonical_permissions(parsed.permissions.as_ref());
-        Ok(RefreshedTokens {
-            access_token: parsed.token.into(),
-            // An installation-token exchange never rotates the App private key.
-            refresh_token: cred.refresh_token.clone(),
-            expires_at_ms: Some(expires_at_ms),
-            github_app_permissions,
-        })
+            ),
+        ));
     }
+    if response.status == 404 {
+        // An uninstall/reinstall can remove an installation between discovery and
+        // exchange. Keep 404 retryable: the next refresh discovers the new id.
+        return Err(GithubInstallationError::TokenExchange(
+            RefreshError::Status(
+                response.status,
+                String::from_utf8_lossy(&response.body).into_owned(),
+            ),
+        ));
+    }
+    if response.status != 201 {
+        return Err(GithubInstallationError::TokenExchange(
+            RefreshError::Status(
+                response.status,
+                String::from_utf8_lossy(&response.body).into_owned(),
+            ),
+        ));
+    }
+
+    let parsed: InstallationTokenResponse =
+        serde_json::from_slice(&response.body).map_err(|error| {
+            GithubInstallationError::TokenExchange(RefreshError::Decode(error.to_string()))
+        })?;
+    let expires_at_ms = chrono::DateTime::parse_from_rfc3339(&parsed.expires_at)
+        .map_err(|error| {
+            GithubInstallationError::TokenExchange(RefreshError::Decode(format!(
+                "invalid GitHub token expiry: {error}"
+            )))
+        })?
+        .timestamp_millis();
+    let token_permissions = canonical_permissions(parsed.permissions.as_ref());
+    Ok(InstallationMintOutcome::Minted(MintedInstallation {
+        access_token: parsed.token.into(),
+        expires_at_ms,
+        token_permissions,
+        installation,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RepositoryPage {
+    repository_selection: Option<String>,
+    total_count: usize,
+    repositories: Vec<RepositoryEntry>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryEntry {
+    full_name: String,
+}
+
+/// Check the installation's live repository listing, preserving GitHub's full-name
+/// casing. Only a complete, consistent listing establishes absence.
+pub async fn check_github_repository(
+    record_id: &str,
+    cred: &OAuthCredential,
+    repo: &str,
+    http: &dyn HttpTransport,
+) -> GithubRepositoryCheck {
+    check_github_repository_inner(record_id, cred, repo, http)
+        .await
+        .unwrap_or(GithubRepositoryCheck::GithubUnavailable)
+}
+
+async fn check_github_repository_inner(
+    record_id: &str,
+    cred: &OAuthCredential,
+    repo: &str,
+    http: &dyn HttpTransport,
+) -> Result<GithubRepositoryCheck, RefreshError> {
+    let token = match mint_installation_token(record_id, cred, http)
+        .await
+        .map_err(GithubInstallationError::into_refresh_error)?
+    {
+        GithubInstallationOutcome::Minted(token) => token,
+        GithubInstallationOutcome::Check(GithubAppCheck::NotInstalled) => {
+            return Ok(GithubRepositoryCheck::NotInstalled)
+        }
+        GithubInstallationOutcome::Check(_) | GithubInstallationOutcome::Suspended => {
+            return Ok(GithubRepositoryCheck::InstallationUnusable)
+        }
+    };
+    let authorization = format!("Bearer {}", token.access_token.expose());
+    let headers = GithubAppAdapter::auth_headers(&authorization);
+    let mut total_count = None;
+    let mut seen = 0;
+    for page_number in 1..=MAX_REPOSITORY_PAGES {
+        let url = format!(
+            "https://api.github.com/installation/repositories?per_page=100&page={page_number}"
+        );
+        let response = http.get(&url, &headers).await?;
+        if response.status != 200 {
+            return Ok(GithubRepositoryCheck::GithubUnavailable);
+        }
+        let page: RepositoryPage = serde_json::from_slice(&response.body)
+            .map_err(|error| RefreshError::Decode(error.to_string()))?;
+        if page.repository_selection.is_some()
+            && page.repository_selection != token.repository_selection
+        {
+            return Ok(GithubRepositoryCheck::GithubUnavailable);
+        }
+        if page_number == 1 {
+            // GitHub reports the selection on the installation, not necessarily on
+            // repository pages. Check it with page one's count before paging further.
+            match token.repository_selection.as_deref() {
+                Some("all") => return Ok(GithubRepositoryCheck::InstallationAll),
+                Some("selected") => {}
+                _ => return Ok(GithubRepositoryCheck::GithubUnavailable),
+            }
+            if page.total_count > MAX_INSTALLATION_REPOSITORIES {
+                return Ok(GithubRepositoryCheck::InstallationTooLarge);
+            }
+            total_count = Some(page.total_count);
+        }
+        if total_count != Some(page.total_count)
+            || page.repositories.len() > page.total_count.saturating_sub(seen)
+        {
+            return Ok(GithubRepositoryCheck::GithubUnavailable);
+        }
+        let page_len = page.repositories.len();
+        seen += page_len;
+        if let Some(entry) = page
+            .repositories
+            .into_iter()
+            .find(|entry| entry.full_name.eq_ignore_ascii_case(repo))
+        {
+            return Ok(GithubRepositoryCheck::Found {
+                full_name: entry.full_name,
+                installation_permissions: token.installation_permissions,
+            });
+        }
+        if seen == page.total_count {
+            return Ok(GithubRepositoryCheck::NotInstalled);
+        }
+        // A short page is not a completeness signal: the transport has no Link header.
+        // Even a non-empty tenth page cannot establish absence below total_count.
+        if page_len == 0 {
+            return Ok(GithubRepositoryCheck::GithubUnavailable);
+        }
+    }
+    Ok(GithubRepositoryCheck::GithubUnavailable)
 }
 
 /// Which ASN.1 container a private-key PEM carries, decided by its armour label.
@@ -467,6 +741,10 @@ fn now_secs() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "github_app_repository_tests.rs"]
+mod repository_tests;
 
 #[cfg(test)]
 mod tests {

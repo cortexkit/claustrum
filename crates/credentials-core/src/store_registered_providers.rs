@@ -233,10 +233,13 @@ impl EncryptedStore {
         validate_registered_provider_service(service)?;
         let empty = RegisteredProviderSettings::default();
         validate_registered_provider_settings(settings.unwrap_or(&empty))?;
+        // `llm-gateway` is refused as a default: only gateway creation assigns it, so a
+        // registered service cannot place every future ordinary key in the gateway group.
         if categories.iter().any(|category| {
-            !crate::catalog::CredentialCategory::ALL
-                .iter()
-                .any(|known| known.as_str() == category)
+            category == crate::catalog::CredentialCategory::LlmGateway.as_str()
+                || !crate::catalog::CredentialCategory::ALL
+                    .iter()
+                    .any(|known| known.as_str() == category)
         }) {
             return Err(StoreOpError::InvalidCategoryName);
         }
@@ -619,6 +622,39 @@ mod tests {
         }
         assert!(store.registered_providers().unwrap().is_empty());
         assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+
+    #[test]
+    fn registered_provider_defaults_refuse_the_gateway_group_and_write_nothing() {
+        let (_root, store) = taxonomy_tests::rig("registered-gateway-group", 199);
+        let tip = store.audit_tip().unwrap();
+        for categories in [
+            vec!["llm-gateway".to_string()],
+            vec!["llm-provider".into(), "llm-gateway".into()],
+        ] {
+            let error = store
+                .set_registered_provider_audited(
+                    "custom",
+                    &categories,
+                    &[],
+                    AuditCtx::admin(AuditOp::ProviderSet),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, StoreOpError::InvalidCategoryName),
+                "{error}"
+            );
+        }
+        assert!(store.registered_providers().unwrap().is_empty());
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        assert!(store
+            .set_registered_provider_audited(
+                "custom",
+                &["llm-provider".into()],
+                &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap());
     }
 
     #[test]

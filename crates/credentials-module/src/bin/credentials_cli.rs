@@ -679,7 +679,7 @@ fn usage_short() -> String {
      usage: ck auth <verb> [flags]\n\
      \n\
      verbs:\n\
-           login               OAuth/device/api-key login; preflight routing ids\n\
+           login               OAuth/device/api-key login; picker includes custom keys\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
@@ -690,7 +690,7 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-           put                 store a secret or gateway key; preflight routing ids\n\
+           put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\

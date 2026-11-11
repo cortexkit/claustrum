@@ -1,0 +1,1 @@
+{"result":{"auth":{"header":"authorization","scheme":"bearer"},"credential_id":"apikey:openai","expires_at_ms":null,"hosts":["api.openai.com"],"invalid_key":{"error_code":"invalid_api_key","error_code_field":"/error/code","status":401},"payload":[118,101,99,116,111,114,45,116,101,115,116,45,107,101,121],"record_version":1}}

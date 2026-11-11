@@ -25,6 +25,73 @@ fn hex_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+async fn non_gateway_scoped_baseline_vectors() -> [(&'static str, Vec<u8>); 2] {
+    let mut rig = Rig::new();
+    let id = "apikey:openai";
+    let record = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "vector",
+        b"vector-test-key".to_vec(),
+        None,
+    );
+    rig.store.create(id, &record).unwrap();
+    rig.store
+        .force_credential_incarnation_for_test(id, "00000000000000000000000000000001");
+    rig.store
+        .set_providers_audited(
+            id,
+            SetProvidersMode::Set,
+            &["openai".into()],
+            AuditCtx::admin(AuditOp::SetProviders),
+        )
+        .unwrap();
+    rig.bind(1, reserved("baseline-reader"));
+    for operation in [GrantOperation::Read, GrantOperation::List] {
+        grant_for(&rig.store, "baseline-reader", id, operation);
+    }
+
+    rig.dispatch(
+        1,
+        1,
+        FrameType::Request,
+        OP_GET_SCOPED,
+        json!({"credential_id": id}),
+    )
+    .await;
+    let get = rig.next().await;
+    assert_eq!(get.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&get.body).unwrap();
+    let result = &reply["result"];
+    assert_eq!(result["credential_id"], id);
+    assert_eq!(result["payload"], json!(b"vector-test-key".to_vec()));
+    assert_eq!(result["record_version"], 1);
+    assert_eq!(result["auth"]["header"], "authorization");
+    assert_eq!(result["auth"]["scheme"], "bearer");
+    assert_eq!(result["hosts"], json!(["api.openai.com"]));
+    for field in ["base_url", "headers"] {
+        assert!(result.get(field).is_none(), "non-gateway must omit {field}");
+    }
+
+    rig.dispatch(1, 2, FrameType::Request, OP_LIST_SCOPED, json!({}))
+        .await;
+    let list = rig.next().await;
+    assert_eq!(list.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&list.body).unwrap();
+    let rows = reply["result"]["credentials"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id);
+    assert_eq!(rows[0]["auth_method"], "apikey");
+    assert_eq!(rows[0]["provider_ids"], json!(["openai"]));
+    assert_eq!(rows[0]["hosts"], json!(["api.openai.com"]));
+
+    // Preserve the dispatched bytes, including field order and whitespace. A JSON
+    // round-trip would hide serialization changes from the non-gateway baseline.
+    [
+        ("get-scoped-non-gateway-baseline-v1.json", get.body),
+        ("list-scoped-non-gateway-baseline-v1.json", list.body),
+    ]
+}
+
 #[tokio::test]
 async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     let mut rig = Rig::new();
@@ -252,16 +319,25 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     let get_emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-get-scoped-vectors/v1", "cases":get_cases}))
             .unwrap();
+    let baselines = non_gateway_scoped_baseline_vectors().await;
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let sums = format!(
+    let mut sums = format!(
         "{}  list-scoped-v2.json\n{}  get-scoped-v1.json\n",
         hex_digest(&emitted), hex_digest(&get_emitted),
     );
-    if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1") {
+    for (name, bytes) in &baselines {
+        sums.push_str(&format!("{}  {name}\n", hex_digest(bytes)));
+    }
+    if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1")
+        || std::env::var("CK_EMIT_SECRET_VECTORS").as_deref() == Ok("1")
+    {
         std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
         std::fs::write(directory.join("get-scoped-v1.json"), &get_emitted).unwrap();
+        for (name, bytes) in &baselines {
+            std::fs::write(directory.join(name), bytes).unwrap();
+        }
         std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
-        println!("emitted six list-scoped v2 cases, three get-scoped v1 cases and SHA256SUMS");
+        println!("emitted six list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and SHA256SUMS");
     } else {
         assert_eq!(
             emitted,
@@ -273,6 +349,13 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             std::fs::read(directory.join("get-scoped-v1.json"))
                 .expect("pinned get-scoped vectors")
         );
+        for (name, bytes) in &baselines {
+            assert_eq!(
+                bytes,
+                &std::fs::read(directory.join(name)).expect("pinned non-gateway baseline"),
+                "non-gateway wire bytes changed: {name}",
+            );
+        }
         assert_eq!(
             sums,
             std::fs::read_to_string(directory.join("SHA256SUMS")).expect("pinned vector hash")

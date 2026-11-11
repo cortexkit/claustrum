@@ -9050,6 +9050,23 @@ mod login_regressions {
             ("salad-cloud", "SaladCloud AI Gateway"),
             ("sambanova", "SambaNova"),
             ("sarvam", "Sarvam AI"),
+            ("standardcompute", "Standard Compute"),
+            ("stepfun-cn", "StepFun (China)"),
+            ("stepfun-ai-step-plan", "StepFun Step Plan (Global)"),
+            ("stepfun-step-plan", "StepFun Step Plan (China)"),
+            ("subconscious", "Subconscious"),
+            ("submodel", "submodel"),
+            ("tempr", "Tempr Gateway"),
+            ("tensorx", "TensorX"),
+            ("the-grid-ai", "The Grid AI"),
+            ("thinkingmachines", "Thinking Machines"),
+            ("tinfoil", "Tinfoil"),
+            ("tokengo", "TokenGo"),
+            ("trustedrouter", "TrustedRouter"),
+            ("unorouter", "UnoRouter"),
+            ("upstage", "Upstage"),
+            ("vivgrid", "Vivgrid"),
+            ("volcengine", "Volcengine Ark"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

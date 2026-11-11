@@ -40,10 +40,26 @@ are unchanged.
 | arcee | https://api.arcee.ai/api/v1/models | 2026-11-11 | 401 | - | - |
 | auriko | https://api.auriko.ai/v1/me | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | baseten | https://inference.baseten.co/v1/models | 2026-11-10 | 401 | - | - |
+| bee | https://api.bee.heossi.com/bee/chat/completions | 2026-11-11 | 401 | unauthorized | /error |
+| berget | https://api.berget.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| blueclaw | https://openai.blueclaw.network/v1/models | 2026-11-11 | 401 | - | - |
+| bothub | https://openai.bothub.chat/v1/models | 2026-11-11 | 401 | UNAUTHORIZED | /error/code |
+| boundless | https://api.inference.boundless.network/v1/credits | 2026-11-11 | 401 | authentication_error | /error/type |
 | charm-hyper | https://hyper.charm.land/v1/credits | 2026-11-10 | 401 | authentication_error | /error/type |
+| chutes | https://api.chutes.ai/users/me | 2026-11-11 | 401 | - | - |
+| claudinio | https://api.claudin.io/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
+| cloudferro-sherlock | https://api-sherlock.cloudferro.com/openai/v1/models | 2026-11-11 | 403 | - | - |
 | cloudflare-workers-ai | https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/models/search?per_page=1 | 2026-11-10 | 400 | - | - |
+| cohere | https://api.cohere.com/v1/models | 2026-11-11 | 401 | - | - |
+| coralbricks | https://inference.coralbricks.ai/v1/quota | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| cortecs | https://api.cortecs.ai/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
+| crossmodel | https://api.crossmodel.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| crusoe | https://api.inference.crusoecloud.com/v1/models | 2026-11-11 | 401 | - | - |
+| daoxe | https://api.daoxe.com/v1/models | 2026-11-11 | 401 | - | - |
 | deepinfra | https://api.deepinfra.com/v1/openai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | deepseek | https://api.deepseek.com/chat/completions | 2026-11-10 | 401 | invalid_request_error | /error/code |
+| digitalocean | https://inference.do-ai.run/v1/models | 2026-11-11 | 401 | Unauthorized | /id |
+| dinference | https://api.dinference.com/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
 | elevenlabs | https://api.elevenlabs.io/v1/user | 2026-11-11 | 401 | unauthorized | /detail/code |
 | firecrawl | https://api.firecrawl.dev/v2/team/credit-usage | 2026-11-10 | 401 | - | - |
 | fireworks-ai | https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1 | 2026-11-10 | 401 | UNAUTHORIZED | /error/code |
@@ -156,6 +172,114 @@ Hosts and key presentation were taken from these provider pages:
 - `auriko`: <https://docs.auriko.ai/api-reference/authentication>; the check is the
   documented key-identity read `/v1/me`.
 
+## Second batch from the Fusiform provider list
+
+The second batch took the next 25 ids that `ck auth provider-report --missing` printed,
+`azure` through `echo`. 19 got rows, 4 are recorded skips (listed under "Fusiform
+provider skips" below), and 2 stay uncovered (see the end of this section).
+
+On 2026-11-11 a network-enabled Linux build server sent each new row's key check by
+hand with curl, redirects not followed. Each request used the check's method and URL,
+the row's `Authorization: Bearer` header carrying a deliberately bogus key, and for chat
+checks the login check's one-token request body. Keys carried the documented prefix
+where one is documented: `bee_sk_live_` for `bee`, `sk_ber_` for `berget`, `bc_` for
+`blueclaw`, `cpk_` for `chutes`, `cb_` for `coralbricks` and `cm-` for `crossmodel`.
+A request without any key was also sent. Where it got the same reply as the bogus key
+(`bee`, `blueclaw`, `bothub`, `cortecs`, `crusoe`, `daoxe`, `digitalocean`), the line still
+records only the bogus-key reply. A generic error type that every DaoXE error carries
+(`new_api_error`), an empty `code` string (DaoXE) and numeric-looking `code` strings
+(`"401"` from the LiteLLM-based APIs) are not recorded as codes; where those APIs give
+a structured reason in `type`, that is recorded instead.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `bailing`: <https://alipaytbox.yuque.com/org-wiki-knowledgepie-mvkzao/pxit93/get_started>
+  documents `POST https://api.ant-ling.com/v1/chat/completions` with a Bearer token
+  and the token page <https://chat.ant-ling.com/platform/api>. Both the model list and
+  the chat route answered the build server with an HTML 405 block page, with or
+  without a key, so the row is stored unchecked and has no evidence line. The
+  `api.tbox.cn` host listed by models.dev is not in the provider's current guide and
+  is not included.
+- `bee`: <https://bee.heossi.com/docs/sdks> documents base URL
+  `https://api.bee.heossi.com/bee` and Bearer keys; its OpenAPI document
+  (<https://api.bee.heossi.com/openapi.json>) marks the model list public, so the check
+  is a chat on `bee-cell`.
+- `berget`: <https://docs.berget.ai/quickstart> documents `https://api.berget.ai/v1` and
+  Bearer keys. Its OpenAPI document marks the model list public, so the check is a
+  chat. The stage server in that document is not a consumer host and is not included.
+- `blueclaw`: <https://blueclaw.network/quickstart.html> documents
+  `https://openai.blueclaw.network/v1` and `bc_` Bearer keys. The quickstart does not
+  document a model list; `/v1/models` answered 401 with or without a key.
+- `bothub`: <https://bothub.ru/free> configures the OpenAI SDK with base URL
+  `https://openai.bothub.chat/v1` and the access token as its API key.
+- `boundless`: <https://inference.boundless.network/docs/api-compatibility> documents
+  `api.inference.boundless.network` and Bearer or `x-api-key` keys;
+  <https://inference.boundless.network/docs/billing> documents the `/v1/credits` read.
+- `chutes`: <https://chutes.ai/docs/getting-started/authentication> documents `cpk_`
+  Bearer keys for the platform API at `api.chutes.ai`; the starter guide
+  <https://chutes.ai/docs/guides/starter-guide> documents inference at
+  `https://llm.chutes.ai/v1`. The docs index (<https://chutes.ai/llms.txt>) calls the
+  model list a public catalog and `/users/me` the authenticated account read.
+- `claudinio`: <https://claudin.io/docs/api-reference/> documents `api.claudin.io`,
+  Bearer or `x-api-key` keys, and `GET /v1/models`.
+- `cloudferro-sherlock`:
+  <https://docs.cloudferro.com/en/latest/sherlock/Package-installation-and-examples-of-Sherlock-AI-code-on-CloudFerro-Cloud.html>
+  documents `https://api-sherlock.cloudferro.com/openai/v1` and Bearer keys. A bogus
+  key got a plain-text 403 `forbidden`; no key got a plain-text 401 `unauthorized`.
+- `cohere`: <https://docs.cohere.com/reference/list-models> documents Bearer keys at
+  `api.cohere.com`; <https://docs.cohere.com/docs/compatibility-api> documents the
+  compatibility API at `https://api.cohere.ai/compatibility/v1` with the same key.
+  `POST /v1/check-api-key` answered 200 `{"valid":false}` for a bogus key and for no
+  key, so the check is the model list.
+- `coralbricks`: <https://www.coralbricks.ai/docs> documents
+  `https://inference.coralbricks.ai/v1`, Bearer keys and the `/v1/quota` balance read.
+- `cortecs`: <https://docs.cortecs.ai/api/api-compatibility> documents
+  `https://api.cortecs.ai/v1` and Bearer keys. Its model list makes the key optional
+  and answered a bogus key with 200, so the check is a chat on `glm-5.3-flash`.
+- `crossmodel`: <https://www.crossmodel.ai/docs/authentication> and
+  <https://www.crossmodel.ai/docs/api-reference/models> document `api.crossmodel.ai`,
+  `cm-` Bearer keys and the model list. The docs give no direct key-page URL, so the
+  row's key page is the authentication guide.
+- `crusoe`:
+  <https://docs.crusoe.ai/quickstart/getting-started-with-serverless-inference/>
+  configures the OpenAI SDK with `https://api.inference.crusoecloud.com/v1` and the
+  key as its API key. The guide does not document a model list; `/v1/models` answered
+  401 with or without a key.
+- `daoxe`: <https://daoxe.com/docs/start/quickstart> documents
+  `GET https://api.daoxe.com/v1/models` with `sk-` Bearer keys. Its base-URL guide
+  (<https://daoxe.com/docs/guide/base-url>) allows other route hosts returned at run
+  time; those are not covered.
+- `digitalocean`:
+  <https://docs.digitalocean.com/products/inference/how-to/si-endpoints/> documents
+  `https://inference.do-ai.run` and Bearer keys;
+  <https://docs.digitalocean.com/products/inference/how-to/retrieve-available-models/>
+  documents the model list. Model access keys and personal access tokens are both
+  accepted.
+- `dinference`: <https://dinference.com/docs> configures the OpenAI SDK with
+  `https://api.dinference.com/v1` and the key as its API key. The site offers sign-in
+  at <https://panel.dinference.com/login>.
+- `drun`: <https://docs.d.run/en/models/api-call> documents `https://chat.d.run` for
+  pay-per-token use and per-region `<region>.d.run` hosts for dedicated instances,
+  which the row does not cover; <https://docs.d.run/en/models/apikey> documents
+  `Authorization: Bearer`. `chat.d.run` reset every connection from the build server,
+  so the row is stored unchecked and has no evidence line.
+- `echo`: <https://echo.tracerml.ai/docs/api> documents host `echo.tracerml.ai` and
+  `Authorization: Bearer` workspace keys. Every documented path, including the model
+  list, sits under a workspace base URL copied from the console, so the row is stored
+  unchecked and has no evidence line.
+
+Two ids from this batch have neither a row nor a skip; `--missing` still prints them:
+
+- `clarifai`: on 2026-11-11 `api.clarifai.com` and `docs.clarifai.com` did not resolve
+  in DNS, and `clarifai.com` resolved to a parking address, so the provider's
+  documentation could not be read and no request could be sent.
+- `ebcloud`: <https://docs.ebtech.com/ai/model-api.html> says to create a key in the
+  console and copy sample code from a model's API-call page there. The page does not
+  state the API host or how the key is sent. models.dev lists
+  `https://maas-api.ebcloud.com/v1`, where `GET /v1/models` answered a bogus Bearer key
+  with 401 (`error.type` `token_not_found_in_db`) and no key with a different 401, but
+  a third-party listing is not provider documentation, so no row was added.
+
 ## Probes without a response
 
 All 50 existing rows with a check were probed; 37 supplied authentication-refusal
@@ -218,6 +342,19 @@ not a reason to skip it.
   <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html>.
 - `atomic-chat`: <https://atomic.chat> describes a local desktop app that works
   offline with no cloud service, so there is no hosted API key.
+- `azure`: Azure OpenAI sends each key to its own resource's host,
+  `https://YOUR-RESOURCE-NAME.openai.azure.com`. See
+  <https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses>.
+- `azure-cognitive-services`: Fusiform links the same Azure OpenAI documentation, and
+  its keys likewise need the resource name (`AZURE_COGNITIVE_SERVICES_RESOURCE_NAME`)
+  that sets the host.
+- `cloudflare-ai-gateway`: requests go to
+  `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/...`, so a key needs
+  the account and gateway ids. See
+  <https://developers.cloudflare.com/ai-gateway/usage/chat-completion/>.
+- `databricks`: model serving is reached at each workspace's own host,
+  `https://<workspace_host>.databricks.com`. See
+  <https://docs.databricks.com/aws/en/machine-learning/model-serving/query-chat-models>.
 
 Only these reasons are permitted:
 
@@ -230,6 +367,10 @@ Only these reasons are permitted:
 | --- | --- |
 | amazon-bedrock | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | atomic-chat | no API key in its documentation |
+| azure | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| azure-cognitive-services | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| cloudflare-ai-gateway | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| databricks | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 
 ## Hosts without provider documentation
 

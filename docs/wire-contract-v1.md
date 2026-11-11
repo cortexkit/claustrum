@@ -541,9 +541,10 @@ catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids wit
 current table without changing any record, taking no writer lease.
 The OpenAI and Google API-key rows default to both `llm-provider` and
 `media-provider`; ElevenLabs defaults to `media-provider` alone. The 302.AI, Abacus,
-AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan and Alibaba Token
-Plan (China) rows (`302ai`, `abacus`, `aihubmix`, `aimlapi`, `alibaba`, `alibaba-cn`,
-`alibaba-token-plan`, `alibaba-token-plan-cn`) also default to both. These are the
+AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan, Alibaba Token
+Plan (China) and DigitalOcean rows (`302ai`, `abacus`, `aihubmix`, `aimlapi`,
+`alibaba`, `alibaba-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`,
+`digitalocean`) also default to both. These are the
 media rows. Routing stops choosing a media key
 its consumer reported unfunded, and lifts that after a successful run. Category
 defaults apply to creation, not existing records or replacements with stored categories.

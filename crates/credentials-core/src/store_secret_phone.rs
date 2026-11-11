@@ -121,6 +121,10 @@ pub enum PhoneOperation {
         signature: Vec<u8>,
         card_ref: Option<String>,
     },
+    ManifestApprove {
+        envelope: Vec<u8>,
+        signature: Vec<u8>,
+    },
     DeleteRequest {
         name: String,
     },
@@ -294,6 +298,7 @@ impl EncryptedStore {
                     list(tx).map(Ok)
                 }
                 PhoneOperation::Approve { envelope, signature, card_ref } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, card_ref.as_deref(), false, op_now),
+                PhoneOperation::ManifestApprove { envelope, signature } => self.gh_manifest_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, op_now),
                 PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, None, true, op_now),
                 PhoneOperation::DeleteRequest { name } => self.secret_delete_request_tx(tx, name, op_now),
                 PhoneOperation::Revoke { grant_id } => super::approval::revoke(tx, &self.audit_key, grant_id, &format!("fed-phone:{fingerprint}"), op_now).map(Ok),

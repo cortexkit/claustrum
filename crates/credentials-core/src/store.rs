@@ -18473,6 +18473,8 @@ mod transfer_key_fence_tests;
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
 
+#[path = "store_gh_approval.rs"]
+mod gh_approval;
 #[path = "store_gh_manifests.rs"]
 mod gh_manifests;
 #[path = "store_gh_proposals.rs"]

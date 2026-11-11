@@ -397,6 +397,79 @@ impl ManifestBindingStatement {
     }
 }
 
+pub const MANIFEST_BINDING_ENVELOPE_V1_TAG: &[u8] = b"ck-manifest-binding-envelope/v1";
+
+/// The phone authorizes one stored proposal, not caller-supplied manifest bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestBindingEnvelope {
+    pub v: String,
+    pub proposal_id: String,
+    pub statement_sha256: String,
+    pub decision: String,
+    pub device_fingerprint: String,
+    pub issued_at_ms: u64,
+}
+
+impl ManifestBindingEnvelope {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, crate::agent_secret::SecretError> {
+        serde_json::to_value(self)
+            .and_then(|value| serde_json::to_vec(&value))
+            .map_err(|_| crate::agent_secret::SecretError::ApprovalInvalid)
+    }
+
+    fn parse_canonical(
+        bytes: &[u8],
+        fingerprint: &str,
+    ) -> Result<Self, crate::agent_secret::SecretError> {
+        use crate::agent_secret::{SecretError, MAX_SECRET_JSON_INTEGER};
+        let invalid = SecretError::ApprovalInvalid;
+        // Struct decoding rejects missing, duplicate and unknown fields. Check the
+        // domain tag here, before constructing a verification key or signature.
+        let envelope: Self = serde_json::from_slice(bytes).map_err(|_| invalid)?;
+        if envelope.v.as_bytes() != MANIFEST_BINDING_ENVELOPE_V1_TAG
+            || envelope.decision != "allow"
+            || envelope.device_fingerprint != fingerprint
+            || envelope.issued_at_ms > MAX_SECRET_JSON_INTEGER
+            || envelope.proposal_id.len() != 26
+            || envelope.proposal_id.as_bytes()[0] > b'7'
+            || !envelope
+                .proposal_id
+                .bytes()
+                .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+            || envelope.statement_sha256.len() != 64
+            || !envelope
+                .statement_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || envelope.canonical_bytes()? != bytes
+        {
+            return Err(invalid);
+        }
+        Ok(envelope)
+    }
+
+    pub fn verify(
+        bytes: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<Self, crate::agent_secret::SecretError> {
+        use crate::agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
+        use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+        let invalid = SecretError::ApprovalInvalid;
+        let envelope = Self::parse_canonical(bytes, fingerprint)?;
+        let key = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| invalid)?;
+        let signature = Signature::from_der(signature).map_err(|_| invalid)?;
+        key.verify(bytes, &signature).map_err(|_| invalid)?;
+        if now.abs_diff(envelope.issued_at_ms as i64) > SECRET_ISSUE_SKEW_LIMIT_MS as u64 {
+            return Err(invalid);
+        }
+        Ok(envelope)
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -407,3 +480,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "gh_manifest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gh_manifest_envelope_tests.rs"]
+mod envelope_tests;

@@ -102,7 +102,7 @@ pub struct GhManifestProposal {
     pub expires_at_ms: i64,
 }
 
-fn setup_complete(conn: &Connection) -> rusqlite::Result<bool> {
+pub(super) fn setup_complete(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id=?1 AND state='active') \
          AND EXISTS(SELECT 1 FROM gh_manifests) \
@@ -316,7 +316,7 @@ fn build_proposal(
     })
 }
 
-fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GhManifestProposal> {
+pub(super) fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GhManifestProposal> {
     Ok(GhManifestProposal {
         proposal_id: row.get(0)?,
         agent_id: row.get(1)?,

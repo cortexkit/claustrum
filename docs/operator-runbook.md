@@ -1453,6 +1453,23 @@ The `gh` routing-manifest root follows its own ceremony: see
 
 ## 12. Deploy and roll back
 
+### Manifest-binding rollout
+
+Upgrade manifest homes **before members**. The manifest home is the agent-secret
+home. An older home answers forwarded manifest calls with uniform `not_found`,
+which a member's AFT cannot distinguish from an empty manifest store.
+
+After deploy, read Callosum's effective operations for the test Mac and confirm
+that `federation.manifest_latest`, `federation.manifest_watch` and
+`federation.manifest_report_active` are present. Existing vault shares use
+`all_declared`, so newly declared operations are exposed on the next catalog read.
+
+Keep `manifest.one_tap` off (its default) until the iPhone has the build that reads
+the binding statement. This setting gates proposing only; the other manifest
+operations, including approving an already-pending proposal, work while it is off.
+The wire forms and admission rules are in
+[the manifest-binding contract](wire-contract-v1.md#17-github-manifest-bindings-and-activation).
+
 ### Build
 
 For local daemon/`ck auth` iteration, the order is **fast check → build/sign → place →

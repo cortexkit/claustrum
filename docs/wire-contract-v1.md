@@ -3444,3 +3444,303 @@ damaged accounts, a home copy, and the omission of a seeded signing key.
 `empty.json`, `watch.json`, and `phone-access-off.json` cover the other shapes.
 `CK_EMIT_CONNECTOR_VECTORS=1` regenerates them through the real route handler;
 only the random watch epoch is normalized to the sample's fixed value.
+
+## 17. GitHub manifest bindings and activation
+
+This section publishes the contract before its implementation and generated samples.
+It adds no golden blocks or vectors. Consumers call these operations by method name
+over the ManagementSurface; `packages/client/src/index.ts` remains unextended.
+
+### Admission, kinds and wire forms
+
+| Operation | Kind | Admitted caller | Exact params |
+|---|---|---|---|
+| `manifest.propose_binding` | Mutate | `reserved:plexus` | `{agent_id, app_id, app_slug, repo}` |
+| `manifest.approve` | Mutate | phone route only, through the phone-operation pipeline | `{envelope_b64url, signature_b64url}` |
+| `manifest.latest` | Query | `reserved:aft` | `{}` |
+| `manifest.watch` | Query, held subscription (`WATCH` delivery) | `reserved:aft`, `reserved:plexus` | `{}` |
+| `manifest.report_active` | Mutate | `reserved:aft` | `{version, payload_sha256, verdict, reason}` |
+| `manifest.active_status` | Query | `reserved:plexus` | `{version}` |
+
+Callers outside an operation's admitted principal receive the uniform `not_found`,
+indistinguishable from an unknown id. Admission precedes parameter decoding. Params
+are closed objects: an unknown field, wrong type or invalid grammar is a transport
+`Error` frame with `code: "invalid_params"` and **no class**, not a domain refusal.
+Every other refusal is a `Response` with `result.error.{code, class}`; additional
+fields, such as `remedy_member`, sit beside `code` and `class`. Successes are
+`Response` results. The domain-refusal table below does not replace this transport
+distinction (§ 1a).
+
+The manifest home is the agent-secret home, not a separate setting. A `Single` or
+`Home` vault serves all six operations locally. A `Remote` vault forwards latest,
+watch and report_active, refuses propose and active_status with `not_found`, and
+gives approve the phone pipeline's `secret_home_elsewhere` with `remedy_member`
+naming the home, before checking phone registration. `RemoteSetupIncomplete`
+refuses the three forwarded operations with `remote_setup_incomplete`/`permanent`
+and `remedy_member`, refuses propose and active_status with `not_found`, and gives
+approve the phone pipeline's `remote_setup_incomplete` (with `remedy_member` when
+the self id is set). An unreadable role gives `store_error`/`transient`.
+
+For forwarding, the member calls the home's `fed:<fp>:claustrum` surface using
+`federation.manifest_latest` (Query, unary), `federation.manifest_watch` (Query,
+held subscription with `WATCH` delivery), and `federation.manifest_report_active`
+(Mutate, unary). The home admits these under the same pairing and `secret_use`
+member-grant checks as forwarded secret operations. A caller without membership
+or the grant receives uniform `not_found`; for the watch this is a terminal
+`Response`. An unreachable home gives `home_unavailable`/`transient`. These three
+operations are declared in the peer-sharing `vault` share; a Mutate must not be
+relayed as a retryable query.
+
+`manifest.one_tap` is **off by default**. Missing means off; a malformed setting
+is unreadable and treated as off. After the principal check, while the setting is
+off, `manifest.propose_binding` refuses `one_tap_disabled`/`transient` before any
+outbound call, emitting no statement and writing no row. Every other manifest
+operation works regardless, including approval of an already-pending proposal,
+latest, watch, report_active, active_status, import and sign. The operator controls
+the setting with `ck auth manifest one-tap on|off|status`; a real change writes
+one audit row and repeating the current value writes none.
+
+### Proposing one repository
+
+`manifest.propose_binding` accepts exactly:
+
+- `agent_id`: 1–128 bytes from `[A-Za-z0-9_-]`.
+- `app_id`: a positive integer.
+- `app_slug`: the slug accepted by the existing `github_app:<slug>` credential-id
+  grammar.
+- `repo`: `owner/name`, each part 1–100 characters from `[A-Za-z0-9._-]`, neither
+  `.` nor `..`.
+
+Grammar is checked before any outbound call. The home needs an active
+`signing:gh-manifest-root:1`, a stored manifest version and its own federation
+member id; otherwise propose or approve refuses
+`manifest_setup_incomplete`/`permanent`.
+
+A proposal has a 60 s deadline. Exhaustion during the identity check gives
+`identity_unavailable`; later exhaustion gives `github_unavailable`, with nothing
+written. The final write transaction checks the deadline once it holds the writer:
+if not admitted it refuses `github_unavailable` without writing; once admitted it
+commits and returns its reply even if the deadline passes. The caller awaits that
+transaction without a timeout. Checks run in this order, comparing repository
+names ASCII-case-insensitively:
+
+1. **Identity.** Call Entorhinal's `agent.github_identity` with `{agent_id}`.
+   Only an `app` identity with equal `app_id` and `app_slug` and
+   `credential_ref == "github_app:" + app_slug` passes. A null identity,
+   `user_token`, mismatched fields, or Entorhinal's `unknown_agent`, `gone` or
+   `invalid_request` gives `identity_mismatch`; an unreachable Entorhinal gives
+   `identity_unavailable`. The identity reply's per-process `incarnation` is
+   decoded, never refused.
+2. **Installation.** Read the active `github_app:<app_slug>` record, mint an
+   installation token and read that installation's GitHub `permissions` map from
+   the same `/app/installations` record. The token stays in memory; this check
+   changes no credential or audit row. Read installation repository pages of 100,
+   beginning at page 1. On page 1, selection `all` gives `installation_all` and
+   `total_count > 1,000` gives `installation_too_large`, before further pages.
+   Stop when the repository is found or the accumulated count equals page 1's
+   `total_count`. Only a complete listing establishes absence (`not_installed`),
+   as does the adapter's `NotInstalled` outcome. Several installations, a
+   mismatched installation or a suspended installation gives
+   `installation_unusable`. An empty page before completion, a changed
+   `total_count`, more entries than that count, or ten pages without either a
+   match or completion gives `github_unavailable`. So does any other request,
+   transport, timeout or decoding failure, including 401, 403, 404, 429 and 5xx.
+   The matched repository's GitHub `full_name` casing is the binding key from
+   here on.
+3. **Existing binding.** If the newest manifest already binds that repository to
+   the same agent, refuse `already_bound` with `{version, manifest_sha256}` of
+   that newest version; a binding to another agent gives `bound_to_other_agent`.
+4. **Base freshness.** Any non-retired activation reporting a version greater
+   than the newest stored version gives `stale_base`.
+5. **Reproducibility.** If re-serializing the newest version does not reproduce
+   its bytes exactly, refuse `not_reproducible`.
+
+Build N+1 from the newest stored version N by incrementing `manifest_version`,
+setting `issued_at_unix_secs` to now and appending `"<full_name>": "<agent_id>"`
+as the last key in `bindings`, using the same serialization. No other manifest
+content changes. In one serializing write transaction, re-read the newest version:
+if it is no longer N, refuse `stale_base` without writing. Return an unexpired
+pending proposal for the same `(agent_id, repo)` unchanged, so concurrent proposes
+return the same proposal. If that pending proposal has reached its expiry, mark
+it expired and insert a replacement in the same transaction. Storing any new
+manifest version supersedes all pending proposals whose base is older, including
+after import or operator signing.
+
+The success result is exactly
+`{status: "approval_required", proposal_id, statement_b64url, manifest_version, manifest_sha256, expires_at_ms}`.
+`proposal_id` is a ULID. The proposal expires 24 h after creation.
+
+### Statement and proposer-filed consent card
+
+The decoded `statement_b64url` is RFC 8785 JCS (JSON Canonicalization Scheme)
+UTF-8 bytes with fields **exactly**
+`{v, proposal_id, agent_id, app_slug, repo, installation_permissions, manifest_version, manifest_sha256, prior_version, prior_sha256, expires_at_ms}`.
+`v` is `ck-manifest-binding-statement/v1`. `repo` uses GitHub `full_name` casing;
+`prior_version` and `prior_sha256` identify the base. `installation_permissions`
+is the bot installation's GitHub permission map exactly as returned for that
+installation at proposal time, with values `read`, `write` or `admin` and keys
+sorted as JCS sorts every object. It is stored with the proposal so the phone
+never signs without seeing what the bot may do. The statement has no display
+names; the card renders the agent's name from `agent_id`.
+The statement and envelope use unpadded base64url; SHA-256 fields are lowercase
+hex digests of the exact bytes they name.
+
+The proposer, Plexus, files a Cingulate consent card from the propose reply:
+consent kind `manifest_binding`, answer field `manifest_binding_answer`, **one
+repository per card**, expiring at the statement's `expires_at_ms` (24 h).
+Plexus passes the statement through unchanged. Nothing in the vault calls
+Cingulate; the phone's signed envelope commits the vault-built statement and is
+the authority.
+
+### Approving the binding
+
+`manifest.approve` takes exactly `{envelope_b64url, signature_b64url}`: base64url
+encodings of the envelope bytes and a P-256 ECDSA signature with SHA-256 in DER
+form over those bytes. The envelope is JCS with fields **exactly**
+`{v, proposal_id, statement_sha256, decision, device_fingerprint, issued_at_ms}`.
+`v` is `ck-manifest-binding-envelope/v1`; `decision` is `allow` only. A decline
+sends nothing to the vault. `statement_sha256` commits the exact statement bytes.
+
+Domain separation runs both ways. `manifest.approve` refuses a non-manifest `v`
+with `approval_invalid` **before signature verification**, writing no rows.
+`secret.approve` refuses a manifest envelope at its strict parse, before its
+signature check, using its ordinary parse-failure refusal. Neither operation
+accepts the other's envelope even when a signature would otherwise verify.
+
+Approval runs inside the phone pipeline's single serializing write transaction.
+Pairing admission, the home-role refusal and the phone-registration check come
+first, then `manifest_setup_incomplete`, then these checks in order:
+
+1. Strictly parse the envelope (including its `v`); require canonical bytes equal
+   to the received bytes, `device_fingerprint` equal to the route's fingerprint,
+   and a valid P-256 signature over the received bytes using the current pairing's
+   registered `approval_pub`. Require `issued_at_ms` within 120,000 ms of now.
+   Any failure gives `approval_invalid`.
+2. Require a known `proposal_id`, the stored `statement_sha256`, and
+   `issued_at_ms >= created_at_ms`. Re-derive the proposal commitments: the
+   statement hash matches its bytes; its proposal id, agent id, app slug, repo,
+   installation permissions and expiry match the stored proposal; its prior
+   version/hash identify the stored base; its new version is base + 1 and matches
+   the manifest bytes; and its manifest hash matches both the row and those
+   bytes. Require the manifest bytes to equal the build rule applied to the
+   stored base, using the proposal's repo and agent id and the new manifest's
+   `issued_at_unix_secs`. Even mutually consistent rewritten hashes, statement
+   and manifest must not authorize a second binding or any other change. Any
+   failure gives `approval_invalid`, before superseded/expired checks.
+3. For an already-approved proposal, only the stored envelope SHA-256 and device
+   fingerprint pair is an exact resend. With `now <= issued_at_ms + 120,000`,
+   return the first reply without writing, including after a restart. Any other
+   envelope, or a resend after the window, gives `approval_invalid`.
+4. A superseded proposal, or a base version that is no longer newest, gives
+   `superseded`.
+5. An expired proposal, `now >= expires_at_ms`, or
+   `issued_at_ms >= expires_at_ms` gives `expired`.
+
+On success, the transaction signs the manifest with `signing:gh-manifest-root:1`,
+writes the approval, signing and storage audit rows, stores the version with
+source `one_tap` and signed time now, marks the proposal approved with the envelope
+hash/fingerprint pair, and supersedes older-base pending proposals. The result
+is exactly `{status: "approved", proposal_id, version, manifest_sha256}`. A failed
+commit gives `store_error`; no signature is returned from approve. The root key
+signs only through this path or `ck auth manifest sign`; `credential.sign` refuses
+the root id in every address mode with uniform `not_found`, while
+`credential.public_key` still works. An exact Sign grant naming the root id cannot
+be created.
+
+### Reading and watching the newest version
+
+`manifest.latest {}` returns exactly
+`{version, envelope: {key_id, manifest_bytes, signature}}` for the newest stored
+version. These are the existing hand-off encodings: `key_id` is 16 lowercase hex
+digits, `manifest_bytes` is the manifest's UTF-8 text as a JSON string (not
+base64), and `signature` is standard base64 Ed25519 over those manifest bytes.
+Nothing stored gives `not_found`/`permanent`.
+
+`manifest.watch {}` holds a subscription. Its notices are exactly
+`{kind: "changed", epoch, seq, version, manifest_sha256}`. It sends `seq: 1`
+immediately with the newest version; `version` and `manifest_sha256` are both
+null when nothing is stored. Later notices occur only when a new version is
+stored. Epochs, sequence numbers, endings, one watch per route and the 64-watch
+cap follow `auth.watch_scoped` above: a process restart changes the epoch,
+sequence gaps require a fresh read, and normal held-stream endings use
+`STREAM_END`.
+
+A member holds one upstream `federation.manifest_watch` per home, opening it on
+the first local watch. It answers local `seq: 1` from the upstream's current
+notice and relays later notices under its own epoch and sequence numbers. If
+the upstream cannot be opened, the local watch ends with a terminal `Response`
+`home_unavailable`/`transient`. If the upstream is lost later, local watches end
+with `STREAM_END`; AFT then re-subscribes and reads `manifest.latest`. Older
+vaults answer `unknown_method` for manifest operations.
+
+### Reporting activation and checking readiness
+
+`manifest.report_active` takes exactly `{version, payload_sha256, verdict, reason}`:
+
+- `version`: a positive integer.
+- `payload_sha256`: 64 lowercase hex digits.
+- `verdict`: `valid` or `invalid`.
+- `reason`: a string of at most 512 characters for `invalid`, otherwise `null`.
+
+The reporting computer is the local vault's own federation member id, or the
+attested `fed-computer:<fp>` for a forwarded report, **never a param**. A local
+report with no self member id gives `secret_setup_incomplete`/`permanent`.
+The report sets that computer's row to the tuple and `reported_at_ms`. A lower
+version than its current one is still recorded and logs a tracing warning.
+Retired computers' reports are recorded without clearing `retired_at_ms`.
+
+Only the first `(member_id, version, verdict)` for a **stored** version writes
+an activation audit row, together with its deduplication row in the same
+transaction. Changes to reason or hash, repeats, and reports of unstored versions
+update the activation table only. There are at most two activation audit rows per
+member per stored version. The success result is exactly
+`{status: "recorded", member_id, version}`. After a forwarded call has been sent,
+`home_unavailable` is an **unknown outcome**, not proof of refusal: the home may
+have committed. Retrying the same report writes no additional activation audit.
+
+`manifest.active_status` takes exactly `{version}`. A version that is not stored
+refuses `unknown_version`/`transient`. Its success result is exactly
+`{version, manifest_sha256, ready, computers: [{member_id, version, payload_sha256, verdict, reason, reported_at_ms}]}`.
+There is one entry per expected computer sorted by `member_id` bytes. A computer
+without a report has null report fields, not a missing entry. The expected set
+is the home's own member id, all members holding a `secret_use` grant and all
+members with an activation row, minus retired members. `ready` is true only for
+a non-empty set whose every entry reports exactly the requested version, its
+stored SHA-256 and `valid`.
+
+Operator retirement removes a computer from this readiness population and is
+final; reporting never un-retires it. Retirement does not revoke delivery: a
+retired computer retaining `secret_use` can still read, watch and report. Revoke
+that grant to stop delivery.
+
+### Domain refusals
+
+All codes below are `Response` `result.error` refusals with the indicated class.
+In addition, callers outside each operation's admitted principal receive uniform
+`not_found`/`permanent`. Params-shape failures remain classless transport
+`invalid_params` errors, not entries in this table.
+
+| Operation | Class | Codes and conditions |
+|---|---|---|
+| `manifest.propose_binding` | `permanent` | `not_found` (not the home); `manifest_setup_incomplete`; `identity_mismatch`; `not_installed`; `installation_all`; `installation_unusable`; `installation_too_large`; `already_bound` with `{version, manifest_sha256}`; `bound_to_other_agent`; `not_reproducible` |
+| `manifest.propose_binding` | `transient` | `one_tap_disabled`; `identity_unavailable`; `github_unavailable`; `stale_base`; `store_error` |
+| `manifest.approve` — phone preflight | `permanent` | `phone_not_registered`; `secret_home_elsewhere` with `remedy_member`; `remote_setup_incomplete` (with `remedy_member` when known), exactly as `secret.approve` |
+| `manifest.approve` — phone preflight | `transient` | `pairing_unavailable`; `store_error`, exactly as `secret.approve` |
+| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired` |
+| `manifest.approve` — after preflight | `transient` | `store_error` |
+| `manifest.latest` | `permanent` | `not_found` (nothing stored, or forwarded without a grant at the home); `remote_setup_incomplete` |
+| `manifest.latest` | `transient` | `home_unavailable`; `store_error` |
+| `manifest.watch` — terminal `Response` | `permanent` | `not_found`; `remote_setup_incomplete` |
+| `manifest.watch` — terminal `Response` | `transient` | `home_unavailable` (a member's upstream could not be opened) |
+| `manifest.report_active` | `permanent` | `secret_setup_incomplete`; `not_found` (forwarded without a grant); `remote_setup_incomplete` |
+| `manifest.report_active` | `transient` | `home_unavailable` (unknown outcome once sent); `store_error` |
+| `manifest.active_status` | `permanent` | `not_found` (not the home) |
+| `manifest.active_status` | `transient` | `unknown_version` (version not stored); `store_error` |
+
+A refusal decided by the answering vault leaves `gh_manifests`,
+`gh_manifest_proposals`, `gh_manifest_activations`,
+`gh_manifest_activation_audits` and `audit_log` unchanged. Shared paths may still
+write the phone pipeline's pairing observation before a phone-op refusal, or the
+home's diagnostic row for a forwarded `not_found`; neither is a manifest state
+change. A member's `home_unavailable` after forwarding is an unknown outcome,
+not a home-decided refusal.

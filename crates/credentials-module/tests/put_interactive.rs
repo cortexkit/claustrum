@@ -92,6 +92,116 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn gateway_put_existing_id_never_offers_replacement_or_provider_registration() {
+    let fixture = Fixture::new();
+    let args = [
+        "put",
+        "--id",
+        "apikey:anthropic-gw-acme",
+        "--gateway-base-url",
+        "http://localhost:4000",
+        "--gateway-auth-header",
+        "authorization",
+        "--gateway-auth-scheme",
+        "bearer",
+        "--provider-id",
+        "anthropic-gw-acme",
+    ];
+    let screen = fixture.terminal(
+        &args,
+        &[("Value (hidden)", format!("{VALUE}\r").as_bytes(), true)],
+    );
+    assert!(!screen.contains("Provider "), "{screen}");
+    assert!(!screen.contains("Groups for this provider"), "{screen}");
+    let before = {
+        let store = fixture.store();
+        (
+            store.meta(args[2]).unwrap(),
+            store.gateway_settings(args[2]).unwrap(),
+            store.audit_tip().unwrap(),
+        )
+    };
+    let (status, screen) = terminal_cli::run(
+        fixture.command(&args),
+        &[("Value (hidden)", b"replacement-canary\r", true)],
+    );
+    assert_eq!(status.code(), Some(1), "{screen}");
+    assert!(screen.contains("already exists"), "{screen}");
+    assert!(!screen.contains("Replace it?"), "{screen}");
+    assert!(!screen.contains("Groups for this provider"), "{screen}");
+    assert!(!screen.contains("replacement-canary"), "{screen}");
+    let store = fixture.store();
+    assert_eq!(
+        store.get(args[2]).unwrap().payload.expose(),
+        VALUE.as_bytes()
+    );
+    assert_eq!(
+        store.meta(args[2]).unwrap().record_version,
+        before.0.record_version
+    );
+    assert_eq!(
+        store.meta(args[2]).unwrap().incarnation,
+        before.0.incarnation
+    );
+    assert_eq!(store.gateway_settings(args[2]).unwrap(), before.1);
+    assert_eq!(store.audit_tip().unwrap(), before.2);
+}
+
+#[test]
+fn gateway_put_usage_errors_precede_all_terminal_prompts() {
+    let fixture = Fixture::new();
+    for id in ["apikey:anthropic-gw-acme", "apikey:unknown-provider"] {
+        for invalid in [
+            vec!["--gateway-auth-header", "authorization"],
+            vec!["--gateway-auth-scheme", "bearer"],
+            vec!["--gateway-header", "x-route=team"],
+            vec!["--gateway-base-url", "http://localhost:4000", "--replace"],
+            vec![
+                "--gateway-base-url",
+                "http://localhost:4000",
+                "--expected-hash",
+                "00",
+            ],
+        ] {
+            let mut args = vec!["put", "--id", id];
+            args.extend(invalid);
+            let (status, screen) = terminal_cli::run(fixture.command(&args), &[]);
+            assert_eq!(status.code(), Some(1), "{args:?}: {screen}");
+            for prompt in ["Replace it?", "Groups for this provider", "Value (hidden)"] {
+                assert!(!screen.contains(prompt), "{screen}");
+            }
+        }
+    }
+    let store = fixture.store();
+    assert!(store.list_meta().unwrap().is_empty());
+}
+
+#[test]
+fn ordinary_put_gateway_service_skips_provider_prompt_and_notice() {
+    let fixture = Fixture::new();
+    let screen = fixture.terminal(
+        &["put", "--id", "apikey:anthropic-gw-ordinary"],
+        &[("Value (hidden)", format!("{VALUE}\r").as_bytes(), true)],
+    );
+    assert!(!screen.contains("Provider "), "{screen}");
+    assert!(!screen.contains("provider set"), "{screen}");
+    assert!(!screen.contains("Groups for this provider"), "{screen}");
+    let store = fixture.store();
+    assert_eq!(
+        store
+            .get("apikey:anthropic-gw-ordinary")
+            .unwrap()
+            .payload
+            .expose(),
+        VALUE.as_bytes()
+    );
+    assert!(store
+        .gateway_settings("apikey:anthropic-gw-ordinary")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn plain_put_stores_a_hidden_api_key_and_default_no_preserves_the_existing_record() {
     let fixture = Fixture::new();
     let screen = fixture.terminal(

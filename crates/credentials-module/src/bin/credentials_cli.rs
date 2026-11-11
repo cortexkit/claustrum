@@ -497,6 +497,10 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             // that handler have to move together.
             "--client-id",
             "--provider-id",
+            "--gateway-base-url",
+            "--gateway-auth-header",
+            "--gateway-auth-scheme",
+            "--gateway-header",
         ],
         "provider" => &[
             "--service",
@@ -686,7 +690,7 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-          put                 store a secret from a file or hidden prompt\n\
+          put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
@@ -1181,6 +1185,9 @@ fn help_verb(verb: &str) -> String {
             "ck auth put [--id <id>] [--payload-file <path>]\n\
              \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
              \x20           [--replace | --expected-hash <hex>] [--client-id <id>]\n\
+             \x20           [--gateway-base-url <url> --gateway-auth-header <name>\n\
+             \x20            --gateway-auth-scheme <bearer|raw> --provider-id <id>]\n\
+             \x20           [--gateway-header <name=value>]...\n\
              \n\
              \x20 --id <id>                    vault credential id to create or rotate\n\
              \x20 --payload-file <path>        keep the secret out of argv; cookie bytes are\n\
@@ -1197,6 +1204,10 @@ fn help_verb(verb: &str) -> String {
              \x20 --client-id <id>             required App JWT issuer for a github_app: deposit\n\
              \x20 --provider-id <id>           add a catalog provider id after deposit\n\
              \x20                              (repeatable)\n\
+             \x20 --gateway-base-url <url>     company AI gateway API root, not /messages\n\
+             \x20 --gateway-auth-header <name> header carrying the gateway key\n\
+             \x20 --gateway-auth-scheme <s>    bearer or raw\n\
+             \x20 --gateway-header <name=value>  fixed non-secret header (repeatable)\n\
              \n\
              NOTES\n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
@@ -1209,6 +1220,16 @@ fn help_verb(verb: &str) -> String {
               defaults to No. Later keys reuse the answer. Without a terminal, put\n\
               stores the key and names ck auth provider set for future defaults.\n\
               Use ck auth set-category to change one key's groups afterwards.\n\
+             \n\
+             Gateway creation needs all three settings flags and exactly one routing\n\
+             id, matching the service in apikey:<vendor>-gw-<name>[:<label>].\n\
+             URL scheme, host and header names are lowercased; trailing URL slashes\n\
+             and surrounding header-value whitespace are stripped. Fixed headers are\n\
+             sorted by name; repeated names refuse. Values must not contain secrets.\n\
+             Gateway flags cannot be used with --replace or --expected-hash. Settings\n\
+             are fixed: replace without gateway flags rotates only the key; remove\n\
+             and re-create to change settings. Existing gateway ids never prompt to\n\
+             replace when gateway flags are present.\n\
              \n\
              At a terminal, omit flags to pick API key, cookie, DSN or opaque secret,\n\
              then name it and paste a hidden value. API keys use apikey:<provider>\n\
@@ -1736,6 +1757,12 @@ fn check_cli_provider_ids(ids: &[String], cap: bool) -> Result<(), CliError> {
 }
 
 fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
+    let ids = provider_id_values(args)?;
+    check_cli_provider_ids(&ids, true)?;
+    Ok(ids)
+}
+
+fn provider_id_values(args: &[String]) -> Result<Vec<String>, CliError> {
     let mut ids = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -1754,6 +1781,10 @@ fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
                 | "--expires-ms"
                 | "--expected-hash"
                 | "--client-id"
+                | "--gateway-base-url"
+                | "--gateway-auth-header"
+                | "--gateway-auth-scheme"
+                | "--gateway-header"
                 | "--provider"
                 | "--account"
         ) {
@@ -1762,7 +1793,6 @@ fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
             i += 1;
         }
     }
-    check_cli_provider_ids(&ids, true)?;
     Ok(ids)
 }
 
@@ -2363,16 +2393,104 @@ fn cmd_provider(
     Ok(())
 }
 
+fn has_gateway_flags(options: &ParsedOptions) -> bool {
+    [
+        "--gateway-base-url",
+        "--gateway-auth-header",
+        "--gateway-auth-scheme",
+        "--gateway-header",
+    ]
+    .iter()
+    .any(|flag| options.optional(flag).is_some())
+}
+
+fn put_gateway_settings(
+    args: &[String],
+    options: &ParsedOptions,
+) -> Result<Option<credentials_core::gateway::GatewaySettings>, CliError> {
+    use credentials_core::gateway::{GatewayAuth, GatewayHeader, GatewaySettings};
+
+    if !has_gateway_flags(options) {
+        return Ok(None);
+    }
+    if options.has_flag("--replace") || options.optional("--expected-hash").is_some() {
+        return Err(CliError::Usage(
+            "gateway flags cannot be used with --replace or --expected-hash".into(),
+        ));
+    }
+    let base_url = options.required("--gateway-base-url")?;
+    let auth_header = options.required("--gateway-auth-header")?;
+    let auth_scheme = options.required("--gateway-auth-scheme")?;
+    // Preserve the path and explicit port spelling: URL parsers can repair invalid
+    // paths or discard default ports before the core validator sees them.
+    let base_url = match base_url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let path = if path.is_empty() {
+                String::new()
+            } else {
+                format!("/{path}")
+            };
+            format!(
+                "{}://{}{}",
+                scheme.to_ascii_lowercase(),
+                authority.to_ascii_lowercase(),
+                path
+            )
+        }
+        None => base_url,
+    }
+    .trim_end_matches('/')
+    .to_string();
+    let mut headers = Vec::new();
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        if flag == "--replace" {
+            continue;
+        }
+        let value = args.next();
+        if flag == "--gateway-header" {
+            let (name, value) = value
+                .and_then(|value| value.split_once('='))
+                .ok_or_else(|| CliError::Usage("--gateway-header needs name=value".into()))?;
+            headers.push(GatewayHeader {
+                name: name.to_ascii_lowercase(),
+                value: value.trim().to_string(),
+            });
+        }
+    }
+    headers.sort_by(|a, b| a.name.cmp(&b.name));
+    // Do not deduplicate: the shared validator refuses repeated names, including
+    // names that become equal after lowercasing.
+    Ok(Some(GatewaySettings {
+        base_url,
+        auth: GatewayAuth {
+            header: auth_header.to_ascii_lowercase(),
+            scheme: auth_scheme,
+        },
+        headers,
+    }))
+}
+
 fn cmd_put(
     global: &GlobalArgs,
     args: &[String],
     mut options: ParsedOptions,
 ) -> Result<(), CliError> {
-    let explicit_ids = provider_id_flags(args)?;
+    let gateway = put_gateway_settings(args, &options)?;
+    let explicit_ids = if gateway.is_some() {
+        provider_id_values(args)?
+    } else {
+        provider_id_flags(args)?
+    };
     if !put_prompt::prepare(global, &mut options)? {
         return Ok(());
     }
     let id = options.required("--id")?;
+    if let Some(settings) = &gateway {
+        credentials_core::gateway::validate_gateway_settings(&id, settings, &explicit_ids)
+            .map_err(CliError::Store)?;
+    }
     if options
         .optional("--kind")
         .is_none_or(|kind| kind == "api_key")
@@ -2499,6 +2617,24 @@ fn cmd_put(
         None if kind == CredentialKind::Cookie => VaultRecord::new_cookie("operator", payload),
         None => VaultRecord::new_static(kind, "operator", payload, expires_at_ms),
     };
+    if let Some(settings) = gateway {
+        commit_admin(
+            global,
+            AdminOpBody::GatewayCreate {
+                v: ADMIN_OP_SCHEMA_V2,
+                id: id.clone(),
+                record: Box::new(record),
+                audit_op: AdminAuditOp::Put,
+                base_url: settings.base_url,
+                auth_header: settings.auth.header,
+                auth_scheme: settings.auth.scheme,
+                headers: settings.headers,
+                provider_ids: explicit_ids,
+            },
+        )?;
+        println!("created {id}");
+        return Ok(());
+    }
     // CREATE-ONLY by default. An overwrite is either an explicit --expected-hash CAS
     // (concurrency-safe: fails if the record changed under you) or --replace
     // (unconditional: bumps record_version, keeps existing handles). --replace is the

@@ -50,6 +50,9 @@ mod isolated_cli;
 #[path = "support/secret_multi_host_cli.rs"]
 mod secret_multi_host_cli;
 
+#[path = "support/gateway_put_cli.rs"]
+mod gateway_put_cli;
+
 fn cli() -> Command {
     let mut command = cli_binary();
     isolated_cli::isolate(&mut command);
@@ -7216,6 +7219,10 @@ struct ProviderRoutePeer {
 
 impl ProviderRoutePeer {
     fn start(vault: &GrantCliVault) -> Self {
+        Self::start_with_gateway_refusal(vault, false)
+    }
+
+    fn start_with_gateway_refusal(vault: &GrantCliVault, refuse_gateway: bool) -> Self {
         use subc_protocol::{Flags, Frame, FrameType, Priority};
         use subc_transport::{
             authenticate_server, connection_file, read_frame, write_frame, ConnectionInfo, Endpoint,
@@ -7300,9 +7307,13 @@ impl ProviderRoutePeer {
                                 let raw = body["params"]["op_body"].as_str().unwrap();
                                 let op: credentials_core::admin_ops::AdminOpBody = serde_json::from_str(raw).unwrap();
                                 ops.lock().unwrap().push(serde_json::from_str(raw).unwrap());
-                                match credentials_core::admin_ops::apply(&store, op, "route-cli-test") {
-                                    Ok(result) => (FrameType::Response, serde_json::json!({"result":result})),
-                                    Err(error) => (FrameType::Error, serde_json::json!({"message":error.to_string()})),
+                                if refuse_gateway && matches!(op, credentials_core::admin_ops::AdminOpBody::GatewayCreate { .. }) {
+                                    (FrameType::Error, serde_json::json!({"message":"unsupported admin.gateway_create"}))
+                                } else {
+                                    match credentials_core::admin_ops::apply(&store, op, "route-cli-test") {
+                                        Ok(result) => (FrameType::Response, serde_json::json!({"result":result})),
+                                        Err(error) => (FrameType::Error, serde_json::json!({"message":error.to_string()})),
+                                    }
                                 }
                             }
                             _ => panic!("unexpected route request: {body}"),

@@ -180,7 +180,10 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
         }
     };
 
-    if !options.has_flag("--replace") && options.optional("--expected-hash").is_none() {
+    if !super::has_gateway_flags(options)
+        && !options.has_flag("--replace")
+        && options.optional("--expected-hash").is_none()
+    {
         let inventory = parse_inventory(&request_admin_status(global)?)?;
         if inventory.iter().any(|row| row.2 == id) {
             if !confirm_replacement(&theme, &id)? {
@@ -216,6 +219,9 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
     let Some(service) = api_key_service(id) else {
         return Ok(true);
     };
+    if service.contains("-gw-") {
+        return Ok(true);
+    }
     if credentials_core::catalog::provider(id).is_some() {
         return Ok(true);
     }

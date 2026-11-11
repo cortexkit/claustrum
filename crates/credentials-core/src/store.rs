@@ -111,6 +111,9 @@ pub const ENROLLMENT_DISPLAY_NAME_SCHEMA_VERSION: u32 = 34;
 /// The migration that records the immutable permissions proposed for enrollment.
 pub const ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION: u32 = 40;
 
+/// Retained GitHub manifests, binding proposals and per-computer activation reports.
+pub const GH_MANIFEST_SCHEMA_VERSION: u32 = 41;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -1075,6 +1078,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION,
         statements: "ALTER TABLE pending_enrollments ADD COLUMN requested_grants_json TEXT;",
+    },
+    Migration {
+        version: GH_MANIFEST_SCHEMA_VERSION,
+        statements: include_str!("gh_manifests.sql"),
     },
 ];
 
@@ -13989,7 +13996,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            40,
+            41,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16938,6 +16945,65 @@ mod migration_10_tests {
             )
         };
 
+        for (table, expected) in [
+            (
+                "gh_manifests",
+                vec![
+                    column("version", "INTEGER", false, None, true),
+                    column("manifest_bytes", "BLOB", true, None, false),
+                    column("manifest_sha256", "TEXT", true, None, false),
+                    column("key_id", "TEXT", true, None, false),
+                    column("signature", "BLOB", true, None, false),
+                    column("signed_at_ms", "INTEGER", true, None, false),
+                    column("source", "TEXT", true, None, false),
+                    column("approval_audit_seq", "INTEGER", false, None, false),
+                ],
+            ),
+            (
+                "gh_manifest_proposals",
+                vec![
+                    column("proposal_id", "TEXT", true, None, true),
+                    column("agent_id", "TEXT", true, None, false),
+                    column("app_id", "INTEGER", true, None, false),
+                    column("app_slug", "TEXT", true, None, false),
+                    column("repo", "TEXT", true, None, false),
+                    column("installation_permissions", "BLOB", true, None, false),
+                    column("base_version", "INTEGER", true, None, false),
+                    column("manifest_bytes", "BLOB", true, None, false),
+                    column("manifest_sha256", "TEXT", true, None, false),
+                    column("statement_bytes", "BLOB", true, None, false),
+                    column("statement_sha256", "TEXT", true, None, false),
+                    column("created_at_ms", "INTEGER", true, None, false),
+                    column("expires_at_ms", "INTEGER", true, None, false),
+                    column("state", "TEXT", true, None, false),
+                    column("approved_envelope_sha256", "TEXT", false, None, false),
+                    column("approved_fingerprint", "TEXT", false, None, false),
+                ],
+            ),
+            (
+                "gh_manifest_activations",
+                vec![
+                    column("member_id", "TEXT", true, None, true),
+                    column("version", "INTEGER", false, None, false),
+                    column("payload_sha256", "TEXT", false, None, false),
+                    column("verdict", "TEXT", false, None, false),
+                    column("reason", "TEXT", false, None, false),
+                    column("reported_at_ms", "INTEGER", false, None, false),
+                    column("retired_at_ms", "INTEGER", false, None, false),
+                ],
+            ),
+            (
+                "gh_manifest_activation_audits",
+                vec![
+                    column("member_id", "TEXT", true, None, true),
+                    column("version", "INTEGER", true, None, true),
+                    column("verdict", "TEXT", true, None, true),
+                ],
+            ),
+        ] {
+            assert_eq!(columns_of(&store, table), expected, "{table}");
+        }
+
         assert_eq!(
             columns_of(&store, "enrolled_consumers"),
             vec![
@@ -18404,8 +18470,11 @@ mod transfer_key_fence_tests;
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
 
+#[path = "store_gh_manifests.rs"]
+mod gh_manifests;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
+pub use gh_manifests::{GhManifestSource, GhManifestVersion};
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, validate_registered_provider_service,
     RegisteredProvider,

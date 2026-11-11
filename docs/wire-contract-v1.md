@@ -3744,3 +3744,20 @@ write the phone pipeline's pairing observation before a phone-op refusal, or the
 home's diagnostic row for a forwarded `not_found`; neither is a manifest state
 change. A member's `home_unavailable` after forwarding is an unknown outcome,
 not a home-decided refusal.
+
+### Audit rows
+
+Every manifest state change writes its audit row in the same transaction. The
+subject is recorded in `credential_id`; `payload_hash` is lowercase SHA-256.
+Except for signing, the commitment frames each field in the listed order with
+its UTF-8 byte length as a little-endian u64 followed by its bytes (`push_field`);
+integers use decimal text.
+
+| Audit op | Records and subject | `payload_hash` commits |
+|---|---|---|
+| `gh_manifest_propose` | Proposal insertion; `gh-manifest-proposal\|<proposal_id>` | Framed `agent_id, repo, base_version, manifest_sha256, statement_sha256` |
+| `gh_manifest_proposal_state` | A proposal leaving pending; same proposal subject | Framed `from, to` |
+| `gh_manifest_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain manifest SHA-256, without field framing |
+| `gh_manifest_store` | Stored version; `gh-manifest\|<version>` | Framed `source, manifest_sha256` |
+| `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
+| `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |

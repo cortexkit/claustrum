@@ -149,9 +149,26 @@ are unchanged.
 | siliconflow-cn | https://api.siliconflow.cn/v1/models | 2026-11-10 | 401 | - | - |
 | singularityapi-dev | https://api.singularityapi.dev/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | singularityapi-tech | https://api.singularityapi.tech/v1/models | 2026-11-10 | 401 | 401 | /error/code |
+| standardcompute | https://api.stdcmpt.com/v1/models | 2026-11-11 | 401 | invalid_request_error | /error/type |
 | stepfun | https://api.stepfun.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| stepfun-ai-step-plan | https://api.stepfun.ai/step_plan/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| stepfun-cn | https://api.stepfun.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| stepfun-step-plan | https://api.stepfun.com/step_plan/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| subconscious | https://api.subconscious.dev/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| submodel | https://maas.clawplay.world/v1/chat/completions | 2026-11-11 | 401 | new_api_error | /error/type |
+| tempr | https://api.temprhq.io/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| tensorx | https://api.tensorx.ai/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| the-grid-ai | https://api.thegrid.ai/v1/diagnostics | 2026-11-11 | 401 | invalid_api_key | /errors/code |
+| thinkingmachines | https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1/messages | 2026-11-11 | 401 | - | - |
+| tinfoil | https://inference.tinfoil.sh/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| tokengo | https://api.thorbase.com/v1/chat/completions | 2026-11-11 | 401 | llmapi_error | /error/type |
+| trustedrouter | https://api.trustedrouter.com/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/type |
 | umans | https://api.code.umans.ai/v1/messages | 2026-11-10 | 401 | authentication_error | /error/type |
+| unorouter | https://api.unorouter.com/api/usage/token/ | 2026-11-11 | 401 | - | - |
+| upstage | https://api.upstage.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | venice | https://api.venice.ai/api/v1/chat/completions | 2026-11-10 | 401 | - | - |
+| vivgrid | https://api.vivgrid.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| volcengine | https://ark.cn-beijing.volces.com/api/v3/chat/completions | 2026-11-11 | 401 | AuthenticationError | /error/code |
 | wafer-serverless | https://pass.wafer.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | xai | https://api.x.ai/v1/models | 2026-11-10 | 400 | invalid-argument | /code |
 | xiaomi-token-plan-ams | https://token-plan-ams.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
@@ -879,6 +896,156 @@ treated as proof that a provider has no API key:
   and chat both returned empty 403 responses. Those replies did not establish
   an authentication-specific refusal, so no invalid-key evidence was recorded.
 
+## Provider-key evidence for Standard Compute through Volcengine Coding Plan
+
+This batch selected the next 25 unprocessed ids, `standardcompute` through
+`volcengine-coding-plan`, from `ck auth provider-report --missing`. Its initial
+report contained 55 uncovered ids and 18 skips. The ten gaps from earlier batches
+and the nine gaps from Pendra through STACKIT were deferred for later decisions;
+this batch did not re-research them. Eleven unprocessed ids lie beyond this
+batch's 25-id cap: `vultr`, `wallaby`, `wally`, `wandb`, `watsonx`, `xiaomi`,
+`xpersona`, `zai`, `zeldoc`, `zenifra` and `zhipuai`. They remain uncovered, so this
+batch cannot close the complete provider list.
+
+Seventeen selected ids now have rows, one has a reviewed duplicate-offering skip,
+and seven remain uncovered for lack of sufficient documentation. The resulting
+report contains 37 uncovered ids and 19 skips: the 19 reserved gaps, these seven
+newly researched gaps and the eleven ids beyond the cap. A transport or
+documentation failure is not turned into a claim that a provider has no API key.
+
+Rows start from `crates/credentials-core/examples/ckdev_provider_rows.rs`: each
+selected entry has text output and gets its Fusiform id as its routing default.
+StepFun (China) also has audio output and gets the media group. Its catalog key
+is `stepfun-cn` because `stepfun` already identifies the global StepFun API;
+that existing row's identity, categories and routing defaults are unchanged.
+All recorded refusals were obtained live on a network-enabled Linux build server
+on 2026-11-11 with deliberately bogus keys and redirects disabled. Chat checks
+requested at most one output token. No real key was used.
+
+The provider-owned documentation for the added rows is:
+
+- `standardcompute`: <https://docs.standardcompute.com/api/models> documents
+  the authenticated Bearer models read at `api.stdcmpt.com`, not the documentation
+  domain. <https://docs.standardcompute.com/quickstart> links the key dashboard.
+  The refusal has no code field; its `error.type` is recorded instead.
+- `stepfun-cn`: <https://platform.stepfun.com/docs/zh/quickstart> documents
+  Bearer keys from the China portal, `api.stepfun.com` and the `step-5-preview`
+  chat. The regional portals are not treated as interchangeable key issuers.
+- `stepfun-ai-step-plan` and `stepfun-step-plan`: the respective
+  <https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api> and
+  <https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api>
+  explicitly fix their regional API host, Bearer header and
+  `/step_plan/v1/chat/completions` path, with `step-5-preview`. They link each
+  region's interface-key page and require a Step Plan subscription, not a second
+  secret. The checks do not use the ordinary pay-as-you-go chat path.
+- `subconscious`: <https://docs.subconscious.dev/api-reference/models.md>
+  documents Bearer inference keys and the authenticated models read at
+  `api.subconscious.dev`. <https://docs.subconscious.dev/ways-to-use/cloud-api.md>
+  links the inference-key dashboard. The row describes the managed cloud API,
+  not customer-hosted on-prem deployments. Management and partner integration
+  credentials are separate products and are not substituted for inference keys.
+  The deliberately bogus `sk-gw-` key was refused as malformed.
+- `submodel`: the official InstaGen landing page at <https://maas.submodel.ai/>
+  documents the Bearer `MiniMax-M2.7` chat at `maas.clawplay.world`.
+  <https://submodel.gitbook.io/docs/instagen/api-reference> also documents
+  Bearer access keys at `llm.submodel.ai`, and
+  <https://submodel.gitbook.io/docs/instagen/get-started> describes creation of
+  an InstaGen Access Key in Account Settings. Both documented receiving hosts
+  are included. The `llm.submodel.ai` models read returned an empty list with
+  HTTP 200 for the bogus key; the protected chat on the landing page's host
+  returned the recorded 401. Its `error.code` is empty, so its string
+  `error.type` is recorded instead. The two model catalogs are not assumed
+  interchangeable.
+- `tempr`: <https://temprhq.io/docs/gateway-reference> documents the Bearer
+  `tvk_` virtual key and the authenticated models read at `api.temprhq.io`.
+  <https://temprhq.io/docs/quickstart-gateway> links the virtual-key page. The row
+  describes ordinary virtual-key access with upstream keys configured in the
+  account, not the optional pass-through mode that sends two credentials.
+- `tensorx`: <https://docs.tensorx.ai/api-reference/chat-completions>
+  documents Bearer chat at `api.tensorx.ai` with `z-ai/glm-5.2`.
+  <https://docs.tensorx.ai/> links the key dashboard. The documented models read
+  returned a 504 availability error, not an authentication refusal; the protected
+  chat returned the recorded 401. Its code is the string `401`, not a number.
+- `the-grid-ai`: <https://thegrid.ai/docs/api-reference/api-reference.md>
+  documents both fixed inference hosts for Consumption keys;
+  <https://thegrid.ai/docs/api-reference/authentication.md> links key creation.
+  The descriptor uses the OpenAI surface's Bearer presentation. The Messages
+  surface uses the same key value with raw `x-api-key`, not a separate key.
+  <https://thegrid.ai/docs/api-reference/diagnostics.md> documents the Bearer
+  diagnostics read, which verifies the Consumption key without inference.
+- `thinkingmachines`:
+  <https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/anthropic/>
+  documents raw `x-api-key`, the fixed `tinker.thinkingmachines.dev` host and
+  `thinkingmachines/Inkling`. The check sends `anthropic-version: 2023-06-01`.
+  <https://tinker-docs.thinkingmachines.ai/tinker/quickstart/index.md> links the
+  console key page. The refusal has only a detail message, not a code.
+- `tinfoil`: <https://docs.tinfoil.sh/quickstart.md> documents the direct
+  Bearer chat at `inference.tinfoil.sh` using `gpt-oss-120b`.
+  <https://docs.tinfoil.sh/get-api-key.md> gives the dashboard navigation.
+  The direct API does not provide the SDK/proxy's connection-time attestation;
+  this row does not claim that the login check performs attestation.
+- `tokengo`:
+  <https://www.tokengo.com/docs/documentation/getting-started/quickstart>
+  explicitly sends a Bearer key to `api.thorbase.com` with `gpt-4o-mini`.
+  <https://www.tokengo.com/docs/documentation/getting-started/authentication>
+  links the TokenGO console. The refusal's `error.code` is empty, so the recorded
+  string is its `error.type`, `llmapi_error`.
+- `trustedrouter`: <https://trustedrouter.com/docs> documents Bearer keys,
+  the read-only `/v1/key` inspection, the primary and alternate inference hosts,
+  and the account-management host. The row asks for an inference key; creating
+  or replacing keys requires a distinct management-key permission. The refusal's
+  `error.code` is numeric, so its string `error.type` is recorded instead.
+- `unorouter`: <https://unorouter.com/en/docs/platform/platform-api>
+  documents the Bearer API-key usage read at `api.unorouter.com`.
+  <https://unorouter.com/en/docs/platform/quickstart> directs users to the Tokens
+  page. Account access tokens have different permissions and are not this key.
+- `upstage`: <https://console.upstage.ai/api/chat> explicitly specifies
+  `Authorization: Bearer <token>`, `api.upstage.ai/v1` and `solar-pro4`.
+  <https://developers.upstage.ai/docs/getting-started> describes key creation;
+  the live authentication refusal also links the console API-key page.
+- `vivgrid`: <https://vivgrid.com/docs/models/gpt-6-astra> documents Bearer chat
+  at `api.vivgrid.com`, the `gpt-6-astra` model and the example key shape
+  `viv-xxxxxxxxxxxxx`. <https://vivgrid.com/docs/quick-start> links the console
+  and distinguishes Model API keys from skill-building `APP_KEY`/`APP_SECRET`.
+  An arbitrary bogus string first returned a 500 format error, which is not
+  recorded. The documented sample-shaped bogus key returned the recorded 401.
+- `volcengine`: <https://ark.volcengine.com/region:cn-beijing/docs/chat-api>
+  documents Bearer Ark keys at `ark.cn-beijing.volces.com` and the
+  `doubao-seed-2-1-pro-260915` chat. The API-key guide at
+  <https://ark.volcengine.com/region:cn-beijing/docs/api-key> links the key page
+  and describes project-scoped keys, not a host chosen per key. The fixed
+  data-plane host is also explicit in
+  <https://ark.volcengine.com/region:cn-beijing/docs/base-url-and-authentication>.
+  The separate control-plane host uses signed Access Keys, not this API key.
+
+Seven selected ids remain gaps, rather than unsupported skips:
+
+- `tencent-coding-plan`: the cited page for this offering at
+  <https://cloud.tencent.com/document/product/1772/128947> did not yield readable
+  API instructions. Related TokenHub Coding Plan documentation at
+  <https://cloud.tencent.com/document/product/1823/130092> restricts use to
+  supported coding tools and prohibits direct scripted API use. No literal
+  header for this offering was established or standalone probe sent.
+- `tencent-token-plan`: <https://cloud.tencent.com/document/product/1823/130060>
+  documents fixed `tokenhub.tencentmaas.com/plan/v3` and `/plan/anthropic`
+  bases, but the retrieved text did not establish a literal key header/scheme.
+- `tencent-tokenhub`: <https://cloud.tencent.com/document/product/1823/130050>
+  describes dedicated inference endpoints and API-key management, but did not
+  establish a fixed shared API host or literal header. Dedicated endpoints
+  alone do not prove that all keys require a per-account hostname.
+- `tokenrouter`: <https://www.tokenrouter.com/docs/tokenrouter-feature-guide/>
+  and the provider's root, docs and llms pages yielded no extractable API
+  instructions. No host or header was inferred from third-party integrations.
+- `vancine`: <https://vancine.com/docs> yielded no readable API documentation.
+- `vispark`: <https://lab.vispark.in/#vision> yielded no readable host/header
+  instructions.
+- `volcengine-coding-plan`: <https://www.volcengine.com/docs/82379/1928261>
+  documents `ark.cn-beijing.volces.com/api/coding/v3` and coding-tool settings,
+  but not a literal HTTP key header for that path. The FAQ at
+  <https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-faq>
+  says standalone API calls do not consume plan quota and are billed under
+  ordinary Ark rules. No ordinary `/api/v3` check was substituted for the plan.
+
 ## Fusiform provider skips
 
 This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
@@ -967,6 +1134,12 @@ not a reason to skip it.
   documents PAT Bearer requests at
   `https://<account-identifier>.snowflakecomputing.com/api/v2/cortex/v1`.
   That per-account host cannot be replaced with a shared provider host.
+- `umans-ai`: <https://app.umans.ai/offers/code/docs/orgs> describes organization
+  billing and member keys for the same Umans Code service as the existing
+  `umans` row (`umans-ai-coding-plan`). Its linked
+  <https://app.umans.ai/offers/code/docs> uses the same billing key page,
+  `api.code.umans.ai`, `umans-coder` and raw `x-api-key` Messages request as that
+  row. An organization membership is not a second API-key offering.
 
 Only these reasons are permitted:
 
@@ -996,6 +1169,7 @@ Only these reasons are permitted:
 | qvac | a user-hosted local server rather than a fixed provider API |
 | sap-ai-core | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | snowflake-cortex | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| umans-ai | a duplicate offering of an existing row |
 
 ## Hosts without provider documentation
 

@@ -99,6 +99,19 @@ pub enum AdminOpBody {
         audit_op: AdminAuditOp,
         mode: StoreMode,
     },
+    /// A separate discriminator prevents an older daemon storing a plain API key.
+    #[serde(rename = "admin.gateway_create")]
+    GatewayCreate {
+        v: u32,
+        id: String,
+        record: Box<VaultRecord>,
+        audit_op: AdminAuditOp,
+        base_url: String,
+        auth_header: String,
+        auth_scheme: String,
+        headers: Vec<crate::gateway::GatewayHeader>,
+        provider_ids: Vec<String>,
+    },
     /// Identity-aware replacement has its own op discriminator so a daemon that predates
     /// sticky identity rejects it instead of silently treating it as a legacy replace.
     #[serde(rename = "admin.store_with_identity_policy")]
@@ -528,6 +541,34 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("audit_op", audit_op)
                 .field("clear_identity", clear_identity)
                 .finish(),
+            AdminOpBody::GatewayCreate {
+                v,
+                id,
+                record,
+                audit_op,
+                base_url,
+                auth_header,
+                auth_scheme,
+                headers,
+                provider_ids,
+            } => f
+                .debug_struct("GatewayCreate")
+                .field("v", v)
+                .field("id", id)
+                .field("record", record)
+                .field("audit_op", audit_op)
+                .field("base_url", base_url)
+                .field("auth_header", auth_header)
+                .field("auth_scheme", auth_scheme)
+                .field(
+                    "header_names",
+                    &headers
+                        .iter()
+                        .map(|header| &header.name)
+                        .collect::<Vec<_>>(),
+                )
+                .field("provider_ids", provider_ids)
+                .finish(),
             AdminOpBody::SetIdentity { v, id, identity } => f
                 .debug_struct("SetIdentity")
                 .field("v", v)
@@ -886,6 +927,7 @@ impl AdminOpBody {
     pub fn schema_version(&self) -> u32 {
         match self {
             AdminOpBody::Store { v, .. }
+            | AdminOpBody::GatewayCreate { v, .. }
             | AdminOpBody::ProviderSet { v, .. }
             | AdminOpBody::ProviderRemove { v, .. }
             | AdminOpBody::OperatorSign { v, .. }
@@ -960,6 +1002,7 @@ impl AdminOpBody {
                 }
             }
             AdminOpBody::GrantCreateV2 { .. }
+            | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
@@ -1032,6 +1075,7 @@ impl AdminOpBody {
                 credential_id: id, ..
             }
             | AdminOpBody::Store { id, .. }
+            | AdminOpBody::GatewayCreate { id, .. }
             | AdminOpBody::OperatorSign { id, .. }
             | AdminOpBody::StoreWithIdentityPolicy { id, .. }
             | AdminOpBody::SetIdentity { id, .. }
@@ -1124,6 +1168,7 @@ impl AdminOpBody {
             AdminOpBody::ProviderSet { .. } => "admin.provider_set",
             AdminOpBody::ProviderRemove { .. } => "admin.provider_remove",
             AdminOpBody::Store { .. } => "admin.store",
+            AdminOpBody::GatewayCreate { .. } => "admin.gateway_create",
             AdminOpBody::StoreWithIdentityPolicy { .. } => "admin.store_with_identity_policy",
             AdminOpBody::SetIdentity { .. } => "admin.set_identity",
             AdminOpBody::Invalidate { .. } => "admin.invalidate",
@@ -1184,6 +1229,7 @@ impl AdminOpBody {
     pub const fn requires_daemon(&self) -> bool {
         match self {
             AdminOpBody::Store { .. }
+            | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::OperatorSign { .. }
@@ -1533,6 +1579,34 @@ pub fn apply(
                 "credential_id": credential_id,
                 "approver": approver,
             }))
+        }
+        AdminOpBody::GatewayCreate {
+            id,
+            record,
+            audit_op,
+            base_url,
+            auth_header,
+            auth_scheme,
+            headers,
+            provider_ids,
+            ..
+        } => {
+            let settings = crate::gateway::GatewaySettings {
+                base_url,
+                auth: crate::gateway::GatewayAuth {
+                    header: auth_header,
+                    scheme: auth_scheme,
+                },
+                headers,
+            };
+            store.gateway_create_audited(
+                &id,
+                &record,
+                &settings,
+                &provider_ids,
+                AuditCtx::route_admin(audit_op.to_audit_op(), actor),
+            )?;
+            Ok(serde_json::json!({ "stored": true }))
         }
         AdminOpBody::Store {
             id,

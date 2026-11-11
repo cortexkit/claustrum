@@ -125,6 +125,8 @@ pub enum AuditOp {
     SetCategory,
     /// A credential's operator-assigned catalog provider ids changed.
     SetProviders,
+    /// Fixed gateway settings were enrolled alongside the credential's birth row.
+    GatewayCreate,
     /// Defaults for future keys of an operator-registered API-key service changed.
     ProviderSet,
     ProviderRemove,
@@ -243,6 +245,7 @@ impl AuditOp {
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
             AuditOp::SetProviders => "set_providers",
+            AuditOp::GatewayCreate => "gateway_create",
             AuditOp::ProviderSet => "provider_set",
             AuditOp::ProviderRemove => "provider_remove",
             AuditOp::SetPlan => "set_plan",
@@ -796,6 +799,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
                 AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
+                AuditOp::GatewayCreate => AuditOp::GatewayCreate.as_str(),
                 AuditOp::ProviderSet => AuditOp::ProviderSet.as_str(),
                 AuditOp::ProviderRemove => AuditOp::ProviderRemove.as_str(),
                 AuditOp::SetPlan => AuditOp::SetPlan.as_str(),

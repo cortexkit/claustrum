@@ -90,6 +90,9 @@ pub const REMOTE_RECORD_SOURCE_SCHEMA_VERSION: u32 = 39;
 /// Read-time host and authentication descriptors for registered providers.
 pub const REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION: u32 = 40;
 
+/// Per-credential gateway settings, bound to the credential's incarnation.
+pub const GATEWAY_SETTINGS_SCHEMA_VERSION: u32 = 41;
+
 /// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
 /// the selector vocabulary, and added the enrollment and grant-generation tables.
 ///
@@ -1078,6 +1081,17 @@ const MIGRATIONS: &[Migration] = &[
                      ALTER TABLE registered_providers ADD COLUMN auth_header TEXT DEFAULT NULL; \
                      ALTER TABLE registered_providers ADD COLUMN auth_scheme TEXT DEFAULT NULL; \
                      ALTER TABLE registered_providers ADD COLUMN fusiform_provider_id TEXT DEFAULT NULL;",
+    },
+    Migration {
+        version: GATEWAY_SETTINGS_SCHEMA_VERSION,
+        statements: "CREATE TABLE credential_gateway_settings (\
+                         credential_id TEXT NOT NULL PRIMARY KEY REFERENCES credentials(credential_id) ON DELETE CASCADE, \
+                         incarnation TEXT NOT NULL, \
+                         base_url TEXT NOT NULL, \
+                         auth_header TEXT NOT NULL, \
+                         auth_scheme TEXT NOT NULL, \
+                         headers_json TEXT NOT NULL\
+                     );",
     },
 ];
 
@@ -5885,6 +5899,13 @@ impl EncryptedStore {
                     tx.execute(
                         "DELETE FROM credential_provider_ids WHERE credential_id = ?1",
                         rusqlite::params![credential_id],
+                    )?;
+                }
+                // Explicit cleanup also covers connections with foreign keys disabled.
+                if read_schema_version(tx)? >= GATEWAY_SETTINGS_SCHEMA_VERSION {
+                    tx.execute(
+                        "DELETE FROM credential_gateway_settings WHERE credential_id = ?1",
+                        [credential_id],
                     )?;
                 }
                 // Diagnostic events go WITH the credential, and this is the one
@@ -13834,7 +13855,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            40,
+            41,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -18248,6 +18269,13 @@ mod store_agent_secrets;
 
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
+
+#[path = "store_gateway.rs"]
+mod gateway;
+
+#[cfg(test)]
+#[path = "gateway_create_tests.rs"]
+mod gateway_create_tests;
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, valid_provider_header_name,
     validate_registered_provider_service, validate_registered_provider_settings,

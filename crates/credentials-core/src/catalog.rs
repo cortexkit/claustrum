@@ -8,6 +8,7 @@ use crate::{google_login as google, refresh_adapters};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CredentialCategory {
     LlmProvider,
+    LlmGateway,
     DataWarehouse,
     CloudInfrastructure,
     /// Keys for web search APIs (Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina,
@@ -21,6 +22,7 @@ pub enum CredentialCategory {
 impl CredentialCategory {
     pub const ALL: &[Self] = &[
         Self::LlmProvider,
+        Self::LlmGateway,
         Self::DataWarehouse,
         Self::CloudInfrastructure,
         Self::WebSearch,
@@ -30,6 +32,7 @@ impl CredentialCategory {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::LlmProvider => "llm-provider",
+            Self::LlmGateway => "llm-gateway",
             Self::DataWarehouse => "data-warehouse",
             Self::CloudInfrastructure => "cloud-infrastructure",
             Self::WebSearch => "web-search",
@@ -3438,6 +3441,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "llm-provider",
+                "llm-gateway",
                 "data-warehouse",
                 "cloud-infrastructure",
                 "web-search",
@@ -3740,6 +3744,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "llm-provider",
+                "llm-gateway",
                 "data-warehouse",
                 "cloud-infrastructure",
                 "web-search",

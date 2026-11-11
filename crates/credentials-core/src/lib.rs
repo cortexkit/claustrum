@@ -123,5 +123,6 @@ pub use store::{
     handle_hash, mint_handle, payload_hash, refresh_token_hash, DepositCookieOutcome,
     EncryptedStore, GrantOperation, MintedHandle, ReadGrant, RecordMeta, RecordState,
     RefreshIntent, ScopedCoverage, ScopedListRow, ScopedListSnapshot, ScopedReadRefusal,
-    SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError, PROVIDER_ID_SCHEMA_VERSION,
+    SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError, GATEWAY_SETTINGS_SCHEMA_VERSION,
+    PROVIDER_ID_SCHEMA_VERSION,
 };

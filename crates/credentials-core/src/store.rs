@@ -7974,6 +7974,9 @@ fn validate_read_grant(
         if crate::agent_secret::is_deposit_key(selector) {
             return Err(StoreOpError::NotFound);
         }
+        if operation == GrantOperation::Sign && selector == GH_MANIFEST_ROOT_KEY_ID {
+            return Err(StoreOpError::NotFound);
+        }
         crate::federation::transfer_key_admits_grant(
             selector,
             &format!("{principal_kind}:{principal_id}"),
@@ -18474,7 +18477,7 @@ mod store_agent_secrets;
 mod gh_manifests;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
-pub use gh_manifests::{GhManifestSource, GhManifestVersion};
+pub use gh_manifests::{GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID};
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, validate_registered_provider_service,
     RegisteredProvider,

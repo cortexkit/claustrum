@@ -14956,6 +14956,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gh_manifest_root_sign_is_not_found_in_every_address_mode_without_writes() {
+        use credentials_core::store::{SetCategoryMode, GH_MANIFEST_ROOT_KEY_ID};
+
+        fn snapshot(conn: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+            let tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                .unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            tables
+                .iter()
+                .map(|table| {
+                    let mut statement =
+                        conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            (0..columns)
+                                .map(|index| row.get(index))
+                                .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                        })
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                })
+                .collect()
+        }
+
+        let (surface, store, db_path, _root) = tmp_surface_with_store(183);
+        let key = MasterKey::from_bytes([183; MASTER_KEY_LEN]);
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            Arc::new(RefreshEngine::new(
+                Arc::clone(&store),
+                Vec::new(),
+                Arc::new(crate::test_support::NoHttp),
+            )),
+            credentials_core::admin_auth::AdminMacKey::derive(&key),
+            credentials_core::vault_id_for(db_path.parent().unwrap()).unwrap(),
+            key.key_id(),
+        ));
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            test_ed25519_pem().into_bytes(),
+            None,
+        );
+        record.audit_each_signature = true;
+        for id in [GH_MANIFEST_ROOT_KEY_ID, "signing:other-manifest-test:1"] {
+            store
+                .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+                .unwrap();
+            store
+                .set_categories_audited(
+                    id,
+                    SetCategoryMode::Set,
+                    &["monitoring".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+        }
+        let handle = mint_test_handle(&store, GH_MANIFEST_ROOT_KEY_ID);
+        let db = rusqlite::Connection::open(db_path).unwrap();
+        // Simulate an exact grant inserted before grant creation began refusing
+        // root-key Sign grants. Existing rows must not let callers sign with it.
+        db.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'manifest-exact', 'exact', ?1, 'sign', 1)", [GH_MANIFEST_ROOT_KEY_ID]).unwrap();
+        admin.record_bind(
+            183,
+            subc_protocol::Principal::Reserved {
+                module_id: "manifest-exact".into(),
+            },
+        );
+        admin.record_bind(
+            184,
+            subc_protocol::Principal::Reserved {
+                module_id: "manifest-category".into(),
+            },
+        );
+        let request_secret = "d1d2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let request = store
+            .propose_enrollment(
+                "manifest-consumer",
+                &credentials_core::enrollment::enrollment_secret_hash(request_secret).unwrap(),
+            )
+            .unwrap();
+        store
+            .approve_enrollment(&request.request_id, "manifest-consumer", "operator")
+            .unwrap();
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .unwrap()
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("expected an approved enrollment, got {other:?}"),
+        };
+        for (kind, id) in [
+            ("reserved", "manifest-category"),
+            ("enrolled", "manifest-consumer"),
+        ] {
+            store
+                .create_read_grant_audited(
+                    kind,
+                    id,
+                    SelectorKind::Category,
+                    "monitoring",
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    kind,
+                    id,
+                    SelectorKind::Exact,
+                    GH_MANIFEST_ROOT_KEY_ID,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+        for (channel, params) in [
+            (
+                184,
+                json!({"credential_id":"signing:other-manifest-test:1","payload_b64":"YQ=="}),
+            ),
+            (
+                185,
+                json!({"credential_id":"signing:other-manifest-test:1","enrollment_token":token,"payload_b64":"YQ=="}),
+            ),
+        ] {
+            let (_, body) = routed_reply(&surface, &admin, channel, OP_SIGN, params).await;
+            let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                reply["result"]["signature_b64"].is_string(),
+                "the grant/token control must really authorize signing"
+            );
+        }
+        let unknown = routed_reply(
+            &surface,
+            &admin,
+            183,
+            OP_SIGN,
+            json!({"handle":"unknown-manifest-handle","payload_b64":"YQ=="}),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&unknown.1).unwrap()["result"]["error"]
+                ["code"],
+            "not_found"
+        );
+        let before = snapshot(&db);
+        for (mode, channel, params) in [
+            ("handle", 183, json!({"handle":handle,"payload_b64":"YQ=="})),
+            (
+                "exact",
+                183,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+            ),
+            (
+                "category",
+                184,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+            ),
+            (
+                "enrollment",
+                185,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token,"payload_b64":"YQ=="}),
+            ),
+        ] {
+            let refused = routed_reply(&surface, &admin, channel, OP_SIGN, params).await;
+            assert_eq!(
+                refused, unknown,
+                "{mode} must be byte-identical to an unknown handle"
+            );
+            assert_eq!(
+                snapshot(&db),
+                before,
+                "{mode} must write nothing, including first-use diagnostics"
+            );
+        }
+        let expected = credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(record.payload.expose()).unwrap(),
+        )
+        .unwrap();
+        for (channel, params) in [
+            (183, json!({"handle":handle})),
+            (184, json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID})),
+            (
+                185,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token}),
+            ),
+        ] {
+            let (_, body) = routed_reply(&surface, &admin, channel, OP_PUBLIC_KEY, params).await;
+            let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(reply["result"]["key_id"], expected.key_id);
+            assert_eq!(reply["result"]["public_key_hex"], expected.public_key_hex);
+        }
+        assert!(!store.get(GH_MANIFEST_ROOT_KEY_ID).unwrap().operator_sign);
+    }
+
+    #[tokio::test]
     async fn read_grant_authorizes_scoped_public_key() {
         let (surface, admin, store) = scoped_rig(86);
         let credential_id = "signing:public-key:read-granted";

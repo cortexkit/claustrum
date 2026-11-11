@@ -1,7 +1,10 @@
 use super::*;
 use crate::audit::{AuditOp, AuditRecord};
 use crate::key::MasterKey;
-use crate::store::{migrate_through_for_test, taxonomy_tests, GH_MANIFEST_SCHEMA_VERSION};
+use crate::store::{
+    migrate_through_for_test, taxonomy_tests, GrantOperation, SelectorKind,
+    GH_MANIFEST_SCHEMA_VERSION,
+};
 use rusqlite::types::Value;
 
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -68,6 +71,309 @@ fn snapshot(store: &EncryptedStore) -> Vec<Vec<Vec<Value>>> {
     store
         .with_raw_conn(|conn| TABLES.iter().map(|table| rows(conn, table)).collect())
         .unwrap()
+}
+
+fn root_key() -> (VaultRecord, Vec<u8>) {
+    use base64::Engine as _;
+    use ring::signature::KeyPair as _;
+    let der =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(der.as_ref()).unwrap();
+    let pem = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+    );
+    (
+        VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            pem.into_bytes(),
+            None,
+        ),
+        pair.public_key().as_ref().to_vec(),
+    )
+}
+
+fn sign_and_store(
+    store: &EncryptedStore,
+    tx: &rusqlite::Transaction<'_>,
+    number: i64,
+    bytes: &[u8],
+) -> rusqlite::Result<crate::signing::Signature> {
+    use base64::Engine as _;
+    let hash = hex32(&payload_hash(bytes));
+    let approval = append_audit_tx(
+        tx,
+        &store.audit_key,
+        &AuditRecord {
+            op: AuditOp::Approval,
+            credential_id: Some(GH_MANIFEST_ROOT_KEY_ID.into()),
+            payload_hash: Some(hash.clone()),
+            actor: "test/approver:owner".into(),
+            alarm: None,
+        },
+    )?;
+    let signature = store
+        .sign_gh_manifest(tx, bytes, AuditCtx::admin(AuditOp::GhManifestSign))
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let raw: [u8; 64] = base64::engine::general_purpose::STANDARD
+        .decode(&signature.signature_b64)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    store.store_gh_manifest_in_tx(
+        tx,
+        &GhManifestVersion {
+            version: number,
+            manifest_bytes: bytes,
+            manifest_sha256: &hash,
+            key_id: &signature.key_id,
+            signature: &raw,
+            signed_at_ms: 123,
+            source: GhManifestSource::Ceremony,
+            approval_audit_seq: Some(approval.seq),
+        },
+        AuditCtx::admin(AuditOp::GhManifestStore),
+    )?;
+    Ok(signature)
+}
+
+#[test]
+fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows() {
+    use base64::Engine as _;
+    use std::sync::{mpsc, Arc};
+    let (_root, store) = taxonomy_tests::rig("manifest-sign-replacement", 179);
+    let store = Arc::new(store);
+    let (original, first_public) = root_key();
+    let (replacement, second_public) = root_key();
+    store
+        .create_audited(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &original,
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    let (writer_held, writer_ready) = mpsc::channel();
+    let (attempting, attempted) = mpsc::channel();
+    let replacing = Arc::clone(&store);
+    let replacement_job = std::thread::spawn(move || {
+        writer_ready.recv().unwrap();
+        attempting.send(()).unwrap();
+        replacing.overwrite_unconditional_audited(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &replacement,
+            AuditCtx::admin(AuditOp::Overwrite),
+        )
+    });
+    let first = store
+        .fenced_write(|tx| {
+            writer_held.send(()).unwrap();
+            attempted.recv().unwrap();
+            sign_and_store(&store, tx, 1, b"first manifest")
+        })
+        .unwrap();
+    replacement_job.join().unwrap().unwrap();
+    let second = store
+        .fenced_write(|tx| sign_and_store(&store, tx, 2, b"second manifest"))
+        .unwrap();
+    for (signature, public, other_public, bytes) in [
+        (
+            &first,
+            &first_public,
+            &second_public,
+            b"first manifest".as_slice(),
+        ),
+        (
+            &second,
+            &second_public,
+            &first_public,
+            b"second manifest".as_slice(),
+        ),
+    ] {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&signature.signature_b64)
+            .unwrap();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+            .verify(bytes, &raw)
+            .unwrap();
+        assert!(
+            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, other_public)
+                .verify(bytes, &raw)
+                .is_err()
+        );
+        assert_eq!(signature.key_id, crate::signing::key_id_for_public(public));
+    }
+    let audit = store.read_audit(None).unwrap();
+    assert_eq!(
+        audit.iter().map(|row| row.op.as_str()).collect::<Vec<_>>(),
+        [
+            "put",
+            "approval",
+            "gh_manifest_sign",
+            "gh_manifest_store",
+            "overwrite",
+            "approval",
+            "gh_manifest_sign",
+            "gh_manifest_store",
+        ]
+    );
+    for (index, hash) in [
+        (
+            2,
+            "2aec5060ec1b1501b0c6216c98f7df76f6c96d1bab5c96c3fc369c363b995842",
+        ),
+        (
+            6,
+            "aa098371a12bbf87dda8655241f8b229c00e93011ab0bb494e32aad60e36b438",
+        ),
+    ] {
+        assert_eq!(
+            audit[index].credential_id.as_deref(),
+            Some(GH_MANIFEST_ROOT_KEY_ID)
+        );
+        assert_eq!(audit[index].payload_hash.as_deref(), Some(hash));
+    }
+    assert!(!store.get(GH_MANIFEST_ROOT_KEY_ID).unwrap().operator_sign);
+    store.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn gh_manifest_sign_rolls_back_with_its_caller_and_fails_closed_on_audit_error() {
+    let (_root, store) = taxonomy_tests::rig("manifest-sign-rollback", 180);
+    store
+        .create(GH_MANIFEST_ROOT_KEY_ID, &root_key().0)
+        .unwrap();
+    let before = snapshot(&store);
+    assert!(store
+        .fenced_write(|tx| {
+            sign_and_store(&store, tx, 1, b"manifest")?;
+            Err::<(), _>(rusqlite::Error::InvalidQuery)
+        })
+        .is_err());
+    assert_eq!(snapshot(&store), before);
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER deny_manifest_sign BEFORE INSERT ON audit_log \
+         WHEN NEW.op = 'gh_manifest_sign' BEGIN SELECT RAISE(ABORT, 'test audit fault'); END;",
+            )
+        })
+        .unwrap();
+    assert!(store
+        .fenced_write(|tx| sign_and_store(&store, tx, 1, b"manifest"))
+        .is_err());
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
+fn gh_manifest_sign_requires_an_active_usable_signing_key_without_writes() {
+    let (_root, store) = taxonomy_tests::rig("manifest-sign-unavailable", 181);
+    let refuse = || {
+        let before = snapshot(&store);
+        store
+            .fenced_write(|tx| {
+                assert!(store
+                    .sign_gh_manifest(tx, b"manifest", AuditCtx::admin(AuditOp::GhManifestSign))
+                    .is_err());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(snapshot(&store), before);
+    };
+    refuse();
+    store
+        .create(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"not a key".to_vec(), None),
+        )
+        .unwrap();
+    refuse();
+    store
+        .overwrite_unconditional_audited(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &VaultRecord::new_static(
+                CredentialKind::SigningKey,
+                "test",
+                b"not a key".to_vec(),
+                None,
+            ),
+            AuditCtx::admin(AuditOp::Overwrite),
+        )
+        .unwrap();
+    refuse();
+    store
+        .overwrite_unconditional_audited(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &root_key().0,
+            AuditCtx::admin(AuditOp::Overwrite),
+        )
+        .unwrap();
+    store.invalidate(GH_MANIFEST_ROOT_KEY_ID).unwrap();
+    refuse();
+}
+
+#[test]
+fn gh_manifest_root_exact_sign_grant_is_refused_without_writes() {
+    let (_root, store) = taxonomy_tests::rig("manifest-grant-fence", 182);
+    for principal_kind in ["reserved", "enrolled"] {
+        let before = store
+            .with_raw_conn(|conn| {
+                Ok((
+                    rows(conn, "read_grants")?,
+                    rows(conn, "audit_log")?,
+                    conn.total_changes(),
+                ))
+            })
+            .unwrap();
+        assert!(matches!(
+            store.create_read_grant_audited(
+                principal_kind,
+                "manifest-consumer",
+                SelectorKind::Exact,
+                GH_MANIFEST_ROOT_KEY_ID,
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate)
+            ),
+            Err(StoreOpError::NotFound)
+        ));
+        let after = store
+            .with_raw_conn(|conn| {
+                Ok((
+                    rows(conn, "read_grants")?,
+                    rows(conn, "audit_log")?,
+                    conn.total_changes(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(after, before);
+    }
+    for operation in [
+        GrantOperation::Read,
+        GrantOperation::List,
+        GrantOperation::Open,
+        GrantOperation::Seal,
+    ] {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "manifest-consumer",
+                SelectorKind::Exact,
+                GH_MANIFEST_ROOT_KEY_ID,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "manifest-consumer",
+            SelectorKind::Exact,
+            "signing:other:1",
+            GrantOperation::Sign,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
 }
 
 #[test]

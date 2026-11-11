@@ -1,4 +1,11 @@
-use super::{append_audit_tx, EncryptedStore, StoreOpError};
+use super::{
+    append_audit_tx, envelope, hex32, payload_hash, CredentialKind, EncryptedStore, RecordBinding,
+    RecordState, StoreOpError, VaultRecord,
+};
+use rusqlite::OptionalExtension;
+
+/// The manifest root is exercised only by the transactional manifest signer.
+pub const GH_MANIFEST_ROOT_KEY_ID: &str = "signing:gh-manifest-root:1";
 use crate::audit::{AuditCtx, GhManifestAudit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +39,64 @@ pub struct GhManifestVersion<'a> {
 }
 
 impl EncryptedStore {
+    /// Sign exact manifest bytes and append their plain SHA-256 commitment in the
+    /// caller's fenced write transaction. Read the key here, not before taking the
+    /// writer, so replacement cannot commit between key selection and the audit row.
+    /// Callers must abort on error and publish the signature only after commit.
+    pub fn sign_gh_manifest(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        manifest_bytes: &[u8],
+        ctx: AuditCtx<'_>,
+    ) -> Result<crate::signing::Signature, StoreOpError> {
+        let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
+        let (version, state, blob): (i64, String, Vec<u8>) = tx
+            .query_row(
+                "SELECT record_version, state, envelope FROM credentials WHERE credential_id = ?1",
+                [GH_MANIFEST_ROOT_KEY_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .ok_or(StoreOpError::NotFound)?;
+        if RecordState::from_str(&state) != RecordState::Active {
+            return Err(StoreOpError::NotFound);
+        }
+        // Ordinary reads can quarantine a broken record through another write. This
+        // transaction must instead fail without attempting a nested store mutation.
+        let plaintext = envelope::open(
+            &self.key,
+            &blob,
+            &RecordBinding {
+                credential_id: GH_MANIFEST_ROOT_KEY_ID,
+                record_version: version as u64,
+            },
+        )
+        .map_err(StoreOpError::Decrypt)?;
+        let record =
+            VaultRecord::decode(&plaintext).map_err(|e| StoreOpError::Corrupt(e.to_string()))?;
+        if record.kind != CredentialKind::SigningKey {
+            return Err(StoreOpError::NotFound);
+        }
+        let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
+        let prepared =
+            crate::signing::prepare_ed25519(pem, manifest_bytes).map_err(|e| match e {
+                crate::signing::SignError::TooLarge { .. } => StoreOpError::Encode(e.to_string()),
+                crate::signing::SignError::UnusableKey(_) => corrupt(),
+            })?;
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &GhManifestAudit::Sign {
+                manifest_sha256: &hex32(&payload_hash(manifest_bytes)),
+            }
+            .record(ctx.actor, ctx.alarm),
+        )
+        .map_err(sql_error)?;
+        Ok(prepared.sign())
+    }
+
     /// Store an already verified version, its audit row and all older pending
     /// proposals' supersede transitions in one transaction under the writer lease.
     pub fn store_gh_manifest(

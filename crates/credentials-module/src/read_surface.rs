@@ -2301,11 +2301,21 @@ impl ReadSurface {
         operation: GrantOperation,
         usage: TransferKeyUse,
     ) -> Result<ResolvedKeyAddress, ReadError> {
+        // Handles and grants must not let callers sign with the manifest root key.
+        // Check the resolved id before scoped authorization can record first use;
+        // public-key reads still resolve under Read and remain available to verifiers.
+        let manifest_sign_fenced = |id: &str| {
+            operation == GrantOperation::Sign
+                && id == credentials_core::store::GH_MANIFEST_ROOT_KEY_ID
+        };
         match address {
             KeyAddress::Handle(handle) => {
                 self.check_limiter(connection_id, handle).await;
                 match self.engine.store().resolve_handle_with_incarnation(handle) {
-                    Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                    Ok((id, _))
+                        if manifest_sign_fenced(&id)
+                            || transfer_key_fenced(&id, TransferKeyAccess::Handle) =>
+                    {
                         Err(ReadError::NotFound)
                     }
                     Ok((id, incarnation)) => Ok(ResolvedKeyAddress {
@@ -2318,6 +2328,9 @@ impl ReadSurface {
                 }
             }
             KeyAddress::Scoped(credential_id) => {
+                if manifest_sign_fenced(credential_id) {
+                    return Err(ReadError::NotFound);
+                }
                 let incarnation = self.engine.store().credential_incarnation(credential_id);
                 let resolved_principal = self.authorize_scoped_for(
                     principal,

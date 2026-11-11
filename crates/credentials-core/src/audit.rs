@@ -565,7 +565,7 @@ impl GhManifestAudit<'_> {
             ),
             Self::Sign { manifest_sha256 } => (
                 AuditOp::GhManifestSign,
-                "signing:gh-manifest-root:1".to_owned(),
+                crate::store::GH_MANIFEST_ROOT_KEY_ID.to_owned(),
                 manifest_sha256.to_owned(),
             ),
             Self::Store {

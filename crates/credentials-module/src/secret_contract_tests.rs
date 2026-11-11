@@ -1557,6 +1557,8 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
             let rest = &SECRET_CONTRACT_DOC[at + marker.len()..];
             &rest[..rest.find(" -->").expect("golden marker end")]
         })
+        // Manifest goldens have their own producer-driven completeness check.
+        .filter(|id| !id.starts_with("manifest."))
         .collect();
     let checked: std::collections::BTreeSet<&str> = SECRET_GOLDEN_IDS.iter().copied().collect();
     assert_eq!(

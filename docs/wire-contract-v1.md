@@ -3764,3 +3764,634 @@ integers use decimal text.
 | `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
 | `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |
 | `gh_manifest_one_tap_set` | A real change to `manifest.one_tap`; no subject | Framed `true` or `false` |
+
+### Producer-generated manifest samples
+
+These TEST-ONLY samples use fixed Ed25519 and P-256 keys, a fixed clock and
+proposal ULID. Process epochs and report timestamps are normalized to fixed
+values after validating their wire types. Regenerate only with
+`CK_EMIT_MANIFEST_VECTORS=1 cargo test --locked -p credentials-module
+--features credentials-core/test-support --bin ck-claustrum
+manifest_binding_vectors_and_wire_goldens_are_producer_pinned`.
+The writer also updates `tests/vectors/manifest-binding-v1.json` and its
+`SHA256SUMS` entry. No sample key is trusted outside tests.
+
+<!-- manifest-binding-generated:start -->
+
+<!-- golden:manifest.active_status.not_ready -->
+```json
+{
+  "result": {
+    "computers": [
+      {
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      },
+      {
+        "member_id": "fed-computer:33333333333333333333333333333333",
+        "payload_sha256": null,
+        "reason": null,
+        "reported_at_ms": null,
+        "verdict": null,
+        "version": null
+      }
+    ],
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "ready": false,
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.active_status.ready -->
+```json
+{
+  "result": {
+    "computers": [
+      {
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      },
+      {
+        "member_id": "fed-computer:33333333333333333333333333333333",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      }
+    ],
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "ready": true,
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.approve.reply -->
+```json
+{
+  "result": {
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "proposal_id": "01HF7YAT000000000000000001",
+    "status": "approved",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.approve.request -->
+```json
+{
+  "method": "manifest.approve",
+  "params": {
+    "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+    "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg"
+  }
+}
+```
+
+<!-- golden:manifest.approve.resend -->
+```json
+{
+  "result": {
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "proposal_id": "01HF7YAT000000000000000001",
+    "status": "approved",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.cross.manifest_to_secret -->
+```json
+{
+  "reply": {
+    "result": {
+      "error": {
+        "class": "permanent",
+        "code": "approval_invalid"
+      }
+    }
+  },
+  "request": {
+    "method": "secret.approve",
+    "params": {
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+      "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.cross.secret_to_manifest -->
+```json
+{
+  "reply": {
+    "result": {
+      "error": {
+        "class": "permanent",
+        "code": "approval_invalid"
+      }
+    }
+  },
+  "request": {
+    "method": "manifest.approve",
+    "params": {
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6Im9uY2UiLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+      "signature_b64url": "MEYCIQDDDWb9MS6QQpePnL-LikCFsRQyD3aE2G8vX648DUMsAQIhAO2etZbnlxx-zUkWJhkm8noT5mGSGLtQd48RtMKwVFG9"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.envelope -->
+```json
+{
+  "approval_public_key_sec1_hex": "041e18532fd4754c02f3041d9c75ceb33b83ffd81ac7ce4fe882ccb1c98bc5896ea46c311c4e2ff40dd96a3653e6e45445d32dfe486eced75c7a90c6a18881c0a3",
+  "envelope": {
+    "decision": "allow",
+    "device_fingerprint": "11111111111111111111111111111111",
+    "issued_at_ms": 1794355300123,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+    "v": "ck-manifest-binding-envelope/v1"
+  },
+  "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+  "envelope_utf8": "{\"decision\":\"allow\",\"device_fingerprint\":\"11111111111111111111111111111111\",\"issued_at_ms\":1794355300123,\"proposal_id\":\"01HF7YAT000000000000000001\",\"statement_sha256\":\"eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6\",\"v\":\"ck-manifest-binding-envelope/v1\"}",
+  "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg",
+  "test_only_private_scalar_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+}
+```
+
+<!-- golden:manifest.latest.reply -->
+```json
+{
+  "result": {
+    "envelope": {
+      "key_id": "56fae12f77164627",
+      "manifest_bytes": "{\n  \"artifact_id\": \"gh-routing-manifest\",\n  \"manifest_version\": 29,\n  \"schema_floor\": 1,\n  \"issued_at_unix_secs\": 1794355300,\n  \"detectors\": [\n    {\n      \"name\": \"café 🦀\",\n      \"enabled\": true,\n      \"fallback\": null,\n      \"weight\": 1.5\n    }\n  ],\n  \"tiers\": {\n    \"write\": [\n      \"push\"\n    ],\n    \"read\": []\n  },\n  \"api_rules\": [],\n  \"canonicalization\": {\n    \"z_last\": false,\n    \"a_first\": \"line\\nfeed\"\n  },\n  \"repository_sections\": [],\n  \"bindings\": {\n    \"Zulu/Existing\": \"agent_1111111111111111\",\n    \"Alpha/Other\": \"agent_2222222222222222\",\n    \"cortexkit/opencode-sidebar\": \"agent_3333333333333333\",\n    \"Octo-Owner/New-Repo\": \"agent_4444444444444444\"\n  },\n  \"worker_reads\": []\n}\n",
+      "signature": "iAD7y8ZFicBY9GkwqxcjiPE4QcROuTZ3Cc7NR5vILApdY5BR6jUEMCOzNTaZ5gCXuhWodNffXAUm8rAGa15dAQ=="
+    },
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.propose.reply -->
+```json
+{
+  "result": {
+    "expires_at_ms": 1794441700123,
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "manifest_version": 29,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+    "status": "approval_required"
+  }
+}
+```
+
+<!-- golden:manifest.propose.request -->
+```json
+{
+  "method": "manifest.propose_binding",
+  "params": {
+    "agent_id": "agent_4444444444444444",
+    "app_id": 4617236,
+    "app_slug": "plex-alfonso",
+    "repo": "octo-owner/new-repo"
+  }
+}
+```
+
+<!-- golden:manifest.refusal.already_bound -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "already_bound",
+      "manifest_sha256": "3551b398de3c6bd38903c49abc3d7b975b716b9f6b69fb4f8ce5316caa50cdf4",
+      "version": 30
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.approval_invalid -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "approval_invalid"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.bound_to_other_agent -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "bound_to_other_agent"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.expired -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "expired"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.github_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "github_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.home_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "home_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.identity_mismatch -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "identity_mismatch"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.identity_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "identity_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_all -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_all"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_too_large -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_too_large"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_unusable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_unusable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.invalid_params -->
+```json
+{
+  "code": "invalid_params",
+  "message": "params not decodable: invalid manifest proposal parameters"
+}
+```
+
+<!-- golden:manifest.refusal.manifest_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "manifest_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_found -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_found"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_installed -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_installed"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_reproducible -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_reproducible"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.one_tap_disabled -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "one_tap_disabled"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.pairing_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "pairing_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.phone_not_registered -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "phone_not_registered"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.forwarded -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.forwarded_with_remedy -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.with_remedy -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.secret_home_elsewhere -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "secret_home_elsewhere",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.secret_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "secret_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.stale_base -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "stale_base"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.store_error -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "store_error"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.superseded -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "superseded"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.unknown_version -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "unknown_version"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.report.reply -->
+```json
+{
+  "result": {
+    "member_id": "fed-computer:22222222222222222222222222222222",
+    "status": "recorded",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.report.request -->
+```json
+{
+  "method": "manifest.report_active",
+  "params": {
+    "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "reason": null,
+    "verdict": "valid",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.statement -->
+```json
+{
+  "statement": {
+    "agent_id": "agent_4444444444444444",
+    "app_slug": "plex-alfonso",
+    "expires_at_ms": 1794441700123,
+    "installation_permissions": {
+      "contents": "read",
+      "issues": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "manifest_version": 29,
+    "prior_sha256": "91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5",
+    "prior_version": 28,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "repo": "Octo-Owner/New-Repo",
+    "v": "ck-manifest-binding-statement/v1"
+  },
+  "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+  "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+  "statement_utf8": "{\"agent_id\":\"agent_4444444444444444\",\"app_slug\":\"plex-alfonso\",\"expires_at_ms\":1794441700123,\"installation_permissions\":{\"contents\":\"read\",\"issues\":\"write\",\"metadata\":\"read\",\"pull_requests\":\"write\"},\"manifest_sha256\":\"94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3\",\"manifest_version\":29,\"prior_sha256\":\"91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5\",\"prior_version\":28,\"proposal_id\":\"01HF7YAT000000000000000001\",\"repo\":\"Octo-Owner/New-Repo\",\"v\":\"ck-manifest-binding-statement/v1\"}"
+}
+```
+
+<!-- golden:manifest.watch.empty -->
+```json
+{
+  "epoch": "00112233445566778899aabbccddeeff",
+  "kind": "changed",
+  "manifest_sha256": null,
+  "seq": 1,
+  "version": null
+}
+```
+
+<!-- golden:manifest.watch.stored -->
+```json
+{
+  "epoch": "00112233445566778899aabbccddeeff",
+  "kind": "changed",
+  "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+  "seq": 1,
+  "version": 29
+}
+```
+<!-- manifest-binding-generated:end -->

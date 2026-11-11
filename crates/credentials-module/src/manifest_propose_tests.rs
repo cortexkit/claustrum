@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "manifest_binding_vectors_tests.rs"]
+mod manifest_binding_vectors;
 use crate::manifest_identity::{decode_identity_reply, IdentityCheckError, IdentityReply};
 use async_trait::async_trait;
 use credentials_core::{

@@ -116,6 +116,43 @@ fn setup_complete(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 impl EncryptedStore {
+    /// Read only an active GitHub App's OAuth material for proposal checks. Unlike
+    /// ordinary credential reads, damaged bytes are not quarantined here: a refused
+    /// proposal must leave both the credential and the audit chain unchanged.
+    pub fn github_app_oauth_for_manifest_proposal(
+        &self,
+        record_id: &str,
+    ) -> Result<Option<crate::oauth::OAuthCredential>, StoreOpError> {
+        if !record_id.starts_with("github_app:") {
+            return Ok(None);
+        }
+        let row = self.store.with_conn(|conn| {
+            conn.query_row(
+                "SELECT record_version,envelope FROM credentials WHERE credential_id=?1 AND state='active'",
+                [record_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            ).optional()
+        }).map_err(StoreOpError::from)?;
+        let Some((version, blob)) = row else {
+            return Ok(None);
+        };
+        let bytes = super::envelope::open(
+            &self.key,
+            &blob,
+            &super::RecordBinding {
+                credential_id: record_id,
+                record_version: version as u64,
+            },
+        )
+        .map_err(StoreOpError::Decrypt)?;
+        let record = super::VaultRecord::decode(&bytes)
+            .map_err(|error| StoreOpError::Corrupt(error.to_string()))?;
+        if record.kind != super::CredentialKind::Oauth {
+            return Ok(None);
+        }
+        Ok(record.oauth)
+    }
+
     /// Malformed or unreadable values never enable statement creation.
     pub fn manifest_one_tap_enabled(&self) -> bool {
         self.store

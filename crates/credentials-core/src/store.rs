@@ -18473,6 +18473,8 @@ mod transfer_key_fence_tests;
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
 
+#[path = "store_gh_activations.rs"]
+mod gh_activations;
 #[path = "store_gh_approval.rs"]
 mod gh_approval;
 #[path = "store_gh_manifests.rs"]
@@ -18481,6 +18483,11 @@ mod gh_manifests;
 mod gh_proposals;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
+pub use gh_activations::{
+    GhManifestActivationOutcome, GhManifestActivationReport, GhManifestActiveStatus,
+    GhManifestComputerStatus, GhManifestHandoffEnvelope, GhManifestLatest,
+    GhManifestLowerVersionReported, GhManifestVerdict,
+};
 pub use gh_manifests::{GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID};
 pub use gh_proposals::{
     manifest_one_tap_status_read_only, GhManifestProposal, GhManifestProposalError,

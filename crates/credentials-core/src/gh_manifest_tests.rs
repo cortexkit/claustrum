@@ -269,18 +269,134 @@ fn statement_builder_commits_the_built_and_prior_manifests() {
 }
 
 #[test]
-fn statement_sorts_object_keys_by_utf16_and_does_not_ascii_escape() {
+fn statement_sorts_valid_permission_keys_and_does_not_ascii_escape() {
     let mut statement = sample_statement();
     statement.app_slug = "café".to_owned();
-    statement.installation_permissions = BTreeMap::from([
-        ("\u{e000}".to_owned(), "read".to_owned()),
-        ("\u{1f600}".to_owned(), "write".to_owned()),
-    ]);
     let bytes = statement.canonical_bytes().unwrap();
     let text = std::str::from_utf8(&bytes).unwrap();
     assert!(text.contains("\"app_slug\":\"café\""));
-    // UTF-16 orders the emoji's leading surrogate before U+E000; UTF-8 does not.
-    assert!(text.contains("\"installation_permissions\":{\"😀\":\"write\",\"\u{e000}\":\"read\"}"));
+    assert!(text.contains(
+        "\"installation_permissions\":{\"contents\":\"admin\",\"metadata\":\"read\",\"pull_requests\":\"write\"}"
+    ));
+}
+
+fn statement_with_permissions(
+    permissions: BTreeMap<String, String>,
+) -> Result<ManifestBindingStatement, ManifestError> {
+    let prior = GhManifest::parse_reproducible(V28).unwrap();
+    let sample = sample_statement();
+    ManifestBindingStatement::new(
+        sample.proposal_id,
+        sample.agent_id,
+        sample.app_slug,
+        sample.repo,
+        permissions,
+        &prior,
+        &prior,
+        sample.expires_at_ms,
+    )
+}
+
+fn assert_invalid_permissions(permissions: BTreeMap<String, String>) {
+    assert!(matches!(
+        validate_installation_permissions(&permissions),
+        Err(ManifestError::InvalidInstallationPermissions)
+    ));
+    assert!(matches!(
+        statement_with_permissions(permissions.clone()),
+        Err(ManifestError::InvalidInstallationPermissions)
+    ));
+    // Public fields and deserialization must not bypass the builder's validation.
+    let mut statement = sample_statement();
+    statement.installation_permissions = permissions;
+    assert!(matches!(
+        statement.canonical_bytes(),
+        Err(ManifestError::InvalidInstallationPermissions)
+    ));
+    assert!(matches!(
+        statement.statement_sha256(),
+        Err(ManifestError::InvalidInstallationPermissions)
+    ));
+}
+
+#[test]
+fn installation_permissions_accept_real_names_and_all_three_levels() {
+    let long_name = "organization_personal_access_token_requests";
+    assert_eq!(long_name.len(), 43);
+    let permissions = BTreeMap::from([
+        (long_name.to_owned(), "admin".to_owned()),
+        ("pull_requests".to_owned(), "write".to_owned()),
+        ("metadata".to_owned(), "read".to_owned()),
+    ]);
+    validate_installation_permissions(&permissions).unwrap();
+    let statement = statement_with_permissions(permissions.clone()).unwrap();
+    assert_eq!(statement.installation_permissions, permissions);
+    assert!(statement.canonical_bytes().is_ok());
+}
+
+#[test]
+fn installation_permissions_count_accepts_1_and_64_refuses_0_and_65() {
+    assert_eq!(MIN_MANIFEST_INSTALLATION_PERMISSIONS, 1);
+    assert_eq!(MAX_MANIFEST_INSTALLATION_PERMISSIONS, 64);
+    for count in [1, 64] {
+        let permissions = (0..count)
+            .map(|index| (format!("permission_{index}"), "read".to_owned()))
+            .collect();
+        let statement = statement_with_permissions(permissions).unwrap();
+        assert_eq!(statement.installation_permissions.len(), count);
+        assert!(statement.canonical_bytes().is_ok());
+    }
+    for count in [0, 65] {
+        assert_invalid_permissions(
+            (0..count)
+                .map(|index| (format!("permission_{index}"), "read".to_owned()))
+                .collect(),
+        );
+    }
+}
+
+#[test]
+fn installation_permission_name_accepts_64_bytes_refuses_65() {
+    assert_eq!(MAX_MANIFEST_PERMISSION_NAME_BYTES, 64);
+    let statement =
+        statement_with_permissions(BTreeMap::from([("a".repeat(64), "read".into())])).unwrap();
+    assert!(statement.canonical_bytes().is_ok());
+    assert_invalid_permissions(BTreeMap::from([("a".repeat(65), "read".into())]));
+}
+
+#[test]
+fn statement_builder_refuses_u2028_permission_name() {
+    assert!(matches!(
+        statement_with_permissions(BTreeMap::from([("contents\u{2028}".into(), "read".into())])),
+        Err(ManifestError::InvalidInstallationPermissions)
+    ));
+}
+
+#[test]
+fn installation_permissions_refuse_ambiguous_or_non_identifier_names() {
+    for name in [
+        "contents\u{2028}",
+        "contents\u{2029}",
+        "\u{202e}contents",
+        "Contents",
+        "pull-requests",
+        "",
+        "_contents",
+        "1contents",
+        "contents\nmetadata",
+        "contents\0",
+        "😀",
+        "\u{e000}",
+    ] {
+        assert_invalid_permissions(BTreeMap::from([(name.to_owned(), "read".into())]));
+    }
+}
+
+#[test]
+fn installation_permissions_refuse_unknown_or_inexact_levels() {
+    for level in ["unknown", "Read", "read ", "", "read\nwrite"] {
+        assert_invalid_permissions(BTreeMap::from([("metadata".into(), level.to_owned())]));
+    }
 }
 
 #[test]

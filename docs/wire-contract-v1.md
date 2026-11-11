@@ -3638,8 +3638,12 @@ UTF-8 bytes with fields **exactly**
 `v` is `ck-manifest-binding-statement/v1`. `repo` uses GitHub `full_name` casing;
 `prior_version` and `prior_sha256` identify the base. `installation_permissions`
 is the bot installation's GitHub permission map exactly as returned for that
-installation at proposal time, with values `read`, `write` or `admin` and keys
-sorted as JCS sorts every object. It is stored with the proposal so the phone
+installation at proposal time. It has **1 to 64 entries**, every name matches
+`^[a-z][a-z0-9_]{0,63}$` (1 to 64 ASCII bytes), and every level is exactly `read`,
+`write` or `admin`. Keys are sorted as JCS sorts every object. The phone refuses
+statements outside these bounds, and the vault refuses to build them. An invalid
+map reaching `manifest.propose_binding` is refused before any proposal or audit
+row is written. The map is stored with the proposal so the phone
 never signs without seeing what the bot may do. The statement has no display
 names; the card renders the agent's name from `agent_id`.
 The statement and envelope use unpadded base64url; SHA-256 fields are lowercase
@@ -3782,7 +3786,7 @@ In addition, callers outside each operation's admitted principal receive uniform
 
 | Operation | Class | Codes and conditions |
 |---|---|---|
-| `manifest.propose_binding` | `permanent` | `not_found` (not the home); `manifest_setup_incomplete`; `identity_mismatch`; `not_installed`; `installation_all`; `installation_unusable`; `installation_too_large`; `already_bound` with `{version, manifest_sha256}`; `bound_to_other_agent`; `not_reproducible` |
+| `manifest.propose_binding` | `permanent` | `not_found` (not the home); `manifest_setup_incomplete`; `identity_mismatch`; `not_installed`; `installation_all`; `installation_unusable`; `installation_too_large`; `installation_permissions_invalid` (permission map outside the statement grammar or bounds); `already_bound` with `{version, manifest_sha256}`; `bound_to_other_agent`; `not_reproducible` |
 | `manifest.propose_binding` | `transient` | `one_tap_disabled`; `identity_unavailable`; `github_unavailable`; `stale_base`; `store_error` |
 | `manifest.approve` — phone preflight | `permanent` | `phone_not_registered`; `secret_home_elsewhere` with `remedy_member`; `remote_setup_incomplete` (with `remedy_member` when known), exactly as `secret.approve` |
 | `manifest.approve` — phone preflight | `transient` | `pairing_unavailable`; `store_error`, exactly as `secret.approve` |

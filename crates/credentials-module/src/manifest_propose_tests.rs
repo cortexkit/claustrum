@@ -623,6 +623,97 @@ async fn manifest_propose_installation_refusals_use_typed_checker() {
     }
 }
 
+fn http_with_installation_permissions(permissions: Value) -> HttpStub {
+    let mut installation: Value = serde_json::from_slice(INSTALLATIONS).unwrap();
+    installation[0]["permissions"] = permissions;
+    HttpStub::new(vec![
+        (200, serde_json::to_vec(&installation).unwrap()),
+        (201, TOKENS.to_vec()),
+        (200, page(1, &[REPO])),
+    ])
+}
+
+#[tokio::test]
+async fn manifest_propose_permission_refusals_are_golden_and_match_contract() {
+    let code = "installation_permissions_invalid";
+    let doc = include_str!("../../../docs/wire-contract-v1.md");
+    let section = doc.split("### Domain refusals").last().unwrap();
+    let permanent_row = section
+        .lines()
+        .find(|line| line.starts_with("| `manifest.propose_binding` | `permanent` |"))
+        .unwrap();
+    assert!(permanent_row.contains(&format!("`{code}`")));
+    assert_eq!(section.matches(&format!("`{code}`")).count(), 1);
+
+    let too_many: serde_json::Map<String, Value> = (0..65)
+        .map(|index| (format!("permission_{index}"), json!("read")))
+        .collect();
+    let mut cases = vec![json!({}), Value::Object(too_many)];
+    for name in [
+        "contents\u{2028}",
+        "contents\u{2029}",
+        "\u{202e}contents",
+        "Contents",
+        "pull-requests",
+        "",
+        "😀",
+        "\u{e000}",
+        &"a".repeat(65),
+    ] {
+        cases.push(json!({name: "read"}));
+    }
+    for permissions in cases {
+        let rig = rig("");
+        let before = snapshot(&rig);
+        let http = http_with_installation_permissions(permissions);
+        assert_refusal(
+            propose(&rig, &IdentityStub::good(), &http).await,
+            code,
+            "permanent",
+        );
+        assert_eq!(http.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(snapshot(&rig), before);
+    }
+}
+
+#[tokio::test]
+async fn manifest_propose_unknown_permission_level_remains_github_unavailable() {
+    let rig = rig("");
+    let before = snapshot(&rig);
+    let http = http_with_installation_permissions(json!({"contents": "unknown"}));
+    assert_refusal(
+        propose(&rig, &IdentityStub::good(), &http).await,
+        "github_unavailable",
+        "transient",
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(snapshot(&rig), before);
+}
+
+#[tokio::test]
+async fn manifest_propose_accepts_real_permissions_and_boundary_maps() {
+    let at_count_limit: serde_json::Map<String, Value> = (0..64)
+        .map(|index| (format!("permission_{index}"), json!("read")))
+        .collect();
+    for permissions in [
+        json!({"organization_personal_access_token_requests": "admin", "pull_requests": "write", "metadata": "read"}),
+        Value::Object(at_count_limit),
+        json!({"a".repeat(64): "read"}),
+    ] {
+        let rig = rig("");
+        let http = http_with_installation_permissions(permissions.clone());
+        let answer = reply(propose(&rig, &IdentityStub::good(), &http).await);
+        assert_eq!(answer["status"], "approval_required");
+        let statement: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(answer["statement_b64url"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(statement["installation_permissions"], permissions);
+    }
+}
+
 #[tokio::test]
 async fn manifest_propose_manifest_refusals_follow_both_outbound_checks() {
     for (case, code, class) in [

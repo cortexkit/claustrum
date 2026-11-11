@@ -173,6 +173,7 @@ pub enum ManifestError {
     NotReproducible,
     InvalidManifest(&'static str),
     InvalidStatementInteger(&'static str),
+    InvalidInstallationPermissions,
 }
 
 impl fmt::Display for ManifestError {
@@ -183,6 +184,9 @@ impl fmt::Display for ManifestError {
             Self::InvalidManifest(reason) => write!(formatter, "invalid manifest: {reason}"),
             Self::InvalidStatementInteger(field) => {
                 write!(formatter, "invalid statement integer: {field}")
+            }
+            Self::InvalidInstallationPermissions => {
+                formatter.write_str("invalid installation permissions")
             }
         }
     }
@@ -319,6 +323,31 @@ pub const MANIFEST_BINDING_STATEMENT_V1_TAG: &[u8] = b"ck-manifest-binding-state
 /// Statement counters and times must survive the phone's JSON number parsing
 /// without rounding; use the same exact-integer bound as agent-secret approvals.
 pub const MAX_MANIFEST_JSON_INTEGER: i64 = crate::agent_secret::MAX_SECRET_JSON_INTEGER as i64;
+pub const MIN_MANIFEST_INSTALLATION_PERMISSIONS: usize = 1;
+pub const MAX_MANIFEST_INSTALLATION_PERMISSIONS: usize = 64;
+pub const MAX_MANIFEST_PERMISSION_NAME_BYTES: usize = 64;
+
+/// Keep the phone's permission card unambiguous: names are bounded ASCII
+/// identifiers, and every entry describes one of GitHub's three permission levels.
+pub fn validate_installation_permissions(
+    permissions: &BTreeMap<String, String>,
+) -> Result<(), ManifestError> {
+    if !(MIN_MANIFEST_INSTALLATION_PERMISSIONS..=MAX_MANIFEST_INSTALLATION_PERMISSIONS)
+        .contains(&permissions.len())
+        || permissions.iter().any(|(name, level)| {
+            let bytes = name.as_bytes();
+            bytes.len() > MAX_MANIFEST_PERMISSION_NAME_BYTES
+                || !bytes.first().is_some_and(u8::is_ascii_lowercase)
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+                || !matches!(level.as_str(), "read" | "write" | "admin")
+        })
+    {
+        return Err(ManifestError::InvalidInstallationPermissions);
+    }
+    Ok(())
+}
 
 /// The exact phone-visible commitment; no agent display name is included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +378,7 @@ impl ManifestBindingStatement {
         prior: &GhManifest,
         expires_at_ms: i64,
     ) -> Result<Self, ManifestError> {
+        validate_installation_permissions(&installation_permissions)?;
         let statement = Self {
             v: MANIFEST_BINDING_STATEMENT_V1.to_owned(),
             proposal_id,
@@ -384,6 +414,7 @@ impl ManifestBindingStatement {
     /// Canonicalization Scheme (RFC 8785) form; manifest objects themselves must
     /// never be sorted this way.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ManifestError> {
+        validate_installation_permissions(&self.installation_permissions)?;
         self.validate_jcs_integers()?;
         let mut value =
             ManifestValue::deserialize(serde_json::to_value(self).expect("statement JSON value"))

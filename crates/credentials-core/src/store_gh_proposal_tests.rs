@@ -603,21 +603,20 @@ fn gh_manifest_proposal_stores_exact_build_full_name_jcs_permissions_and_commitm
 }
 
 #[test]
-fn gh_manifest_proposal_permissions_follow_jcs_utf16_not_native_map_order() {
+fn gh_manifest_proposal_refuses_non_ascii_permissions_without_writes() {
     let (_root, store) = ready("manifest-proposal-permissions");
+    let before = snapshot(&store);
     let mut request = input(REPO);
     request.installation_permissions = BTreeMap::from([
         ("\u{e000}".into(), "read".into()),
         ("😀".into(), "write".into()),
     ]);
     let prepared = store.prepare_gh_manifest_proposal(request).unwrap();
-    let proposal = store
-        .propose_gh_manifest_binding(&prepared, "reserved:plexus", || true, || NOW)
-        .unwrap();
-    assert_eq!(
-        proposal.installation_permissions,
-        "{\"😀\":\"write\",\"\u{e000}\":\"read\"}".as_bytes()
-    );
+    assert!(matches!(
+        store.propose_gh_manifest_binding(&prepared, "reserved:plexus", || true, || NOW),
+        Err(GhManifestProposalError::NotReproducible)
+    ));
+    assert_eq!(snapshot(&store), before);
 }
 
 #[test]

@@ -127,6 +127,113 @@ fn input(repo: &str) -> GhManifestProposalInput {
     }
 }
 
+#[test]
+fn gh_manifest_proposal_oauth_read_never_quarantines_or_writes() {
+    let (_root, store) = ready("manifest-read-only-oauth");
+    let id = "github_app:repo-bot";
+    let credential = crate::oauth::OAuthCredential {
+        access_token: "test-token".to_owned().into(),
+        refresh_token: "test-key".to_owned().into(),
+        expires_at_ms: Some(0),
+        token_url: String::new(),
+        client_id: Some("test-client".into()),
+        client_secret: None,
+        scopes: vec![],
+    };
+    store
+        .create(
+            id,
+            &VaultRecord::new_oauth("test", "github_app", credential, b"test-token".to_vec()),
+        )
+        .unwrap();
+    let all_rows = || {
+        let mut rows = snapshot(&store);
+        rows.push(
+            store
+                .with_raw_conn(|conn| {
+                    let mut stmt =
+                        conn.prepare("SELECT * FROM credentials ORDER BY credential_id")?;
+                    let count = stmt.column_count();
+                    let rows = stmt
+                        .query_map([], |row| {
+                            (0..count)
+                                .map(|i| row.get(i))
+                                .collect::<rusqlite::Result<Vec<Value>>>()
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .unwrap(),
+        );
+        rows
+    };
+    let before = all_rows();
+    assert_eq!(
+        store
+            .github_app_oauth_for_manifest_proposal(id)
+            .unwrap()
+            .unwrap()
+            .access_token
+            .expose(),
+        "test-token"
+    );
+    assert!(store
+        .github_app_oauth_for_manifest_proposal("github_app:missing")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .github_app_oauth_for_manifest_proposal(GH_MANIFEST_ROOT_KEY_ID)
+        .unwrap()
+        .is_none());
+    assert_eq!(all_rows(), before);
+    store.invalidate(id).unwrap();
+    let before = all_rows();
+    assert!(store
+        .github_app_oauth_for_manifest_proposal(id)
+        .unwrap()
+        .is_none());
+    assert_eq!(all_rows(), before);
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE credentials SET state='active',envelope=x'00' WHERE credential_id=?1",
+                [id],
+            )
+        })
+        .unwrap();
+    let before = all_rows();
+    assert!(matches!(
+        store.github_app_oauth_for_manifest_proposal(id),
+        Err(StoreOpError::Decrypt(_))
+    ));
+    assert_eq!(all_rows(), before);
+    // A valid seal with an invalid record exercises record decoding separately from
+    // opening the envelope.
+    let blob = super::super::envelope::seal(
+        &store.key,
+        b"not a record",
+        &super::super::RecordBinding {
+            credential_id: id,
+            record_version: 1,
+        },
+    )
+    .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE credentials SET envelope=?2 WHERE credential_id=?1",
+                params![id, blob],
+            )
+        })
+        .unwrap();
+    let before = all_rows();
+    assert!(matches!(
+        store.github_app_oauth_for_manifest_proposal(id),
+        Err(StoreOpError::Corrupt(_))
+    ));
+    assert_eq!(all_rows(), before);
+}
+
 fn propose(store: &EncryptedStore, now: i64) -> GhManifestProposal {
     let prepared = store.prepare_gh_manifest_proposal(input(REPO)).unwrap();
     store

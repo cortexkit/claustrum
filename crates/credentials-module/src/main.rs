@@ -24,6 +24,8 @@ mod admin_surface;
 mod connectors;
 mod federation;
 mod limiter;
+mod manifest_identity;
+mod manifest_propose;
 mod read_surface;
 mod secret_phone;
 mod secret_use;
@@ -1399,6 +1401,13 @@ async fn dispatch_route_request(
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
     if method
         .as_ref()
+        .is_some_and(|request| request.method == manifest_propose::OP_PROPOSE_BINDING)
+        && !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id == "plexus")
+    {
+        return send_route_result(writer, header, uniform_not_found()).await;
+    }
+    if method
+        .as_ref()
         .is_some_and(|request| connectors::is_op(&request.method))
     {
         return handle_read_request(frame, writer, surface, admin, caller.principal()).await;
@@ -1642,6 +1651,29 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        manifest_propose::OP_PROPOSE_BINDING => {
+            match manifest_propose::serve(
+                Arc::clone(surface.store()),
+                admin.home().outbound(),
+                principal.as_ref(),
+                &request.params,
+            )
+            .await
+            {
+                manifest_propose::ProposeAnswer::Reply(reply) => wrap_result(reply),
+                manifest_propose::ProposeAnswer::InvalidParams => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid manifest proposal parameters",
+                    )
+                    .await
+                }
+            }
+        }
         method @ ("connectors.list" | "connectors.watch") => {
             return connectors::serve(
                 frame.header,
@@ -2511,6 +2543,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.home".into(), description: None, kind: ManagementOperationKind::Query },
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: manifest_propose::OP_PROPOSE_BINDING.into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
@@ -2850,6 +2883,7 @@ mod tests {
         for name in secret_phone::PHONE_OPS.into_iter().chain([
             "secret.home",
             "secret.use",
+            manifest_propose::OP_PROPOSE_BINDING,
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
             "permissions.list",

@@ -13,6 +13,8 @@
 #[path = "federation/mod.rs"]
 pub mod federation;
 pub mod manifest_identity;
+#[cfg(not(test))]
+pub mod manifest_propose;
 pub mod secret_phone;
 pub mod secret_use;
 

@@ -170,6 +170,8 @@ are unchanged.
 | venice | https://api.venice.ai/api/v1/chat/completions | 2026-11-10 | 401 | - | - |
 | vivgrid | https://api.vivgrid.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | volcengine | https://ark.cn-beijing.volces.com/api/v3/chat/completions | 2026-11-11 | 401 | AuthenticationError | /error/code |
+| sensenova | https://token.sensenova.cn/v1/models | 2026-11-11 | 401 | - | - |
+| vancine | https://vancine.com/v1/models | 2026-11-11 | 401 | vancine_error | /error/type |
 | vultr | https://api.vultrinference.com/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
 | wafer-serverless | https://pass.wafer.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | wallaby | https://api.wallabytoken.com/v1/models | 2026-11-11 | 401 | authentication_error | /error/type |
@@ -1181,6 +1183,137 @@ One selected id remains uncovered:
   context alone, so no skip was claimed.
   No standalone inference probe or invalid-key evidence was recorded.
 
+## Final dispositions for the remaining Fusiform providers
+
+On 2026-11-11 the owner reviewed the remaining 27 uncovered ids and approved
+nine rows and eighteen skips. These decisions supersede the earlier sections'
+uncovered dispositions, without changing any existing row's identity, routing or
+categories. `ck-auth provider-report --missing` now has no uncovered ids before
+its `Skipped:` section; the section still lists all 37 reviewed skips. The
+proposer (`cargo run --locked -p credentials-core --example ckdev_provider_rows`)
+has no remaining row to propose. Regolo AI has text and image output in the
+vendored list, so its new row defaults to both LLM and media; the other eight
+new rows have text output and default to LLM only. All nine use their published
+Fusiform id as the catalog key and routing default, and have no model-vendor
+assignments.
+
+### Rendered documentation and fresh checks
+
+The owner read these four rendered pages in a real browser on 2026-11-11.
+Re-reading them with the documentation reader returned empty pages for
+ModelScope, SenseNova and Vancine, and HTTP 403 for Scaleway. The host/header
+facts below therefore cite the owner's rendered-page quotations, not text
+recovered by that reader:
+
+- `modelscope`: <https://modelscope.cn/docs/model-service/API-Inference/intro>
+  gives base `https://api-inference.modelscope.cn/v1` and literally shows
+  `"Authorization": f"Bearer {…}"`. On 2026-11-11 the Linux bogus-key GET to
+  `/v1/models` returned HTTP 200 with a model list. That public response cannot
+  check a key, so the row is unvalidated and has no invalid-key evidence line.
+- `scaleway`: <https://www.scaleway.com/en/docs/generative-apis/api-cli/using-generative-apis/>
+  says "Authorization: HTTP header with your API key prefixed by Bearer" and
+  shows `curl -H "Authorization: Bearer $SCW_SECRET_KEY" https://api.scaleway.ai/v1/models`.
+  On 2026-11-11 that GET with a bogus key returned HTTP 403,
+  `{"error":{"code":403,"message":"insufficient permissions to access the resource","type":"forbidden","param":""}}`.
+  It does not specifically identify an invalid key, so the row is unvalidated
+  and has no invalid-key evidence line.
+- `sensenova`: <https://platform.sensenova.cn/docs> gives
+  `https://token.sensenova.cn/v1`, says every request carries
+  `Authorization: Bearer $SENSENOVA_API_KEY`, and says keys start `sk-`.
+  On 2026-11-11 the bogus-key models GET returned HTTP 401 with
+  `{"error":{"code":16,"message":"Forbidden"}}`. The row uses that GET check;
+  the numeric code is not coerced to a string in the evidence table.
+- `vancine`: <https://vancine.com/docs> gives `https://vancine.com/v1`,
+  `Authorization: Bearer sk-…`, and "GET /v1/models requires an API key".
+  On 2026-11-11 the bogus-key models GET returned HTTP 401 with message
+  `Invalid token (request id: …)` and `error.type: vancine_error` (the
+  `error.code` string was empty). The row uses that GET check and records the
+  nonempty type at `/error/type`.
+
+These four checks ran on a network-enabled Linux build server with redirects
+disabled and `Authorization: Bearer ck-invalid-provider-probe`. No real key was
+used, no model call was sent, and no public model-list success is treated as a
+successful key check.
+
+### Documented keys checked on first use
+
+The owner approved the following rows without a login probe. Their earlier
+2026-11-11 inconclusive observations remain observations, not authentication
+evidence; each row has `invalid_key: None` and explains why it is stored unchecked.
+
+- `modelis`: <https://modelishub.com/pricing> documents Bearer keys at
+  `https://modelishub.com/v1`. The two earlier bogus-key chat probes returned
+  HTTP 502. The separate RapidAPI key is not substituted.
+- `poolside`: <https://docs.poolside.ai/api/overview.md> documents hosted Bearer
+  inference at `inference.poolside.ai`. The earlier models checks failed TLS
+  before an HTTP response; self-managed deployments are not covered.
+- `regolo-ai`: <https://docs.regolo.ai/getting-started/quick-start/> documents
+  Bearer keys at `api.regolo.ai`. The earlier model-group and chat checks were
+  blocked by an HTML administrative-rules 403, not a key refusal.
+- `stackit`: <https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models>
+  documents Bearer keys at
+  `api.openai-compat.model-serving.eu01.onstackit.cloud`. The earlier models and
+  chat checks returned empty HTTP 403 responses, not authentication-specific errors.
+- `volcengine-coding-plan`: <https://www.volcengine.com/docs/82379/1928261>
+  explicitly names the OpenAI-compatible base
+  `https://ark.cn-beijing.volces.com/api/coding/v3`. Re-read on 2026-11-11,
+  Volcengine's own Ark guide at
+  <https://ark.volcengine.com/region:cn-beijing/docs/base-url-and-authentication>
+  explicitly says to add `Authorization: Bearer $ARK_API_KEY` in the HTTP header
+  and shows that header on `ark.cn-beijing.volces.com`. Together these establish
+  the coding base and the key header for that same host, as the owner required;
+  the coding-tool settings alone are not the header evidence. No reliable free
+  check for the coding path was established. The coding guide warns not to use
+  ordinary `/api/v3` because it incurs charges outside Coding Plan quota, so the
+  ordinary Ark row's chat check is not reused.
+
+### Reviewed skips and availability rechecks
+
+On 2026-11-11 the Linux build server rechecked the five unavailable services:
+
+- `clarifai`: `api.clarifai.com` and `docs.clarifai.com` failed DNS with
+  "Name or service not known". `clarifai.com` still resolved to the parking
+  address `192.64.119.122`; the parked-domain assessment is the owner's ruling.
+- `lilac`: bogus-key GET `https://api.getlilac.com/v1/models` returned HTTP 410,
+  `Lilac inference has been discontinued.`
+- `llmtech`: bogus-key GET `https://api.llmtech.eu/v1/models` returned HTTP 410,
+  `error.code: service_closed`, saying "The LLM Tech API was shut down on
+  31 October 2026 and keys no longer work."
+- `neosmith`: `router.neosmith.ai` failed DNS with "Temporary failure in name
+  resolution"; this observation establishes unreachability from the build
+  server, not proof that the domain was permanently removed.
+- `routing-run`: `docs.routing.run` failed DNS with "Name or service not known".
+
+The two HTTP rechecks used the same bogus Bearer value as above and disabled
+redirects. These five ids use the new discontinued-or-unreachable reason rather
+than claiming that their documentation has no API key.
+
+The owner also approved a public-documentation reason for twelve ids, based on
+the documentation reviewed in the earlier sections: `ebcloud` exposes the host
+only in the signed-in console's sample code; `hetzner` and `nova` put the relevant
+docs behind sign-in; `kuae-cloud-coding-plan`, `qihang-ai`, `scx-ai`, `vispark`,
+`tokenrouter`, `tencent-tokenhub`, `tencent-token-plan`, `tencent-coding-plan` and
+`scnet-token-plan` do not publicly establish both the API host and key header.
+This reason is about the missing public contract, not an assertion that no key
+exists. In addition, the owner confirmed that the Token Plan page
+<https://cloud.tencent.com/document/product/1823/130060> limits the key to AI
+tools such as Claude Code and forbids API use in automated scripts, custom
+backends and non-interactive batch calls. Tencent Coding Plan's related terms
+at <https://cloud.tencent.com/document/product/1823/130092> and SCNet Token Plan
+at <https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html>
+likewise prohibit direct scripted/backend API calls. No probes were sent for
+these restricted plans, and general inference instructions were not substituted
+for their plan contracts.
+
+`watsonx` uses the token-exchange reason. IBM's
+<https://cloud.ibm.com/apidocs/iam-identity-token-api> documents exchanging an API
+key at `/identity/token` using `grant_type=urn:ibm:params:oauth:grant-type:apikey`.
+It says to use the returned `access_token` with the prefix `Bearer` in the HTTP
+`Authorization` header and documents the token's `expires_in` lifetime. The
+inference reference at <https://cloud.ibm.com/docs/apis/watsonx-ai> requires
+either `space_id` or `project_id` for text generation. The pasted IBM API key
+is therefore not itself a fixed-host inference Bearer key in this catalog.
+
 ## Fusiform provider skips
 
 This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
@@ -1283,6 +1416,9 @@ Only these reasons are permitted:
 - a duplicate offering of an existing row
 - a second secret or a per-account host in the style of Azure, Bedrock or Vertex
 - a user-hosted local server rather than a fixed provider API
+- the service is discontinued or unreachable
+- its public documentation does not name both the API host and the key header
+- the key is exchanged for a short-lived token before use
 
 | Fusiform id | reason |
 | --- | --- |
@@ -1305,6 +1441,24 @@ Only these reasons are permitted:
 | sap-ai-core | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | snowflake-cortex | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | umans-ai | a duplicate offering of an existing row |
+| clarifai | the service is discontinued or unreachable |
+| lilac | the service is discontinued or unreachable |
+| llmtech | the service is discontinued or unreachable |
+| neosmith | the service is discontinued or unreachable |
+| routing-run | the service is discontinued or unreachable |
+| ebcloud | its public documentation does not name both the API host and the key header |
+| hetzner | its public documentation does not name both the API host and the key header |
+| kuae-cloud-coding-plan | its public documentation does not name both the API host and the key header |
+| nova | its public documentation does not name both the API host and the key header |
+| qihang-ai | its public documentation does not name both the API host and the key header |
+| scnet-token-plan | its public documentation does not name both the API host and the key header |
+| scx-ai | its public documentation does not name both the API host and the key header |
+| tencent-coding-plan | its public documentation does not name both the API host and the key header |
+| tencent-token-plan | its public documentation does not name both the API host and the key header |
+| tencent-tokenhub | its public documentation does not name both the API host and the key header |
+| tokenrouter | its public documentation does not name both the API host and the key header |
+| vispark | its public documentation does not name both the API host and the key header |
+| watsonx | the key is exchanged for a short-lived token before use |
 
 ## Hosts without provider documentation
 

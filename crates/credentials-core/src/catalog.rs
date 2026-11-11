@@ -374,6 +374,66 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
     ),
     // The organization guide issues the same Umans Code keys as the existing umans row.
     ("umans-ai", "a duplicate offering of an existing row"),
+    // These services have closed or their documented API/documentation hosts no longer resolve.
+    ("clarifai", "the service is discontinued or unreachable"),
+    ("lilac", "the service is discontinued or unreachable"),
+    ("llmtech", "the service is discontinued or unreachable"),
+    ("neosmith", "the service is discontinued or unreachable"),
+    ("routing-run", "the service is discontinued or unreachable"),
+    // Public pages do not establish both where the key goes and how it is presented.
+    (
+        "ebcloud",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "hetzner",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "kuae-cloud-coding-plan",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "nova",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "qihang-ai",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "scnet-token-plan",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "scx-ai",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "tencent-coding-plan",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "tencent-token-plan",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "tencent-tokenhub",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "tokenrouter",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    (
+        "vispark",
+        "its public documentation does not name both the API host and the key header",
+    ),
+    // IBM Cloud API keys must first be exchanged for expiring IAM bearer tokens.
+    (
+        "watsonx",
+        "the key is exchanged for a short-lived token before use",
+    ),
 ];
 
 /// The permitted dispositions for a provider researched but not added to the catalog.
@@ -383,6 +443,9 @@ pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
     "a duplicate offering of an existing row",
     "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
     "a user-hosted local server rather than a fixed provider API",
+    "the service is discontinued or unreachable",
+    "its public documentation does not name both the API host and the key header",
+    "the key is exchanged for a short-lived token before use",
 ];
 
 use ModelVendor::{
@@ -4733,6 +4796,179 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    ApiKeyProvider {
+        key: "modelis",
+        fusiform_provider_id: Some("modelis"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["modelishub.com"],
+        hosts_doc: "https://modelishub.com/pricing",
+        invalid_key: None,
+        default_provider_ids: &["modelis"],
+        display_name: "Modelis",
+        default_id: "apikey:modelis",
+        dashboard_url: "https://modelishub.com/pricing",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Modelis returned gateway errors to key checks at https://modelishub.com/v1, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "modelscope",
+        fusiform_provider_id: Some("modelscope"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api-inference.modelscope.cn"],
+        hosts_doc: "https://modelscope.cn/docs/model-service/API-Inference/intro",
+        invalid_key: None,
+        default_provider_ids: &["modelscope"],
+        display_name: "ModelScope",
+        default_id: "apikey:modelscope",
+        dashboard_url: "https://modelscope.cn/docs/model-service/API-Inference/intro",
+        placeholder: "Access token",
+        validation: KeyValidation::Unvalidated {
+            reason: "ModelScope's model list at https://api-inference.modelscope.cn/v1/models accepts a bogus key, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "poolside",
+        fusiform_provider_id: Some("poolside"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["inference.poolside.ai"],
+        hosts_doc: "https://docs.poolside.ai/api/overview.md",
+        invalid_key: None,
+        default_provider_ids: &["poolside"],
+        display_name: "Poolside",
+        default_id: "apikey:poolside",
+        dashboard_url: "https://platform.poolside.ai",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Poolside's hosted inference endpoint failed TLS during key checks, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "regolo-ai",
+        fusiform_provider_id: Some("regolo-ai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.regolo.ai"],
+        hosts_doc: "https://docs.regolo.ai/getting-started/quick-start/",
+        invalid_key: None,
+        default_provider_ids: &["regolo-ai"],
+        display_name: "Regolo AI",
+        default_id: "apikey:regolo-ai",
+        dashboard_url: "https://docs.regolo.ai/getting-started/quick-start/",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Regolo AI blocked key checks with an administrative HTML 403 rather than an authentication error, so the key will be checked on first use",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "scaleway",
+        fusiform_provider_id: Some("scaleway"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.scaleway.ai"],
+        hosts_doc: "https://www.scaleway.com/en/docs/generative-apis/api-cli/using-generative-apis/",
+        invalid_key: None,
+        default_provider_ids: &["scaleway"],
+        display_name: "Scaleway",
+        default_id: "apikey:scaleway",
+        dashboard_url: "https://www.scaleway.com/en/docs/generative-apis/api-cli/using-generative-apis/",
+        placeholder: "Secret API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Scaleway's model list at https://api.scaleway.ai/v1/models returned an insufficient-permissions 403 rather than an invalid-key refusal, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "sensenova",
+        fusiform_provider_id: Some("sensenova"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["token.sensenova.cn"],
+        hosts_doc: "https://platform.sensenova.cn/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["sensenova"],
+        display_name: "SenseNova (China)",
+        default_id: "apikey:sensenova",
+        dashboard_url: "https://platform.sensenova.cn/docs",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://token.sensenova.cn/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "stackit",
+        fusiform_provider_id: Some("stackit"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.openai-compat.model-serving.eu01.onstackit.cloud"],
+        hosts_doc: "https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models",
+        invalid_key: None,
+        default_provider_ids: &["stackit"],
+        display_name: "STACKIT",
+        default_id: "apikey:stackit",
+        dashboard_url: "https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "STACKIT returned empty 403 responses to key checks rather than an authentication-specific refusal, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "vancine",
+        fusiform_provider_id: Some("vancine"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["vancine.com"],
+        hosts_doc: "https://vancine.com/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("vancine_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["vancine"],
+        display_name: "Vancine",
+        default_id: "apikey:vancine",
+        dashboard_url: "https://vancine.com/docs",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://vancine.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "volcengine-coding-plan",
+        fusiform_provider_id: Some("volcengine-coding-plan"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["ark.cn-beijing.volces.com"],
+        hosts_doc: "https://ark.volcengine.com/region:cn-beijing/docs/base-url-and-authentication",
+        invalid_key: None,
+        default_provider_ids: &["volcengine-coding-plan"],
+        display_name: "Volcengine Ark Coding Plan",
+        default_id: "apikey:volcengine-coding-plan",
+        dashboard_url: "https://www.volcengine.com/docs/82379/1928261",
+        placeholder: "Ark Coding Plan API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Volcengine documents https://ark.cn-beijing.volces.com/api/coding/v3 for Coding Plan but no reliable free key check; an ordinary Ark check could bill outside the plan, so the key will be checked on first use",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5282,6 +5518,15 @@ pub fn valid_category_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fusiform_catalog_has_no_unreviewed_gaps() {
+        let missing: Vec<_> = missing_fusiform_providers()
+            .into_iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
+        assert_eq!(missing, Vec::<&str>::new());
+    }
+
+    #[test]
     fn fusiform_gaps_exclude_any_carried_id_and_reviewed_skips() {
         let mut providers = crate::fusiform_providers::fusiform_providers()[..4].to_vec();
         for (provider, id) in providers
@@ -5567,6 +5812,18 @@ mod tests {
             (
                 "volcengine",
                 "Volcengine documents Ark on volcengine.com; its data plane uses volces.com",
+            ),
+            (
+                "scaleway",
+                "Scaleway documents Generative APIs on scaleway.com; keys go to api.scaleway.ai",
+            ),
+            (
+                "stackit",
+                "STACKIT documents model serving on stackit.cloud; its shared API uses onstackit.cloud",
+            ),
+            (
+                "volcengine-coding-plan",
+                "Volcengine documents Coding Plan on volcengine.com; its data plane uses volces.com",
             ),
         ];
         let mut unchecked_exemptions = std::collections::BTreeSet::new();
@@ -6602,6 +6859,15 @@ mod tests {
             ("zeldoc", &["zeldoc"]),
             ("zenifra", &["zenifra"]),
             ("zhipuai", &["zhipuai"]),
+            ("modelis", &["modelis"]),
+            ("modelscope", &["modelscope"]),
+            ("poolside", &["poolside"]),
+            ("regolo-ai", &["regolo-ai"]),
+            ("scaleway", &["scaleway"]),
+            ("sensenova", &["sensenova"]),
+            ("stackit", &["stackit"]),
+            ("vancine", &["vancine"]),
+            ("volcengine-coding-plan", &["volcengine-coding-plan"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -6641,9 +6907,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, ElevenLabs for media, and 140 rows proposed from Fusiform's
+        // 9 search APIs, ElevenLabs for media, and 149 rows proposed from Fusiform's
         // provider list.
-        assert_eq!(API_KEY_PROVIDERS.len(), 207);
+        assert_eq!(API_KEY_PROVIDERS.len(), 216);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -6931,6 +7197,15 @@ mod tests {
         "zeldoc",
         "zenifra",
         "zhipuai",
+        "modelis",
+        "modelscope",
+        "poolside",
+        "regolo-ai",
+        "scaleway",
+        "sensenova",
+        "stackit",
+        "vancine",
+        "volcengine-coding-plan",
     ];
 
     /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
@@ -6956,6 +7231,7 @@ mod tests {
         "poe",
         "qiniu-ai",
         "requesty",
+        "regolo-ai",
         "stepfun-cn",
     ];
 
@@ -7187,6 +7463,13 @@ mod tests {
                 "echo",
                 "google-vertex",
                 "inferx",
+                "modelis",
+                "modelscope",
+                "poolside",
+                "regolo-ai",
+                "scaleway",
+                "stackit",
+                "volcengine-coding-plan",
             ]
         );
     }
@@ -7828,6 +8111,15 @@ mod source_ownership_tests {
                 ("zeldoc", vec![]),
                 ("zenifra", vec![]),
                 ("zhipuai", vec![]),
+                ("modelis", vec![]),
+                ("modelscope", vec![]),
+                ("poolside", vec![]),
+                ("regolo-ai", vec![]),
+                ("scaleway", vec![]),
+                ("sensenova", vec![]),
+                ("stackit", vec![]),
+                ("vancine", vec![]),
+                ("volcengine-coding-plan", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

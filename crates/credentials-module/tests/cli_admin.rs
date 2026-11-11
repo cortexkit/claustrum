@@ -9192,6 +9192,10 @@ fn provider_catalog_report_missing_is_exact_without_a_vault_or_key() {
     assert!(out.stderr.is_empty());
     let output = String::from_utf8(out.stdout).unwrap();
     let (missing, skipped) = output.split_once("Skipped:\n").expect("skipped section");
+    assert!(
+        missing.is_empty(),
+        "unreviewed Fusiform providers: {missing}"
+    );
 
     // Decode the vendored bytes independently of the report's gap helper.
     let vendored: serde_json::Value = serde_json::from_slice(FUSIFORM_PROVIDERS_JSON).unwrap();

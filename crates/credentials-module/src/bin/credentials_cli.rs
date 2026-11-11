@@ -9077,6 +9077,15 @@ mod login_regressions {
             ("zeldoc", "Zeldoc"),
             ("zenifra", "Zenifra"),
             ("zhipuai", "Zhipu AI (Standard API)"),
+            ("modelis", "Modelis"),
+            ("modelscope", "ModelScope"),
+            ("poolside", "Poolside"),
+            ("regolo-ai", "Regolo AI"),
+            ("scaleway", "Scaleway"),
+            ("sensenova", "SenseNova (China)"),
+            ("stackit", "STACKIT"),
+            ("vancine", "Vancine"),
+            ("volcengine-coding-plan", "Volcengine Ark Coding Plan"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

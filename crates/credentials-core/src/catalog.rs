@@ -310,6 +310,25 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
         "databricks",
         "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
     ),
+    // Copilot takes a GitHub account token, not an inference key, and the Copilot runtime
+    // uses it at a host chosen per account: github.com, or the enterprise's own hostname
+    // under GitHub Enterprise Cloud with data residency.
+    (
+        "github-copilot",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // GitLab Duo takes a GitLab token sent to the user's own instance (GitLab.com,
+    // Self-Managed or Dedicated), which exchanges it for short-lived AI gateway tokens.
+    (
+        "gitlab",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // Claude on Vertex AI is not offered in express mode, so it needs a Google Cloud project
+    // and a regional host.
+    (
+        "google-vertex-anthropic",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
 ];
 
 /// The permitted dispositions for a provider researched but not added to the catalog.
@@ -2675,6 +2694,454 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    // Eden AI serves the same API on a global and an EU host, with one key. Its model list
+    // does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "edenai",
+        fusiform_provider_id: Some("edenai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.edenai.run", "api.eu.edenai.run"],
+        hosts_doc: "https://www.edenai.co/docs/v3/data-governance/eu-endpoint",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["edenai"],
+        display_name: "Eden AI",
+        default_id: "apikey:edenai",
+        dashboard_url: "https://app.edenai.run/settings/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.edenai.run/v3",
+            model: "openai/gpt-4o-mini",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // The check is the documented account usage read, which returns the key's balance.
+    ApiKeyProvider {
+        key: "empiriolabs",
+        fusiform_provider_id: Some("empiriolabs"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.empiriolabs.ai"],
+        hosts_doc: "https://docs.empiriolabs.ai/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["empiriolabs"],
+        display_name: "EmpirioLabs AI",
+        default_id: "apikey:empiriolabs",
+        dashboard_url: "https://platform.empiriolabs.ai",
+        placeholder: "sk-empiriolabs-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.empiriolabs.ai/v1/account/usage?limit=1",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Engy's model list does not need a key, so the check is a chat. Its separate
+    // management API on engy.ai takes account tokens, not inference keys.
+    ApiKeyProvider {
+        key: "engy",
+        fusiform_provider_id: Some("engy"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.engy.ai"],
+        hosts_doc: "https://engy.ai/docs/api-reference/inference-api/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["engy"],
+        display_name: "engy",
+        default_id: "apikey:engy",
+        dashboard_url: "https://engy.ai/dashboard",
+        placeholder: "sk-engy-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.engy.ai/v1",
+            model: "glm-5.3-flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // evroc Think shared models; dedicated model instances are not covered.
+    ApiKeyProvider {
+        key: "evroc",
+        fusiform_provider_id: Some("evroc"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["models.think.evroc.com"],
+        hosts_doc: "https://docs.evroc.com/products/think/openai-compatibility.html",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["evroc"],
+        display_name: "evroc",
+        default_id: "apikey:evroc",
+        dashboard_url: "https://cloud.evroc.com/",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://models.think.evroc.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // FastRouter's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "fastrouter",
+        fusiform_provider_id: Some("fastrouter"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.fastrouter.ai"],
+        hosts_doc: "https://docs.fastrouter.ai/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["fastrouter"],
+        display_name: "FastRouter",
+        default_id: "apikey:fastrouter",
+        dashboard_url: "https://fastrouter.ai/",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.fastrouter.ai/api/v1",
+            model: "openai/gpt-4o-mini",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // FreeModel's site configures the OpenAI SDK with this base URL and the key as its
+    // API key, which the SDK sends as a Bearer token. Its Anthropic-style endpoint on
+    // cc.freemodel.dev takes the key in another header and is not covered. The model list
+    // does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "freemodel",
+        fusiform_provider_id: Some("freemodel"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.freemodel.dev"],
+        hosts_doc: "https://freemodel.dev/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["freemodel"],
+        display_name: "FreeModel",
+        default_id: "apikey:freemodel",
+        dashboard_url: "https://freemodel.dev/dashboard",
+        placeholder: "fe_oa_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.freemodel.dev/v1",
+            model: "gpt-6-luna",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Friendli's serverless model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "friendli",
+        fusiform_provider_id: Some("friendli"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.friendli.ai"],
+        hosts_doc: "https://friendli.ai/docs/guides/introduction/get-started",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["friendli"],
+        display_name: "Friendli",
+        default_id: "apikey:friendli",
+        dashboard_url: "https://friendli.ai/suite/~/setting/keys",
+        placeholder: "flp_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.friendli.ai/serverless/v1",
+            model: "zai-org/GLM-5.3-Flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // FrogBot also accepts the key in `x-api-key`; the row uses the documented Bearer form.
+    ApiKeyProvider {
+        key: "frogbot",
+        fusiform_provider_id: Some("frogbot"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["app.frogbot.ai"],
+        hosts_doc: "https://docs.frogbot.ai/api-keys",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("Unauthorized"), error_code_field: Some("/error") }),
+        default_provider_ids: &["frogbot"],
+        display_name: "FrogBot",
+        default_id: "apikey:frogbot",
+        dashboard_url: "https://app.frogbot.ai",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://app.frogbot.ai/api/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Covers Vertex AI express-mode API keys only: Gemini models at the global endpoint,
+    // with no project or region. Vertex used through a project and region (service
+    // account credentials and regional hosts) is not covered.
+    ApiKeyProvider {
+        key: "google-vertex",
+        fusiform_provider_id: Some("google-vertex"),
+        auth: Some(AuthDescriptor { header: "x-goog-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["aiplatform.googleapis.com"],
+        hosts_doc: "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview",
+        invalid_key: None,
+        default_provider_ids: &["google-vertex"],
+        display_name: "Vertex (express mode)",
+        default_id: "apikey:google-vertex",
+        dashboard_url: "https://console.cloud.google.com/agent-platform/studio/settings/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Vertex AI answered a bogus express-mode key with the same 401 it gives a call that takes no API keys at all, and its only documented express-mode requests are billed model calls, so no free check tells a bad key from a good one",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "greenpt",
+        fusiform_provider_id: Some("greenpt"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.greenpt.ai"],
+        hosts_doc: "https://docs.greenpt.ai/get-started",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["greenpt"],
+        display_name: "GreenPT",
+        default_id: "apikey:greenpt",
+        dashboard_url: "https://account.greenpt.ai/api/keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.greenpt.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Helicone's AI gateway. Its model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "helicone",
+        fusiform_provider_id: Some("helicone"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["ai-gateway.helicone.ai"],
+        hosts_doc: "https://docs.helicone.ai/getting-started/quick-start",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["helicone"],
+        display_name: "Helicone",
+        default_id: "apikey:helicone",
+        dashboard_url: "https://us.helicone.ai/settings/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://ai-gateway.helicone.ai",
+            model: "gpt-4o-mini",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // The check is the documented balance read, which is free and answers at zero balance.
+    ApiKeyProvider {
+        key: "hopper",
+        fusiform_provider_id: Some("hopper"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.withhopper.com"],
+        hosts_doc: "https://docs.withhopper.com",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["hopper"],
+        display_name: "Hopper",
+        default_id: "apikey:hopper",
+        dashboard_url: "https://withhopper.com/console/keys",
+        placeholder: "sk_hopper_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.withhopper.com/v1/balance",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "hpc-ai",
+        fusiform_provider_id: Some("hpc-ai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.hpc-ai.com"],
+        hosts_doc: "https://www.hpc-ai.com/doc/docs/Model-APIs/API-Reference/OpenAI-Compatible-API/OpenAI-SDK",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["hpc-ai"],
+        display_name: "HPC-AI",
+        default_id: "apikey:hpc-ai",
+        dashboard_url: "https://www.hpc-ai.com/models-console/api-key",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.hpc-ai.com/inference/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Impossibl's model list does not need a key, so the check is the documented read of
+    // the key's latest request.
+    ApiKeyProvider {
+        key: "impossibl",
+        fusiform_provider_id: Some("impossibl"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.impossibl.com"],
+        hosts_doc: "https://impossibl.com/docs/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["impossibl"],
+        display_name: "Impossibl",
+        default_id: "apikey:impossibl",
+        dashboard_url: "https://impossibl.com/dashboard",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.impossibl.com/v1/requests?limit=1",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Inceptron's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "inceptron",
+        fusiform_provider_id: Some("inceptron"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inceptron.io"],
+        hosts_doc: "https://docs.inceptron.io",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("unauthorized"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["inceptron"],
+        display_name: "Inceptron",
+        default_id: "apikey:inceptron",
+        dashboard_url: "https://console.inceptron.io",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.inceptron.io/v1",
+            model: "zai-org/GLM-5.3-Flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Inco documents its model list as public without a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "inco",
+        fusiform_provider_id: Some("inco"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inco.ai"],
+        hosts_doc: "https://platform.inco.ai/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["inco"],
+        display_name: "Inco",
+        default_id: "apikey:inco",
+        dashboard_url: "https://platform.inco.ai/keys",
+        placeholder: "sk-inco-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.inco.ai/v1",
+            model: "glm-5.3-flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Infer's docs give no direct key-page URL, so the row's key page is the API guide.
+    ApiKeyProvider {
+        key: "infer",
+        fusiform_provider_id: Some("infer"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["infer.flow7.org"],
+        hosts_doc: "https://infer.flow7.org/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["infer"],
+        display_name: "Infer by Flow7",
+        default_id: "apikey:infer",
+        dashboard_url: "https://infer.flow7.org/docs",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://infer.flow7.org/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Inference.net serves a default and a US-only host with one key. Its model list does
+    // not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "inference",
+        fusiform_provider_id: Some("inference"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inference.net", "us.api.inference.net"],
+        hosts_doc: "https://docs.inference.net/api/api-quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("InvalidApiKey"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["inference"],
+        display_name: "Inference",
+        default_id: "apikey:inference",
+        dashboard_url: "https://inference.net/dashboard/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.inference.net/v1",
+            model: "llama-3.2-1b-instruct",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // InferX's console gives each key a tenant- and endpoint-specific base URL on this
+    // host, so there is no fixed request to check a key with.
+    ApiKeyProvider {
+        key: "inferx",
+        fusiform_provider_id: Some("inferx"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["model.inferx.net"],
+        hosts_doc: "https://inferx.net/docs/authentication",
+        invalid_key: None,
+        default_provider_ids: &["inferx"],
+        display_name: "InferX",
+        default_id: "apikey:inferx",
+        dashboard_url: "https://model.inferx.net/login",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "InferX gives each key a tenant- and endpoint-specific base URL in its console, so a fixed check URL could refuse a good key",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Infomaniak AI requests carry the account's AI Tools product id in the path, which
+    // consumers must supply. The check lists the token's AI products, which needs no id.
+    ApiKeyProvider {
+        key: "infomaniak",
+        fusiform_provider_id: Some("infomaniak"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.infomaniak.com"],
+        hosts_doc: "https://developer.infomaniak.com/docs/api/post/2/ai/%7Bproduct_id%7D/openai/v1/chat/completions",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("not_authorized"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["infomaniak"],
+        display_name: "Infomaniak",
+        default_id: "apikey:infomaniak",
+        dashboard_url: "https://manager.infomaniak.com/v3/ng/accounts/token/list",
+        placeholder: "API token",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.infomaniak.com/1/ai",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // IO Intelligence's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "io-net",
+        fusiform_provider_id: Some("io-net"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.intelligence.io.solutions"],
+        hosts_doc: "https://io.net/docs/reference/ai-models/get-started-with-io-intelligence-api",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["io-net"],
+        display_name: "IO.NET",
+        default_id: "apikey:io-net",
+        dashboard_url: "https://ai.io.net/ai/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.intelligence.io.solutions/api/v1",
+            model: "meta-llama/Llama-3.3-70B-Instruct",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3445,6 +3912,18 @@ mod tests {
             (
                 "digitalocean",
                 "DigitalOcean documents serverless inference on digitalocean.com; it runs on do-ai.run",
+            ),
+            (
+                "edenai",
+                "Eden AI documents its API on edenai.co; keys go to edenai.run",
+            ),
+            (
+                "google-vertex",
+                "Google documents Vertex AI on google.com; APIs use googleapis.com",
+            ),
+            (
+                "io-net",
+                "io.net documents IO Intelligence on io.net; its API runs on io.solutions",
             ),
         ];
         let mut unchecked_exemptions = std::collections::BTreeSet::new();
@@ -4382,6 +4861,27 @@ mod tests {
             ("dinference", &["dinference"]),
             ("drun", &["drun"]),
             ("echo", &["echo"]),
+            ("edenai", &["edenai"]),
+            ("empiriolabs", &["empiriolabs"]),
+            ("engy", &["engy"]),
+            ("evroc", &["evroc"]),
+            ("fastrouter", &["fastrouter"]),
+            ("freemodel", &["freemodel"]),
+            ("friendli", &["friendli"]),
+            ("frogbot", &["frogbot"]),
+            ("google-vertex", &["google-vertex"]),
+            ("greenpt", &["greenpt"]),
+            ("helicone", &["helicone"]),
+            ("hopper", &["hopper"]),
+            ("hpc-ai", &["hpc-ai"]),
+            ("impossibl", &["impossibl"]),
+            ("inceptron", &["inceptron"]),
+            ("inco", &["inco"]),
+            ("infer", &["infer"]),
+            ("inference", &["inference"]),
+            ("inferx", &["inferx"]),
+            ("infomaniak", &["infomaniak"]),
+            ("io-net", &["io-net"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -4421,9 +4921,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, ElevenLabs for media, and 42 rows proposed from Fusiform's
+        // 9 search APIs, ElevenLabs for media, and 63 rows proposed from Fusiform's
         // provider list.
-        assert_eq!(API_KEY_PROVIDERS.len(), 109);
+        assert_eq!(API_KEY_PROVIDERS.len(), 130);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -4613,6 +5113,27 @@ mod tests {
         "dinference",
         "drun",
         "echo",
+        "edenai",
+        "empiriolabs",
+        "engy",
+        "evroc",
+        "fastrouter",
+        "freemodel",
+        "friendli",
+        "frogbot",
+        "google-vertex",
+        "greenpt",
+        "helicone",
+        "hopper",
+        "hpc-ai",
+        "impossibl",
+        "inceptron",
+        "inco",
+        "infer",
+        "inference",
+        "inferx",
+        "infomaniak",
+        "io-net",
     ];
 
     /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
@@ -4627,6 +5148,9 @@ mod tests {
         "alibaba-token-plan",
         "alibaba-token-plan-cn",
         "digitalocean",
+        "edenai",
+        "fastrouter",
+        "google-vertex",
     ];
 
     /// Catalogued keys used by both model and web-search consumers.
@@ -4857,6 +5381,8 @@ mod tests {
                 "bailing",
                 "drun",
                 "echo",
+                "google-vertex",
+                "inferx",
             ]
         );
     }
@@ -5400,6 +5926,27 @@ mod source_ownership_tests {
                 ("dinference", vec![]),
                 ("drun", vec![]),
                 ("echo", vec![]),
+                ("edenai", vec![]),
+                ("empiriolabs", vec![]),
+                ("engy", vec![]),
+                ("evroc", vec![]),
+                ("fastrouter", vec![]),
+                ("freemodel", vec![]),
+                ("friendli", vec![]),
+                ("frogbot", vec![]),
+                ("google-vertex", vec![]),
+                ("greenpt", vec![]),
+                ("helicone", vec![]),
+                ("hopper", vec![]),
+                ("hpc-ai", vec![]),
+                ("impossibl", vec![]),
+                ("inceptron", vec![]),
+                ("inco", vec![]),
+                ("infer", vec![]),
+                ("inference", vec![]),
+                ("inferx", vec![]),
+                ("infomaniak", vec![]),
+                ("io-net", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

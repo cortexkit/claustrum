@@ -60,12 +60,31 @@ are unchanged.
 | deepseek | https://api.deepseek.com/chat/completions | 2026-11-10 | 401 | invalid_request_error | /error/code |
 | digitalocean | https://inference.do-ai.run/v1/models | 2026-11-11 | 401 | Unauthorized | /id |
 | dinference | https://api.dinference.com/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
+| edenai | https://api.edenai.run/v3/chat/completions | 2026-11-11 | 401 | - | - |
 | elevenlabs | https://api.elevenlabs.io/v1/user | 2026-11-11 | 401 | unauthorized | /detail/code |
+| empiriolabs | https://api.empiriolabs.ai/v1/account/usage?limit=1 | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| engy | https://api.engy.ai/v1/chat/completions | 2026-11-11 | 401 | authentication_error | /error/type |
+| evroc | https://models.think.evroc.com/v1/models | 2026-11-11 | 401 | authentication_error | /error/type |
+| fastrouter | https://api.fastrouter.ai/api/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | firecrawl | https://api.firecrawl.dev/v2/team/credit-usage | 2026-11-10 | 401 | - | - |
 | fireworks-ai | https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1 | 2026-11-10 | 401 | UNAUTHORIZED | /error/code |
+| freemodel | https://api.freemodel.dev/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| friendli | https://api.friendli.ai/serverless/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| frogbot | https://app.frogbot.ai/api/v1/models | 2026-11-11 | 401 | Unauthorized | /error |
 | google | https://generativelanguage.googleapis.com/v1beta/models | 2026-11-10 | 400 | API_KEY_INVALID | /error/details/0/reason |
+| greenpt | https://api.greenpt.ai/v1/models | 2026-11-11 | 401 | - | - |
+| helicone | https://ai-gateway.helicone.ai/chat/completions | 2026-11-11 | 401 | - | - |
+| hopper | https://api.withhopper.com/v1/balance | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| hpc-ai | https://api.hpc-ai.com/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | huggingface | https://huggingface.co/api/whoami-v2 | 2026-11-10 | 401 | - | - |
+| impossibl | https://api.impossibl.com/v1/requests?limit=1 | 2026-11-11 | 401 | authentication_error | /error/type |
 | inception | https://api.inceptionlabs.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| inceptron | https://api.inceptron.io/v1/chat/completions | 2026-11-11 | 401 | unauthorized | /error/code |
+| inco | https://api.inco.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| infer | https://infer.flow7.org/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| inference | https://api.inference.net/v1/chat/completions | 2026-11-11 | 401 | InvalidApiKey | /error/type |
+| infomaniak | https://api.infomaniak.com/1/ai | 2026-11-11 | 401 | not_authorized | /error/code |
+| io-net | https://api.intelligence.io.solutions/api/v1/chat/completions | 2026-11-11 | 401 | - | - |
 | kiro | https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR | 2026-11-10 | 403 | - | - |
 | meta | https://api.meta.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | minimax-code | https://api.minimax.io/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
@@ -280,6 +299,128 @@ Two ids from this batch have neither a row nor a skip; `--missing` still prints 
   with 401 (`error.type` `token_not_found_in_db`) and no key with a different 401, but
   a third-party listing is not provider documentation, so no row was added.
 
+## Third batch from the Fusiform provider list
+
+After the second batch, `ck auth provider-report --missing` printed 138 ids. It still
+begins with `clarifai` and `ebcloud`, which the second batch left uncovered (see the
+end of that section), so the third batch took the next 25 ids after them, `edenai`
+through `io-net`. 21 got rows, 3 are recorded skips (`github-copilot`, `gitlab` and
+`google-vertex-anthropic`, listed under "Fusiform provider skips" below), and
+`hetzner` stays uncovered (see the end of this section). On 2026-11-11
+`api.clarifai.com` and `docs.clarifai.com` still did not resolve in DNS and
+`clarifai.com` still resolved to a parking address.
+
+On 2026-11-11 a network-enabled Linux build server sent each new checked row's key
+check by hand with curl, redirects not followed: the check's method and URL, the row's
+key header carrying a deliberately bogus key, and for chat checks the login check's
+one-token request body. Keys carried the documented prefix where one is documented:
+`sk-empiriolabs-` for `empiriolabs`, `sk-engy-` for `engy`, `fe_oa_` for `freemodel`,
+`flp_` for `friendli`, `sk_hopper_` for `hopper` and `sk-inco-` for `inco`. Every
+checked row got a 401. A request without any key was also sent; it got the same reply
+as the bogus key for `friendli`, `frogbot`, `greenpt` and `hetzner`, and a reply naming the
+missing key for the others. Numeric `code` values (`engy`, `evroc`) and messages
+(`edenai`, `freemodel`, `friendli`, `io-net`, and the plain-text replies of `greenpt`
+and `helicone`) are not recorded as codes; where a reply gives a structured reason in
+`type`, that is recorded instead.
+
+Where a model list answered without a key, the check is a chat on a model that list
+named on 2026-11-11 (`edenai`, `engy`, `fastrouter`, `freemodel`, `friendli`,
+`helicone`, `inceptron`, `inco`, `inference`, `io-net`). The `inco`, `inference` and
+`io-net` model lists refuse a bogus key but answer a missing key with the public
+catalog, so they too use a chat.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `edenai`: <https://www.edenai.co/docs/v3/data-governance/eu-endpoint> documents the
+  global host `https://api.edenai.run` and the EU host `https://api.eu.edenai.run`,
+  one key for both, and `Authorization: Bearer`. It calls `/v3/models` public.
+- `empiriolabs`: <https://docs.empiriolabs.ai/authentication> documents
+  `api.empiriolabs.ai`, `sk-empiriolabs-` Bearer keys and the
+  `GET /v1/account/usage?limit=1` read used as the check.
+- `engy`: <https://engy.ai/docs/api-reference/inference-api/overview> documents base
+  URL `https://api.engy.ai`, `sk-engy-` Bearer keys and a model list that needs no
+  key. The management API on `engy.ai/api/v1` takes separate account tokens and is not
+  covered.
+- `evroc`: <https://docs.evroc.com/products/think/openai-compatibility.html> documents
+  `https://models.think.evroc.com/v1`, Bearer keys and `GET /v1/models` with a key.
+  Dedicated model instances are not covered.
+- `fastrouter`: <https://docs.fastrouter.ai/> documents
+  `https://api.fastrouter.ai/api/v1/chat/completions` with `Authorization: Bearer`.
+  models.dev lists `go.fastrouter.ai`, which the provider's documentation does not
+  name, so it is not included. The docs give no direct key-page URL.
+- `freemodel`: the site's own sample at <https://freemodel.dev> (documentation at
+  <https://freemodel.dev/docs>, rendered in the browser) configures the OpenAI SDK with
+  `https://api.freemodel.dev/v1` and an `fe_oa_` key as its API key. Its Claude Code
+  guide uses `https://cc.freemodel.dev` with the key as `ANTHROPIC_API_KEY`, which
+  Claude Code sends in another header; that host is not covered.
+- `friendli`: <https://friendli.ai/docs/guides/introduction/get-started> documents
+  `https://api.friendli.ai/serverless/v1`, `Authorization: Bearer` and the key page;
+  <https://friendli.ai/docs/guides/suite/usage-and-costs> documents `flp_` keys.
+- `frogbot`: <https://docs.frogbot.ai/api-keys> documents
+  `https://app.frogbot.ai/api/v1` with the key in `Authorization: Bearer` or
+  `x-api-key`.
+- `google-vertex`: the express-mode page
+  <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
+  documents the global endpoint
+  `https://aiplatform.googleapis.com/v1/publishers/google/models/MODEL_ID:...` with the
+  key in `x-goog-api-key`. The row covers express-mode keys only, which reach the Gemini
+  models that page lists; Vertex used through a Google Cloud project and region is not
+  covered. A bogus key sent to the model read and to `generateContent` got 401 "API
+  keys are not supported by this API" (`CREDENTIALS_MISSING`), the reply for a call
+  that takes no API keys at all, so the row is stored unchecked and has no evidence
+  line.
+- `greenpt`: <https://docs.greenpt.ai/get-started> documents `https://api.greenpt.ai/v1`,
+  `Authorization: Bearer`, `GET /v1/models` and the key page.
+- `helicone`: <https://docs.helicone.ai/getting-started/quick-start> documents the AI
+  gateway at `https://ai-gateway.helicone.ai`, `Authorization: Bearer` and the key page.
+- `hopper`: <https://docs.withhopper.com> documents `https://api.withhopper.com/v1`,
+  `sk_hopper_` Bearer keys and the key page; <https://docs.withhopper.com/models>
+  documents the free `GET /v1/balance` read.
+- `hpc-ai`:
+  <https://www.hpc-ai.com/doc/docs/Model-APIs/API-Reference/OpenAI-Compatible-API/OpenAI-SDK>
+  documents `https://api.hpc-ai.com/inference/v1` and `Authorization: Bearer`. The
+  documented model list's page does not print its path; `/inference/v1/models` refused
+  bogus and missing keys alike.
+- `impossibl`: <https://impossibl.com/docs/quickstart> documents
+  `https://api.impossibl.com/v1`, Bearer keys and the
+  `GET /v1/requests?limit=1` read. Its model list answered a bogus key with 200.
+- `inceptron`: <https://docs.inceptron.io> documents `https://api.inceptron.io/v1`
+  and `Authorization: Bearer`.
+- `inco`: <https://platform.inco.ai/docs> documents `https://api.inco.ai/v1`,
+  `sk-inco-` Bearer keys and a model list that is public without a key.
+- `infer`: <https://infer.flow7.org/docs> documents `https://infer.flow7.org/v1` and
+  `Authorization: Bearer`. The docs give no direct key-page URL, so the row's key page
+  is that guide.
+- `inference`: <https://docs.inference.net/api/api-quickstart> documents
+  `https://api.inference.net/v1`, the US-only `https://us.api.inference.net/v1`, and
+  Bearer keys.
+- `inferx`: <https://inferx.net/docs/authentication> documents Bearer keys, and
+  <https://inferx.net/docs/quickstart> documents `https://model.inferx.net/v1` while
+  saying production URLs "can be tenant- and endpoint-specific". Without a key
+  `/v1/models` answered "no tenant context: set a default tenant or use a
+  tenant-restricted API key", so a fixed check could refuse a good key; the row is
+  stored unchecked and has no evidence line.
+- `infomaniak`:
+  <https://developer.infomaniak.com/docs/api/post/2/ai/%7Bproduct_id%7D/openai/v1/chat/completions>
+  documents `https://api.infomaniak.com/2/ai/{product_id}/openai/v1` and
+  `Authorization: Bearer`. Requests carry the account's AI Tools product id, which
+  consumers must supply, as `echo` consumers supply a workspace id. The check is
+  `GET /1/ai` (<https://developer.infomaniak.com/docs/api/get/1/ai>), which needs no
+  product id.
+- `io-net`:
+  <https://io.net/docs/reference/ai-models/get-started-with-io-intelligence-api>
+  documents `https://api.intelligence.io.solutions/api/v1` and `Authorization: Bearer`.
+
+One id from this batch has neither a row nor a skip; `--missing` still prints it:
+
+- `hetzner`: Fusiform's documentation link,
+  <https://experiments.hetzner.com/docs/inference>, is a browser app behind Hetzner
+  account sign-in, so its text could not be read. The app's configuration names
+  `https://inference.hetzner.com/v1`, and models.dev lists
+  `https://inference.hetzner.com/api/v1`, where `GET /api/v1/models` answered bogus and
+  missing Bearer keys alike with a plain-text 401. Neither is readable provider
+  documentation, so no row was added.
+
 ## Probes without a response
 
 All 50 existing rows with a check were probed; 37 supplied authentication-refusal
@@ -355,6 +496,25 @@ not a reason to skip it.
 - `databricks`: model serving is reached at each workspace's own host,
   `https://<workspace_host>.databricks.com`. See
   <https://docs.databricks.com/aws/en/machine-learning/model-serving/query-chat-models>.
+- `github-copilot`: Copilot takes a GitHub account token (an OAuth sign-in or a
+  personal access token), not an inference key, and requires a Copilot license. The
+  Copilot runtime uses the token at a host chosen per account: github.com, or the
+  enterprise's own hostname under GitHub Enterprise Cloud with data residency
+  (`copilot login --host HOSTNAME`). The documentation does not publish the model API's
+  host. See
+  <https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli>.
+- `gitlab`: GitLab Duo Agent Platform runs on GitLab.com, GitLab Self-Managed and
+  GitLab Dedicated instances, and uses "a multi-token authentication chain before
+  requests reach a model provider": the user's token goes to their own instance, which
+  issues short-lived tokens for the AI gateway. See
+  <https://docs.gitlab.com/user/duo_agent_platform/authentication/>.
+- `google-vertex-anthropic`: Claude models on Vertex AI are not in the express-mode
+  model list ("Only the models listed in the preceding table are supported in express
+  mode"), so they are reached at
+  `https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/...`
+  with Google Cloud credentials. See
+  <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
+  and <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude>.
 
 Only these reasons are permitted:
 
@@ -371,6 +531,9 @@ Only these reasons are permitted:
 | azure-cognitive-services | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | cloudflare-ai-gateway | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | databricks | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 
 ## Hosts without provider documentation
 

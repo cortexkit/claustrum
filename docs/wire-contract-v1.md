@@ -542,9 +542,10 @@ current table without changing any record, taking no writer lease.
 The OpenAI and Google API-key rows default to both `llm-provider` and
 `media-provider`; ElevenLabs defaults to `media-provider` alone. The 302.AI, Abacus,
 AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan, Alibaba Token
-Plan (China) and DigitalOcean rows (`302ai`, `abacus`, `aihubmix`, `aimlapi`,
-`alibaba`, `alibaba-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`,
-`digitalocean`) also default to both. These are the
+Plan (China), DigitalOcean, Eden AI, FastRouter and Vertex (express mode) rows
+(`302ai`, `abacus`, `aihubmix`, `aimlapi`, `alibaba`, `alibaba-cn`,
+`alibaba-token-plan`, `alibaba-token-plan-cn`, `digitalocean`, `edenai`,
+`fastrouter`, `google-vertex`) also default to both. These are the
 media rows. Routing stops choosing a media key
 its consumer reported unfunded, and lifts that after a successful run. Category
 defaults apply to creation, not existing records or replacements with stored categories.

@@ -2,10 +2,7 @@ use super::*;
 
 #[test]
 fn provider_catalog_client_decodes_real_new_rows_and_old_or_null_metadata() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../credentials-module/tests/vectors/list-scoped-v2.json");
-    let vector: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let reply = vector["cases"][0]["reply"].clone();
+    let reply = producer_vector_reply("list-scoped-v2.json", "catalog_and_lifecycle");
     let listing = decode_list_scoped_reply(reply.clone()).unwrap();
     assert!(listing.undecodable_credentials.is_empty());
     let kimi = listing
@@ -50,6 +47,23 @@ fn provider_catalog_client_decodes_real_new_rows_and_old_or_null_metadata() {
     }
 }
 
+fn producer_vector_reply(file: &str, case: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../credentials-module/tests/vectors")
+        .join(file);
+    let vector: Value = serde_json::from_slice(
+        &std::fs::read(path).expect("producer vector must be available in the checkout"),
+    )
+    .expect("producer vector is JSON");
+    vector["cases"]
+        .as_array()
+        .expect("vector cases")
+        .iter()
+        .find(|entry| entry["case"] == case)
+        .unwrap_or_else(|| panic!("producer vector {file} has no {case}"))["reply"]
+        .clone()
+}
+
 fn producer_operation(op: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../credentials-module/tests/fixtures/enrollment_wire_contract.json");
@@ -69,6 +83,238 @@ fn producer_operation(op: &str) -> Value {
 fn producer_reply(reply: &Value) -> Value {
     serde_json::from_str(reply.as_str().expect("serialized producer reply"))
         .expect("producer reply is JSON")
+}
+
+#[test]
+fn provider_catalog_decodes_producer_fusiform_ids_hosts_and_absence() {
+    let reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    assert_eq!(listing.credentials.len(), 3);
+    for (decoded, wire) in listing
+        .credentials
+        .iter()
+        .zip(reply["result"]["credentials"].as_array().unwrap())
+    {
+        assert_eq!(decoded.id, wire["id"].as_str().unwrap());
+        assert_eq!(serde_json::to_value(&decoded.hosts).unwrap(), wire["hosts"]);
+        assert_eq!(
+            decoded.fusiform_provider_id.as_deref(),
+            wire.get("fusiform_provider_id").and_then(Value::as_str)
+        );
+    }
+    let openai = listing
+        .credentials
+        .iter()
+        .find(|row| row.id == "apikey:openai")
+        .unwrap();
+    assert_eq!(openai.hosts, Some(vec!["api.openai.com".into()]));
+    assert_eq!(openai.fusiform_provider_id.as_deref(), Some("openai"));
+    let oauth = listing
+        .credentials
+        .iter()
+        .find(|row| row.id == "oauth:anthropic")
+        .unwrap();
+    assert_eq!(oauth.hosts, None);
+    assert_eq!(oauth.fusiform_provider_id, None);
+}
+
+#[test]
+fn provider_catalog_decodes_empty_hosts_missing_from_vectors() {
+    let mut reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
+    // The vectors omit explicitly empty host lists; exercise that presence separately.
+    assert!(reply["result"]["credentials"][2].get("hosts").is_none());
+    reply["result"]["credentials"][2]["hosts"] = json!([]);
+    let listing = decode_list_scoped_reply(reply).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    assert_eq!(
+        listing.credentials[1].fusiform_provider_id.as_deref(),
+        Some("openai")
+    );
+    assert_eq!(listing.credentials[2].hosts, Some(vec![]));
+}
+
+#[test]
+fn provider_catalog_decodes_omitted_and_null_fusiform_ids_and_hosts_as_absent() {
+    for null in [false, true] {
+        let mut reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
+        for row in reply["result"]["credentials"].as_array_mut().unwrap() {
+            for field in ["fusiform_provider_id", "hosts"] {
+                if null {
+                    row[field] = Value::Null;
+                } else {
+                    row.as_object_mut().unwrap().remove(field);
+                }
+            }
+        }
+        let listing = decode_list_scoped_reply(reply).unwrap();
+        assert_eq!(listing.credentials.len(), 3);
+        assert!(listing.undecodable_credentials.is_empty());
+        assert!(listing
+            .credentials
+            .iter()
+            .all(|row| row.fusiform_provider_id.is_none() && row.hosts.is_none()));
+    }
+}
+
+#[test]
+fn provider_catalog_refuses_malformed_fusiform_ids_and_hosts_row_locally() {
+    for (field, malformed) in [
+        ("fusiform_provider_id", json!(1)),
+        ("fusiform_provider_id", json!([])),
+        ("hosts", json!("api.openai.com")),
+        ("hosts", json!([1])),
+        ("hosts", json!([null])),
+    ] {
+        let mut reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
+        reply["result"]["credentials"][0][field] = malformed;
+        let listing = decode_list_scoped_reply(reply).unwrap();
+        assert_eq!(listing.credentials.len(), 2);
+        assert_eq!(listing.undecodable_credentials.len(), 1);
+        assert!(listing.undecodable_credentials[0].contains(field));
+    }
+}
+
+#[test]
+fn producer_get_scoped_decodes_real_auth_hosts_and_invalid_key() {
+    for case in ["catalog_with_evidence", "catalog_without_evidence"] {
+        let reply = producer_vector_reply("get-scoped-v1.json", case);
+        let decoded = decode_credential_reply(reply.clone()).unwrap();
+        assert_eq!(decoded.expose(), b"vector-test-key");
+        assert_eq!(
+            decoded.auth,
+            Some(AuthDescriptor {
+                header: "authorization".into(),
+                scheme: AuthScheme::Bearer
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded.hosts).unwrap(),
+            reply["result"]["hosts"]
+        );
+        let expected_evidence = if case == "catalog_with_evidence" {
+            assert_eq!(decoded.hosts, Some(vec!["api.openai.com".into()]));
+            Some(InvalidKeyEvidence {
+                status: 401,
+                error_code: Some("invalid_api_key".into()),
+                error_code_field: Some("/error/code".into()),
+            })
+        } else {
+            assert_eq!(reply["result"].get("invalid_key"), Some(&Value::Null));
+            None
+        };
+        assert_eq!(decoded.invalid_key, expected_evidence);
+    }
+    let reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
+    for field in ["auth", "hosts", "invalid_key"] {
+        assert!(reply["result"].get(field).is_none());
+    }
+    let decoded = decode_credential_reply(reply).unwrap();
+    assert_eq!(decoded.expose(), b"vector-test-key");
+    assert_eq!(decoded.auth, None);
+    assert_eq!(decoded.hosts, None);
+    assert_eq!(decoded.invalid_key, None);
+}
+
+#[test]
+fn producer_get_scoped_decodes_descriptor_values_missing_from_vectors() {
+    // Preserve the catalog descriptors and inject only wire values absent from the vectors.
+    let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
+    reply["result"]["auth"] = json!({"header": "authorization", "scheme": "raw"});
+    let decoded = decode_credential_reply(reply).unwrap();
+    assert_eq!(
+        decoded.auth,
+        Some(AuthDescriptor {
+            header: "authorization".into(),
+            scheme: AuthScheme::Raw
+        })
+    );
+    for status in [0, 65535] {
+        let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
+        reply["result"]["hosts"] = json!([]);
+        reply["result"]["invalid_key"] =
+            json!({"status": status, "error_code": null, "error_code_field": null});
+        let decoded = decode_credential_reply(reply).unwrap();
+        assert_eq!(decoded.hosts, Some(vec![]));
+        assert_eq!(
+            decoded.invalid_key,
+            Some(InvalidKeyEvidence {
+                status,
+                error_code: None,
+                error_code_field: None
+            })
+        );
+    }
+}
+
+#[test]
+fn producer_get_scoped_decodes_omitted_and_null_descriptors_as_absent() {
+    for null in [false, true] {
+        let mut reply = producer_vector_reply("get-scoped-v1.json", "catalog_with_evidence");
+        for field in ["auth", "hosts", "invalid_key"] {
+            if null {
+                reply["result"][field] = Value::Null;
+            } else {
+                reply["result"].as_object_mut().unwrap().remove(field);
+            }
+        }
+        let decoded = decode_credential_reply(reply).unwrap();
+        assert_eq!(decoded.auth, None);
+        assert_eq!(decoded.hosts, None);
+        assert_eq!(decoded.invalid_key, None);
+    }
+}
+
+#[test]
+fn producer_get_scoped_refuses_malformed_auth_hosts_and_invalid_key() {
+    for (field, malformed) in [
+        ("auth", json!([])),
+        ("auth", json!("bearer")),
+        ("auth", json!({})),
+        ("auth", json!({"header": 1, "scheme": "raw"})),
+        ("auth", json!({"header": "authorization"})),
+        (
+            "auth",
+            json!({"header": "authorization", "scheme": "basic"}),
+        ),
+        ("auth", json!({"header": "authorization", "scheme": null})),
+        ("hosts", json!("api.openai.com")),
+        ("hosts", json!([1])),
+        ("hosts", json!([null])),
+        ("invalid_key", json!([])),
+        ("invalid_key", json!("unauthorized")),
+        ("invalid_key", json!({})),
+        ("invalid_key", json!({"status": "401"})),
+        ("invalid_key", json!({"status": 1.5})),
+        ("invalid_key", json!({"status": -1})),
+        ("invalid_key", json!({"status": 65536})),
+        (
+            "invalid_key",
+            json!({"status": 401, "error_code": 1, "error_code_field": null}),
+        ),
+        (
+            "invalid_key",
+            json!({"status": 401, "error_code": null, "error_code_field": []}),
+        ),
+        (
+            "invalid_key",
+            json!({"status": 401, "error_code": "invalid_api_key", "error_code_field": null}),
+        ),
+        (
+            "invalid_key",
+            json!({"status": 401, "error_code": null, "error_code_field": "/error/code"}),
+        ),
+    ] {
+        let mut reply = producer_vector_reply("get-scoped-v1.json", "catalog_with_evidence");
+        reply["result"][field] = malformed;
+        let error = decode_credential_reply(reply).unwrap_err();
+        assert_eq!(
+            error.class,
+            CredentialErrorClass::InvalidResponse,
+            "{field}"
+        );
+        assert!(error.to_string().contains(field));
+    }
 }
 
 #[test]
@@ -124,6 +370,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("antigravity".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    fusiform_provider_id: None,
+                    hosts: None,
                     id: "antigravity:google".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -144,6 +392,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("openrouter".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    fusiform_provider_id: Some("openrouter".into()),
+                    hosts: Some(vec!["openrouter.ai".into()]),
                     id: "apikey:openrouter".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "apikey".into(),
@@ -184,6 +434,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("openai".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    fusiform_provider_id: None,
+                    hosts: None,
                     id: "chatgpt:openai".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -204,6 +456,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: None,
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    fusiform_provider_id: None,
+                    hosts: None,
                     id: "github_app:plex-alfonso".into(),
                     categories: vec!["github-app-native".into()],
                     credential_type: "github_app".into(),
@@ -224,6 +478,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("anthropic".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    fusiform_provider_id: None,
+                    hosts: None,
                     id: "oauth:anthropic".into(),
                     categories: vec!["anthropic-native".into(), "llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -253,7 +509,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "+hVsGpurYe8HLf5URcObYYtmrde+iBAkEGnKYWo4WKM=".into(),
+            view: "kehakvIMhQw4gPUf4l6aG9YnOTL4SyubRengxfCPZ0I=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }
@@ -271,6 +527,8 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 provider: Some("anthropic".into()),
                 incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                 plan_tier_observed_at_ms: None,
+                fusiform_provider_id: None,
+                hosts: None,
                 id: "oauth:anthropic".into(),
                 categories: vec!["llm-provider".into()],
                 credential_type: "oauth".into(),
@@ -292,7 +550,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 selector: "llm-provider".into(),
                 operation: "list".into()
             }],
-            view: "uwFwpdF/kjLYzixwV6c44qDX41GonCY4TorjPAG/E+M=".into(),
+            view: "Xqi9f8zrVXEj+oY9i33BPScGE8JAedPfEwj5rD/GGpk=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

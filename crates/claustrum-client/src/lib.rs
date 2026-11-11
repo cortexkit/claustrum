@@ -193,6 +193,31 @@ pub struct ResolvedCredential {
     /// Provider organization name returned by the vault, when captured (OAuth logins
     /// that report one; static API keys carry none).
     pub org_name: Option<String>,
+    /// Read-time provider metadata, absent on older vaults and non-provider records.
+    pub auth: Option<AuthDescriptor>,
+    pub hosts: Option<Vec<String>>,
+    pub invalid_key: Option<InvalidKeyEvidence>,
+}
+
+/// How a provider accepts a key in a request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthDescriptor {
+    pub header: String,
+    pub scheme: AuthScheme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScheme {
+    Bearer,
+    Raw,
+}
+
+/// An observation of a rejected key, not a rule evaluated by the vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidKeyEvidence {
+    pub status: u16,
+    pub error_code: Option<String>,
+    pub error_code_field: Option<String>,
 }
 
 /// Plaintext readiness metadata for a scoped credential. This never contains or
@@ -294,6 +319,9 @@ pub struct ScopedCredentialListing {
 pub struct ListedCredential {
     /// Catalog service key, distinct from routing provider ids.
     pub provider: Option<String>,
+    /// Read-time join key for Fusiform's provider card, not a stored routing id.
+    pub fusiform_provider_id: Option<String>,
+    pub hosts: Option<Vec<String>>,
     pub incarnation: Option<String>,
     pub plan_tier_observed_at_ms: Option<i64>,
     /// The vault credential ID, returned verbatim (for example `oauth:anthropic:yiyi`).
@@ -350,6 +378,9 @@ impl ResolvedCredential {
             account_id,
             email,
             org_name,
+            auth: None,
+            hosts: None,
+            invalid_key: None,
         }
     }
 
@@ -368,6 +399,9 @@ impl std::fmt::Debug for ResolvedCredential {
             .field("account_id", &self.account_id)
             .field("email", &self.email)
             .field("org_name", &self.org_name)
+            .field("auth", &self.auth)
+            .field("hosts", &self.hosts)
+            .field("invalid_key", &self.invalid_key)
             .finish()
     }
 }
@@ -1659,9 +1693,62 @@ fn decode_optional_string(row: &Value, key: &str) -> Result<Option<String>, Stri
     }
 }
 
+fn decode_optional_hosts(row: &Value) -> Result<Option<Vec<String>>, String> {
+    match row.get("hosts") {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => listing_strings(row, "hosts", false).map(Some),
+    }
+}
+
+fn decode_optional_auth(row: &Value) -> Result<Option<AuthDescriptor>, String> {
+    let auth = match row.get("auth") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(auth) if auth.is_object() => auth,
+        Some(_) => return Err("auth is not an object".into()),
+    };
+    let header = auth
+        .get("header")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "auth.header is not a string".to_string())?
+        .to_owned();
+    let scheme = match auth.get("scheme").and_then(Value::as_str) {
+        Some("bearer") => AuthScheme::Bearer,
+        Some("raw") => AuthScheme::Raw,
+        _ => return Err("auth.scheme is not bearer or raw".into()),
+    };
+    Ok(Some(AuthDescriptor { header, scheme }))
+}
+
+fn decode_optional_invalid_key(row: &Value) -> Result<Option<InvalidKeyEvidence>, String> {
+    let evidence = match row.get("invalid_key") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(evidence) if evidence.is_object() => evidence,
+        Some(_) => return Err("invalid_key is not an object".into()),
+    };
+    let status = evidence
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .ok_or_else(|| "invalid_key.status is not a u16".to_string())?;
+    let error_code = decode_optional_string(evidence, "error_code")
+        .map_err(|error| format!("invalid_key.{error}"))?;
+    let error_code_field = decode_optional_string(evidence, "error_code_field")
+        .map_err(|error| format!("invalid_key.{error}"))?;
+    if error_code.is_some() != error_code_field.is_some() {
+        return Err("invalid_key error_code and error_code_field must be present together".into());
+    }
+    Ok(Some(InvalidKeyEvidence {
+        status,
+        error_code,
+        error_code_field,
+    }))
+}
+
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
         provider: decode_optional_string(row, "provider")?,
+        fusiform_provider_id: decode_optional_string(row, "fusiform_provider_id")?,
+        hosts: decode_optional_hosts(row)?,
         incarnation: decode_optional_string(row, "incarnation")?,
         plan_tier_observed_at_ms: match row.get("plan_tier_observed_at_ms") {
             None | Some(Value::Null) => None,
@@ -2239,14 +2326,18 @@ pub fn decode_credential_reply(
                 .ok_or_else(|| invalid_metadata("expires_at_ms is not an integer"))?,
         ),
     };
-    Ok(ResolvedCredential::new_with_identity(
+    let mut credential = ResolvedCredential::new_with_identity(
         payload,
         version,
         expires_at_ms,
         decode_optional_string(&result, "account_id").map_err(invalid_metadata)?,
         decode_optional_string(&result, "email").map_err(invalid_metadata)?,
         decode_optional_string(&result, "org_name").map_err(invalid_metadata)?,
-    ))
+    );
+    credential.auth = decode_optional_auth(&result).map_err(invalid_metadata)?;
+    credential.hosts = decode_optional_hosts(&result).map_err(invalid_metadata)?;
+    credential.invalid_key = decode_optional_invalid_key(&result).map_err(invalid_metadata)?;
+    Ok(credential)
 }
 
 /// Decodes whether `credential.report_auth_failure` accepted the report.

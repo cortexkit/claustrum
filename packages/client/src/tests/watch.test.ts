@@ -77,8 +77,8 @@ test('watch stand-in rejects op and extra read-envelope keys', async () => {
 test('watch decodes the producer notices exactly', () => {
   expect(samples.length).toBe(2)
   expect(samples.map((sample) => decodeScopedWatchNotice(new TextEncoder().encode(sample)))).toEqual([
-    { epoch: '00000000000000000000000000000000', keys: 'gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=', kind: 'changed', seq: 1, view: '+skaLPyrcLeF01AH35WtFtgjkrAcAc4AmXU0xzLgTbs=' },
-    { epoch: '00000000000000000000000000000000', keys: 'gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=', kind: 'changed', seq: 2, view: 'YDo4I9eAWt7JGIeAHyD4My3SJT58kkfmNB+7Kw/Tl0c=' },
+    { epoch: '00000000000000000000000000000000', keys: 'gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=', kind: 'changed', seq: 1, view: 'rPhZ9o1s0Wch9jJpeg+26jdk2qZprdASbtIqmCl+UAs=' },
+    { epoch: '00000000000000000000000000000000', keys: 'gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=', kind: 'changed', seq: 2, view: 'JXPDNv9w8FmY4sWcMnCsBojYO47GMGxdKyWRcdJ16Ko=' },
   ])
 })
 

@@ -365,6 +365,140 @@ mod scoped_watch {
     }
 
     #[tokio::test]
+    async fn list_scoped_hosts_use_local_descriptors_for_local_and_remote_rows() {
+        let rig = Rig::new();
+        rig.store
+            .set_registered_provider_settings_audited(
+                "customdescriptor",
+                &[],
+                &[],
+                Some(&credentials_core::store::RegisteredProviderSettings {
+                    hosts: vec!["api.example.com".into()],
+                    auth_header: Some("x-api-key".into()),
+                    auth_scheme: Some("raw".into()),
+                    fusiform_provider_id: None,
+                }),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        rig.store
+            .set_registered_provider_audited(
+                "nodescriptor",
+                &[],
+                &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        for remote in [false, true] {
+            for (id, hosts) in [
+                ("apikey:openai", Some(json!(["api.openai.com"]))),
+                (
+                    "apikey:nanogpt",
+                    Some(json!(["api.nano-gpt.com", "nano-gpt.com"])),
+                ),
+                ("apikey:customdescriptor", Some(json!(["api.example.com"]))),
+                ("apikey:nodescriptor", None),
+                ("apikey:searxng", None),
+                ("apikey:typesafe", None),
+                ("apikey:kagi", None),
+                ("oauth:anthropic", None),
+                ("cookie:openai", None),
+                ("manual:openai", None),
+            ] {
+                let id = format!("{id}:{}", if remote { "remote" } else { "local" });
+                if remote {
+                    rig.store
+                        .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+                            credential_id: id.clone(),
+                            home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
+                            refresh_adapter: None,
+                            detected_plan: None,
+                            identity: Default::default(),
+                            home_version: 3,
+                            categories: Vec::new(),
+                        })
+                        .unwrap();
+                } else {
+                    rig.store
+                        .create(
+                            &id,
+                            &VaultRecord::new_static(
+                                CredentialKind::ApiKey,
+                                "test",
+                                b"test-key".to_vec(),
+                                None,
+                            ),
+                        )
+                        .unwrap();
+                }
+                rig.grant("watcher", &id);
+                let listing = rig.surface
+                    .list_scoped(
+                        Some(&reserved("watcher")),
+                        &read_surface::ListScopedParams { enrollment_token: None },
+                    )
+                    .unwrap();
+                let row = listing.credentials.iter().find(|row| row.id == id).unwrap();
+                let wire = serde_json::to_value(row).unwrap();
+                assert_eq!(wire.get("hosts"), hosts.as_ref(), "{id}");
+                let fusiform_id = match id.split(':').nth(1) {
+                    Some("openai") if id.starts_with("apikey:") => Some("openai"),
+                    Some("nanogpt") => Some("nano-gpt"),
+                    Some("typesafe") => Some("typesafe"),
+                    _ => None,
+                };
+                assert_eq!(
+                    wire.get("fusiform_provider_id").and_then(serde_json::Value::as_str),
+                    fusiform_id,
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_scoped_registry_hosts_change_emits_through_committed_write() {
+        let mut rig = Rig::new();
+        let settings = |host: &str| credentials_core::store::RegisteredProviderSettings {
+            hosts: vec![host.into()],
+            auth_header: Some("x-api-key".into()),
+            auth_scheme: Some("raw".into()),
+            fusiform_provider_id: None,
+        };
+        assert!(rig.store
+            .set_registered_provider_settings_audited(
+                "active",
+                &[],
+                &[],
+                Some(&settings("api.example.com")),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap());
+        rig.grant("watcher", "apikey:active");
+        rig.bind(1, reserved("watcher"));
+        rig.open(1, 11, json!({})).await;
+        let initial = rig.notice(1, 11, 1).await;
+        let version = rig.store.meta("apikey:active").unwrap().record_version;
+        assert!(rig.store
+            .set_registered_provider_settings_audited(
+                "active",
+                &[],
+                &[],
+                Some(&settings("other.example.com")),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap());
+        let changed = rig.notice(1, 11, 2).await;
+        assert_ne!(initial["view"], changed["view"]);
+        assert_eq!(initial["keys"], changed["keys"]);
+        assert_eq!(initial["epoch"], changed["epoch"]);
+        assert_eq!(
+            rig.store.meta("apikey:active").unwrap().record_version,
+            version,
+        );
+    }
+
+    #[tokio::test]
     async fn watch_scoped_token_refresh_is_quiet() {
         let mut rig = Rig::new();
         let record = roster_oauth_record();

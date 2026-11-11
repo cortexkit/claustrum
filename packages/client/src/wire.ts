@@ -64,6 +64,19 @@ export type ClaustrumClientOptions = {
   logger?: (errorClass: string) => void
 }
 
+/** How a provider accepts a key in a request header. */
+export type AuthDescriptor = {
+  readonly header: string
+  readonly scheme: 'bearer' | 'raw'
+}
+
+/** An observation of a rejected key, not a rule evaluated by the vault. */
+export type InvalidKeyEvidence = {
+  readonly status: number
+  readonly errorCode?: string
+  readonly errorCodeField?: string
+}
+
 /**
  * Credential material plus optional non-secret identity metadata. Missing wire fields remain
  * `undefined`; a present non-string identity value rejects the response as invalid.
@@ -105,6 +118,10 @@ export type ServedCredential = {
   email?: string
   /** Non-secret organization or workspace display metadata captured at login. */
   orgName?: string
+  /** Read-time provider metadata; absent on older vaults and non-provider records. */
+  auth?: AuthDescriptor
+  hosts?: readonly string[]
+  invalidKey?: InvalidKeyEvidence
 }
 
 /** The same credential metadata with opaque payload bytes, without text conversion. */
@@ -161,6 +178,15 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string'
 }
 
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+}
+
+function isAuthDescriptor(value: unknown): value is AuthDescriptor {
+  return isRecord(value) && typeof value.header === 'string' &&
+    (value.scheme === 'bearer' || value.scheme === 'raw')
+}
+
 /**
  * Exported for the golden-reply test only; `index.ts` re-exports by name, so this does not
  * widen the published surface.
@@ -210,14 +236,34 @@ function decodeCredentialBytes(
   const accountId = result?.account_id
   const email = result?.email
   const orgName = result?.org_name
+  const auth = result?.auth ?? undefined
+  const hosts = result?.hosts ?? undefined
   if (
     !isOptionalString(credentialId) ||
     !isOptionalString(projectId) ||
     !isOptionalString(accountId) ||
     !isOptionalString(email) ||
-    !isOptionalString(orgName)
+    !isOptionalString(orgName) ||
+    (auth !== undefined && !isAuthDescriptor(auth)) ||
+    (hosts !== undefined && !isStringArray(hosts))
   ) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  }
+  const rawInvalidKey = result?.invalid_key ?? undefined
+  let invalidKey: InvalidKeyEvidence | undefined
+  if (rawInvalidKey !== undefined) {
+    if (!isRecord(rawInvalidKey)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    const errorCode = rawInvalidKey.error_code ?? undefined
+    const errorCodeField = rawInvalidKey.error_code_field ?? undefined
+    if (
+      typeof rawInvalidKey.status !== 'number' || !Number.isInteger(rawInvalidKey.status) ||
+      rawInvalidKey.status < 0 || rawInvalidKey.status > 65535 ||
+      !isOptionalString(errorCode) || !isOptionalString(errorCodeField) ||
+      (errorCode === undefined) !== (errorCodeField === undefined)
+    ) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
+    invalidKey = { status: rawInvalidKey.status, errorCode, errorCodeField }
   }
   return {
     material: Uint8Array.from(payload),
@@ -228,6 +274,9 @@ function decodeCredentialBytes(
     accountId,
     email,
     orgName,
+    auth,
+    hosts,
+    invalidKey,
   }
 }
 
@@ -655,6 +704,9 @@ export interface ScopedInventoryRow {
   readonly id: string
   /** Vault catalog service key, not a routing provider id. */
   readonly provider?: string
+  /** Read-time join key for Fusiform's provider card, not a stored routing id. */
+  readonly fusiformProviderId?: string
+  readonly hosts?: readonly string[]
   readonly incarnation?: string
   /** First observation of the effective tier; absent when unknown. */
   readonly planTierObservedAtMs?: number
@@ -806,10 +858,13 @@ export function decodeScopedInventory(
     }
     const authMethod = row.auth_method
     const provider = row.provider ?? undefined
+    const fusiformProviderId = row.fusiform_provider_id ?? undefined
+    const hosts = row.hosts ?? undefined
     const incarnation = row.incarnation ?? undefined
     const planTierObservedAtMs = row.plan_tier_observed_at_ms ?? undefined
     if (
-      !isOptionalString(provider) || !isOptionalString(incarnation) ||
+      !isOptionalString(provider) || !isOptionalString(fusiformProviderId) ||
+      (hosts !== undefined && !isStringArray(hosts)) || !isOptionalString(incarnation) ||
       (planTierObservedAtMs !== undefined &&
         (typeof planTierObservedAtMs !== 'number' || !Number.isSafeInteger(planTierObservedAtMs)))
     ) {
@@ -835,6 +890,8 @@ export function decodeScopedInventory(
     return {
       id: row.id,
       provider,
+      fusiformProviderId,
+      hosts,
       incarnation,
       planTierObservedAtMs,
       categories: strings(row.categories),

@@ -119,6 +119,12 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[2]["categories"], json!(["llm-provider", "web-search"]));
     assert_eq!(rows[2]["plan_tier_observed_at_ms"], 1_700_000_000_000_i64);
     assert_eq!(rows[3]["state"], "retired");
+    assert_eq!(rows[1]["hosts"], json!(["api.exa.ai"]));
+    assert!(rows.iter().all(|row| row.get("hosts").is_some()));
+    assert_eq!(rows[2]["fusiform_provider_id"], "kimi-code-plan-global");
+    for index in [0, 1, 3] {
+        assert!(rows[index].get("fusiform_provider_id").is_none());
+    }
     let mut cases = vec![list_vector_case(
         "catalog_and_lifecycle",
         OP_LIST_SCOPED,
@@ -170,16 +176,99 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         "auth.watch_scoped.unsupported",
         unknown,
     ));
+
+    rig.bind(2, reserved("descriptor-reader"));
+    let mut get_cases = Vec::new();
+    for (index, (label, id)) in [
+        ("catalog_with_evidence", "apikey:openai"),
+        ("catalog_without_evidence", "apikey:nanogpt"),
+        ("oauth_without_descriptor", "oauth:anthropic"),
+    ].iter().enumerate() {
+        let record = if *id == "oauth:anthropic" {
+            VaultRecord::new_oauth(
+                "vector",
+                "anthropic",
+                credentials_core::oauth::OAuthCredential {
+                    access_token: "vector-test-access".to_owned().into(),
+                    refresh_token: "vector-test-refresh".to_owned().into(),
+                    expires_at_ms: None,
+                    token_url: String::new(),
+                    client_id: None,
+                    client_secret: None,
+                    scopes: Vec::new(),
+                },
+                b"vector-test-key".to_vec(),
+            )
+        } else {
+            VaultRecord::new_static(CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None)
+        };
+        rig.store.create(id, &record).unwrap();
+        rig.store.force_credential_incarnation_for_test(id, &format!("{:032x}", index + 101));
+        rig.store.create_read_grant_audited(
+            "reserved", "descriptor-reader", SelectorKind::Exact, id,
+            GrantOperation::Read, AuditCtx::admin(AuditOp::GrantCreate),
+        ).unwrap();
+        let params = json!({"credential_id": id});
+        rig.dispatch(2, 20 + index as u64, FrameType::Request, OP_GET_SCOPED, params.clone()).await;
+        let frame = rig.next().await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let mut case = list_vector_case(label, OP_GET_SCOPED, frame);
+        case["request"]["params"] = params;
+        let reply = &case["reply"]["result"];
+        assert_eq!(reply["credential_id"], *id);
+        match *label {
+            "catalog_with_evidence" => {
+                assert_eq!(reply["invalid_key"]["status"], 401);
+                assert_eq!(reply["invalid_key"]["error_code"], "invalid_api_key");
+            }
+            "catalog_without_evidence" => {
+                assert!(reply.get("auth").is_some());
+                assert_eq!(reply.get("invalid_key"), Some(&serde_json::Value::Null));
+            }
+            _ => {
+                for field in ["auth", "hosts", "invalid_key"] {
+                    assert!(reply.get(field).is_none(), "OAuth must omit {field}");
+                }
+            }
+        }
+        get_cases.push(case);
+    }
+    rig.dispatch(2, 30, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let listing = rig.next().await;
+    assert_eq!(listing.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&listing.body).unwrap();
+    let rows = reply["result"]["credentials"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["hosts"], json!(["api.nano-gpt.com", "nano-gpt.com"]));
+    assert_eq!(rows[1]["hosts"], json!(["api.openai.com"]));
+    assert_eq!(rows[0]["fusiform_provider_id"], "nano-gpt");
+    assert_eq!(rows[1]["fusiform_provider_id"], "openai");
+    assert!(rows[2].get("hosts").is_none());
+    assert!(rows[2].get("fusiform_provider_id").is_none());
+    cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
+    let get_emitted =
+        serde_json::to_vec_pretty(&json!({"v":"ck-get-scoped-vectors/v1", "cases":get_cases}))
+            .unwrap();
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
     // SHA256SUMS lists every vector file in the directory, one line each. This test
-    // owns only its own line, so other files' entries must not affect it.
-    let line = format!("{}  list-scoped-v2.json", hex_digest(&emitted));
+    // owns only the lines for the two files it produces, so other files' entries must
+    // not affect it.
+    const OWNED: [&str; 2] = ["get-scoped-v1.json", "list-scoped-v2.json"];
+    let owned_by_us = |entry: &str| {
+        OWNED
+            .iter()
+            .any(|name| entry.ends_with(&format!("  {name}")))
+    };
+    let lines = vec![
+        format!("{}  get-scoped-v1.json", hex_digest(&get_emitted)),
+        format!("{}  list-scoped-v2.json", hex_digest(&emitted)),
+    ];
     let ours = |text: &str| -> Vec<String> {
         text.lines()
-            .filter(|entry| entry.ends_with("  list-scoped-v2.json"))
+            .filter(|entry| owned_by_us(entry))
             .map(str::to_owned)
             .collect()
     };
@@ -187,21 +276,33 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     let sums = std::fs::read_to_string(&sums_path).expect("pinned vector hash");
     if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1") {
         std::fs::write(directory.join("list-scoped-v2.json"), &emitted).unwrap();
-        let mut lines: Vec<String> = sums
+        std::fs::write(directory.join("get-scoped-v1.json"), &get_emitted).unwrap();
+        let mut all: Vec<String> = sums
             .lines()
-            .filter(|entry| !entry.ends_with("  list-scoped-v2.json"))
+            .filter(|entry| !owned_by_us(entry))
             .map(str::to_owned)
-            .chain([line])
+            .chain(lines)
             .collect();
-        lines.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
-        std::fs::write(&sums_path, format!("{}\n", lines.join("\n"))).unwrap();
-        println!("emitted five list-scoped v2 cases and their SHA256SUMS line");
+        all.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
+        std::fs::write(&sums_path, format!("{}\n", all.join("\n"))).unwrap();
+        println!(
+            "emitted six list-scoped v2 cases, three get-scoped v1 cases and their SHA256SUMS lines"
+        );
     } else {
         assert_eq!(
             emitted,
             std::fs::read(directory.join("list-scoped-v2.json"))
                 .expect("pinned list-scoped vectors")
         );
-        assert_eq!(ours(&sums), [line], "SHA256SUMS must list list-scoped-v2.json once, with this hash");
+        assert_eq!(
+            get_emitted,
+            std::fs::read(directory.join("get-scoped-v1.json"))
+                .expect("pinned get-scoped vectors")
+        );
+        assert_eq!(
+            ours(&sums),
+            lines,
+            "SHA256SUMS must list get-scoped-v1.json and list-scoped-v2.json once each, with these hashes"
+        );
     }
 }

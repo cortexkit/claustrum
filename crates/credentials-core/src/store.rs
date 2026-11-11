@@ -114,6 +114,9 @@ pub const ENROLLMENT_REQUESTED_GRANTS_SCHEMA_VERSION: u32 = 40;
 /// Retained GitHub manifests, binding proposals and per-computer activation reports.
 pub const GH_MANIFEST_SCHEMA_VERSION: u32 = 41;
 
+/// Read-time host and authentication descriptors for registered providers.
+pub const REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION: u32 = 42;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -1082,6 +1085,13 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: GH_MANIFEST_SCHEMA_VERSION,
         statements: include_str!("gh_manifests.sql"),
+    },
+    Migration {
+        version: REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION,
+        statements: "ALTER TABLE registered_providers ADD COLUMN hosts_json TEXT NOT NULL DEFAULT '[]'; \
+                     ALTER TABLE registered_providers ADD COLUMN auth_header TEXT DEFAULT NULL; \
+                     ALTER TABLE registered_providers ADD COLUMN auth_scheme TEXT DEFAULT NULL; \
+                     ALTER TABLE registered_providers ADD COLUMN fusiform_provider_id TEXT DEFAULT NULL;",
     },
 ];
 
@@ -13999,7 +14009,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            41,
+            42,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -18497,7 +18507,8 @@ pub use gh_proposals::{
 };
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, validate_registered_provider_service,
-    RegisteredProvider,
+    validate_registered_provider_settings, RegisteredProvider, RegisteredProviderSettings,
+    MAX_REGISTERED_PROVIDER_HOSTS,
 };
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{

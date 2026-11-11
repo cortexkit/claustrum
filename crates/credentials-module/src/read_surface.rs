@@ -343,6 +343,12 @@ pub struct ListScopedCredential {
     /// value, such as a GitHub App.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
+    /// Read-time provider-card join key, distinct from stored routing `provider_ids`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fusiform_provider_id: Option<String>,
+    /// Receiving hosts from the same descriptor served by `credential.get_scoped`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -662,6 +668,502 @@ pub struct GetResult {
     /// limits from), when captured at login. NON-secret display metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+    /// Read-time catalog or registry metadata, only for `credential.get_scoped`.
+    /// Grouping the fields keeps an absent descriptor distinct from absent evidence.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub scoped_descriptor: Option<Box<ScopedKeyDescriptor>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScopedKeyDescriptor {
+    auth: ScopedKeyAuth,
+    hosts: Vec<String>,
+    // A descriptor with no observed bogus-key refusal still emits explicit null.
+    invalid_key: Option<credentials_core::catalog::InvalidKeyEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScopedKeyAuth {
+    header: String,
+    scheme: String,
+}
+
+impl GetResult {
+    fn with_scoped_descriptor(
+        mut self,
+        credential_id: &str,
+        providers: &[credentials_core::store::RegisteredProvider],
+    ) -> Self {
+        self.scoped_descriptor = ScopedKeyDescriptor::for_id(credential_id, providers);
+        self
+    }
+}
+
+impl ScopedKeyDescriptor {
+    fn for_id(
+        credential_id: &str,
+        providers: &[credentials_core::store::RegisteredProvider],
+    ) -> Option<Box<Self>> {
+        credentials_core::catalog::api_key_provider_for_credential(credential_id)
+            .and_then(|row| {
+                if row.hosts.is_empty() {
+                    return None;
+                }
+                Some(Box::new(ScopedKeyDescriptor {
+                    auth: ScopedKeyAuth {
+                        header: row.auth?.header.into(),
+                        scheme: match row.auth?.scheme {
+                            credentials_core::catalog::AuthScheme::Bearer => "bearer",
+                            credentials_core::catalog::AuthScheme::Raw => "raw",
+                        }
+                        .into(),
+                    },
+                    hosts: row.hosts.iter().map(|host| (*host).into()).collect(),
+                    invalid_key: row.invalid_key,
+                }))
+            })
+            .or_else(|| {
+                let row =
+                    credentials_core::store::RegisteredProvider::for_id(providers, credential_id)?;
+                if row.hosts.is_empty() {
+                    return None;
+                }
+                Some(Box::new(ScopedKeyDescriptor {
+                    auth: ScopedKeyAuth {
+                        header: row.auth_header.clone()?,
+                        scheme: row.auth_scheme.clone()?,
+                    },
+                    hosts: row.hosts.clone(),
+                    invalid_key: None,
+                }))
+            })
+    }
+}
+
+#[cfg(test)]
+mod get_scoped_tests {
+    use super::*;
+    use credentials_core::record::{CredentialKind, VaultRecord};
+    use credentials_core::store::SelectorKind;
+    use serde_json::{json, Value};
+
+    fn openai_descriptor() -> Value {
+        json!({
+            "auth": {"header": "authorization", "scheme": "bearer"},
+            "hosts": ["api.openai.com"],
+            "invalid_key": {
+                "status": 401,
+                "error_code": "invalid_api_key",
+                "error_code_field": "/error/code"
+            }
+        })
+    }
+
+    fn golden_reply(id: &str, version: u64, descriptor: Value) -> Value {
+        let mut reply = json!({
+            "payload": [107],
+            "expires_at_ms": null,
+            "record_version": version,
+            "credential_id": id
+        });
+        reply
+            .as_object_mut()
+            .unwrap()
+            .extend(descriptor.as_object().unwrap().clone());
+        reply
+    }
+
+    fn registered_descriptor() -> Value {
+        json!({"auth": {"header": "x-api-key", "scheme": "raw"}, "hosts": ["api.example.com"], "invalid_key": null})
+    }
+
+    #[tokio::test]
+    async fn get_scoped_descriptor_golden_cases() {
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(214);
+        store
+            .set_registered_provider_audited(
+                "customservice",
+                &["llm-provider".into()],
+                &[],
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        store
+            .set_registered_provider_settings_audited(
+                "customdescriptor",
+                &[],
+                &[],
+                Some(&credentials_core::store::RegisteredProviderSettings {
+                    hosts: vec!["api.example.com".into()],
+                    auth_header: Some("x-api-key".into()),
+                    auth_scheme: Some("raw".into()),
+                    fusiform_provider_id: None,
+                }),
+                AuditCtx::admin(AuditOp::ProviderSet),
+            )
+            .unwrap();
+        let null_evidence = json!({
+            "auth": {"header": "authorization", "scheme": "bearer"},
+            "hosts": ["api.nano-gpt.com", "nano-gpt.com"],
+            "invalid_key": null
+        });
+        let mut cases = vec![
+            ("apikey:openai", openai_descriptor()),
+            ("apikey:nanogpt", null_evidence),
+            ("apikey:openai:work", openai_descriptor()),
+            ("apikey:searxng", json!({})),
+            ("apikey:typesafe", json!({})),
+            ("apikey:kagi", json!({})),
+            ("apikey:customservice:work", json!({})),
+            ("apikey:customdescriptor", registered_descriptor()),
+            ("apikey:customdescriptor:work", registered_descriptor()),
+            ("apikey:openaiish", json!({})),
+            ("cookie:openai", json!({})),
+            ("manual:openai", json!({})),
+        ];
+        cases.extend(
+            credentials_core::catalog::LOGIN_PROVIDERS
+                .iter()
+                .map(|row| (row.default_id, json!({}))),
+        );
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        for (id, descriptor) in cases {
+            let record = if credentials_core::catalog::credential_type(id) == "oauth" {
+                VaultRecord::new_oauth(
+                    "test",
+                    "anthropic",
+                    credentials_core::oauth::OAuthCredential {
+                        access_token: "test-access".to_owned().into(),
+                        refresh_token: "test-refresh".to_owned().into(),
+                        expires_at_ms: None,
+                        token_url: String::new(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: Vec::new(),
+                    },
+                    b"k".to_vec(),
+                )
+            } else {
+                let kind = if id.starts_with("cookie:") {
+                    CredentialKind::Cookie
+                } else {
+                    CredentialKind::ApiKey
+                };
+                VaultRecord::new_static(kind, "test", b"k".to_vec(), None)
+            };
+            store.create(id, &record).unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "descriptor-reader",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            let outcome = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                golden_reply(id, 1, descriptor),
+                "{id}"
+            );
+        }
+
+        // Even a catalog API key has no descriptor on the handle-authorized surface.
+        let handle = credentials_core::store::mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:openai",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+        let outcome = surface
+            .get(
+                1,
+                &GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            golden_reply("apikey:openai", 1, json!({}))
+        );
+    }
+
+    #[test]
+    fn remote_get_scoped_descriptor_comes_from_local_catalog() {
+        let outcome = remote_get_outcome(
+            "apikey:openai:remote",
+            crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
+                payload: b"k".to_vec(),
+                expires_at_ms: None,
+                record_version: 7,
+                project_id: None,
+                account_id: None,
+                email: None,
+                org_name: None,
+            }),
+            &[],
+        );
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            golden_reply("apikey:openai:remote", 7, openai_descriptor())
+        );
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_existing_records_keep_assignments_and_use_catalog_descriptor() {
+        use credentials_core::store::{SetCategoryMode, SetProvidersMode};
+
+        let (surface, store, db_path, _root) = crate::tests::tmp_surface_with_store(216);
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+                )
+                .unwrap();
+            // Reproduce assignments saved before ElevenLabs had a catalog row.
+            store
+                .set_categories_audited(
+                    id,
+                    SetCategoryMode::Set,
+                    &["web-search".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+            store
+                .set_providers_audited(
+                    id,
+                    SetProvidersMode::Set,
+                    &["legacy-route".into()],
+                    AuditCtx::admin(AuditOp::SetProviders),
+                )
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "descriptor-reader",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+
+        // An older binary could register ElevenLabs; current setters must refuse it.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO registered_providers \
+             (service, categories_json, provider_ids_json, created_at_ms, hosts_json, \
+              auth_header, auth_scheme, fusiform_provider_id) \
+             VALUES ('elevenlabs', '[\"llm-provider\"]', '[\"registered-route\"]', 123, \
+                     '[\"api.openai.com\"]', 'authorization', 'bearer', 'openai')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let registration = store.registered_providers().unwrap();
+
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            let record = store.get(id).unwrap().encode().unwrap();
+            let reply = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                golden_reply(
+                    id,
+                    1,
+                    json!({
+                        "auth": {"header": "xi-api-key", "scheme": "raw"},
+                        "hosts": ["api.elevenlabs.io"],
+                        "invalid_key": {
+                            "status": 401,
+                            "error_code": "unauthorized",
+                            "error_code_field": "/detail/code"
+                        }
+                    })
+                )
+            );
+            assert_eq!(store.categories(id).unwrap(), ["web-search"]);
+            assert_eq!(store.provider_ids(id).unwrap(), ["legacy-route"]);
+            assert_eq!(store.get(id).unwrap().encode().unwrap(), record);
+        }
+        assert_eq!(store.registered_providers().unwrap(), registration);
+    }
+
+    #[tokio::test]
+    async fn registered_provider_v2_v3_sequence_projects_current_descriptor_for_every_key() {
+        use credentials_core::admin_ops::{apply, AdminOpBody};
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(215);
+        let id = "apikey:custom:existing";
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "descriptor-reader",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        let base = json!({"op":"admin.provider_set", "v":3, "service":"custom", "categories":[], "provider_ids":[]});
+        let run = |body: Value| {
+            apply(
+                &store,
+                serde_json::from_value::<AdminOpBody>(body).unwrap(),
+                "operator",
+            )
+        };
+        let mut with_descriptor = base.clone();
+        with_descriptor["hosts"] = json!(["api.example.com"]);
+        with_descriptor["auth_header"] = json!("x-api-key");
+        with_descriptor["auth_scheme"] = json!("raw");
+        with_descriptor["fusiform_provider_id"] = json!("anthropic");
+        run(with_descriptor.clone()).unwrap();
+        let mut legacy = base.clone();
+        legacy["v"] = json!(2);
+        legacy["categories"] = json!(["web-search"]);
+        for body in [with_descriptor.clone(), legacy.clone()] {
+            run(body).unwrap();
+            let reply = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                golden_reply(id, 1, registered_descriptor())
+            );
+        }
+        assert_eq!(
+            store.registered_providers().unwrap()[0].categories,
+            ["web-search"]
+        );
+        assert!(
+            store.categories(id).unwrap().is_empty(),
+            "defaults must not reclassify an existing key"
+        );
+        let providers = store.registered_providers().unwrap();
+        assert_eq!(
+            providers[0].fusiform_provider_id.as_deref(),
+            Some("anthropic")
+        );
+        let remote = remote_get_outcome(
+            id,
+            crate::federation::RemoteAnswer::Served(crate::federation::RemoteGet {
+                payload: b"k".to_vec(),
+                expires_at_ms: None,
+                record_version: 7,
+                project_id: None,
+                account_id: None,
+                email: None,
+                org_name: None,
+            }),
+            &providers,
+        );
+        assert_eq!(
+            serde_json::to_value(remote).unwrap(),
+            golden_reply(id, 7, registered_descriptor())
+        );
+        let tip = store.audit_tip().unwrap();
+        // A v3 replacement with no descriptor clears the provider for existing keys too.
+        run(base.clone()).unwrap();
+        assert_ne!(store.audit_tip().unwrap(), tip);
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .last()
+                .unwrap()
+                .credential_id
+                .as_deref(),
+            Some("provider:custom||||||")
+        );
+        let reply = surface
+            .get_scoped(
+                Some(&principal),
+                &GetScopedParams {
+                    credential_id: id.into(),
+                    min_ttl_ms: None,
+                    enrollment_token: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            serde_json::to_value(reply).unwrap(),
+            golden_reply(id, 1, json!({}))
+        );
+        let before = store.registered_providers().unwrap();
+        let tip = store.audit_tip().unwrap();
+        for hosts in [json!(["api.example.com"]), Value::Null] {
+            let mut body = legacy.clone();
+            body["hosts"] = hosts;
+            assert!(run(body).is_err());
+            assert_eq!(store.registered_providers().unwrap(), before);
+            assert_eq!(store.audit_tip().unwrap(), tip);
+        }
+        with_descriptor["fusiform_provider_id"] = json!("unavailable-provider");
+        assert!(run(with_descriptor)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable-provider"));
+        assert_eq!(store.registered_providers().unwrap(), before);
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        // Explicit null on every new field is a valid complete, empty registration.
+        let mut cleared = base;
+        for key in [
+            "hosts",
+            "auth_header",
+            "auth_scheme",
+            "fusiform_provider_id",
+        ] {
+            cleared[key] = Value::Null;
+        }
+        assert_eq!(run(cleared).unwrap(), json!({"changed":false}));
+    }
 }
 
 /// A non-secret error code returned to a consumer (never leaks why beyond the
@@ -1114,6 +1616,20 @@ pub(crate) fn list_scoped_view(
                 .map(|time| time.to_string())
                 .as_deref(),
         );
+        push_optional_string(
+            &mut digest_input,
+            credential.fusiform_provider_id.as_deref(),
+        );
+        match &credential.hosts {
+            None => digest_input.push(0),
+            Some(hosts) => {
+                digest_input.push(1);
+                push_u32(&mut digest_input, hosts.len());
+                for host in hosts {
+                    push_string(&mut digest_input, host);
+                }
+            }
+        }
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -1124,7 +1640,15 @@ pub(crate) fn list_scoped_view(
     base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
 }
 
+#[cfg(test)]
 pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
+    project_list_scoped_with_providers(snapshot, &[])
+}
+
+fn project_list_scoped_with_providers(
+    snapshot: ScopedListSnapshot,
+    providers: &[credentials_core::store::RegisteredProvider],
+) -> ListScopedResult {
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
         .into_iter()
@@ -1146,6 +1670,16 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
             ListScopedCredential {
+                fusiform_provider_id: if let Some(provider) =
+                    credentials_core::catalog::api_key_provider_for_credential(&row.id)
+                {
+                    provider.fusiform_provider_id.map(str::to_owned)
+                } else {
+                    credentials_core::store::RegisteredProvider::for_id(providers, &row.id)
+                        .and_then(|provider| provider.fusiform_provider_id.clone())
+                },
+                hosts: ScopedKeyDescriptor::for_id(&row.id, providers)
+                    .map(|descriptor| descriptor.hosts),
                 provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
@@ -2095,6 +2629,7 @@ impl ReadSurface {
                     account_id,
                     email: record.identity.email.clone(),
                     org_name: record.identity.org_name.clone(),
+                    scoped_descriptor: None,
                 })
             }
             Err(e) => err(map_engine_error(&e)),
@@ -2582,7 +3117,12 @@ impl ReadSurface {
             )
         });
         let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
-        let result = project_list_scoped(snapshot);
+        let providers = self
+            .engine
+            .store()
+            .registered_providers()
+            .map_err(|_| ReadError::StoreError)?;
+        let result = project_list_scoped_with_providers(snapshot, &providers);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -2645,7 +3185,12 @@ impl ReadSurface {
             .rows
             .retain(|row| !transfer_key_fenced(&row.id, rows_access));
         keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, keys_access));
-        let view = project_list_scoped(snapshot).view;
+        let providers = self
+            .engine
+            .store()
+            .registered_providers()
+            .map_err(|_| ReadError::StoreError)?;
+        let view = project_list_scoped_with_providers(snapshot, &providers).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
         input.push(1);
@@ -2838,12 +3383,16 @@ impl ReadSurface {
         ) {
             return err(code);
         }
+        let providers = match self.engine.store().registered_providers() {
+            Ok(providers) => providers,
+            Err(error) => return err(map_store_error(&error)),
+        };
         // A remote id is served by its home vault, never from the local store. The
         // grant check above already covered it, through this vault's own categories.
         match remote_record {
             Ok(Some(record)) => {
                 let answer = self.remote.get(&record, params.min_ttl_ms).await;
-                return remote_get_outcome(&params.credential_id, answer);
+                return remote_get_outcome(&params.credential_id, answer, &providers);
             }
             Ok(None) => {}
             Err(error) => return err(map_store_error(&error)),
@@ -2923,18 +3472,22 @@ impl ReadSurface {
                     _ => None,
                 }
                 .or_else(|| record.identity.account_id.clone());
-                GetOutcome::Ok(GetResult {
-                    payload: record.payload.into_inner().to_vec(),
-                    expires_at_ms: record.expires_at_ms,
-                    record_version: record.record_version,
-                    // The principal supplied this id; echo it after the successful read so
-                    // scoped and handle-authorized success bodies keep one shape.
-                    credential_id: Some(params.credential_id.clone()),
-                    project_id,
-                    account_id,
-                    email: record.identity.email.clone(),
-                    org_name: record.identity.org_name.clone(),
-                })
+                GetOutcome::Ok(
+                    GetResult {
+                        payload: record.payload.into_inner().to_vec(),
+                        expires_at_ms: record.expires_at_ms,
+                        record_version: record.record_version,
+                        // The principal supplied this id; echo it after the successful read so
+                        // scoped and handle-authorized success bodies keep one shape.
+                        credential_id: Some(params.credential_id.clone()),
+                        project_id,
+                        account_id,
+                        email: record.identity.email.clone(),
+                        org_name: record.identity.org_name.clone(),
+                        scoped_descriptor: None,
+                    }
+                    .with_scoped_descriptor(&params.credential_id, &providers),
+                )
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
                 self.record_scoped_refusal(
@@ -3564,18 +4117,26 @@ fn err(code: ReadError) -> GetOutcome {
 
 /// A remote read's answer in the local `get_scoped` shape: a served token is the same
 /// `GetResult` a local read returns, with the caller's id echoed.
-fn remote_get_outcome(credential_id: &str, answer: crate::federation::RemoteAnswer) -> GetOutcome {
+fn remote_get_outcome(
+    credential_id: &str,
+    answer: crate::federation::RemoteAnswer,
+    providers: &[credentials_core::store::RegisteredProvider],
+) -> GetOutcome {
     match answer {
-        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(GetResult {
-            payload: get.payload,
-            expires_at_ms: get.expires_at_ms,
-            record_version: get.record_version,
-            credential_id: Some(credential_id.to_string()),
-            project_id: get.project_id,
-            account_id: get.account_id,
-            email: get.email,
-            org_name: get.org_name,
-        }),
+        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(
+            GetResult {
+                payload: get.payload,
+                expires_at_ms: get.expires_at_ms,
+                record_version: get.record_version,
+                credential_id: Some(credential_id.to_string()),
+                project_id: get.project_id,
+                account_id: get.account_id,
+                email: get.email,
+                org_name: get.org_name,
+                scoped_descriptor: None,
+            }
+            .with_scoped_descriptor(credential_id, providers),
+        ),
         crate::federation::RemoteAnswer::Refused(refusal) => GetOutcome::RemoteErr {
             error: refusal.body(),
         },
@@ -4409,7 +4970,7 @@ mod list_scoped_tests {
                 ),
                 with_providers(
                     row(
-                        "a-active",
+                        "apikey:openai",
                         &["llm-provider", "monitoring"],
                         RecordState::Active,
                         &[GrantOperation::Read, GrantOperation::Sign],
@@ -4458,10 +5019,10 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "zzrt6oJHB/1jCqi4+TUqAol9XN3jLGea/H09sqqJW14=",
+            "D2CalG28QGfnfZL4p9Sb/24UA7d+uWruQKqPROpdTCE=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
-        assert_eq!(result.credentials[0].id, "a-active");
+        assert_eq!(result.credentials[0].id, "apikey:openai");
         assert!(result
             .credentials
             .iter()
@@ -4552,6 +5113,8 @@ mod list_scoped_tests {
             out.extend_from_slice(value.as_bytes());
         }
         let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
+            fusiform_provider_id: None,
+            hosts: None,
             provider: None,
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -4601,6 +5164,8 @@ mod list_scoped_tests {
             bytes.push(0); // provider absent
             string(&mut bytes, "0123456789abcdef0123456789abcdef");
             bytes.push(0); // tier observation time absent
+            bytes.push(0); // Fusiform provider id absent
+            bytes.push(0); // hosts absent
             bytes.push(2);
             u32_be(&mut bytes, 0);
             let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
@@ -4704,6 +5269,8 @@ mod list_scoped_tests {
             bytes.push(0); // provider absent
             string(&mut bytes, "0123456789abcdef0123456789abcdef");
             bytes.push(0); // tier observation time absent
+            bytes.push(0); // Fusiform provider id absent
+            bytes.push(0); // hosts absent
             bytes.push(2);
             bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
             let expected = base64::engine::general_purpose::STANDARD
@@ -4716,6 +5283,159 @@ mod list_scoped_tests {
             } else {
                 assert!(wire.get("plan_tier").is_none());
                 assert!(wire.get("plan_tier_source").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn list_scoped_fusiform_ids_project_catalog_and_registry_without_deriving_routing_ids() {
+        use credentials_core::store::RegisteredProvider;
+        let mut providers = vec![RegisteredProvider {
+            service: "custom".into(),
+            categories: vec![],
+            provider_ids: vec!["unrelated-route".into()],
+            created_at_ms: 1,
+            hosts: vec![],
+            auth_header: None,
+            auth_scheme: None,
+            fusiform_provider_id: Some("anthropic".into()),
+        }];
+        let cases = [
+            ("apikey:openai:work", Some("openai")),
+            ("apikey:firepass", Some("fireworks-fire-pass")),
+            ("apikey:brave", None),
+            ("oauth:openai", None),
+            ("manual:custom", None),
+            ("apikey:custom:work", Some("anthropic")),
+            ("apikey:unregistered", None),
+        ];
+        let snapshot = || ScopedListSnapshot {
+            rows: cases
+                .iter()
+                .map(|(id, _)| {
+                    let mut source =
+                        row(id, &[], RecordState::Active, &[GrantOperation::Read], None);
+                    source.provider_ids = vec!["stored-route".into()];
+                    source
+                })
+                .collect(),
+            grants: vec![],
+        };
+        let result = project_list_scoped_with_providers(snapshot(), &providers);
+        for (id, expected) in cases {
+            let credential = result.credentials.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(credential.fusiform_provider_id.as_deref(), expected, "{id}");
+            assert_eq!(credential.provider_ids, ["stored-route"], "{id}");
+        }
+        let custom = result
+            .credentials
+            .iter()
+            .find(|row| row.id == "apikey:custom:work")
+            .unwrap();
+        assert_eq!(custom.hosts, None, "an id does not require a descriptor");
+        providers[0].fusiform_provider_id = None;
+        let cleared = project_list_scoped_with_providers(snapshot(), &providers);
+        assert_eq!(
+            cleared
+                .credentials
+                .iter()
+                .find(|row| row.id == "apikey:custom:work")
+                .unwrap()
+                .fusiform_provider_id,
+            None
+        );
+        assert_ne!(
+            cleared.view, result.view,
+            "an id-only registry change changes the view"
+        );
+    }
+
+    #[test]
+    fn list_scoped_view_frames_fusiform_id_then_hosts_after_plan_observation() {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        let mut source = row(
+            "apikey:framing",
+            &[],
+            RecordState::Active,
+            &[GrantOperation::Read],
+            None,
+        );
+        source.plan_tier_observed_at_ms = Some(42);
+        let result = project_list_scoped(ScopedListSnapshot {
+            rows: vec![source],
+            grants: Vec::new(),
+        });
+        let mut credential = result.credentials[0].clone();
+        let mut views = std::collections::BTreeSet::new();
+        for fusiform_id in [None, Some("openai"), Some("anthropic")] {
+            credential.fusiform_provider_id = fusiform_id.map(str::to_owned);
+            for hosts in [
+                None,
+                Some(vec![]),
+                Some(vec!["ab"]),
+                Some(vec!["a", "b"]),
+                Some(vec!["b", "a"]),
+            ] {
+                credential.hosts = hosts
+                    .as_ref()
+                    .map(|hosts| hosts.iter().map(|host| (*host).to_owned()).collect());
+                // Assemble the entire frame independently: the two new slots follow the
+                // observation time, and an absent host list is not a present empty list.
+                let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
+                bytes.push(1);
+                bytes.extend_from_slice(&1u32.to_be_bytes());
+                string(&mut bytes, "apikey:framing");
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // categories
+                string(&mut bytes, "active");
+                bytes.extend_from_slice(&1u32.to_be_bytes());
+                string(&mut bytes, "read");
+                bytes.extend_from_slice(&[0, 0, 0]); // identity
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // routing provider ids
+                bytes.extend_from_slice(&[0, 0, 0, 0]); // auth method, tier, source, provider
+                string(&mut bytes, "0123456789abcdef0123456789abcdef");
+                bytes.push(1);
+                string(&mut bytes, "42");
+                match fusiform_id {
+                    None => bytes.push(0),
+                    Some(id) => {
+                        bytes.push(1);
+                        string(&mut bytes, id);
+                    }
+                }
+                match &hosts {
+                    None => bytes.push(0),
+                    Some(hosts) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&(hosts.len() as u32).to_be_bytes());
+                        for host in hosts {
+                            string(&mut bytes, host);
+                        }
+                    }
+                }
+                bytes.push(2);
+                bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
+                let expected = base64::engine::general_purpose::STANDARD
+                    .encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+                let view = list_scoped_view(std::slice::from_ref(&credential), &[]);
+                assert_eq!(
+                    view, expected,
+                    "Fusiform id {fusiform_id:?}, hosts {hosts:?}"
+                );
+                assert!(views.insert(view), "every id/host frame must be distinct");
+                let wire = serde_json::to_value(&credential).unwrap();
+                if let Some(id) = fusiform_id {
+                    assert_eq!(wire["fusiform_provider_id"], id);
+                } else {
+                    assert!(wire.get("fusiform_provider_id").is_none());
+                }
+                if let Some(hosts) = hosts {
+                    assert_eq!(wire["hosts"], serde_json::json!(hosts));
+                } else {
+                    assert!(wire.get("hosts").is_none());
+                }
             }
         }
     }

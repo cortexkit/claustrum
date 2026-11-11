@@ -40,6 +40,46 @@ fn api_key_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
+/// Keep the validated name and id together so callers need neither to recover the
+/// name from an assumed prefix nor to fill in a missing id.
+pub(super) struct ApiKeyName {
+    name: String,
+    id: String,
+}
+
+impl ApiKeyName {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(super) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(super) fn into_id(self) -> String {
+        self.id
+    }
+}
+
+pub(super) fn api_key_name(theme: &ColorfulTheme) -> Result<ApiKeyName, CliError> {
+    let value: String = Input::with_theme(theme)
+        .with_prompt("Provider name (optionally provider:label)")
+        .validate_with(|value: &String| api_key_id(value).map(|_| ()))
+        .interact_text()
+        .map_err(prompt_error)?;
+    let id = api_key_id(&value).map_err(CliError::Usage)?;
+    Ok(ApiKeyName { name: value, id })
+}
+
+pub(super) fn confirm_replacement(theme: &ColorfulTheme, id: &str) -> Result<bool, CliError> {
+    eprintln!("{id} already holds a credential.");
+    Confirm::with_theme(theme)
+        .with_prompt("Replace it?")
+        .default(false)
+        .interact()
+        .map_err(prompt_error)
+}
+
 fn cookie_id(domain: &str, account: &str) -> Result<String, String> {
     if !valid_deposit_cookie_id(&format!("cookie:{domain}:account")) {
         return Err("use a lowercase site domain, such as example.com (no URL or path)".into());
@@ -61,14 +101,7 @@ fn manual_id(id: &str) -> Result<String, String> {
 
 fn name(theme: &ColorfulTheme, kind: usize) -> Result<String, CliError> {
     match kind {
-        0 => {
-            let value: String = Input::with_theme(theme)
-                .with_prompt("Provider name (optionally provider:label)")
-                .validate_with(|value: &String| api_key_id(value).map(|_| ()))
-                .interact_text()
-                .map_err(prompt_error)?;
-            api_key_id(&value).map_err(CliError::Usage)
-        }
+        0 => api_key_name(theme).map(ApiKeyName::into_id),
         1 => {
             let domain: String = Input::with_theme(theme)
                 .with_prompt("Site domain")
@@ -150,13 +183,7 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
     if !options.has_flag("--replace") && options.optional("--expected-hash").is_none() {
         let inventory = parse_inventory(&request_admin_status(global)?)?;
         if inventory.iter().any(|row| row.2 == id) {
-            eprintln!("{id} already holds a credential.");
-            if !Confirm::with_theme(&theme)
-                .with_prompt("Replace it?")
-                .default(false)
-                .interact()
-                .map_err(prompt_error)?
-            {
+            if !confirm_replacement(&theme, &id)? {
                 return Ok(false);
             }
             options.bools.insert("--replace".into());
@@ -218,7 +245,7 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         .collect();
     eprintln!("Routing provider ids tell routing which models the key may serve. A wrong id sends work to a key that refuses it; empty is the safe answer.");
     let raw: String = Input::with_theme(&theme)
-        .with_prompt("Routing provider ids (comma-separated, empty for none)")
+        .with_prompt("Which models may this key run? Leave empty if unsure.")
         .allow_empty(true)
         .validate_with(|value: &String| {
             let ids = routing_ids(value);
@@ -226,23 +253,63 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         })
         .interact_text()
         .map_err(prompt_error)?;
+    let raw_hosts: String = Input::with_theme(&theme)
+        .with_prompt("Which addresses may receive this key? Host names only, like api.example.com, separated by commas. Leave empty if unsure.")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_error)?;
+    let hosts = if raw_hosts.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![raw_hosts]
+    };
+    let (auth_header, auth_scheme) = if hosts.is_empty() {
+        (None, None)
+    } else {
+        let header: String = Input::with_theme(&theme)
+            .with_prompt("Which request header carries the key?")
+            .interact_text()
+            .map_err(prompt_error)?;
+        let scheme = Select::with_theme(&theme)
+            .with_prompt("Is the key sent as 'Bearer <key>' or by itself?")
+            .items(["Bearer <key>", "The key by itself"])
+            .default(0)
+            .interact()
+            .map_err(prompt_error)?;
+        (
+            Some(header),
+            Some(if scheme == 0 { "bearer" } else { "raw" }.to_string()),
+        )
+    };
+    let fusiform_id: String = Input::with_theme(&theme)
+        .with_prompt("Which provider is this in Fusiform's list? Leave empty if unsure.")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_error)?;
+    let op = super::provider_set_op(
+        service.to_string(),
+        categories,
+        routing_ids(&raw),
+        credentials_core::store::RegisteredProviderSettings {
+            hosts,
+            auth_header,
+            auth_scheme,
+            fusiform_provider_id: if fusiform_id.trim().is_empty() {
+                None
+            } else {
+                Some(fusiform_id.trim().to_string())
+            },
+        },
+    )?;
     if !Confirm::with_theme(&theme)
-        .with_prompt("Save these provider defaults and continue?")
+        .with_prompt("Save these provider settings and continue?")
         .default(false)
         .interact()
         .map_err(prompt_error)?
     {
         return Ok(false);
     }
-    super::commit_admin(
-        global,
-        credentials_core::admin_ops::AdminOpBody::ProviderSet {
-            v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
-            service: service.to_string(),
-            categories,
-            provider_ids: routing_ids(&raw),
-        },
-    )?;
+    super::commit_admin(global, op)?;
     Ok(true)
 }
 

@@ -74,6 +74,7 @@ use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{
     AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+    ADMIN_OP_SCHEMA_V3,
 };
 use credentials_core::catalog::{
     default_provider_ids as catalog_default_provider_ids, login_provider, DeviceKind, ExchangeWire,
@@ -404,7 +405,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "revoke-grant" => cmd_revoke_grant(&global, &args),
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global, &args),
-        "provider-report" => cmd_provider_report(&global),
+        "provider-report" => cmd_provider_report(&global, options),
         "grants" => cmd_grants(&global),
         "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
@@ -503,7 +504,15 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "--client-id",
             "--provider-id",
         ],
-        "provider" => &["--service", "--category", "--provider-id"],
+        "provider" => &[
+            "--service",
+            "--category",
+            "--provider-id",
+            "--host",
+            "--auth-header",
+            "--auth-scheme",
+            "--fusiform-id",
+        ],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
         "import" => &[
@@ -569,6 +578,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
+        "provider-report" => &["--missing"],
         "enroll" => &[
             "--keep-grants",
             "--clear",
@@ -676,12 +686,12 @@ fn usage_short() -> String {
      usage: ck auth <verb> [flags]\n\
      \n\
      verbs:\n\
-       login               OAuth/device/api-key login (interactive with no flags)\n\
+       login               OAuth/device/api-key login; picker includes custom keys\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
-       provider-report     compare stored provider ids with catalog defaults\n\
+       provider-report     compare routing ids or list uncovered providers\n\
        provider            list, set or remove operator provider defaults\n\
        grants              principal-scoped grants (no secrets)\n\
        enroll              approve, label, list or revoke consumer enrollments\n\
@@ -752,39 +762,61 @@ fn help_verb(verb: &str) -> String {
             "ck auth provider list\n\
              ck auth provider set --service <name> [--category <c>]...\n\
              \x20                    [--provider-id <id>]...\n\
+             \x20                    [--host <host>]...\n\
+             \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
+             \x20                    [--fusiform-id <id>]\n\
              ck auth provider remove --service <name>\n\
              \n\
              \x20 --service <name>    API-key service name (set and remove)\n\
              \x20 --category <c>      default group for future keys (set; repeatable)\n\
              \x20 --provider-id <id>  default routing id (set; repeatable)\n\
+             \x20 --host <host>       allowed key destination (set; repeatable)\n\
+             \x20 --auth-header <h>   key header, for example authorization (set)\n\
+             \x20 --auth-scheme <s>   bearer or raw (set)\n\
+             \x20 --fusiform-id <id>  provider id in the embedded Fusiform list (set)\n\
              \n\
              NOTES\n\
-             list is read-only and lease-free: service, groups and routing ids.\n\
-             set remembers defaults for future apikey:<service>[:<label>] keys.\n\
+             list is read-only and lease-free; descriptor fields are JSON columns.\n\
+             set states the whole registration; omitted optional settings are cleared.\n\
+             Groups and routing ids are defaults for future keys. Hosts and auth\n\
+             describe every key for this service, including existing keys.\n\
              Choose groups from ck auth categories; no groups or routing ids is valid.\n\
              A fixed catalog service cannot be registered. Repeating a set is a no-op.\n\
-             set and remove never change existing keys. Use set-category or\n\
-             set-providers to edit those. Routing ids tell routing which models a key\n\
+             Use set-category or set-providers to edit existing keys' groups or ids.\n\
+             Routing ids tell routing which models a key\n\
              may serve; a wrong id sends work to a key that refuses it. Empty is safe."
         }
         "provider list" => {
             "ck auth provider list\n\
              \n\
              NOTES\n\
-             List registered service names, groups and routing provider ids.\n\
+             Columns: SERVICE, GROUPS, PROVIDER IDS, HOSTS, AUTH, FUSIFORM ID.\n\
+             All but SERVICE are JSON: arrays, an auth object or null, an id or null.\n\
              Read-only and lease-free; no master key is needed."
         }
         "provider set" => {
             "ck auth provider set --service <name> [--category <c>]...\n\
              \x20                    [--provider-id <id>]...\n\
+             \x20                    [--host <host>]...\n\
+             \x20                    [--auth-header <header> --auth-scheme <scheme>]\n\
+             \x20                    [--fusiform-id <id>]\n\
              \n\
              \x20 --service <name>    API-key service absent from the fixed catalog\n\
              \x20 --category <c>      default group for future keys (repeatable)\n\
              \x20 --provider-id <id>  default routing id (repeatable)\n\
+             \x20 --host <host>       allowed key destination (repeatable; commas OK)\n\
+             \x20 --auth-header <h>   key header, for example authorization\n\
+             \x20 --auth-scheme <s>   bearer (Bearer <key>) or raw (the key alone)\n\
+             \x20 --fusiform-id <id>  provider id in the embedded Fusiform list\n\
              \n\
              NOTES\n\
              No groups or routing ids is valid. Groups are from ck auth categories.\n\
-             Existing records are never changed; an identical set writes nothing.\n\
+             set states the whole registration; omitted optional settings are cleared.\n\
+             Give hosts and auth together, or neither. Hosts are exact names only,\n\
+             with no scheme, port, path or pattern (at most 8). Hosts and the header\n\
+             are lowercased; hosts are trimmed, sorted and deduplicated.\n\
+             Groups and routing ids apply to future keys only. Hosts and auth also\n\
+             describe existing keys; an identical set writes nothing.\n\
              Routing ids tell routing which models a key may serve. A wrong id sends\n\
              work to a key that refuses it; empty is the safe answer."
         }
@@ -798,13 +830,18 @@ fn help_verb(verb: &str) -> String {
              The next interactive put for this service asks again."
         }
         "provider-report" => {
-            "ck auth provider-report\n\
+            "ck auth provider-report [--missing]\n\
+             \n\
+             \x20 --missing    list uncovered embedded provider ids, then reviewed skips\n\
              \n\
              NOTES\n\
              List catalog-matched credentials whose stored routing provider ids differ\n\
              from the table, with ID, STORED and TABLE columns (JSON arrays of ids).\n\
              Unmapped rows with no stored ids are not differences. Unknown services\n\
-             are not compared. Read-only and lease-free: no records are changed."
+             are not compared. Read-only and lease-free: no records are changed.\n\
+             With --missing, no vault or key is needed. Print ids in provider-id order\n\
+             when no API-key row carries them and no reviewed skip holds them, then\n\
+             print skipped ids and reasons under 'Skipped:'."
         }
         "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
@@ -875,6 +912,10 @@ fn help_verb(verb: &str) -> String {
              api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
+             The picker ends with Other API key provider… for a named API key.\n\
+             Enter a provider name or provider:label; existing ids ask Replace it?\n\
+             with default No before provider settings or the hidden key prompt.\n\
+             Unknown providers reuse the groups and routing ids chosen on first use.\n\
               Catalog API-key and subscription logins store their table's routing\n\
               provider ids when no --provider-id is given. An explicit\n\
              --provider-id replaces the default; --replace keeps an existing\n\
@@ -1180,6 +1221,7 @@ fn help_verb(verb: &str) -> String {
               default. A cookie:<domain> id always creates a session-cookie record.\n\
               Catalog ids store the table's routing provider ids by default. Explicit\n\
               --provider-id wins; --replace keeps a stored set, as login does.\n\
+              Use ck auth login to add a provider key, with a check where available.\n\
               Unknown API-key providers ask once for groups and routing ids before\n\
               reading the value. No groups or routing ids is valid; confirmation\n\
               defaults to No. Later keys reuse the answer. Without a terminal, put\n\
@@ -2213,6 +2255,44 @@ fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 
+fn canonical_provider_hosts(values: &[String]) -> Vec<String> {
+    let mut hosts: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(|host| host.trim().to_ascii_lowercase())
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn provider_set_op(
+    service: String,
+    categories: Vec<String>,
+    provider_ids: Vec<String>,
+    mut settings: credentials_core::store::RegisteredProviderSettings,
+) -> Result<AdminOpBody, CliError> {
+    credentials_core::store::validate_registered_provider_service(&service)
+        .map_err(CliError::Store)?;
+    check_cli_provider_ids(&provider_ids, true)?;
+    settings.hosts = canonical_provider_hosts(&settings.hosts);
+    settings.auth_header = settings
+        .auth_header
+        .map(|header| header.to_ascii_lowercase());
+    credentials_core::store::validate_registered_provider_settings(&settings)
+        .map_err(CliError::Store)?;
+    Ok(AdminOpBody::ProviderSet {
+        v: ADMIN_OP_SCHEMA_V3,
+        service,
+        categories,
+        provider_ids,
+        hosts: Some(serde_json::json!(settings.hosts)),
+        auth_header: Some(serde_json::json!(settings.auth_header)),
+        auth_scheme: Some(serde_json::json!(settings.auth_scheme)),
+        fusiform_provider_id: Some(serde_json::json!(settings.fusiform_provider_id)),
+    })
+}
+
 fn cmd_provider(
     global: &GlobalArgs,
     args: &[String],
@@ -2222,7 +2302,15 @@ fn cmd_provider(
     let service_flags = ["--service"];
     let flags: &[&str] = match action {
         Some("list") if args.len() == 1 => &[],
-        Some("set") => &["--service", "--category", "--provider-id"],
+        Some("set") => &[
+            "--service",
+            "--category",
+            "--provider-id",
+            "--host",
+            "--auth-header",
+            "--auth-scheme",
+            "--fusiform-id",
+        ],
         Some("remove") => &service_flags,
         _ => return Err(CliError::Usage(help_verb("provider"))),
     };
@@ -2244,30 +2332,37 @@ fn cmd_provider(
         Some("list") if args.len() == 1 => {
             let rows = credentials_core::store::registered_providers_read_only(&store_path(global))
                 .map_err(CliError::Store)?;
-            println!("SERVICE\tGROUPS\tPROVIDER IDS");
+            println!("SERVICE\tGROUPS\tPROVIDER IDS\tHOSTS\tAUTH\tFUSIFORM ID");
             for row in rows {
+                let auth = row.auth_header.zip(row.auth_scheme).map(
+                    |(header, scheme)| serde_json::json!({"header": header, "scheme": scheme}),
+                );
                 println!(
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     row.service,
                     serde_json::to_string(&row.categories).unwrap(),
-                    serde_json::to_string(&row.provider_ids).unwrap()
+                    serde_json::to_string(&row.provider_ids).unwrap(),
+                    serde_json::to_string(&row.hosts).unwrap(),
+                    serde_json::to_string(&auth).unwrap(),
+                    serde_json::to_string(&row.fusiform_provider_id).unwrap()
                 );
             }
         }
         Some("set") => {
             let service = options.required("--service")?;
-            credentials_core::store::validate_registered_provider_service(&service)
-                .map_err(CliError::Store)?;
             let provider_ids = provider_id_flags(args)?;
-            commit_admin(
-                global,
-                AdminOpBody::ProviderSet {
-                    v: ADMIN_OP_SCHEMA_V2,
-                    service: service.clone(),
-                    categories: repeated_values(args, "--category"),
-                    provider_ids,
+            let op = provider_set_op(
+                service.clone(),
+                repeated_values(args, "--category"),
+                provider_ids,
+                credentials_core::store::RegisteredProviderSettings {
+                    hosts: repeated_values(args, "--host"),
+                    auth_header: options.optional("--auth-header"),
+                    auth_scheme: options.optional("--auth-scheme"),
+                    fusiform_provider_id: options.optional("--fusiform-id"),
                 },
             )?;
+            commit_admin(global, op)?;
             println!("set provider {service}");
         }
         Some("remove") if args.len() == 3 && args[1] == "--service" => {
@@ -2952,8 +3047,10 @@ fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option
     ))
 }
 
+const OTHER_API_KEY_PROVIDER: &str = "__other_api_key__";
+
 /// Every row the interactive login picker offers, as (provider key, display name,
-/// default id): the OAuth/device logins first, then every API-key catalog row.
+/// default id): OAuth/device logins, API-key catalog rows, then a custom provider.
 fn login_picker_rows() -> Vec<(String, String, String)> {
     let mut rows = Vec::new();
     for &(key, name) in LOGIN_PICKER_ROWS {
@@ -2971,6 +3068,11 @@ fn login_picker_rows() -> Vec<(String, String, String)> {
             provider.default_id.to_string(),
         ));
     }
+    rows.push((
+        OTHER_API_KEY_PROVIDER.to_string(),
+        "Other API key provider…".to_string(),
+        String::new(),
+    ));
     rows
 }
 
@@ -3007,6 +3109,13 @@ fn pick_login_interactively(
             ))
         })?;
     let (provider, _, default_id) = &combined_rows[pick];
+    if provider == OTHER_API_KEY_PROVIDER {
+        return Ok(InteractiveChoice {
+            provider: provider.clone(),
+            id_override: None,
+            replace: false,
+        });
+    }
     google_login::validate_client_flags(args, provider)?;
     let default_id = default_id.as_str();
     let existing = provider_ids(&inventory, default_id);
@@ -3273,6 +3382,68 @@ fn cmd_device_login(
     Ok(())
 }
 
+struct OtherApiKeyChoice {
+    key: put_prompt::ApiKeyName,
+    replace: bool,
+}
+
+fn pick_other_api_key(global: &GlobalArgs) -> Result<Option<OtherApiKeyChoice>, CliError> {
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let key = put_prompt::api_key_name(&theme)?;
+    let inventory = parse_inventory(&request_admin_status(global)?)?;
+    let replace = inventory.iter().any(|row| row.2 == key.id());
+    if replace && !put_prompt::confirm_replacement(&theme, key.id())? {
+        return Ok(None);
+    }
+    Ok(Some(OtherApiKeyChoice { key, replace }))
+}
+
+fn cmd_other_api_key_login(
+    global: &GlobalArgs,
+    args: &[String],
+    choice: &OtherApiKeyChoice,
+) -> Result<(), CliError> {
+    let id = choice.key.id();
+    let replace = choice.replace;
+    let preflighted_key = preflight_login(
+        global,
+        id,
+        replace,
+        format!("{id} already holds a credential."),
+    )?;
+    if !put_prompt::provider(global, id)? {
+        return Ok(());
+    }
+    println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
+    let name = choice.key.name();
+    let key = dialoguer::Password::new()
+        .with_prompt(format!("Enter API key for {name}"))
+        .interact()
+        .map_err(|e| CliError::Io(format!("reading API key: {e}")))?;
+    let record = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "login",
+        key.trim().as_bytes().to_vec(),
+        None,
+    );
+    let (audit_op, store_mode) = if replace {
+        (AdminAuditOp::Overwrite, StoreMode::ReplaceUnconditional)
+    } else {
+        (AdminAuditOp::Put, StoreMode::Create)
+    };
+    commit_login_admin(
+        global,
+        store_op(id, record, audit_op, store_mode),
+        preflighted_key,
+        args,
+    )?;
+    println!(
+        "logged in and {} {id}",
+        if replace { "replaced" } else { "stored" }
+    );
+    Ok(())
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     provider_id_flags(args)?;
     use credentials_core::oauth_login::{
@@ -3295,21 +3466,38 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         None => pick_login_interactively(global, args)?,
     };
-    let provider = interactive.provider.clone();
+    let from_other =
+        optional(args, "--provider").is_none() && interactive.provider == OTHER_API_KEY_PROVIDER;
+    let other = if from_other {
+        let Some(choice) = pick_other_api_key(global)? else {
+            return Ok(());
+        };
+        Some(choice)
+    } else {
+        None
+    };
+    let provider = match &other {
+        Some(choice) => parse_credential_id(choice.key.id()).provider.to_string(),
+        None => interactive.provider.clone(),
+    };
     google_login::validate_client_flags(args, &provider)?;
 
     // Resolve the target credential id BEFORE routing so the dispatch can key on the
     // credential METHOD, not the bare provider name. openai/xai/google each name both
     // an OAuth login (chatgpt:openai / oauth:xai / oauth:google) and an api-key row
     // (apikey:*). Precedence: explicit --id > the interactive picker's chosen id > the
-    // provider's default. Route to the api-key branch when the provider has ONLY an
+    // provider's default. Other uses the id entered at its name prompt instead.
+    // Route to the api-key branch when the provider has ONLY an
     // api-key login, OR it has both AND the resolved id is explicitly an `apikey:` id.
     // (Gating purely on the id's method would send a malformed `--id zai` for an
     // api-key-only provider to the "unknown provider" path instead of the helpful
     // id-rail error.)
-    let target_id = optional(args, "--id")
-        .or_else(|| interactive.id_override.clone())
-        .unwrap_or_else(|| default_login_id(&provider));
+    let target_id = match &other {
+        Some(choice) => choice.key.id().to_string(),
+        None => optional(args, "--id")
+            .or_else(|| interactive.id_override.clone())
+            .unwrap_or_else(|| default_login_id(&provider)),
+    };
     let has_oauth_login =
         login_provider(&provider).is_some() || google_login::is_provider(&provider);
     let apikey_row = api_key_login::API_KEY_PROVIDERS
@@ -3337,6 +3525,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
     }
 
+    if let Some(choice) = other.as_ref().filter(|_| apikey_row.is_none()) {
+        return cmd_other_api_key_login(global, args, choice);
+    }
+
     if !route_api_key && google_login::is_provider(&provider) {
         return google_login::cmd_login(
             global,
@@ -3358,7 +3550,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )));
         }
 
-        let replace = login_replace(args, interactive.replace);
+        let replace = match &other {
+            Some(choice) => choice.replace,
+            None => login_replace(args, interactive.replace),
+        };
         let preflighted_key = preflight_login(
             global,
             &id,
@@ -3373,6 +3568,12 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ),
         )?;
 
+        if matches!(
+            p.validation,
+            api_key_login::KeyValidation::Unvalidated { .. }
+        ) {
+            println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
+        }
         let key = if let Some(path) = optional(args, "--payload-file") {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
@@ -5774,7 +5975,28 @@ fn format_ts_ms(ts_ms: i64) -> String {
     format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
-fn cmd_provider_report(global: &GlobalArgs) -> Result<(), CliError> {
+fn missing_provider_report_lines(
+    missing: &[&credentials_core::fusiform_providers::FusiformProvider],
+    skips: &[(&str, &str)],
+) -> Vec<String> {
+    let mut lines: Vec<_> = missing.iter().map(|provider| provider.id.clone()).collect();
+    lines.push("Skipped:".to_owned());
+    let mut skips = skips.to_vec();
+    skips.sort_by_key(|(id, _)| *id);
+    lines.extend(skips.iter().map(|(id, reason)| format!("{id}\t{reason}")));
+    lines
+}
+
+fn cmd_provider_report(global: &GlobalArgs, options: ParsedOptions) -> Result<(), CliError> {
+    if options.has_flag("--missing") {
+        for line in missing_provider_report_lines(
+            &credentials_core::catalog::missing_fusiform_providers(),
+            credentials_core::catalog::FUSIFORM_PROVIDER_SKIPS,
+        ) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     let result = request_admin_status(global)?;
     println!("ID\tSTORED\tTABLE");
     for (_, _, id, _, mut stored) in parse_inventory(&result)? {
@@ -8864,6 +9086,115 @@ mod login_regressions {
     }
 
     #[test]
+    fn the_login_picker_keeps_all_rows_and_appends_other_api_key_provider() {
+        let rows = login_picker_rows();
+        let expected: Vec<_> = LOGIN_PICKER_ROWS
+            .iter()
+            .map(|(key, name)| {
+                (
+                    key.to_string(),
+                    name.to_string(),
+                    login_provider(key).unwrap().default_id.to_string(),
+                )
+            })
+            .chain(api_key_login::API_KEY_PROVIDERS.iter().map(|row| {
+                (
+                    row.key.to_string(),
+                    row.display_name.to_string(),
+                    row.default_id.to_string(),
+                )
+            }))
+            .collect();
+        assert_eq!(&rows[..rows.len() - 1], expected);
+        assert!(rows.contains(&(
+            "elevenlabs".into(),
+            "ElevenLabs".into(),
+            "apikey:elevenlabs".into(),
+        )));
+        for (key, name) in [
+            ("iteracompute", "IteraCompute"),
+            ("kilo", "Kilo Gateway"),
+            ("minimax-cn", "MiniMax (minimax.cn)"),
+            ("mixlayer", "Mixlayer"),
+            ("moark", "Moark"),
+            ("model-oracle-ai", "Model Oracle AI"),
+            ("modular", "Modular"),
+            ("moonshotai-cn", "Moonshot AI (China)"),
+            ("morph", "Morph"),
+            ("munito", "Munito AI"),
+            ("munito-eu", "Munito AI (EU)"),
+            ("nan", "NaN"),
+            ("nearai", "NEAR AI Cloud"),
+            ("nebius", "Nebius Token Factory"),
+            ("neuralwatt", "Neuralwatt"),
+            ("ofox", "Ofox"),
+            ("opper", "Opper"),
+            ("orcarouter", "OrcaRouter"),
+            ("ovhcloud", "OVHcloud AI Endpoints"),
+            ("pareto", "Pareto Inference"),
+            ("pendra", "Pendra"),
+            ("perplexity-agent", "Perplexity Agent"),
+            ("pioneer", "Pioneer"),
+            ("poe", "Poe"),
+            ("prime", "Prime Inference"),
+            ("privatemode-ai", "Privatemode AI"),
+            ("qiniu-ai", "Qiniu"),
+            ("reflection", "Reflection"),
+            ("requesty", "Requesty"),
+            ("runinfra", "RunInfra"),
+            ("salad-cloud", "SaladCloud AI Gateway"),
+            ("sambanova", "SambaNova"),
+            ("sarvam", "Sarvam AI"),
+            ("standardcompute", "Standard Compute"),
+            ("stepfun-cn", "StepFun (China)"),
+            ("stepfun-ai-step-plan", "StepFun Step Plan (Global)"),
+            ("stepfun-step-plan", "StepFun Step Plan (China)"),
+            ("subconscious", "Subconscious"),
+            ("submodel", "submodel"),
+            ("tempr", "Tempr Gateway"),
+            ("tensorx", "TensorX"),
+            ("the-grid-ai", "The Grid AI"),
+            ("thinkingmachines", "Thinking Machines"),
+            ("tinfoil", "Tinfoil"),
+            ("tokengo", "TokenGo"),
+            ("trustedrouter", "TrustedRouter"),
+            ("unorouter", "UnoRouter"),
+            ("upstage", "Upstage"),
+            ("vivgrid", "Vivgrid"),
+            ("volcengine", "Volcengine Ark"),
+            ("vultr", "Vultr"),
+            ("wallaby", "Wallaby"),
+            ("wally", "Wally"),
+            ("wandb", "CoreWeave"),
+            ("xiaomi", "Xiaomi (Standard API)"),
+            ("xpersona", "Xpersona"),
+            ("zai-api", "Z.AI (Standard API)"),
+            ("zeldoc", "Zeldoc"),
+            ("zenifra", "Zenifra"),
+            ("zhipuai", "Zhipu AI (Standard API)"),
+            ("modelis", "Modelis"),
+            ("modelscope", "ModelScope"),
+            ("poolside", "Poolside"),
+            ("regolo-ai", "Regolo AI"),
+            ("scaleway", "Scaleway"),
+            ("sensenova", "SenseNova (China)"),
+            ("stackit", "STACKIT"),
+            ("vancine", "Vancine"),
+            ("volcengine-coding-plan", "Volcengine Ark Coding Plan"),
+        ] {
+            assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
+        }
+        assert_eq!(
+            rows.last().unwrap(),
+            &(
+                OTHER_API_KEY_PROVIDER.to_string(),
+                "Other API key provider…".to_string(),
+                String::new(),
+            )
+        );
+    }
+
+    #[test]
     fn windows_browser_argv_preserves_the_entire_url() {
         let url = "https://example.com/authorize?client_id=public&state=test&redirect_uri=http%3A%2F%2Flocalhost";
         let command = windows_browser_command(url);
@@ -8929,6 +9260,94 @@ mod explicit_route_regressions {
 #[cfg(test)]
 mod provider_cli_tests {
     use super::*;
+
+    #[test]
+    fn provider_missing_report_places_skips_and_reasons_after_uncovered_ids() {
+        let provider = &credentials_core::fusiform_providers::fusiform_providers()[0];
+        assert_eq!(
+            missing_provider_report_lines(
+                &[provider],
+                &[
+                    ("z-skip", "OAuth only"),
+                    ("a-skip", "no API key in its documentation")
+                ],
+            ),
+            [
+                provider.id.as_str(),
+                "Skipped:",
+                "a-skip\tno API key in its documentation",
+                "z-skip\tOAuth only"
+            ]
+        );
+        assert_eq!(missing_provider_report_lines(&[], &[]), ["Skipped:"]);
+        let options = reject_unknown_args("provider-report", &["--missing".to_owned()]).unwrap();
+        assert!(options.has_flag("--missing"));
+        assert!(reject_unknown_args("provider-report", &["--missng".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn provider_set_body_is_v3_and_canonical() {
+        let op = provider_set_op(
+            "custom-service".into(),
+            vec!["llm-provider".into()],
+            vec!["custom-models".into()],
+            credentials_core::store::RegisteredProviderSettings {
+                hosts: vec![
+                    " B.example.com, a.example.com ".into(),
+                    "b.example.com".into(),
+                ],
+                auth_header: Some("X-API-Key".into()),
+                auth_scheme: Some("raw".into()),
+                fusiform_provider_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(op).unwrap(),
+            serde_json::json!({
+                "op": "admin.provider_set", "v": 3, "service": "custom-service",
+                "categories": ["llm-provider"], "provider_ids": ["custom-models"],
+                "hosts": ["a.example.com", "b.example.com"],
+                "auth_header": "x-api-key", "auth_scheme": "raw",
+                "fusiform_provider_id": null
+            })
+        );
+    }
+
+    #[test]
+    fn provider_set_empty_registration_is_a_v3_clear() {
+        let op = provider_set_op(
+            "custom-service".into(),
+            vec![],
+            vec![],
+            credentials_core::store::RegisteredProviderSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(op).unwrap(),
+            serde_json::json!({
+                "op": "admin.provider_set", "v": 3, "service": "custom-service",
+                "categories": [], "provider_ids": [], "hosts": [],
+                "auth_header": null, "auth_scheme": null, "fusiform_provider_id": null
+            })
+        );
+    }
+
+    #[test]
+    fn provider_registration_help_explains_complete_replacement_and_new_flags() {
+        for page in ["provider", "provider set"] {
+            let help = help_verb(page);
+            for flag in ["--host", "--auth-header", "--auth-scheme", "--fusiform-id"] {
+                assert!(help.contains(flag), "{page}: {flag}");
+            }
+            assert!(help.contains(
+                "set states the whole registration; omitted optional settings are cleared."
+            ));
+            assert!(help.lines().all(|line| line.len() <= 80), "{page}");
+        }
+        assert!(help_verb("provider list")
+            .contains("Columns: SERVICE, GROUPS, PROVIDER IDS, HOSTS, AUTH, FUSIFORM ID."));
+    }
 
     #[test]
     fn provider_flags_do_not_parse_another_flags_value_as_a_flag() {

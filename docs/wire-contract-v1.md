@@ -477,6 +477,30 @@ operator-chosen label. Account routing pools on `account_id` (with the refresh a
 `list_scoped`), never on `record_version`: that bumps on every token refresh, so a key that
 includes it splits one account into a new pool per refresh.
 
+`credential.get_scoped` also projects an API-key descriptor from this vault's catalog
+or provider registry when the credential id resolves to a row with hosts and auth,
+including labeled ids such as `apikey:openai:work`. The fixed catalog takes precedence
+over registrations. The three top-level fields are served together:
+
+- `auth: {header, scheme}`: `header` is a lowercase HTTP header name; `scheme` is
+  `bearer` (`Bearer <key>`) or `raw` (the key alone).
+- `hosts: [..]`: exact lowercase receiving host names, sorted without duplicates,
+  with no scheme, port, path or wildcard.
+- `invalid_key: {status, error_code, error_code_field} | null`: an observation of
+  what a deliberately bogus key returned. `status` is the HTTP status;
+  `error_code_field` is an RFC 6901 JSON Pointer to the observed string `error_code`.
+  Those two code fields are null together when no string code was observed. The
+  vault never evaluates this evidence. `invalid_key: null` means the descriptor is
+  known but no invalid-key observation is recorded.
+
+All three fields are absent for OAuth and other login-provider records,
+no-descriptor catalog rows, registered providers without hosts, and non-provider
+records such as cookies or manual ids. Absence is not the same as `invalid_key: null`.
+The fields are read-time projections, not stored credential metadata. Registered
+providers always serve `invalid_key: null`. Remote records use this vault's catalog
+and registry lookup by credential id too; no descriptor fields cross federation.
+`credential.get` (and its handle-based batch form) never serves these fields.
+
 `account_id` IS THE PROVIDER'S ACCOUNT IDENTIFIER AND ITS SHAPE IS THE PROVIDER'S CHOICE.
 Treat it as an opaque string. It is stable per account and comparable to itself, and
 nothing more: do not validate it against a pattern, do not compare values across
@@ -532,21 +556,46 @@ returned rows and tuples; changes outside the caller's visibility do not move it
 
 ### Provider metadata, plan tier and authentication method
 
-Every `credential.list_scoped` row has `provider_ids`, an array of stored
-Fusiform catalog provider ids in ascending byte order, including `[]` when unset.
+Two provider-id fields answer different questions:
+
+| Field | Meaning |
+|---|---|
+| `provider_ids` | Stored routing ids, per credential, in ascending byte order; `[]` when unset. |
+| `fusiform_provider_id` | One Fusiform provider id per provider row, projected at read time from the catalog or registration; omitted when unmapped. |
+
+Apps join to Fusiform's provider card (name, logo and docs) on `fusiform_provider_id`,
+not on the routing `provider_ids`. The provider-card mapping is optional; rows omit
+it when no provider-card mapping is available. Every `credential.list_scoped` row
+carries its stored `provider_ids`.
 `ck auth put` and API-key or subscription `ck auth login` store the catalog row's
 defaults at creation when no `--provider-id` is given. Explicit ids win over defaults;
 replacement preserves an existing set. Existing records are never automatically
 remapped. The vault never derives these ids at read time from the credential id,
 catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
 current table without changing any record, taking no writer lease.
-Only the OpenAI and Google API-key rows default to both `llm-provider` and
-`media-provider`; no other row gets the media group. Routing stops choosing a media key
+The OpenAI and Google API-key rows default to both `llm-provider` and
+`media-provider`; ElevenLabs defaults to `media-provider` alone. The 302.AI, Abacus,
+AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan, Alibaba Token
+Plan (China), DigitalOcean, Eden AI, FastRouter, Vertex (express mode), Kenari,
+Kilo Gateway, Merge Gateway, NaN, NEAR AI Cloud, Poe, Qiniu, Regolo AI, Requesty and
+StepFun (China) rows
+(`302ai`, `abacus`, `aihubmix`, `aimlapi`, `alibaba`, `alibaba-cn`,
+`alibaba-token-plan`, `alibaba-token-plan-cn`, `digitalocean`, `edenai`,
+`fastrouter`, `google-vertex`, `kenari`, `kilo`, `merge-gateway`, `nan`, `nearai`,
+`poe`, `qiniu-ai`, `regolo-ai`, `requesty`, `stepfun-cn`) also default to
+both. These are the media rows. Routing stops choosing a media key
 its consumer reported unfunded, and lifts that after a successful run. Category
 defaults apply to creation, not existing records or replacements with stored categories.
 Consumers join on exact provider-id equality, with no fallback. `serves` answers which
 model vendors are reachable; `provider_ids` answers which catalog providers the operator
 assigned to this credential. They are not interchangeable.
+
+List rows also carry `hosts` exactly when `credential.get_scoped` would serve an
+API-key descriptor for that id: a nonempty array of exact receiving host names from
+this vault's catalog or registry, in served order. Otherwise the field is omitted,
+not null or `[]`. This applies equally to local and remote rows, including labeled
+ids. Like the descriptor, it is a read-time projection, never a stored routing fact;
+no remote descriptor is trusted or sent across federation.
 
 Three additive fields are present on every current row:
 
@@ -625,11 +674,17 @@ Provider-id and tier edits do not bump `record_version`: observers use `view`. I
 `org_name` optional-string frame, append a u32 provider-id count and each string-framed id
 in ascending byte order, then `auth_method` as an optional string, then `plan_tier` and `plan_tier_source` as
 optional strings, then `provider` as an optional string, `incarnation` as a string,
-and `plan_tier_observed_at_ms` as an optional decimal-string frame. The absent optional
-frame is used whenever the JSON key is omitted, never an empty string. Deployment leaves
-an empty inventory's view unchanged but changes every nonempty visible inventory's view
+and `plan_tier_observed_at_ms` as an optional decimal-string frame. Next frame
+`fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
+byte 0 when absent, or byte 1, a u32 host count, and each host as a length-prefixed
+string in served order. The absent optional frame is used whenever the JSON key is
+omitted, never an empty string. Deployment leaves an empty inventory's view unchanged
+but changes every nonempty visible inventory's view
 once, even if all provider-id arrays are empty and all methods omitted. Subsequent edits
-move only views whose returned rows include that credential.
+move only views whose returned rows include that credential. A committed registry
+hosts change moves the affected view and wakes `auth.watch_scoped` through the store's
+committed-write notification path; a token-only refresh does not. Catalog host changes
+arrive with a new binary and appear in the watcher's initial snapshot.
 
 The TypeScript client 0.8.0 exposes `providerIds`, optional `authMethod`, optional
 `planTier`, and optional `planTierSource` (`operator` or `detected`). An absent source
@@ -744,13 +799,16 @@ established. Refresh never changes account identity and does not touch the asser
 Removing a credential removes its tier, even without foreign-key enforcement.
 
 `crates/credentials-module/tests/vectors/list-scoped-v2.json` pins real dispatched
-list replies for search and Kimi coding keys, lifecycle states and category-filtered
-visibility, plus the real watch opening, category-change and revoked-caller terminal
-frames. Its unknown-method case is the dispatcher's actual reply to an unsupported
+list replies for search and Kimi coding keys, present and absent `hosts`, lifecycle
+states and category-filtered visibility, plus the real watch opening, category-change
+and revoked-caller terminal frames. Its unknown-method case is the dispatcher's actual reply to an unsupported
 method, standing in for an older vault. Storage incarnations and detection times are
 fixed test values; only the process-local watch boot nonce is normalized to zero.
+`crates/credentials-module/tests/vectors/get-scoped-v1.json` pins real dispatched
+`get_scoped` replies for a catalog row with invalid-key evidence, a catalog row with
+`invalid_key: null`, and an OAuth record with all descriptor fields absent.
 Each case carries decoded JSON, base64url reply bytes and a reply hash; `SHA256SUMS`
-pins the file. Regenerate with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
+pins both files. Regenerate both with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
 `list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned` test.
 
 ### `admin.set_plan`

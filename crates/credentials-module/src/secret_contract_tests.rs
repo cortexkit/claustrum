@@ -1607,6 +1607,9 @@ secret_error_golden! {
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
     SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
+    ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
+    Superseded => "superseded", "permanent", "result error";
+    Expired => "expired", "permanent", "result error";
     PendingLimit => "pending_limit", "transient", "result error";
     StoreError => "store_error", "transient", "result error";
 }

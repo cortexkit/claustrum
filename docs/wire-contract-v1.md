@@ -3015,6 +3015,9 @@ the message is fixed text and never echoes the request.
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
+| `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
+| `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
+| `expired` | `permanent` | result error | `manifest.approve` only (§17): the proposal, or the envelope's `issued_at_ms`, reached `expires_at_ms` |
 | `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
 | `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
 | `permissions_operator_required` | none | transport Error | `permissions.list` or `permissions.revoke` from a caller other than `reserved:cingulate` or the MAC-authenticated operator; body per `permissions/v1` |
@@ -3506,8 +3509,7 @@ one audit row and repeating the current value writes none.
 
 - `agent_id`: 1–128 bytes from `[A-Za-z0-9_-]`.
 - `app_id`: a positive integer.
-- `app_slug`: the slug accepted by the existing `github_app:<slug>` credential-id
-  grammar.
+- `app_slug`: 1–100 bytes from `[a-z0-9-]`, GitHub's App slug alphabet.
 - `repo`: `owner/name`, each part 1–100 characters from `[A-Za-z0-9._-]`, neither
   `.` nor `..`.
 

@@ -12689,6 +12689,7 @@ mod tests {
                     created_by: None,
                     provider_ids: Vec::new(),
                     plan_tier: None,
+                    gateway: None,
                 },
             )
         }

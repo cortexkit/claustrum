@@ -245,6 +245,7 @@ mod tests {
                 created_by: None,
                 plan_tier: None,
                 provider_ids: Vec::new(),
+                gateway: None,
             },
         )
     }

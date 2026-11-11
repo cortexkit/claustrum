@@ -1227,6 +1227,9 @@ pub struct RecordMeta {
     pub provider_ids: Vec<String>,
     /// Operator-asserted subscription tier, unknown when absent.
     pub plan_tier: Option<String>,
+    /// Fixed gateway settings, absent before [`GATEWAY_SETTINGS_SCHEMA_VERSION`]
+    /// or on an ordinary credential, regardless of its categories.
+    pub gateway: Option<StoredGatewaySettings>,
 }
 
 pub type DetectedPlanListing =
@@ -1466,9 +1469,10 @@ pub struct ScopedListRow {
     /// Effective tier disclosed only to callers with read or list authority.
     pub plan_tier: Option<String>,
     pub plan_tier_source: Option<String>,
-    /// Derived from the unsealed record's kind and refresh adapter by
-    /// [`crate::list_auth_method::list_auth_method`]. `None` when the row is reached
-    /// only through `sign` or `open` (it stays sealed) or when the table yields nothing.
+    /// Gateway settings take precedence over the unsealed record's kind and refresh
+    /// adapter via [`crate::list_auth_method::list_auth_method_with_gateway`].
+    /// `None` when the row is reached only through `sign` or `open` (it stays sealed)
+    /// or when the table yields nothing.
     pub auth_method: Option<crate::list_auth_method::ListAuthMethod>,
 }
 
@@ -2632,6 +2636,7 @@ impl EncryptedStore {
                             created_by: row.get(5)?,
                             provider_ids: Vec::new(),
                             plan_tier: None,
+                            gateway: None,
                         })
                     },
                 )
@@ -2644,6 +2649,7 @@ impl EncryptedStore {
                             read_schema_version(conn)?,
                         )?;
                         meta.plan_tier = plan_tier_from_conn(conn, credential_id, read_schema_version(conn)?)?;
+                        meta.gateway = gateway::from_conn(conn, credential_id, read_schema_version(conn)?)?;
                         Ok(Some(meta))
                     }
                     None => Ok(None),
@@ -4014,6 +4020,7 @@ impl EncryptedStore {
                     // recorded yet, and it must not be listed as if it were healthy.
                     let disclose_identity = operations.contains(&GrantOperation::Read)
                         || operations.contains(&GrantOperation::List);
+                    let is_gateway = disclose_identity && gateway::has_settings(&tx, &id)?;
                     let decoded_record = if state != RecordState::Corrupt
                         && (include_keys || disclose_identity)
                     {
@@ -4043,9 +4050,10 @@ impl EncryptedStore {
                                         )),
                                     )
                                 })?;
-                        let auth_method = crate::list_auth_method::list_auth_method(
+                        let auth_method = crate::list_auth_method::list_auth_method_with_gateway(
                             record.kind,
                             record.refresh_adapter.as_deref(),
+                            is_gateway,
                         );
                         if include_keys && record.kind.is_vault_held_key() {
                             keys.push((id.clone(), record_version));
@@ -4058,7 +4066,7 @@ impl EncryptedStore {
                         Some((identity, adapter, auth_method, detected_plan, observed)) => {
                             (Some(identity), adapter, auth_method, detected_plan, observed)
                         }
-                        None => (None, None, None, None, None),
+                        None => (None, None, is_gateway.then_some(crate::ListAuthMethod::Gateway), None, None),
                     };
                     let (plan_tier, plan_tier_source) = crate::plan_detection::effective_plan(
                         identity.as_ref().and(plan_tier), detected_plan.as_ref(),
@@ -7905,12 +7913,12 @@ fn home_watch_candidates_from_conn(
 /// Read one credential's `auth_method` without a lease, for `ck auth list --json`.
 ///
 /// The value comes from the same closed table `credential.list_scoped` reports
-/// ([`crate::list_auth_method::list_auth_method`] over the unsealed record's kind
-/// and stored refresh adapter), never from the credential id, so the scripted
-/// inventory and the consumer listing cannot disagree. A row that fails to open
-/// or decode maps to `None` (its JSON row carries null) rather than failing the
-/// whole listing: one unreadable envelope must not hide the other credentials,
-/// the same way `detected_plans_read_only` skips rather than refuses.
+/// (gateway settings first, then [`crate::list_auth_method::list_auth_method`] over
+/// the unsealed record's kind and stored refresh adapter), never from the credential
+/// id, so `ck auth list --json` and `credential.list_scoped` cannot disagree.
+/// A non-gateway row that fails to open or decode maps to `None` (its JSON row carries
+/// null) rather than failing the whole listing: one unreadable envelope must not hide
+/// the other credentials, the same way `detected_plans_read_only` skips rather than refuses.
 ///
 /// Lease-free and read-only, like the other inventory readers `ck auth list` uses:
 /// safe beside a running daemon and against a stopped one.
@@ -7947,6 +7955,10 @@ fn auth_methods_from_conn(
     let mut methods = std::collections::BTreeMap::new();
     for row in rows {
         let (id, version, envelope) = row?;
+        if gateway::has_settings(conn, &id)? {
+            methods.insert(id, Some(crate::ListAuthMethod::Gateway));
+            continue;
+        }
         let method = envelope::open(
             key,
             &envelope,
@@ -8151,7 +8163,7 @@ fn list_meta_from_conn(
         ),
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
+    let mut rows: Vec<(String, RecordMeta)> = stmt
         .query_map([], |row| {
             let categories: String = row.get(5)?;
             Ok((
@@ -8167,10 +8179,14 @@ fn list_meta_from_conn(
                     plan_tier: row.get(8)?,
                     incarnation: row.get(9)?,
                     plan_tier_observed_at_ms: row.get(10)?,
+                    gateway: None,
                 },
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, meta) in &mut rows {
+        meta.gateway = gateway::from_conn(conn, id, schema_version)?;
+    }
     Ok(rows)
 }
 
@@ -18324,6 +18340,7 @@ mod registered_providers;
 
 #[path = "store_gateway.rs"]
 mod gateway;
+pub use gateway::StoredGatewaySettings;
 
 #[cfg(test)]
 #[path = "gateway_create_tests.rs"]
@@ -18332,6 +18349,10 @@ mod gateway_create_tests;
 #[cfg(test)]
 #[path = "gateway_fixed_tests.rs"]
 mod gateway_fixed_tests;
+
+#[cfg(test)]
+#[path = "gateway_readers_tests.rs"]
+mod gateway_readers_tests;
 pub use registered_providers::{
     api_key_service, registered_providers_read_only, valid_provider_header_name,
     validate_registered_provider_service, validate_registered_provider_settings,

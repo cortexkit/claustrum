@@ -16,7 +16,7 @@
 #                    Structurally BLIND to absence: it iterates what exists, so a
 #                    missing artifact is not expressible. This returned a clean 5-of-5
 #                    while v7 was gone.
-#   chain -> files   "can I replay every approval I made?"
+#   chain -> files or gh_manifests   "can I replay every approval I made?"
 #                    This is the one that found v7.
 #
 # TWO PROPERTIES, because a hash authenticates CONTENT and says nothing about IDENTITY:
@@ -60,7 +60,16 @@ approvals=$(sql "SELECT COUNT(*) FROM audit_log WHERE op='approval' AND credenti
 case "$approvals" in
   ''|*[!0-9]*) echo "REFUSING: invalid approval count" >&2; exit 2 ;;
 esac
-rows=$(sql "SELECT seq, datetime(ts_ms/1000,'unixepoch'), payload_hash FROM audit_log
+# Older stores have only signed-payloads. New versions retain the exact signed
+# bytes in gh_manifests; a derived envelope file is not required for retention.
+manifest_table=$(sql "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gh_manifests';") || {
+  echo "REFUSING: cannot read manifest schema from $STORE" >&2; exit 2;
+}
+retained_version="NULL"
+if [ "$manifest_table" = 1 ]; then
+  retained_version="(SELECT version FROM gh_manifests WHERE manifest_sha256=a.payload_hash LIMIT 1)"
+fi
+rows=$(sql "SELECT seq, datetime(ts_ms/1000,'unixepoch'), payload_hash, $retained_version FROM audit_log AS a
             WHERE op='approval' AND credential_id='$KEY_ID' ORDER BY seq;") || {
   echo "REFUSING: cannot read approval chain from $STORE" >&2; exit 2;
 }
@@ -110,9 +119,13 @@ for f in "$PAYLOADS"/*.json; do
 done
 
 echo
-echo "=== chain -> files: can I replay every approval? (the direction that finds absence) ==="
-while IFS='|' read -r seq ts hash; do
+echo "=== chain -> retained bytes: can I replay every approval? (finds absence) ==="
+while IFS='|' read -r seq ts hash stored_version; do
   [ -n "$hash" ] || continue
+  if [ -n "$stored_version" ]; then
+    printf '  seq %-6s %s  gh_manifests version %s\n' "$seq" "${hash:0:16}" "$stored_version"
+    continue
+  fi
   match=""
   for f in "$PAYLOADS"/*.json; do
     [ -f "$f" ] || continue

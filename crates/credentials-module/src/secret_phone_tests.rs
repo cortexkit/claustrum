@@ -748,7 +748,14 @@ fn manifest_envelope(proposal: &GhManifestProposal) -> Vec<u8> {
 #[tokio::test]
 async fn manifest_approve_phone_commits_verifiable_bytes_and_resends_across_restart() {
     let (root, store) = rig("manifest-restart");
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
     let (proposal, signer, public) = pending_manifest(&store).await;
+    store
+        .set_manifest_one_tap_audited(false, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    assert!(!store.manifest_one_tap_enabled());
     let envelope = manifest_envelope(&proposal);
     let signature: Signature = signer.sign(&envelope);
     let params = json!({

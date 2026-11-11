@@ -193,6 +193,31 @@ fn report(version: i64) -> Value {
 }
 
 #[tokio::test]
+async fn manifest_delivery_and_readiness_still_work_after_one_tap_is_turned_off() {
+    let mut rig = Rig::new();
+    rig.self_member();
+    for enabled in [true, false] {
+        rig.store
+            .set_manifest_one_tap_audited(enabled, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+            .unwrap();
+    }
+    assert!(!rig.store.manifest_one_tap_enabled());
+    rig.store_version(28);
+    assert_eq!(rig.call("aft", OP_LATEST, json!({})).await["version"], 28);
+    rig.request(caller("aft"), OP_WATCH, json!({}), 7, 9).await;
+    assert_eq!(rig.notice(7, 9, 1).await["version"], 28);
+    assert_eq!(
+        rig.call("aft", OP_REPORT_ACTIVE, report(28)).await["status"],
+        "recorded"
+    );
+    assert_eq!(
+        rig.call("plexus", OP_ACTIVE_STATUS, json!({"version":28}))
+            .await["ready"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn manifest_latest_returns_newest_handoff_or_domain_refusal() {
     let mut rig = Rig::new();
     assert_eq!(

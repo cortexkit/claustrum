@@ -2,8 +2,9 @@
 
 The catalog records observations from deliberately bogus API keys, not rules that the
 vault evaluates. Requests used the existing login check, with redirects disabled, on a
-network-enabled Linux build server on 2026-11-10. Cloudflare Workers AI used the dummy
-account id `00000000000000000000000000000000`. No real provider key was used.
+network-enabled Linux build server on the dates in the table. Cloudflare Workers
+AI used the dummy account id `00000000000000000000000000000000`. No real provider
+key was used.
 
 A dash means that no string-valued error code was observed. Numeric codes are not
 coerced to strings. Where an API uses an error type or structured reason as its code,
@@ -169,13 +170,23 @@ are unchanged.
 | venice | https://api.venice.ai/api/v1/chat/completions | 2026-11-10 | 401 | - | - |
 | vivgrid | https://api.vivgrid.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | volcengine | https://ark.cn-beijing.volces.com/api/v3/chat/completions | 2026-11-11 | 401 | AuthenticationError | /error/code |
+| vultr | https://api.vultrinference.com/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
 | wafer-serverless | https://pass.wafer.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| wallaby | https://api.wallabytoken.com/v1/models | 2026-11-11 | 401 | authentication_error | /error/type |
+| wally | https://inference.runanywhere.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| wandb | https://api.inference.wandb.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | xai | https://api.x.ai/v1/models | 2026-11-10 | 400 | invalid-argument | /code |
+| xiaomi | https://api.xiaomimimo.com/v1/models | 2026-11-11 | 401 | 401 | /error/code |
 | xiaomi-token-plan-ams | https://token-plan-ams.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | xiaomi-token-plan-cn | https://token-plan-cn.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | xiaomi-token-plan-sgp | https://token-plan-sgp.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| xpersona | https://www.xpersona.co/v1/usage | 2026-11-11 | 401 | unauthorized | /error/code |
 | zai | https://api.z.ai/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zai-api | https://api.z.ai/api/paas/v4/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| zeldoc | https://api.zeldoc.ai/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| zenifra | https://ai.zenifra.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | zhipu-coding-plan | https://open.bigmodel.cn/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zhipuai | https://open.bigmodel.cn/api/paas/v4/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
 
 ## ElevenLabs key check
 
@@ -1045,6 +1056,130 @@ Seven selected ids remain gaps, rather than unsupported skips:
   <https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-faq>
   says standalone API calls do not consume plan quota and are billed under
   ordinary Ark rules. No ordinary `/api/v3` check was substituted for the plan.
+
+## Provider-key evidence for Vultr through Zhipu AI
+
+This final batch researched only `vultr`, `wallaby`, `wally`, `wandb`, `watsonx`,
+`xiaomi`, `xpersona`, `zai`, `zeldoc`, `zenifra` and `zhipuai`. The initial report
+contained 37 uncovered ids and 19 skips. Ten ids now have evidence-backed rows;
+`watsonx` remains an open gap. No new skip reason was applied. The final
+`ck auth provider-report --missing` contains 27 uncovered ids and 19 skips:
+the 26 previously researched documentation gaps summarized in the preceding batch
+sections, plus `watsonx`. Those 26 gaps were not re-researched here.
+
+Each new row carries its published Fusiform id as `fusiform_provider_id` and
+its sole default provider id. All eleven entries list only text output in the
+vendored snapshot, so the ten rows default to `llm-provider`, not media. Their
+`serves` lists are empty, matching the earlier Fusiform batches. Existing plan
+rows and their identities, routing defaults, categories and serving assignments
+are unchanged.
+
+The table's ten new refusals were obtained on a network-enabled Linux build
+server on 2026-11-11, using the exact row checks, redirects disabled and obviously
+bogus keys. Chat bodies were `model`, a user message containing `hi`, and
+`max_tokens: 1`. No real provider key was used. Wallaby and Zenifra initially
+returned edge-filter 403 responses (`error code: 1010`) to Python's User-Agent;
+those were not counted as invalid-key evidence. Repeating the same checks with
+no User-Agent, as the login transport sends them, produced the recorded 401s.
+
+The provider-owned documentation for the added rows is:
+
+- `vultr`: <https://api.vultrinference.com/docs/get-started/authentication>
+  documents the shared `api.vultrinference.com` host, Bearer inference keys and
+  <https://console.vultr.com/inference/> key management. No per-account host is
+  required. <https://api.vultrinference.com/docs/reference/list-models> explicitly
+  calls the models list public; it also returned 200 with a fake key. The
+  protected chat instead returned `Invalid API key`. The documented chat at
+  <https://api.vultrinference.com/docs/reference/create-chat-completion> supports
+  `max_tokens` as an alias of `max_completion_tokens`; the docs' overview at
+  <https://api.vultrinference.com/docs> uses `deepseek-v4.1-flash-1017`. The refusal's
+  `error.code` is numeric, so its string `error.type` is recorded.
+- `wallaby`: <https://wallabytoken.com/docs> documents Bearer `sk-` keys,
+  `api.wallabytoken.com/v1`, and the authenticated models read. It directs key
+  creation to <https://api.wallabytoken.com/keys>, Tokens → Add token. The bogus
+  key used the documented prefix. The refusal says `Invalid token`; its
+  `error.code` is empty, so the string `error.type` is recorded instead.
+- `wally`: <https://docs.runanywhere.ai/wally-cloud/api> documents the hosted
+  Bearer API at `inference.runanywhere.ai/v1` and the current key's models read.
+  <https://docs.runanywhere.ai/wally-cloud/quickstart> directs users to Cloud keys
+  in <https://console.runanywhere.ai/> and distinguishes `sk-runa-` Cloud keys
+  from `runa_prod_` on-device SDK credentials. The fake key used `sk-runa-`.
+  This row is the hosted API, not a local server or device SDK license.
+- `wandb`: <https://docs.coreweave.com/products/inference/serverless/api-reference>
+  documents the fixed `api.inference.wandb.ai/v1` host, literal Bearer header and
+  CoreWeave Forge keys created at <https://forge.coreweave.com/settings>.
+  <https://docs.coreweave.com/products/inference/serverless/api-reference/list-models.md>
+  documents the models read. The reference says team/project attribution is
+  optional: without it the service uses the default entity and `inference`
+  project. The check therefore sends no `OpenAI-Project` header. This is the
+  Fusiform `wandb` offering named CoreWeave, not a dedicated inference deployment.
+- `xiaomi`: <https://mimo.mi.com/docs/en-US/api/model/list-models-get>
+  documents `GET https://api.xiaomimimo.com/v1/models` with raw `api-key`.
+  <https://mimo.mi.com/static/docs/quick-start/faq/api-integration.md> specifies
+  `sk-` pay-as-you-go keys and links
+  <https://platform.xiaomimimo.com/#/console/api-keys>. The bogus key used `sk-`.
+  That FAQ explicitly distinguishes `tp-` Token Plan keys and says the two
+  credential types cannot be mixed. The standard host is not any of the three
+  existing Token Plan hosts. The old test exclusion for a row named `xiaomi`
+  is removed because this documented standard API now has its own row.
+- `xpersona`: <https://www.xpersona.co/docs> fixes the inference host as
+  `www.xpersona.co`, documents Bearer `xp_` keys and the authenticated, read-only
+  `/v1/usage` request. The bogus key used `xp_`. The public `/v1/models` route is
+  not used as a key check. Key creation is Dashboard → Connect AI; the row opens
+  the provider's instructions rather than guessing an unpublished dashboard URL.
+- `zai-api` (Fusiform `zai`): <https://docs.z.ai/api-reference/introduction>
+  documents Bearer standard keys and `api.z.ai/api/paas/v4`.
+  <https://docs.z.ai/api-reference/llm/chat-completion> documents `glm-5.3` and
+  a `max_tokens` minimum of one. Keys are created at
+  <https://z.ai/manage-apikey/apikey-list>.
+  <https://docs.z.ai/devpack/notice/api-key-management> distinguishes new Standard
+  keys, billed against account balance or usage bundles, from Coding Plan keys.
+  Existing Compatible keys can have endpoint-dependent billing; that does not
+  make the offerings interchangeable. The existing catalog key `zai` remains
+  the coding-plan key, mapped to `zai-coding-plan` and checking
+  `/api/coding/paas/v4`. The ordinary API uses the new catalog key `zai-api`,
+  without changing any live credential id or the existing web-search category.
+- `zeldoc`: <https://docs.zeldoc.ai/what-is-zeldoc/> documents the Bearer models
+  read at `api.zeldoc.ai/v1`. <https://docs.zeldoc.ai/connect-opencode#generate-an-api-key>
+  explains invitation-based access and dashboard key creation, or a key supplied
+  directly by the team. The row opens those instructions because they do not
+  publish a dashboard URL. A key is not treated as unavailable merely because
+  enrollment requires an invitation.
+- `zenifra`: <https://docs.zenifra.com/en/docs/ai/get-started> fixes the inference
+  base as `ai.zenifra.com/v1` and documents `zenifra/qwen3.8-flash`.
+  <https://docs.zenifra.com/en/docs/ai/examples-nodejs> explicitly uses Bearer
+  authentication. <https://docs.zenifra.com/en/docs/ai> calls the inference models
+  list public, so the row checks chat with `max_tokens: 1` instead. The one-token
+  cap follows the provider's stated OpenAI compatibility, not a Zenifra-specific
+  documented field. The row opens the
+  getting-started instructions for AI Models → On demand → API Keys. It does not
+  ask for a `znf_` organization management key for `api.zenifra.com`; those are
+  different credentials. The `zai_` prefix documented for plan-per-member keys
+  is not assumed for an ordinary on-demand key.
+- `zhipuai`: <https://docs.bigmodel.cn/cn/api/introduction> documents Bearer
+  model-standard keys, `open.bigmodel.cn/api/paas/v4`, `glm-5.3` and key creation
+  at <https://bigmodel.cn/usercenter/proj-mgmt/apikeys>. It explicitly says that
+  model-standard, personal-plan and team-plan keys are managed separately and
+  cannot be mixed. The existing `zhipu-coding-plan` row checks
+  `/api/coding/paas/v4`, as documented by
+  <https://docs.bigmodel.cn/cn/coding-plan/quick-start>. The new standard row
+  therefore does not duplicate the existing plan offering.
+
+One selected id remains uncovered:
+
+- `watsonx`: IBM's
+  <https://www.ibm.com/docs/en/watsonx/saas?topic=resources-credentials-programmatic-access>
+  requires exchanging an API key for an IAM bearer token at
+  `https://iam.cloud.ibm.com/identity/token`; the ordinary API key is not itself
+  the REST Bearer token. The SDK setup at
+  <https://ibm.github.io/watsonx-ai-python-sdk/v1.6.0a/setup_cloud.html> also
+  requires a default project or space id and an endpoint matching the provisioned
+  instance's region. The catalog's plain-key checks cannot express that exchange
+  and context. These documents describe shared regional hosts, not a required
+  per-account hostname or second secret. None of the reasons listed in
+  [Fusiform provider skips](#fusiform-provider-skips) covers that exchange and
+  context alone, so no skip was claimed.
+  No standalone inference probe or invalid-key evidence was recorded.
 
 ## Fusiform provider skips
 

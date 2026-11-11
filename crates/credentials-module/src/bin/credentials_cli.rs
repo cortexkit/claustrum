@@ -9067,6 +9067,16 @@ mod login_regressions {
             ("upstage", "Upstage"),
             ("vivgrid", "Vivgrid"),
             ("volcengine", "Volcengine Ark"),
+            ("vultr", "Vultr"),
+            ("wallaby", "Wallaby"),
+            ("wally", "Wally"),
+            ("wandb", "CoreWeave"),
+            ("xiaomi", "Xiaomi (Standard API)"),
+            ("xpersona", "Xpersona"),
+            ("zai-api", "Z.AI (Standard API)"),
+            ("zeldoc", "Zeldoc"),
+            ("zenifra", "Zenifra"),
+            ("zhipuai", "Zhipu AI (Standard API)"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

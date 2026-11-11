@@ -30,10 +30,41 @@ pub(crate) struct PreparedWatch {
     pub member: String,
     pub pairing: String,
     pub home: String,
-    pub rows: Vec<RemoteWatchRow>,
+    pub projection: Projection,
     pub store: Arc<EncryptedStore>,
     pub writes: watch::Receiver<()>,
     pub budget: Duration,
+}
+
+pub(crate) enum Projection {
+    Logins(Vec<RemoteWatchRow>),
+    Manifest(Value),
+}
+
+impl Projection {
+    fn notice(&self, home: &str, seq: u64) -> Value {
+        match self {
+            Self::Logins(rows) => json!({
+                "kind":"snapshot", "home":home, "epoch":epoch(), "seq":seq,
+                "logins":remote_watch_logins_wire(rows),
+            }),
+            Self::Manifest(value) => {
+                let mut value = value.clone();
+                value["kind"] = json!("changed");
+                value["epoch"] = json!(epoch());
+                value["seq"] = json!(seq);
+                value
+            }
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Logins(a), Self::Logins(b)) => remote_watch_lists_equal(a, b),
+            (Self::Manifest(a), Self::Manifest(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 pub struct PendingOpen {
@@ -286,6 +317,35 @@ impl RemoteWatchHub {
         member: &str,
         params: &Value,
     ) -> Result<(), String> {
+        self.open_kind(home, pending, writer, header, member, params, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_manifest(
+        &self,
+        home: &HomeVault,
+        pending: PendingOpen,
+        writer: &mpsc::Sender<Frame>,
+        header: EnvelopeHeader,
+        member: &str,
+        params: &Value,
+    ) -> Result<(), String> {
+        self.open_kind(home, pending, writer, header, member, params, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_kind(
+        &self,
+        home: &HomeVault,
+        pending: PendingOpen,
+        writer: &mpsc::Sender<Frame>,
+        header: EnvelopeHeader,
+        member: &str,
+        params: &Value,
+        manifest: bool,
+    ) -> Result<(), String> {
         #[cfg(test)]
         let _completed = Completed(&self.completed);
         let draining = {
@@ -304,7 +364,7 @@ impl RemoteWatchHub {
         let prepared = if draining {
             Err(unavailable())
         } else {
-            home.prepare_remote_watch(member, params).await
+            home.prepare_remote_watch(member, params, manifest).await
         };
         let result = self.publish(&pending, writer, header, prepared).await;
         if result.is_err() {
@@ -328,12 +388,9 @@ impl RemoteWatchHub {
             .as_ref()
             .ok()
             .map(|watch| {
-                serde_json::to_vec(&json!({
-                    "kind":"snapshot", "home":watch.home, "epoch":epoch(), "seq":1,
-                    "logins":remote_watch_logins_wire(&watch.rows),
-                }))
-                .map_err(|error| error.to_string())
-                .and_then(|body| frame(header, FrameType::StreamData, body))
+                serde_json::to_vec(&watch.projection.notice(&watch.home, 1))
+                    .map_err(|error| error.to_string())
+                    .and_then(|body| frame(header, FrameType::StreamData, body))
             })
             .transpose()?;
         let oldest = {
@@ -487,10 +544,11 @@ impl Subscription {
             && latest.devices.get(&self.watch.member) != Some(&self.watch.pairing)
     }
 
-    async fn project(&self) -> Result<Option<Vec<RemoteWatchRow>>, ()> {
+    async fn project(&self) -> Result<Option<Projection>, ()> {
         let store = Arc::clone(&self.watch.store);
         let member = self.watch.member.clone();
         let pairing = self.watch.pairing.clone();
+        let manifest = matches!(self.watch.projection, Projection::Manifest(_));
         let snapshots = Arc::clone(&self.snapshots);
         let deadline = tokio::time::Instant::now() + self.watch.budget;
         let result = tokio::time::timeout_at(deadline, async {
@@ -505,9 +563,15 @@ impl Subscription {
                 if !store.federation_member_mapping().map_err(|_| ())? {
                     return Ok(None);
                 }
-                HomeVault::project_remote_watch(&store, &member, &pairing)
-                    .map(Some)
-                    .map_err(|_| ())
+                if manifest {
+                    HomeVault::project_manifest_watch(&store, &member, &pairing)
+                        .map(|value| value.map(Projection::Manifest))
+                        .map_err(|_| ())
+                } else {
+                    HomeVault::project_remote_watch(&store, &member, &pairing)
+                        .map(|rows| Some(Projection::Logins(rows)))
+                        .map_err(|_| ())
+                }
             })
             .await
             .map_err(|_| ())?
@@ -520,7 +584,7 @@ impl Subscription {
         result
     }
 
-    async fn publish(&self, rows: Option<&[RemoteWatchRow]>, seq: u64) -> Result<(), String> {
+    async fn publish(&self, rows: Option<&Projection>, seq: u64) -> Result<(), String> {
         let _publication = self.publication.lock().await;
         let permit = self.writer.reserve().await.map_err(|e| e.to_string())?;
         let Some(registry) = self.registry.upgrade() else {
@@ -536,11 +600,8 @@ impl Subscription {
             Some(rows) => frame(
                 self.header,
                 FrameType::StreamData,
-                serde_json::to_vec(&json!({
-                    "kind":"snapshot", "home":self.watch.home, "epoch":epoch(), "seq":seq,
-                    "logins":remote_watch_logins_wire(rows),
-                }))
-                .map_err(|e| e.to_string())?,
+                serde_json::to_vec(&rows.notice(&self.watch.home, seq))
+                    .map_err(|e| e.to_string())?,
             )?,
             None => {
                 registry.entries.remove(&self.pending.key);
@@ -589,9 +650,9 @@ impl Subscription {
                 }
                 match self.project().await {
                     Ok(None) => self.publish(None, seq).await,
-                    Ok(Some(rows)) if !remote_watch_lists_equal(&self.watch.rows, &rows) => {
+                    Ok(Some(rows)) if !self.watch.projection.same(&rows) => {
                         self.publish(Some(&rows), seq + 1).await?;
-                        self.watch.rows = rows;
+                        self.watch.projection = rows;
                         seq += 1;
                         Ok(())
                     }

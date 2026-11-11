@@ -1557,6 +1557,8 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
             let rest = &SECRET_CONTRACT_DOC[at + marker.len()..];
             &rest[..rest.find(" -->").expect("golden marker end")]
         })
+        // Manifest goldens have their own producer-driven completeness check.
+        .filter(|id| !id.starts_with("manifest."))
         .collect();
     let checked: std::collections::BTreeSet<&str> = SECRET_GOLDEN_IDS.iter().copied().collect();
     assert_eq!(
@@ -1607,6 +1609,9 @@ secret_error_golden! {
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
     SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
+    ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
+    Superseded => "superseded", "permanent", "result error";
+    Expired => "expired", "permanent", "result error";
     PendingLimit => "pending_limit", "transient", "result error";
     StoreError => "store_error", "transient", "result error";
 }

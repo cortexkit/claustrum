@@ -56,6 +56,9 @@ pub enum SecretError {
     SecretSetupIncomplete,
     SecretMultiHostDisabled,
     ApprovalInvalid,
+    ManifestSetupIncomplete,
+    Superseded,
+    Expired,
     PendingLimit,
     StoreError,
 }
@@ -74,6 +77,9 @@ impl SecretError {
             Self::SecretSetupIncomplete => "secret_setup_incomplete",
             Self::SecretMultiHostDisabled => "secret_multi_host_disabled",
             Self::ApprovalInvalid => "approval_invalid",
+            Self::ManifestSetupIncomplete => "manifest_setup_incomplete",
+            Self::Superseded => "superseded",
+            Self::Expired => "expired",
             Self::PendingLimit => "pending_limit",
             Self::StoreError => "store_error",
         }

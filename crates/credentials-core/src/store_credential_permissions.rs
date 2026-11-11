@@ -9,10 +9,7 @@ use sha2::{Digest, Sha256};
 pub const MODULE_RUNTIME_CATEGORY: &str = "module-runtime";
 
 fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant>> {
-    let runtime: std::collections::BTreeSet<String> = conn
-        .prepare("SELECT credential_id FROM credential_categories WHERE category=?1")?
-        .query_map([MODULE_RUNTIME_CATEGORY], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let runtime = runtime_ids(conn)?;
     Ok(
         read_grants_from_conn(conn, None, None, read_schema_version(conn)?)?
             .into_iter()
@@ -25,6 +22,82 @@ fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant
             })
             .collect(),
     )
+}
+
+impl EncryptedStore {
+    /// Credentials in the `module-runtime` group are omitted from both app lists.
+    /// Use the same category membership query as the permission grant filter.
+    pub fn connector_runtime_ids(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, StoreOpError> {
+        self.store
+            .with_conn(runtime_ids)
+            .map_err(StoreOpError::from)
+    }
+
+    /// Permission-row ids reaching a credential, using the permission list's visible
+    /// grants and opaque id function. Audience grants never reach stored credentials.
+    pub fn connector_permission_ids(
+        &self,
+        id: &str,
+        categories: &[String],
+    ) -> Result<Vec<String>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                let mut ids: Vec<_> = visible_grants(conn)?
+                    .iter()
+                    .filter(|grant| match grant.selector_kind {
+                        SelectorKind::Exact => grant.selector == id,
+                        SelectorKind::Category => categories.contains(&grant.selector),
+                        SelectorKind::Audience => false,
+                    })
+                    .map(grant_id)
+                    .collect();
+                ids.sort();
+                Ok(ids)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Open display metadata without lifecycle gating or writes. Undecodable records
+    /// are omitted because their kind cannot be determined safely.
+    pub fn connector_records(
+        &self,
+    ) -> Result<Vec<(String, crate::ConnectorRecordMetadata)>, StoreOpError> {
+        self.store.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT credential_id, record_version, envelope FROM credentials ORDER BY credential_id")?;
+            let mut records = Vec::new();
+            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Vec<u8>>(2)?)))? {
+                let (id, version, bytes) = row?;
+                if let Ok(plaintext) = envelope::open(&self.key, &bytes, &RecordBinding { credential_id: &id, record_version: version }) {
+                    if let Ok(record) = VaultRecord::decode(&plaintext) {
+                        records.push((id, crate::ConnectorRecordMetadata {
+                            kind: record.kind,
+                            refresh_adapter: record.refresh_adapter,
+                            identity: record.identity,
+                            detected_plan: record.detected_plan,
+                        }));
+                    }
+                }
+            }
+            Ok(records)
+        }).map_err(StoreOpError::from)
+    }
+
+    /// Newest existing diagnostic reason, without imposing a global event limit.
+    pub fn connector_auth_reason(&self, id: &str) -> Result<Option<String>, StoreOpError> {
+        self.store.with_conn(|conn| {
+            conn.query_row("SELECT detail FROM auth_events WHERE credential_id=?1 AND detail IS NOT NULL ORDER BY seq DESC LIMIT 1", [id], |row| row.get(0)).optional()
+        }).map_err(StoreOpError::from)
+    }
+}
+
+fn runtime_ids(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    conn.prepare("SELECT credential_id FROM credential_categories WHERE category=?1 UNION SELECT credential_id FROM remote_record_categories WHERE category=?1")?
+        .query_map([MODULE_RUNTIME_CATEGORY], |row| row.get(0))?
+        .collect()
 }
 
 fn grant_id(grant: &ReadGrant) -> String {
@@ -51,7 +124,14 @@ pub(super) fn permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<V
                     .query_row(
                         "SELECT display_name FROM enrolled_consumers WHERE name=?1 AND revoked_at_ms IS NULL",
                         [&grant.principal_id],
-                        |row| row.get(0),
+                        |row| {
+                            let label: Option<String> = row.get(0)?;
+                            Ok(crate::display_name::effective_enrollment_display_name(
+                                &grant.principal_id,
+                                label.as_deref(),
+                            )
+                            .map(str::to_owned))
+                        },
                     )
                     .optional()?
                     .flatten();

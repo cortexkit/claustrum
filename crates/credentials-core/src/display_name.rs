@@ -1,6 +1,32 @@
-//! Validation shared by enrollment proposals and operator-approved labels.
+//! Validation and read-time defaults for enrollment display names.
 
 pub const MAX_DISPLAY_NAME_CHARS: usize = 40;
+
+const DEFAULT_ENROLLMENT_DISPLAY_NAMES: &[(&str, &str)] = &[
+    ("openai-auth-opencode", "ChatGPT for OpenCode"),
+    ("openai-auth-pi", "ChatGPT for Pi"),
+    ("anthropic-auth-opencode", "Claude sign-in for OpenCode"),
+    ("anthropic-auth-pi", "Claude sign-in for Pi"),
+    (
+        "antigravity-auth-opencode",
+        "Antigravity sign-in for OpenCode",
+    ),
+    ("antigravity-auth-pi", "Antigravity sign-in for Pi"),
+    ("claustrum-auth-opencode", "Model API keys for OpenCode"),
+    ("claustrum-auth-pi", "Model API keys for Pi"),
+];
+
+/// Prefer a stored label, falling back only for exact CortexKit plugin names.
+pub fn effective_enrollment_display_name<'a>(
+    name: &str,
+    display_name: Option<&'a str>,
+) -> Option<&'a str> {
+    display_name.or_else(|| {
+        DEFAULT_ENROLLMENT_DISPLAY_NAMES
+            .iter()
+            .find_map(|(plugin_name, label)| (*plugin_name == name).then_some(*label))
+    })
+}
 
 /// Absence is optional, but a present display name must be a string, not null.
 pub fn deserialize_optional_display_name<'de, D>(
@@ -33,6 +59,38 @@ pub fn validate_display_name(value: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_enrollment_display_names_pass_validation() {
+        for (name, label) in DEFAULT_ENROLLMENT_DISPLAY_NAMES {
+            assert_eq!(validate_display_name(label).unwrap(), *label, "{name}");
+            assert_eq!(effective_enrollment_display_name(name, None), Some(*label));
+        }
+    }
+
+    #[test]
+    fn effective_enrollment_display_names_prefer_stored_labels_and_match_exactly() {
+        assert_eq!(
+            effective_enrollment_display_name("anthropic-auth-pi", None),
+            Some("Claude sign-in for Pi")
+        );
+        assert_eq!(
+            effective_enrollment_display_name("anthropic-auth-pi", Some("My Claude")),
+            Some("My Claude")
+        );
+        for name in [
+            "openai-auth-opencode-x",
+            "xopenai-auth-opencode",
+            "OPENAI-AUTH-OPENCODE",
+            "unknown-plugin",
+        ] {
+            assert_eq!(
+                effective_enrollment_display_name(name, None),
+                None,
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn display_names_accept_40_scalars_and_refuse_41() {

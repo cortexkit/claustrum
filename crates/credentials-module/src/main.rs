@@ -21,8 +21,13 @@
 //! is never served while a crash-left refresh intent is unresolved.
 
 mod admin_surface;
+mod connectors;
 mod federation;
 mod limiter;
+mod manifest;
+mod manifest_active_report;
+mod manifest_identity;
+mod manifest_propose;
 mod read_surface;
 mod secret_phone;
 mod secret_use;
@@ -1080,9 +1085,13 @@ async fn handle_frame(
             // its new principal to an already-accepted request.
             let caller = admin.route_caller(frame.header.channel);
             let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
-                && serde_json::from_slice::<ReadRequest>(&frame.body)
-                    .is_ok_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
-            {
+                && serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                    matches!(
+                        request.method.as_str(),
+                        federation::ingress::OP_REMOTE_WATCH
+                            | federation::ingress::OP_MANIFEST_WATCH
+                    )
+                }) {
                 Some(admin.home().remote_watches.register(frame.header))
             } else {
                 None
@@ -1090,10 +1099,19 @@ async fn handle_frame(
             // Register subscriptions before reading the next ingress frame, so a
             // following CANCEL or route close cannot race ahead of registration.
             // Opening only spawns the SQLite work; it never waits on the reactor.
+            if serde_json::from_slice::<ReadRequest>(&frame.body)
+                .is_ok_and(|request| request.method == "connectors.watch")
+            {
+                handle_read_request(frame, &route, &surface, &admin, caller.principal()).await?;
+                return Ok(true);
+            }
             if let federation::RouteCaller::Principal(principal) = &caller {
-                if serde_json::from_slice::<ReadRequest>(&frame.body)
-                    .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
-                {
+                if serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                    request.method == OP_WATCH_SCOPED
+                        || (request.method == manifest::OP_WATCH
+                            && manifest::admitted(&request.method, principal.as_ref())
+                            && request.params.as_object().is_some_and(|p| p.is_empty()))
+                }) {
                     let principal = principal.clone();
                     handle_read_request(frame, &route, &surface, &admin, principal).await?;
                     return Ok(true);
@@ -1203,7 +1221,16 @@ async fn handle_control_request(
             // `fed-` harness marks a call forwarded from another computer, which the bind
             // registry then serves with no principal (see `AdminSurface::principal`).
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            admin.record_bind_at(route_channel, epoch, principal, &identity.harness);
+            let peer: subc_protocol::peer::RouteBindPeer =
+                serde_json::from_slice(&frame.body).map_err(ModuleError::Json)?;
+            admin.record_connector_bind(
+                route_channel,
+                epoch,
+                principal,
+                &identity.harness,
+                peer.operator_app.map(|app| app.app),
+                scope.as_ref(),
+            );
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1381,6 +1408,25 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if let Some(request) = method.as_ref().filter(|r| manifest::is_op(&r.method)) {
+        if !matches!(&caller, federation::RouteCaller::Principal(principal) if manifest::admitted(&request.method, principal.as_ref()))
+        {
+            return send_route_result(writer, header, uniform_not_found()).await;
+        }
+    }
+    if method
+        .as_ref()
+        .is_some_and(|request| request.method == manifest_propose::OP_PROPOSE_BINDING)
+        && !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id == "plexus")
+    {
+        return send_route_result(writer, header, uniform_not_found()).await;
+    }
+    if method
+        .as_ref()
+        .is_some_and(|request| connectors::is_op(&request.method))
+    {
+        return handle_read_request(frame, writer, surface, admin, caller.principal()).await;
+    }
     if let Some(request) = method
         .as_ref()
         .filter(|r| matches!(r.method.as_str(), "permissions.list" | "permissions.revoke"))
@@ -1411,10 +1457,12 @@ async fn dispatch_route_request(
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
-    if method
-        .as_ref()
-        .is_some_and(|request| request.method == federation::ingress::OP_REMOTE_WATCH)
-        && !matches!(caller, federation::RouteCaller::Member(_))
+    if method.as_ref().is_some_and(|request| {
+        matches!(
+            request.method.as_str(),
+            federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+        )
+    }) && !matches!(caller, federation::RouteCaller::Member(_))
     {
         let refusal = federation::home_watch::refusal(
             header,
@@ -1454,11 +1502,21 @@ async fn dispatch_route_request(
                 )
                 .await;
             };
-            if request.method == federation::ingress::OP_REMOTE_WATCH {
+            if matches!(
+                request.method.as_str(),
+                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+            ) {
                 let Some(pending) = remote_watch else {
                     return Ok(());
                 };
                 let home = admin.home();
+                if request.method == federation::ingress::OP_MANIFEST_WATCH {
+                    return home
+                        .remote_watches
+                        .open_manifest(home, pending, writer, header, &member, &request.params)
+                        .await
+                        .map_err(ModuleError::Message);
+                }
                 return home
                     .remote_watches
                     .open(home, pending, writer, header, &member, &request.params)
@@ -1620,6 +1678,51 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        method if manifest::is_op(method) => {
+            return manifest::serve(
+                frame.header,
+                writer,
+                surface,
+                principal.as_ref(),
+                method,
+                &request.params,
+            )
+            .await;
+        }
+        manifest_propose::OP_PROPOSE_BINDING => {
+            match manifest_propose::serve(
+                Arc::clone(surface.store()),
+                admin.home().outbound(),
+                principal.as_ref(),
+                &request.params,
+            )
+            .await
+            {
+                manifest_propose::ProposeAnswer::Reply(reply) => wrap_result(reply),
+                manifest_propose::ProposeAnswer::InvalidParams => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid manifest proposal parameters",
+                    )
+                    .await
+                }
+            }
+        }
+        method @ ("connectors.list" | "connectors.watch") => {
+            return connectors::serve(
+                frame.header,
+                writer,
+                surface,
+                admin,
+                method,
+                &request.params,
+            )
+            .await;
+        }
         method @ ("secret.use" | "secret.request_flow_approval" | "secret.revoke_flow_grants") => {
             match serve_secret_call(surface, admin, principal.as_ref(), method, &request.params)
                 .await
@@ -2279,6 +2382,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
         provides: vec![
             "permissions/v1".to_owned(),
+            subc_protocol::peer::OPERATOR_APP_CAPABILITY.to_owned(),
             subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
             subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
         ],
@@ -2299,6 +2403,9 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
                 federation::ingress::OP_REMOTE_WATCH,
+                federation::ingress::OP_MANIFEST_LATEST,
+                federation::ingress::OP_MANIFEST_WATCH,
+                federation::ingress::OP_MANIFEST_REPORT_ACTIVE,
             ],
             "peer_classes": ["computer"],
         }]))]),
@@ -2306,7 +2413,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     .operation_delivery(BTreeMap::from([(
         federation::ingress::OP_REMOTE_WATCH.to_owned(),
         OperationDelivery::WATCH,
-    )]))
+    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH), (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH)]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2470,6 +2577,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.deposit_keys".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.deposit".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "manifest.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.list".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -2477,9 +2585,19 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.home".into(), description: None, kind: ManagementOperationKind::Query },
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "manifest.propose_binding".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "manifest.latest".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "manifest.watch".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "manifest.report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "federation.manifest_report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "connectors.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "connectors.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "permissions.revoke".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation {
                 name: OP_ACCOUNT_TOKEN.to_string(),
@@ -2701,6 +2819,7 @@ mod tests {
         include!("usage_report_tests.rs");
     }
     include!("watch_scoped_tests.rs");
+    include!("connectors_tests.rs");
     include!("federation/home_watch_route_tests.rs");
     include!("secret_contract_tests.rs");
     include!("credential_permissions_tests.rs");
@@ -2797,6 +2916,7 @@ mod tests {
             m.capabilities.as_ref().unwrap().provides,
             vec![
                 "permissions/v1",
+                "operator-app/v1",
                 "flow-identity-scopes/v1",
                 "bind-no-project/v1"
             ]
@@ -2804,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+    fn the_manifest_declares_every_secret_manifest_and_permissions_op_with_its_kind() {
         let m = manifest("claustrum", None);
         let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
             panic!("management surface")
@@ -2812,6 +2932,14 @@ mod tests {
         for name in secret_phone::PHONE_OPS.into_iter().chain([
             "secret.home",
             "secret.use",
+            manifest_propose::OP_PROPOSE_BINDING,
+            "manifest.latest",
+            "manifest.watch",
+            "manifest.report_active",
+            "manifest.active_status",
+            "federation.manifest_latest",
+            "federation.manifest_watch",
+            "federation.manifest_report_active",
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
             "permissions.list",
@@ -2828,7 +2956,15 @@ mod tests {
             );
             let kind = if matches!(
                 name,
-                "secret.deposit_keys" | "secret.list" | "secret.home" | "permissions.list"
+                "secret.deposit_keys"
+                    | "secret.list"
+                    | "secret.home"
+                    | "permissions.list"
+                    | "manifest.latest"
+                    | "manifest.watch"
+                    | "manifest.active_status"
+                    | "federation.manifest_latest"
+                    | "federation.manifest_watch"
             ) {
                 ManagementOperationKind::Query
             } else {
@@ -2836,6 +2972,10 @@ mod tests {
             };
             assert_eq!(matches[0].kind, kind, "wrong relay kind for {name}");
         }
+        assert_eq!(
+            m.operation_delivery.get("manifest.watch"),
+            Some(&OperationDelivery::WATCH)
+        );
     }
 
     #[test]
@@ -2926,6 +3066,12 @@ mod tests {
                 ManagementOperationKind::Mutate,
             ),
             ("federation.remote_watch", ManagementOperationKind::Query),
+            ("federation.manifest_latest", ManagementOperationKind::Query),
+            ("federation.manifest_watch", ManagementOperationKind::Query),
+            (
+                "federation.manifest_report_active",
+                ManagementOperationKind::Mutate,
+            ),
         ] {
             assert!(federation::is_federation_op(op), "{op} must be allowlisted");
             assert!(
@@ -2939,6 +3085,20 @@ mod tests {
             Some(&subc_protocol::manifest::OperationDelivery::WATCH),
             "remote inventory snapshots must be exposed as a watch"
         );
+        assert_eq!(
+            manifest.operation_delivery.get("federation.manifest_watch"),
+            Some(&OperationDelivery::WATCH)
+        );
+        for op in ["connectors.list", "connectors.watch"] {
+            assert!(declared
+                .iter()
+                .any(|(name, kind)| name == op && *kind == ManagementOperationKind::Query));
+        }
+        assert_eq!(
+            manifest.operation_delivery.get("connectors.watch"),
+            Some(&OperationDelivery::WATCH)
+        );
+        assert!(!manifest.operation_delivery.contains_key("connectors.list"));
         let sharing = manifest
             .role_declarations
             .get("peer-sharing/v1")
@@ -5742,6 +5902,15 @@ mod tests {
                         "{home}"
                     );
                     assert_eq!(home, list);
+                    let approve = routed_json(
+                        &surface,
+                        &admin,
+                        90,
+                        "manifest.approve",
+                        json!({"envelope_b64url":"AA","signature_b64url":"AA"}),
+                    )
+                    .await;
+                    assert_eq!(approve, list);
                 }
             }
         }
@@ -6033,7 +6202,7 @@ mod tests {
         )
     }
 
-    /// On a vault whose secrets live on another member, each of the seven phone ops is
+    /// On a vault whose secrets live on another member, each of the phone ops is
     /// refused `secret_home_elsewhere` naming the home, for a registered phone and for a
     /// paired phone that never registered here, and none of them writes anything. The
     /// same requests are served again once the setting is cleared, so the refusal comes
@@ -6062,6 +6231,10 @@ mod tests {
             ("secret.deposit", deposit.clone()),
             (
                 "secret.approve",
+                json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
+            ),
+            (
+                "manifest.approve",
                 json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
             ),
             ("secret.list", json!({})),
@@ -7419,7 +7592,10 @@ mod tests {
         for channel in [91, 92, 93, 94] {
             for op in ops {
                 let reply = routed_reply(&surface, &admin, channel, op, json!({})).await;
-                let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+                let expected = if matches!(
+                    op,
+                    federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+                ) {
                     (FrameType::Error, watch_not_found.clone())
                 } else {
                     (FrameType::Response, not_found.clone())
@@ -7433,7 +7609,10 @@ mod tests {
         for op in ops {
             let params = json!({ "credential_id": FORWARDED_TEST_ID });
             let reply = routed_reply(&surface, &admin, 91, op, params).await;
-            let expected = if op == federation::ingress::OP_REMOTE_WATCH {
+            let expected = if matches!(
+                op,
+                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
+            ) {
                 (FrameType::Error, watch_not_found.clone())
             } else {
                 (FrameType::Response, not_found.clone())
@@ -9361,6 +9540,7 @@ mod tests {
                 proposed_name: "consumer".into(),
                 request_secret_hash: "0".repeat(64),
                 display_name: None,
+                requested_grants: None,
             })
             .unwrap(),
             operation(OP_ENROLL_PROPOSE)["request"]
@@ -10434,6 +10614,7 @@ mod tests {
             proposed_name: "consumer".into(),
             request_secret_hash: "a".repeat(64),
             display_name: Some("Claude sign-in for Pi".into()),
+            requested_grants: None,
         };
         let proposed = enrollment_route_frame(
             &surface,
@@ -10451,6 +10632,7 @@ mod tests {
             final_name: "consumer".into(),
             display_name: Some("Approved Pi label".into()),
             keep_grants: false,
+            grant_requested: false,
         };
         let approval_bytes = String::from_utf8(op.to_bytes().unwrap()).unwrap();
         if let AdminOpBody::EnrollApprove { request_id: id, .. } = &mut op {
@@ -10655,6 +10837,149 @@ mod tests {
         .await;
         assert_enrollment_refusal(&old_token, "not_found", "permanent");
         assert_eq!(old_token.body, unknown.body);
+    }
+
+    #[tokio::test]
+    async fn enrollment_requested_grants_validates_shapes_and_four_entry_boundary() {
+        let (surface, admin, store) = deposit_cookie_rig(116);
+        let valid = json!([
+            {"selector":{"category":"llm-provider"},"operation":"read"},
+            {"selector":{"category":"llm-provider"},"operation":"list"},
+            {"selector":{"exact":"apikey:zai"},"operation":"read"},
+            {"selector":{"exact":"apikey:zai"},"operation":"list"}
+        ]);
+        let mut too_many = valid.as_array().unwrap().clone();
+        too_many.push(json!({"selector":{"exact":"apikey:other"},"operation":"read"}));
+        for invalid in [
+            json!([]),
+            json!(null),
+            json!({}),
+            json!(too_many),
+            json!([valid[0].clone(), valid[0].clone()]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"sign"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"open"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"deposit"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"seal"}]),
+            json!([{"selector":{"category":"llm-provider"},"operation":"account_token"}]),
+            json!([{"selector":{"category":"bad category"},"operation":"read"}]),
+            json!([{"selector":{"exact":""},"operation":"read"}]),
+            json!([{"selector":{"audience":"provider"},"operation":"read"}]),
+            json!([{"selector":{"category":"llm-provider","exact":"apikey:zai"},"operation":"read"}]),
+            json!([{"selector":{},"operation":"read"}]),
+            json!([{"selector":{"exact":7},"operation":"read"}]),
+            json!([{"selector":{"exact":"apikey:zai"},"operation":"read","extra":true}]),
+        ] {
+            let before = store.audit_tip().unwrap();
+            let frame = enrollment_route_frame(&surface, &admin, OP_ENROLL_PROPOSE, json!({
+                "proposed_name":"consumer", "request_secret_hash":"a".repeat(64), "requested_grants":invalid,
+            })).await;
+            assert_enrollment_refusal(&frame, "invalid_params", "permanent");
+            assert_eq!(store.audit_tip().unwrap(), before);
+            assert_eq!(
+                store
+                    .with_raw_conn(|conn| conn.query_row(
+                        "SELECT COUNT(*) FROM pending_enrollments",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    ))
+                    .unwrap(),
+                0
+            );
+        }
+        let params: EnrollProposeParams = serde_json::from_value(json!({
+            "proposed_name":"consumer", "request_secret_hash":"a".repeat(64), "requested_grants":valid,
+        })).unwrap();
+        let frame = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            serde_json::to_value(&params).unwrap(),
+        )
+        .await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let body: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        assert!(body["result"]["request_id"].is_string(), "{body}");
+        let stored: String = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT requested_grants_json FROM pending_enrollments",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+            valid
+        );
+    }
+
+    #[tokio::test]
+    async fn enrollment_requested_grants_wire_golden() {
+        use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (surface, admin, _store) = scoped_rig(116);
+        let params: EnrollProposeParams = serde_json::from_value(json!({
+            "proposed_name":"consumer", "request_secret_hash":"a".repeat(64),
+            "requested_grants":[{"selector":{"category":"llm-provider"},"operation":"read"}],
+        }))
+        .unwrap();
+        let frame = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            serde_json::to_value(&params).unwrap(),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        assert!(body["result"]["request_id"].is_string(), "{body}");
+        let op = AdminOpBody::EnrollApprove {
+            v: ADMIN_OP_SCHEMA_V2,
+            request_id: "request-id".into(),
+            final_name: "consumer".into(),
+            display_name: None,
+            keep_grants: false,
+            grant_requested: true,
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/enrollment_wire_contract.json");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (operation, actual) in [
+            (OP_ENROLL_PROPOSE, serde_json::to_string(&params).unwrap()),
+            (
+                "admin.enroll_approve",
+                String::from_utf8(op.to_bytes().unwrap()).unwrap(),
+            ),
+        ] {
+            let key = "requested_grants_request";
+            let row = fixture["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["op"] == operation)
+                .unwrap();
+            if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+                let replacement = format!("      \"{key}\": {},", json!(actual));
+                if let Some(old) = row.get(key) {
+                    let old_line = format!("      \"{key}\": {old},");
+                    assert_eq!(text.matches(&old_line).count(), 1);
+                    text = text.replacen(&old_line, &replacement, 1);
+                } else {
+                    let anchor = format!("      \"op\": \"{operation}\",");
+                    let start = text.find("\"operations\":").unwrap();
+                    let offset = start + text[start..].find(&anchor).unwrap() + anchor.len();
+                    text.insert_str(offset, &format!("\n{replacement}"));
+                }
+            } else {
+                assert_eq!(
+                    row[key], actual,
+                    "regenerate with UPDATE_ENROLLMENT_WIRE_FIXTURE=1"
+                );
+            }
+        }
+        if std::env::var("UPDATE_ENROLLMENT_WIRE_FIXTURE").as_deref() == Ok("1") {
+            std::fs::write(path, text).unwrap();
+        }
     }
 
     #[test]
@@ -14766,6 +15091,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gh_manifest_root_sign_is_not_found_in_every_address_mode_without_writes() {
+        use credentials_core::store::{SetCategoryMode, GH_MANIFEST_ROOT_KEY_ID};
+
+        fn snapshot(conn: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+            let tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                .unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            tables
+                .iter()
+                .map(|table| {
+                    let mut statement =
+                        conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            (0..columns)
+                                .map(|index| row.get(index))
+                                .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                        })
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                })
+                .collect()
+        }
+
+        let (surface, store, db_path, _root) = tmp_surface_with_store(183);
+        let key = MasterKey::from_bytes([183; MASTER_KEY_LEN]);
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            Arc::new(RefreshEngine::new(
+                Arc::clone(&store),
+                Vec::new(),
+                Arc::new(crate::test_support::NoHttp),
+            )),
+            credentials_core::admin_auth::AdminMacKey::derive(&key),
+            credentials_core::vault_id_for(db_path.parent().unwrap()).unwrap(),
+            key.key_id(),
+        ));
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            test_ed25519_pem().into_bytes(),
+            None,
+        );
+        record.audit_each_signature = true;
+        for id in [GH_MANIFEST_ROOT_KEY_ID, "signing:other-manifest-test:1"] {
+            store
+                .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+                .unwrap();
+            store
+                .set_categories_audited(
+                    id,
+                    SetCategoryMode::Set,
+                    &["monitoring".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+        }
+        let handle = mint_test_handle(&store, GH_MANIFEST_ROOT_KEY_ID);
+        let db = rusqlite::Connection::open(db_path).unwrap();
+        // Simulate an exact grant inserted before grant creation began refusing
+        // root-key Sign grants. Existing rows must not let callers sign with it.
+        db.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'manifest-exact', 'exact', ?1, 'sign', 1)", [GH_MANIFEST_ROOT_KEY_ID]).unwrap();
+        admin.record_bind(
+            183,
+            subc_protocol::Principal::Reserved {
+                module_id: "manifest-exact".into(),
+            },
+        );
+        admin.record_bind(
+            184,
+            subc_protocol::Principal::Reserved {
+                module_id: "manifest-category".into(),
+            },
+        );
+        let request_secret = "d1d2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let request = store
+            .propose_enrollment(
+                "manifest-consumer",
+                &credentials_core::enrollment::enrollment_secret_hash(request_secret).unwrap(),
+            )
+            .unwrap();
+        store
+            .approve_enrollment(&request.request_id, "manifest-consumer", "operator")
+            .unwrap();
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .unwrap()
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("expected an approved enrollment, got {other:?}"),
+        };
+        for (kind, id) in [
+            ("reserved", "manifest-category"),
+            ("enrolled", "manifest-consumer"),
+        ] {
+            store
+                .create_read_grant_audited(
+                    kind,
+                    id,
+                    SelectorKind::Category,
+                    "monitoring",
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    kind,
+                    id,
+                    SelectorKind::Exact,
+                    GH_MANIFEST_ROOT_KEY_ID,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+        for (channel, params) in [
+            (
+                184,
+                json!({"credential_id":"signing:other-manifest-test:1","payload_b64":"YQ=="}),
+            ),
+            (
+                185,
+                json!({"credential_id":"signing:other-manifest-test:1","enrollment_token":token,"payload_b64":"YQ=="}),
+            ),
+        ] {
+            let (_, body) = routed_reply(&surface, &admin, channel, OP_SIGN, params).await;
+            let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                reply["result"]["signature_b64"].is_string(),
+                "the grant/token control must really authorize signing"
+            );
+        }
+        let unknown = routed_reply(
+            &surface,
+            &admin,
+            183,
+            OP_SIGN,
+            json!({"handle":"unknown-manifest-handle","payload_b64":"YQ=="}),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&unknown.1).unwrap()["result"]["error"]
+                ["code"],
+            "not_found"
+        );
+        let before = snapshot(&db);
+        for (mode, channel, params) in [
+            ("handle", 183, json!({"handle":handle,"payload_b64":"YQ=="})),
+            (
+                "exact",
+                183,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+            ),
+            (
+                "category",
+                184,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+            ),
+            (
+                "enrollment",
+                185,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token,"payload_b64":"YQ=="}),
+            ),
+        ] {
+            let refused = routed_reply(&surface, &admin, channel, OP_SIGN, params).await;
+            assert_eq!(
+                refused, unknown,
+                "{mode} must be byte-identical to an unknown handle"
+            );
+            assert_eq!(
+                snapshot(&db),
+                before,
+                "{mode} must write nothing, including first-use diagnostics"
+            );
+        }
+        let expected = credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(record.payload.expose()).unwrap(),
+        )
+        .unwrap();
+        for (channel, params) in [
+            (183, json!({"handle":handle})),
+            (184, json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID})),
+            (
+                185,
+                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token}),
+            ),
+        ] {
+            let (_, body) = routed_reply(&surface, &admin, channel, OP_PUBLIC_KEY, params).await;
+            let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(reply["result"]["key_id"], expected.key_id);
+            assert_eq!(reply["result"]["public_key_hex"], expected.public_key_hex);
+        }
+        assert!(!store.get(GH_MANIFEST_ROOT_KEY_ID).unwrap().operator_sign);
+    }
+
+    #[tokio::test]
     async fn read_grant_authorizes_scoped_public_key() {
         let (surface, admin, store) = scoped_rig(86);
         let credential_id = "signing:public-key:read-granted";
@@ -17828,6 +18351,7 @@ mod tests {
                     proposed_name: "attributed-consumer".into(),
                     request_secret_hash: secret_hash,
                     display_name: None,
+                    requested_grants: None,
                 },
             )
             .expect("propose");
@@ -17994,12 +18518,20 @@ mod tests {
     ///             KIND only (never its message, which can carry a path)
     ///   warn!     permanent account exchange failure: fixed text only, never the JWT,
     ///             challenge, upstream body or signer material
+    ///   info!     unsigned desktop development admission for a connectors read:
+    ///             fixed admission name only, never request or credential fields
+    ///   warn/info! member watch failure/recovery: home member id and ending code or
+    ///             fixed kind only; repeated failures remain debug-only
+    ///   warn/debug! member watch reconciliation and disconnect diagnostics:
+    ///             existing fixed text, row/home ids, and error or ending values
+    ///   warn!     manifest activation downgrade: member id and two version integers,
+    ///             never manifest bytes, hashes or the caller's reason
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the eight source files linked
+    /// the one shape every secret read must take. Covers twelve source files linked
     /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -18015,6 +18547,16 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connectors.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/member_watch.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/manifest_active_report.rs"
+            )),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/manifest.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18031,7 +18573,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 5, 0),
+            (1, 2, 16, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18050,6 +18592,19 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[10], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![("warn".into(), "member_id, reported = lower.reported, active = lower.active, \"lower manifest version reported\"".into())]);
+        assert_eq!(output_site_arguments(sources[9], &shapes), vec![
+            ("debug".into(), "target: \"federation\", ?ending, \"home watch ended; inventory retained\"".into()),
+            ("debug".into(), "target: \"federation\", ?error, \"home watch disconnected\"".into()),
+            ("info".into(), "target: \"federation\", home, \"home watch recovered\"".into()),
+            ("warn".into(), "target: \"federation\", home, ending = ending.kind(), \"home watch ended; retrying\"".into()),
+            ("warn".into(), "target: \"federation\", home, %id, \"home watch id already held; existing holder wins\"".into()),
+            ("warn".into(), "target: \"federation\", ?error, \"home watch apply failed; retaining snapshot for retry\"".into()),
+            ("warn".into(), "target: \"federation\", home, id = %row.credential_id, %error, \"home watch row rejected; existing row unchanged\"".into()),
+            ("warn".into(), "target: \"federation\", ?error, home = %fp, \"home watch removal failed; retaining removal for retry\"".into()),
+            ("warn".into(), "target: \"federation\", %error, \"home watch startup inventory unavailable\"".into()),
+        ]);
+        assert_eq!(output_site_arguments(sources[8], &shapes), vec![("info".into(), "target: \"connectors\", \"unsigned_desktop_development_admission admitted connectors read\"".into())]);
         assert_eq!(account_sites, vec![("warn".into(), "\"account worker exchange refused permanently; signer or contract vector may be wrong\"".into())]);
         let mut sites = 0;
         for source in sources {

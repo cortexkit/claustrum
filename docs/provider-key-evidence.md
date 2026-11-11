@@ -2,8 +2,9 @@
 
 The catalog records observations from deliberately bogus API keys, not rules that the
 vault evaluates. Requests used the existing login check, with redirects disabled, on a
-network-enabled Linux build server on 2026-11-10. Cloudflare Workers AI used the dummy
-account id `00000000000000000000000000000000`. No real provider key was used.
+network-enabled Linux build server on the dates in the table. Cloudflare Workers
+AI used the dummy account id `00000000000000000000000000000000`. No real provider
+key was used.
 
 A dash means that no string-valued error code was observed. Numeric codes are not
 coerced to strings. Where an API uses an error type or structured reason as its code,
@@ -14,43 +15,491 @@ are unchanged.
 
 | row | url | date | status | error_code | code field |
 | --- | --- | --- | --- | --- | --- |
+| 302ai | https://api.302.ai/v1/models | 2026-11-11 | 401 | - | - |
+| abacus | https://routellm.abacus.ai/v1/chat/completions | 2026-11-11 | 403 | GenericPermissionDeniedError | /errorType |
 | abliteration | https://api.abliteration.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| above | https://api.above.dev/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| agnes | https://apihub.agnes-ai.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| ai-router | https://api.ai-router.dev/models | 2026-11-11 | 401 | INVALID_API_KEY | /code |
+| ai21 | https://api.ai21.com/studio/v1/library/files | 2026-11-11 | 401 | - | - |
 | aiand | https://api.aiand.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| aihubmix | https://aihubmix.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| aimlapi | https://api.aimlapi.com/v2/billing | 2026-11-11 | 401 | UnauthorizedException | /error/name |
+| ainetcafe | https://microquickjs.com/v1/models | 2026-11-11 | 401 | - | - |
+| aixy | https://api.aixy-gateway.com/v1/models | 2026-11-11 | 401 | invalid_gateway_api_key | /error/code |
+| aki-io | https://aki.io/openai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba | https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-cn | https://dashscope.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-coding-plan | https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-coding-plan-cn | https://coding.dashscope.aliyuncs.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| alibaba-token-plan | https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | InvalidApiKey | /code |
+| alibaba-token-plan-cn | https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models | 2026-11-11 | 401 | InvalidApiKey | /code |
+| ambient | https://api.ambient.xyz/v1/assistants | 2026-11-11 | 401 | authentication_error | /error/type |
+| amd | https://developer.amd.com.cn/radeon/api/v1/models | 2026-11-11 | 401 | - | - |
 | anthropic | https://api.anthropic.com/v1/models | 2026-11-10 | 401 | authentication_error | /error/type |
+| anyapi | https://api.anyapi.ai/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| arcee | https://api.arcee.ai/api/v1/models | 2026-11-11 | 401 | - | - |
+| auriko | https://api.auriko.ai/v1/me | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | baseten | https://inference.baseten.co/v1/models | 2026-11-10 | 401 | - | - |
+| bee | https://api.bee.heossi.com/bee/chat/completions | 2026-11-11 | 401 | unauthorized | /error |
+| berget | https://api.berget.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| blueclaw | https://openai.blueclaw.network/v1/models | 2026-11-11 | 401 | - | - |
+| bothub | https://openai.bothub.chat/v1/models | 2026-11-11 | 401 | UNAUTHORIZED | /error/code |
+| boundless | https://api.inference.boundless.network/v1/credits | 2026-11-11 | 401 | authentication_error | /error/type |
 | charm-hyper | https://hyper.charm.land/v1/credits | 2026-11-10 | 401 | authentication_error | /error/type |
+| chutes | https://api.chutes.ai/users/me | 2026-11-11 | 401 | - | - |
+| claudinio | https://api.claudin.io/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
+| cloudferro-sherlock | https://api-sherlock.cloudferro.com/openai/v1/models | 2026-11-11 | 403 | - | - |
 | cloudflare-workers-ai | https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/models/search?per_page=1 | 2026-11-10 | 400 | - | - |
+| cohere | https://api.cohere.com/v1/models | 2026-11-11 | 401 | - | - |
+| coralbricks | https://inference.coralbricks.ai/v1/quota | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| cortecs | https://api.cortecs.ai/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
+| crossmodel | https://api.crossmodel.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| crusoe | https://api.inference.crusoecloud.com/v1/models | 2026-11-11 | 401 | - | - |
+| daoxe | https://api.daoxe.com/v1/models | 2026-11-11 | 401 | - | - |
 | deepinfra | https://api.deepinfra.com/v1/openai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | deepseek | https://api.deepseek.com/chat/completions | 2026-11-10 | 401 | invalid_request_error | /error/code |
+| digitalocean | https://inference.do-ai.run/v1/models | 2026-11-11 | 401 | Unauthorized | /id |
+| dinference | https://api.dinference.com/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
+| edenai | https://api.edenai.run/v3/chat/completions | 2026-11-11 | 401 | - | - |
+| elevenlabs | https://api.elevenlabs.io/v1/user | 2026-11-11 | 401 | unauthorized | /detail/code |
+| empiriolabs | https://api.empiriolabs.ai/v1/account/usage?limit=1 | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| engy | https://api.engy.ai/v1/chat/completions | 2026-11-11 | 401 | authentication_error | /error/type |
+| evroc | https://models.think.evroc.com/v1/models | 2026-11-11 | 401 | authentication_error | /error/type |
+| fastrouter | https://api.fastrouter.ai/api/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | firecrawl | https://api.firecrawl.dev/v2/team/credit-usage | 2026-11-10 | 401 | - | - |
 | fireworks-ai | https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1 | 2026-11-10 | 401 | UNAUTHORIZED | /error/code |
+| freemodel | https://api.freemodel.dev/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| friendli | https://api.friendli.ai/serverless/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| frogbot | https://app.frogbot.ai/api/v1/models | 2026-11-11 | 401 | Unauthorized | /error |
 | google | https://generativelanguage.googleapis.com/v1beta/models | 2026-11-10 | 400 | API_KEY_INVALID | /error/details/0/reason |
+| greenpt | https://api.greenpt.ai/v1/models | 2026-11-11 | 401 | - | - |
+| helicone | https://ai-gateway.helicone.ai/chat/completions | 2026-11-11 | 401 | - | - |
+| hopper | https://api.withhopper.com/v1/balance | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| hpc-ai | https://api.hpc-ai.com/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | huggingface | https://huggingface.co/api/whoami-v2 | 2026-11-10 | 401 | - | - |
+| impossibl | https://api.impossibl.com/v1/requests?limit=1 | 2026-11-11 | 401 | authentication_error | /error/type |
 | inception | https://api.inceptionlabs.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| inceptron | https://api.inceptron.io/v1/chat/completions | 2026-11-11 | 401 | unauthorized | /error/code |
+| inco | https://api.inco.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| infer | https://infer.flow7.org/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| inference | https://api.inference.net/v1/chat/completions | 2026-11-11 | 401 | InvalidApiKey | /error/type |
+| infomaniak | https://api.infomaniak.com/1/ai | 2026-11-11 | 401 | not_authorized | /error/code |
+| io-net | https://api.intelligence.io.solutions/api/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| iteracompute | https://api.iteracompute.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| jalapeno | https://api.jalapeno-cloud.ai/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| jiekou | https://api.jiekou.ai/openai/v1/chat/completions | 2026-11-11 | 401 | FAILED_TO_AUTH | /reason |
+| kenari | https://kenari.id/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| kilo | https://ai-gateway.kilo.ai/api/v1/chat/completions | 2026-11-11 | 401 | INVALID_TOKEN | /error/code |
+| kimi-code-plan-cn | https://api.kimi.com/coding/v1/models | 2026-11-11 | 401 | invalid_authentication_error | /error/type |
 | kiro | https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR | 2026-11-10 | 403 | - | - |
+| klokintegration | https://ai.klok.ipaas.se/proxy/kloker-key/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| kosmik | https://api.koscompute.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| liquid | https://router.inference.ai.exchange/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmgateway | https://api.llmgateway.io/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmgateway-providers | https://api.llmgateway.io/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| llmtr | https://llmtr.com/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
+| longcat | https://api.longcat.chat/openai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| lowrouter | https://api.lowrouter.ai/v1/chat/completions | 2026-11-11 | 401 | api_key_not_registered | /error/code |
+| lucidquery | https://api.lucidquery.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| meganova | https://api.meganova.ai/v1/chat/completions | 2026-11-11 | 401 | token_not_found | /error/type |
+| melious | https://api.melious.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| merge-gateway | https://api-gateway.merge.dev/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/type |
 | meta | https://api.meta.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| minimax | https://api.minimax.io/v1/models | 2026-11-11 | 401 | authorized_error | /error/type |
+| minimax-cn | https://api.minimax.cn/v1/models | 2026-11-11 | 401 | authorized_error | /error/type |
 | minimax-code | https://api.minimax.io/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | minimax-code-cn | https://api.minimax.cn/v1/chat/completions | 2026-11-10 | 401 | authorized_error | /error/type |
 | mistral | https://api.mistral.ai/v1/models | 2026-11-10 | 401 | - | - |
+| mixlayer | https://mixlayer.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| moark | https://api.moark.com/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| model-oracle-ai | https://api.modeloracle.com/api/v1/chat/completions | 2026-11-11 | 401 | Unauthorized | /error/type |
+| modular | https://api.modular.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
 | moonshot | https://api.moonshot.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_authentication_error | /error/type |
+| moonshotai-cn | https://api.moonshot.cn/v1/models | 2026-11-11 | 401 | invalid_authentication_error | /error/type |
+| morph | https://api.morphllm.com/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| munito | https://api.munito.ai/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| munito-eu | https://api.eu.munito.ai/inference/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| nan | https://api.nan.builders/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| nearai | https://cloud-api.near.ai/v1/attestation/report | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| nebius | https://api.tokenfactory.nebius.com/v1/models | 2026-11-11 | 401 | - | - |
+| neuralwatt | https://api.neuralwatt.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| ofox | https://api.ofox.ai/v1/user/balance | 2026-11-11 | 401 | unauthorized | /error |
 | openai | https://api.openai.com/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | openrouter | https://openrouter.ai/api/v1/auth/key | 2026-11-10 | 401 | - | - |
+| opper | https://api.opper.ai/v3/compat/models | 2026-11-11 | 401 | - | - |
+| orcarouter | https://api.orcarouter.ai/v1/models | 2026-11-11 | 401 | orcarouter_api_error | /error/type |
+| ovhcloud | https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions | 2026-11-11 | 403 | - | - |
+| pareto | https://api.paretoinference.com/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| pendra | https://api.pendra.ai/api/v1/models | 2026-11-11 | 401 | - | - |
 | perplexity | https://api.perplexity.ai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| perplexity-agent | https://api.perplexity.ai/orchestrator/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| pioneer | https://api.fastino.ai/v1/model-status/fastino/gliner2.5-multi-v1 | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| poe | https://api.poe.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| prime | https://api.pinference.ai/api/v1/models | 2026-11-11 | 401 | - | - |
+| privatemode-ai | https://proxyless-api.privatemode.ai/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| qiniu-ai | https://api.qnaigc.com/v1/chat/completions | 2026-11-11 | 401 | auth_api_key_missing | /error/code |
 | qwen-portal | https://portal.qwen.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| reflection | https://api.reflection.ai/openai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| requesty | https://router.requesty.ai/v1/models | 2026-11-11 | 403 | - | - |
+| runinfra | https://api.runinfra.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| salad-cloud | https://ai.salad.cloud/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| sambanova | https://api.sambanova.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| sarvam | https://api.sarvam.ai/v1/chat/completions | 2026-11-11 | 403 | invalid_api_key_error | /error/code |
 | siliconflow | https://api.siliconflow.com/v1/models | 2026-11-10 | 401 | - | - |
 | siliconflow-cn | https://api.siliconflow.cn/v1/models | 2026-11-10 | 401 | - | - |
 | singularityapi-dev | https://api.singularityapi.dev/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
 | singularityapi-tech | https://api.singularityapi.tech/v1/models | 2026-11-10 | 401 | 401 | /error/code |
+| standardcompute | https://api.stdcmpt.com/v1/models | 2026-11-11 | 401 | invalid_request_error | /error/type |
 | stepfun | https://api.stepfun.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| stepfun-ai-step-plan | https://api.stepfun.ai/step_plan/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| stepfun-cn | https://api.stepfun.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| stepfun-step-plan | https://api.stepfun.com/step_plan/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| subconscious | https://api.subconscious.dev/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| submodel | https://maas.clawplay.world/v1/chat/completions | 2026-11-11 | 401 | new_api_error | /error/type |
+| tempr | https://api.temprhq.io/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| tensorx | https://api.tensorx.ai/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| the-grid-ai | https://api.thegrid.ai/v1/diagnostics | 2026-11-11 | 401 | invalid_api_key | /errors/code |
+| thinkingmachines | https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1/messages | 2026-11-11 | 401 | - | - |
+| tinfoil | https://inference.tinfoil.sh/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| tokengo | https://api.thorbase.com/v1/chat/completions | 2026-11-11 | 401 | llmapi_error | /error/type |
+| trustedrouter | https://api.trustedrouter.com/v1/key | 2026-11-11 | 401 | invalid_api_key | /error/type |
 | umans | https://api.code.umans.ai/v1/messages | 2026-11-10 | 401 | authentication_error | /error/type |
+| unorouter | https://api.unorouter.com/api/usage/token/ | 2026-11-11 | 401 | - | - |
+| upstage | https://api.upstage.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | venice | https://api.venice.ai/api/v1/chat/completions | 2026-11-10 | 401 | - | - |
+| vivgrid | https://api.vivgrid.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| volcengine | https://ark.cn-beijing.volces.com/api/v3/chat/completions | 2026-11-11 | 401 | AuthenticationError | /error/code |
+| sensenova | https://token.sensenova.cn/v1/models | 2026-11-11 | 401 | - | - |
+| vancine | https://vancine.com/v1/models | 2026-11-11 | 401 | vancine_error | /error/type |
+| vultr | https://api.vultrinference.com/v1/chat/completions | 2026-11-11 | 401 | auth_error | /error/type |
 | wafer-serverless | https://pass.wafer.ai/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| wallaby | https://api.wallabytoken.com/v1/models | 2026-11-11 | 401 | authentication_error | /error/type |
+| wally | https://inference.runanywhere.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| wandb | https://api.inference.wandb.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | xai | https://api.x.ai/v1/models | 2026-11-10 | 400 | invalid-argument | /code |
+| xiaomi | https://api.xiaomimimo.com/v1/models | 2026-11-11 | 401 | 401 | /error/code |
 | xiaomi-token-plan-ams | https://token-plan-ams.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | xiaomi-token-plan-cn | https://token-plan-cn.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
 | xiaomi-token-plan-sgp | https://token-plan-sgp.xiaomimimo.com/v1/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| xpersona | https://www.xpersona.co/v1/usage | 2026-11-11 | 401 | unauthorized | /error/code |
 | zai | https://api.z.ai/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zai-api | https://api.z.ai/api/paas/v4/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| zeldoc | https://api.zeldoc.ai/v1/models | 2026-11-11 | 401 | 401 | /error/code |
+| zenifra | https://ai.zenifra.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
 | zhipu-coding-plan | https://open.bigmodel.cn/api/coding/paas/v4/chat/completions | 2026-11-10 | 401 | 401 | /error/code |
+| zhipuai | https://open.bigmodel.cn/api/paas/v4/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+
+## ElevenLabs key check
+
+On 2026-11-11 a network-enabled Linux build server sent a deliberately bogus key
+in the raw `xi-api-key` header to `GET https://api.elevenlabs.io/v1/user`. The
+response was HTTP 401 with `detail.code` equal to `unauthorized`,
+`detail.status` equal to `invalid_api_key`, and the message `Invalid API key`.
+The authentication documentation at
+<https://elevenlabs.io/docs/api-reference/authentication> specifies the header and
+the fixed `api.elevenlabs.io` host. The read-only user endpoint is documented at
+<https://elevenlabs.io/docs/api-reference/user/get>.
+
+## Rows added from the Fusiform provider list
+
+On 2026-11-11 a network-enabled Linux build server sent each new row's key check by
+hand with curl, redirects not followed: the check's method and URL, the row's
+`Authorization: Bearer` header carrying a deliberately bogus key, and for chat checks
+the login check's one-token request body. Keys for `above` (`sk-gw-`) and `aixy`
+(`gak_`) carried the documented prefix; an unprefixed key got a format refusal
+(`above`) or a missing-key code (`aixy`) instead. Generic error types that every API
+error carries (302.AI `api_error`, AIHubMix `Aihubmix_api_error`, Agnes AI
+`AgnesAI_error`) and empty `code` strings (Agnes AI, ainetcafe) are not recorded as
+codes. A request without any key was also sent; where it got the same reply as the
+bogus key (`anyapi`, `ambient`, `auriko`, `ainetcafe`), the line still records only
+the bogus-key reply.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `302ai`: <https://help.302.ai/docs/ji-cheng-dao-OpenAI-guan-fang-SDK> sets
+  `https://api.302.ai/v1` as the OpenAI SDK base URL; key page
+  <https://dash.302.ai/apis/list>.
+- `abacus`: <https://abacus.ai/help/route-llm/> documents the self-serve
+  `routellm.abacus.ai` host and Bearer keys. Enterprise workspaces use a
+  per-workspace host that the row does not cover. `/v1/models` answered a bogus
+  key with 200, so the check is a `route-llm` chat.
+- `above`: <https://above.dev/docs>. `/v1/models` answered a bogus key with 200,
+  so the check is a chat.
+- `agentrouter`: <https://agentrouter.org/docs/opencode.html> documents
+  `agentrouter.org` and Bearer keys for the OpenAI protocol. Its Claude app guide
+  sends users to <https://ps.air-outer.com/console/token> for tokens. Every probe,
+  with or without a key, got 401 `unauthorized_client_error` ("unauthorized client
+  detected"), so the row is stored unchecked and has no evidence line.
+- `agnes`: <https://agnes-ai.com/doc> documents `apihub.agnes-ai.com` and Bearer
+  keys. `/v1/models` answered a bogus key with 200, so the check is a chat.
+- `ai-router`: <https://ai-router.dev/docs/getting-started/first-request/> documents
+  `https://api.ai-router.dev/models` (no `/v1`) with a Bearer key.
+- `ai21`: <https://docs.ai21.com/reference/authentication> documents Bearer keys for
+  `api.ai21.com`. `/studio/v1/models` answered a bogus key with 200 and an empty
+  list, so the check is the documented library file list.
+- `aihubmix`: <https://docs.aihubmix.com/cn/quick-start> documents `aihubmix.com` and
+  the `api.inferera.com` fallback. `/v1/models` answered a bogus key with 200, so
+  the check is a chat.
+- `aimlapi`: <https://docs.aimlapi.com/readme-1> documents `api.aimlapi.com`. Its
+  model list answered a bogus key with 200, so the check is the documented
+  `/v2/billing` balance read.
+- `ainetcafe`: <https://ainetcafe.com/k3/guides/> and
+  <https://ainetcafe.com/k3/guides/codewhale.html> send `sk-` keys to
+  `microquickjs.com`.
+- `aixy`: <https://docs.aixy-gateway.com/integrations/overview>.
+- `aki-io`: <https://aki.io/docs/compatibility/openai-api-compatibility/> documents
+  the `https://aki.io/openai/v1/models` request.
+- `alibaba`, `alibaba-cn`, `alibaba-coding-plan`, `alibaba-coding-plan-cn`,
+  `alibaba-token-plan` and `alibaba-token-plan-cn`:
+  <https://www.alibabacloud.com/help/en/model-studio/base-url> and
+  <https://help.aliyun.com/zh/model-studio/base-url> list the Singapore and Beijing
+  hosts; <https://www.alibabacloud.com/help/en/model-studio/coding-plan> and
+  <https://help.aliyun.com/zh/model-studio/coding-plan> list the Coding Plan hosts.
+  Model Studio keys belong to one region; keys from other regions and
+  workspace-specific hosts are not covered. Coding Plan `/v1/models` answered a bogus
+  key with 200, so those checks are chats.
+- `ambient`: <https://ambient.xyz/docs/build/api> documents that `/v1/models` needs
+  no key, so the check is the documented assistant list.
+- `amd`: <https://amd-aim.github.io/radeon-cloud-docs/api/authentication/> and
+  <https://amd-aim.github.io/radeon-cloud-docs/guides/token-factory/> document `rc-`
+  keys sent as Bearer to `https://developer.amd.com.cn/radeon/api/v1`. Without a key
+  the model list answered 401 "Login required"; with a bogus key, "Invalid bearer
+  token".
+- `anyapi`: <https://docs.anyapi.ai/guides/authentication>.
+- `arcee`: <https://docs.arcee.ai/api-reference/your-first-api-call>.
+- `auriko`: <https://docs.auriko.ai/api-reference/authentication>; the check is the
+  documented key-identity read `/v1/me`.
+
+## Second batch from the Fusiform provider list
+
+The second batch took the next 25 ids that `ck auth provider-report --missing` printed,
+`azure` through `echo`. 19 got rows, 4 are recorded skips (listed under "Fusiform
+provider skips" below), and 2 stay uncovered (see the end of this section).
+
+On 2026-11-11 a network-enabled Linux build server sent each new row's key check by
+hand with curl, redirects not followed. Each request used the check's method and URL,
+the row's `Authorization: Bearer` header carrying a deliberately bogus key, and for chat
+checks the login check's one-token request body. Keys carried the documented prefix
+where one is documented: `bee_sk_live_` for `bee`, `sk_ber_` for `berget`, `bc_` for
+`blueclaw`, `cpk_` for `chutes`, `cb_` for `coralbricks` and `cm-` for `crossmodel`.
+A request without any key was also sent. Where it got the same reply as the bogus key
+(`bee`, `blueclaw`, `bothub`, `cortecs`, `crusoe`, `daoxe`, `digitalocean`), the line still
+records only the bogus-key reply. A generic error type that every DaoXE error carries
+(`new_api_error`), an empty `code` string (DaoXE) and numeric-looking `code` strings
+(`"401"` from the LiteLLM-based APIs) are not recorded as codes; where those APIs give
+a structured reason in `type`, that is recorded instead.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `bailing`: <https://alipaytbox.yuque.com/org-wiki-knowledgepie-mvkzao/pxit93/get_started>
+  documents `POST https://api.ant-ling.com/v1/chat/completions` with a Bearer token
+  and the token page <https://chat.ant-ling.com/platform/api>. Both the model list and
+  the chat route answered the build server with an HTML 405 block page, with or
+  without a key, so the row is stored unchecked and has no evidence line. The
+  `api.tbox.cn` host listed by models.dev is not in the provider's current guide and
+  is not included.
+- `bee`: <https://bee.heossi.com/docs/sdks> documents base URL
+  `https://api.bee.heossi.com/bee` and Bearer keys; its OpenAPI document
+  (<https://api.bee.heossi.com/openapi.json>) marks the model list public, so the check
+  is a chat on `bee-cell`.
+- `berget`: <https://docs.berget.ai/quickstart> documents `https://api.berget.ai/v1` and
+  Bearer keys. Its OpenAPI document marks the model list public, so the check is a
+  chat. The stage server in that document is not a consumer host and is not included.
+- `blueclaw`: <https://blueclaw.network/quickstart.html> documents
+  `https://openai.blueclaw.network/v1` and `bc_` Bearer keys. The quickstart does not
+  document a model list; `/v1/models` answered 401 with or without a key.
+- `bothub`: <https://bothub.ru/free> configures the OpenAI SDK with base URL
+  `https://openai.bothub.chat/v1` and the access token as its API key.
+- `boundless`: <https://inference.boundless.network/docs/api-compatibility> documents
+  `api.inference.boundless.network` and Bearer or `x-api-key` keys;
+  <https://inference.boundless.network/docs/billing> documents the `/v1/credits` read.
+- `chutes`: <https://chutes.ai/docs/getting-started/authentication> documents `cpk_`
+  Bearer keys for the platform API at `api.chutes.ai`; the starter guide
+  <https://chutes.ai/docs/guides/starter-guide> documents inference at
+  `https://llm.chutes.ai/v1`. The docs index (<https://chutes.ai/llms.txt>) calls the
+  model list a public catalog and `/users/me` the authenticated account read.
+- `claudinio`: <https://claudin.io/docs/api-reference/> documents `api.claudin.io`,
+  Bearer or `x-api-key` keys, and `GET /v1/models`.
+- `cloudferro-sherlock`:
+  <https://docs.cloudferro.com/en/latest/sherlock/Package-installation-and-examples-of-Sherlock-AI-code-on-CloudFerro-Cloud.html>
+  documents `https://api-sherlock.cloudferro.com/openai/v1` and Bearer keys. A bogus
+  key got a plain-text 403 `forbidden`; no key got a plain-text 401 `unauthorized`.
+- `cohere`: <https://docs.cohere.com/reference/list-models> documents Bearer keys at
+  `api.cohere.com`; <https://docs.cohere.com/docs/compatibility-api> documents the
+  compatibility API at `https://api.cohere.ai/compatibility/v1` with the same key.
+  `POST /v1/check-api-key` answered 200 `{"valid":false}` for a bogus key and for no
+  key, so the check is the model list.
+- `coralbricks`: <https://www.coralbricks.ai/docs> documents
+  `https://inference.coralbricks.ai/v1`, Bearer keys and the `/v1/quota` balance read.
+- `cortecs`: <https://docs.cortecs.ai/api/api-compatibility> documents
+  `https://api.cortecs.ai/v1` and Bearer keys. Its model list makes the key optional
+  and answered a bogus key with 200, so the check is a chat on `glm-5.3-flash`.
+- `crossmodel`: <https://www.crossmodel.ai/docs/authentication> and
+  <https://www.crossmodel.ai/docs/api-reference/models> document `api.crossmodel.ai`,
+  `cm-` Bearer keys and the model list. The docs give no direct key-page URL, so the
+  row's key page is the authentication guide.
+- `crusoe`:
+  <https://docs.crusoe.ai/quickstart/getting-started-with-serverless-inference/>
+  configures the OpenAI SDK with `https://api.inference.crusoecloud.com/v1` and the
+  key as its API key. The guide does not document a model list; `/v1/models` answered
+  401 with or without a key.
+- `daoxe`: <https://daoxe.com/docs/start/quickstart> documents
+  `GET https://api.daoxe.com/v1/models` with `sk-` Bearer keys. Its base-URL guide
+  (<https://daoxe.com/docs/guide/base-url>) allows other route hosts returned at run
+  time; those are not covered.
+- `digitalocean`:
+  <https://docs.digitalocean.com/products/inference/how-to/si-endpoints/> documents
+  `https://inference.do-ai.run` and Bearer keys;
+  <https://docs.digitalocean.com/products/inference/how-to/retrieve-available-models/>
+  documents the model list. Model access keys and personal access tokens are both
+  accepted.
+- `dinference`: <https://dinference.com/docs> configures the OpenAI SDK with
+  `https://api.dinference.com/v1` and the key as its API key. The site offers sign-in
+  at <https://panel.dinference.com/login>.
+- `drun`: <https://docs.d.run/en/models/api-call> documents `https://chat.d.run` for
+  pay-per-token use and per-region `<region>.d.run` hosts for dedicated instances,
+  which the row does not cover; <https://docs.d.run/en/models/apikey> documents
+  `Authorization: Bearer`. `chat.d.run` reset every connection from the build server,
+  so the row is stored unchecked and has no evidence line.
+- `echo`: <https://echo.tracerml.ai/docs/api> documents host `echo.tracerml.ai` and
+  `Authorization: Bearer` workspace keys. Every documented path, including the model
+  list, sits under a workspace base URL copied from the console, so the row is stored
+  unchecked and has no evidence line.
+
+Two ids from this batch have neither a row nor a skip; `--missing` still prints them:
+
+- `clarifai`: on 2026-11-11 `api.clarifai.com` and `docs.clarifai.com` did not resolve
+  in DNS, and `clarifai.com` resolved to a parking address, so the provider's
+  documentation could not be read and no request could be sent.
+- `ebcloud`: <https://docs.ebtech.com/ai/model-api.html> says to create a key in the
+  console and copy sample code from a model's API-call page there. The page does not
+  state the API host or how the key is sent. models.dev lists
+  `https://maas-api.ebcloud.com/v1`, where `GET /v1/models` answered a bogus Bearer key
+  with 401 (`error.type` `token_not_found_in_db`) and no key with a different 401, but
+  a third-party listing is not provider documentation, so no row was added.
+
+## Third batch from the Fusiform provider list
+
+After the second batch, `ck auth provider-report --missing` printed 138 ids. It still
+begins with `clarifai` and `ebcloud`, which the second batch left uncovered (see the
+end of that section), so the third batch took the next 25 ids after them, `edenai`
+through `io-net`. 21 got rows, 3 are recorded skips (`github-copilot`, `gitlab` and
+`google-vertex-anthropic`, listed under "Fusiform provider skips" below), and
+`hetzner` stays uncovered (see the end of this section). On 2026-11-11
+`api.clarifai.com` and `docs.clarifai.com` still did not resolve in DNS and
+`clarifai.com` still resolved to a parking address.
+
+On 2026-11-11 a network-enabled Linux build server sent each new checked row's key
+check by hand with curl, redirects not followed: the check's method and URL, the row's
+key header carrying a deliberately bogus key, and for chat checks the login check's
+one-token request body. Keys carried the documented prefix where one is documented:
+`sk-empiriolabs-` for `empiriolabs`, `sk-engy-` for `engy`, `fe_oa_` for `freemodel`,
+`flp_` for `friendli`, `sk_hopper_` for `hopper` and `sk-inco-` for `inco`. Every
+checked row got a 401. A request without any key was also sent; it got the same reply
+as the bogus key for `friendli`, `frogbot`, `greenpt` and `hetzner`, and a reply naming the
+missing key for the others. Numeric `code` values (`engy`, `evroc`) and messages
+(`edenai`, `freemodel`, `friendli`, `io-net`, and the plain-text replies of `greenpt`
+and `helicone`) are not recorded as codes; where a reply gives a structured reason in
+`type`, that is recorded instead.
+
+Where a model list answered without a key, the check is a chat on a model that list
+named on 2026-11-11 (`edenai`, `engy`, `fastrouter`, `freemodel`, `friendli`,
+`helicone`, `inceptron`, `inco`, `inference`, `io-net`). The `inco`, `inference` and
+`io-net` model lists refuse a bogus key but answer a missing key with the public
+catalog, so they too use a chat.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `edenai`: <https://www.edenai.co/docs/v3/data-governance/eu-endpoint> documents the
+  global host `https://api.edenai.run` and the EU host `https://api.eu.edenai.run`,
+  one key for both, and `Authorization: Bearer`. It calls `/v3/models` public.
+- `empiriolabs`: <https://docs.empiriolabs.ai/authentication> documents
+  `api.empiriolabs.ai`, `sk-empiriolabs-` Bearer keys and the
+  `GET /v1/account/usage?limit=1` read used as the check.
+- `engy`: <https://engy.ai/docs/api-reference/inference-api/overview> documents base
+  URL `https://api.engy.ai`, `sk-engy-` Bearer keys and a model list that needs no
+  key. The management API on `engy.ai/api/v1` takes separate account tokens and is not
+  covered.
+- `evroc`: <https://docs.evroc.com/products/think/openai-compatibility.html> documents
+  `https://models.think.evroc.com/v1`, Bearer keys and `GET /v1/models` with a key.
+  Dedicated model instances are not covered.
+- `fastrouter`: <https://docs.fastrouter.ai/> documents
+  `https://api.fastrouter.ai/api/v1/chat/completions` with `Authorization: Bearer`.
+  models.dev lists `go.fastrouter.ai`, which the provider's documentation does not
+  name, so it is not included. The docs give no direct key-page URL.
+- `freemodel`: the site's own sample at <https://freemodel.dev> (documentation at
+  <https://freemodel.dev/docs>, rendered in the browser) configures the OpenAI SDK with
+  `https://api.freemodel.dev/v1` and an `fe_oa_` key as its API key. Its Claude Code
+  guide uses `https://cc.freemodel.dev` with the key as `ANTHROPIC_API_KEY`, which
+  Claude Code sends in another header; that host is not covered.
+- `friendli`: <https://friendli.ai/docs/guides/introduction/get-started> documents
+  `https://api.friendli.ai/serverless/v1`, `Authorization: Bearer` and the key page;
+  <https://friendli.ai/docs/guides/suite/usage-and-costs> documents `flp_` keys.
+- `frogbot`: <https://docs.frogbot.ai/api-keys> documents
+  `https://app.frogbot.ai/api/v1` with the key in `Authorization: Bearer` or
+  `x-api-key`.
+- `google-vertex`: the express-mode page
+  <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
+  documents the global endpoint
+  `https://aiplatform.googleapis.com/v1/publishers/google/models/MODEL_ID:...` with the
+  key in `x-goog-api-key`. The row covers express-mode keys only, which reach the Gemini
+  models that page lists; Vertex used through a Google Cloud project and region is not
+  covered. A bogus key sent to the model read and to `generateContent` got 401 "API
+  keys are not supported by this API" (`CREDENTIALS_MISSING`), the reply for a call
+  that takes no API keys at all, so the row is stored unchecked and has no evidence
+  line.
+- `greenpt`: <https://docs.greenpt.ai/get-started> documents `https://api.greenpt.ai/v1`,
+  `Authorization: Bearer`, `GET /v1/models` and the key page.
+- `helicone`: <https://docs.helicone.ai/getting-started/quick-start> documents the AI
+  gateway at `https://ai-gateway.helicone.ai`, `Authorization: Bearer` and the key page.
+- `hopper`: <https://docs.withhopper.com> documents `https://api.withhopper.com/v1`,
+  `sk_hopper_` Bearer keys and the key page; <https://docs.withhopper.com/models>
+  documents the free `GET /v1/balance` read.
+- `hpc-ai`:
+  <https://www.hpc-ai.com/doc/docs/Model-APIs/API-Reference/OpenAI-Compatible-API/OpenAI-SDK>
+  documents `https://api.hpc-ai.com/inference/v1` and `Authorization: Bearer`. The
+  documented model list's page does not print its path; `/inference/v1/models` refused
+  bogus and missing keys alike.
+- `impossibl`: <https://impossibl.com/docs/quickstart> documents
+  `https://api.impossibl.com/v1`, Bearer keys and the
+  `GET /v1/requests?limit=1` read. Its model list answered a bogus key with 200.
+- `inceptron`: <https://docs.inceptron.io> documents `https://api.inceptron.io/v1`
+  and `Authorization: Bearer`.
+- `inco`: <https://platform.inco.ai/docs> documents `https://api.inco.ai/v1`,
+  `sk-inco-` Bearer keys and a model list that is public without a key.
+- `infer`: <https://infer.flow7.org/docs> documents `https://infer.flow7.org/v1` and
+  `Authorization: Bearer`. The docs give no direct key-page URL, so the row's key page
+  is that guide.
+- `inference`: <https://docs.inference.net/api/api-quickstart> documents
+  `https://api.inference.net/v1`, the US-only `https://us.api.inference.net/v1`, and
+  Bearer keys.
+- `inferx`: <https://inferx.net/docs/authentication> documents Bearer keys, and
+  <https://inferx.net/docs/quickstart> documents `https://model.inferx.net/v1` while
+  saying production URLs "can be tenant- and endpoint-specific". Without a key
+  `/v1/models` answered "no tenant context: set a default tenant or use a
+  tenant-restricted API key", so a fixed check could refuse a good key; the row is
+  stored unchecked and has no evidence line.
+- `infomaniak`:
+  <https://developer.infomaniak.com/docs/api/post/2/ai/%7Bproduct_id%7D/openai/v1/chat/completions>
+  documents `https://api.infomaniak.com/2/ai/{product_id}/openai/v1` and
+  `Authorization: Bearer`. Requests carry the account's AI Tools product id, which
+  consumers must supply, as `echo` consumers supply a workspace id. The check is
+  `GET /1/ai` (<https://developer.infomaniak.com/docs/api/get/1/ai>), which needs no
+  product id.
+- `io-net`:
+  <https://io.net/docs/reference/ai-models/get-started-with-io-intelligence-api>
+  documents `https://api.intelligence.io.solutions/api/v1` and `Authorization: Bearer`.
+
+One id from this batch has neither a row nor a skip; `--missing` still prints it:
+
+- `hetzner`: Fusiform's documentation link,
+  <https://experiments.hetzner.com/docs/inference>, is a browser app behind Hetzner
+  account sign-in, so its text could not be read. The app's configuration names
+  `https://inference.hetzner.com/v1`, and models.dev lists
+  `https://inference.hetzner.com/api/v1`, where `GET /api/v1/models` answered bogus and
+  missing Bearer keys alike with a plain-text 401. Neither is readable provider
+  documentation, so no row was added.
 
 ## Probes without a response
 
@@ -103,11 +552,862 @@ Each of these rows keeps `invalid_key: None`. Their checks are not changed here.
 
 No scheme was added: the descriptor supports only Bearer and raw header values.
 
+## Fourth batch from the Fusiform provider list
+
+After the third batch, `ck auth provider-report --missing` printed 114 ids. The
+fourth batch left the earlier gaps (`clarifai`, `ebcloud`, `hetzner`) for separate
+review and took the next 25, `iteracompute` through `minimax-cn`. 20 got rows and
+2 are recorded skips (`lmstudio`, `lynkr`, listed below). Three remain uncovered:
+`kuae-cloud-coding-plan`, `lilac`, `llmtech`. The report now prints 92 uncovered ids.
+
+On 2026-11-11 a network-enabled Linux build server sent the new rows' checks using
+Python's HTTP client with redirects disabled. Every request used the row's
+`Authorization: Bearer` header with a deliberately bogus key; chat requests used the
+login check's one-token body. All 20 returned 401. A no-key request was also sent.
+Documented prefixes were used for Kenari (`kn-`), Liquid (`sk-liquid-`), LLM Gateway
+(`llmgtwy_`), LLMTR (`llmtr-`), LowRouter (`sk-lr-`), LucidQuery
+(`sk_lucidquery_`), Melious (`sk-mel-`) and Merge (`mg_`). LowRouter's fabricated
+key body had the documented 43 characters and Melious's had 121 after the prefix,
+so those checks reached unknown-key refusals rather than only format checks.
+Jalapeno's numeric `code` and message-valued `type` are not recorded as an error
+code. Meganova's structured `token_not_found` type is recorded instead of its
+status-like `"401"` code. Kenari's refusal is plain text.
+
+Hosts and key presentation were taken from these provider pages:
+
+- `iteracompute`: <https://iteracompute.com/docs.html> documents
+  `https://api.iteracompute.com/v1`, Bearer keys, the key page and free `Auto` chat.
+  The model list is public, so the check is a chat.
+- `jalapeno`: <https://www.jalapeno-cloud.ai/docs/> documents
+  `https://api.jalapeno-cloud.ai/v1`, Bearer keys, the key page and `DeepSeek-V4-Pro`.
+  The model-list route returned a generic 403 access block with or without a key;
+  the documented chat route instead returned an authentication refusal.
+- `jiekou`: <https://docs.jiekou.ai/docs/model/llm.md> documents Bearer keys, the
+  compatible chat API and `deepseek/deepseek-r1`;
+  <https://docs.jiekou.ai/docs/announcement/announcement.md> names the fixed domestic
+  `api.highwayapi.ai` and original/overseas `api.jiekou.ai` hosts. The model list
+  answered bogus and missing keys alike with 200, so the check is a chat.
+- `kenari`: <https://kenari.id/docs/quickstart> documents `https://kenari.id/v1`,
+  `kn-` Bearer keys and the free `step-3-7-flash:free` model. Authentication docs
+  (<https://kenari.id/docs/authentication>) identify the model list as public.
+- `kilo`: <https://docs.kilo.ai/docs/gateway/authentication> documents
+  `https://ai-gateway.kilo.ai/api/v1` and Bearer keys from the personal profile at
+  <https://app.kilo.ai>. The models guide
+  (<https://docs.kilo.ai/docs/gateway/models-and-providers>) documents `kilo-auto/free`.
+  Its catalog and free chat accept no key, but a supplied bogus key was refused by
+  the chat. The old exclusion of `kilo` as a custom-login-only provider no longer
+  describes this documented Gateway key flow.
+- `kimi-code-plan-cn`: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+  pairs `https://api.kimi.com/coding/v1` with `experimental_bearer_token`; the Code
+  overview (<https://www.kimi.com/code/docs/en/>) links the key console and identifies
+  this as the China endpoint. The model-list read refused a bogus Bearer key.
+  This row is separate from the existing global Coding Plan row, which is unchanged.
+- `klokintegration`: <https://klokintegration.se/docs/ai-api> documents
+  `https://ai.klok.ipaas.se/proxy/kloker-key/v1`, the older fixed alias
+  `api-gw.klok.ipaas.se`, Bearer keys and `GET /models` when enabled on the key.
+  The check uses the documented `Kloker` chat instead, so optional model-list access
+  is not required. The docs direct users to the platform for a token, without a
+  direct key-page URL.
+- `kosmik`: <https://api.koscompute.com/docs/overview/quickstart/> documents
+  `https://api.koscompute.com/v1` with Bearer keys; the docs home
+  (<https://api.koscompute.com/docs/>) uses `qwen/qwen3.8-27b` for chat. The model
+  list is public without a key (though a bogus key is refused), so the check is a
+  chat. No key-creation page is given; the row links to the quickstart.
+- `liquid`: <https://inference.ai.exchange/docs/api.md> documents
+  `router.inference.ai.exchange` with `sk-liquid-` Bearer keys or raw `x-api-key`.
+  The quickstart (<https://inference.ai.exchange/docs/quickstart>) uses
+  `gpt-oss-120b`. Its model list is public, so the check is a chat. The row links to
+  the quickstart's workspace/key instructions rather than guessing a dashboard path.
+- `llmgateway` and `llmgateway-providers`:
+  <https://docs.llmgateway.io/developers/devpass-usage> documents
+  `GET https://api.llmgateway.io/v1/key` with `llmgtwy_` Bearer keys, and explicitly
+  says it works for both DevPass and pay-as-you-go keys, even when usage is exhausted.
+  Both offerings keep their own Fusiform id and routing default. The quickstart
+  (<https://docs.llmgateway.io/quick-start>) describes the dashboard and project key
+  flow without a direct key-page URL, so the rows link to the API-key guide.
+- `llmtr`: <https://llmtr.com/docs/en/quickstart/> documents `https://llmtr.com/v1`,
+  `llmtr-` Bearer keys and chat model `openai/gpt-6-luna`. Its model list is public;
+  the row links to the API-key instructions, which name the dashboard's API Keys page.
+- `longcat`: <https://longcat.chat/platform/docs/> documents
+  `https://api.longcat.chat/openai/v1/chat/completions`, Bearer keys, the key page and
+  `LongCat-2.5`. Its model list answered a bogus key with 200, so the check is a chat.
+- `lowrouter`: <https://lowrouter.ai/docs/integrations/openai-compatible> documents
+  `https://api.lowrouter.ai/v1` with `sk-lr-` Bearer keys; the first-completion guide
+  (<https://lowrouter.ai/docs/getting-started/first-completion>) uses
+  `auto/mistralai/mistral-large-2512`. Its model list is public without a key, so the
+  check is a chat. The key guide links <https://lowrouter.ai/app/keys>.
+- `lucidquery`: <https://lucidquery.com/docs> documents `https://api.lucidquery.com/v1`,
+  Bearer keys, the key page and `lucidquery-agi-01-swift`. The auth section names
+  `sk_lucidquery_` keys, while an SDK example uses `lq_live_`; the probe followed the
+  auth section. Its model list is public, so the check is a chat.
+- `meganova`: <https://docs.meganova.ai/inference-models.md> documents
+  `https://api.meganova.ai/v1` and Bearer keys from <https://console.meganova.ai>;
+  <https://docs.meganova.ai/enterprise/enterprise-endpoint.md> documents the same key
+  at `enterprise.api.meganova.ai`. The free-model guide names `meganova-ai/manta-mini-1.0`.
+  Its model list is public, so the check is a chat.
+- `melious`: <https://melious.ai/docs/get-started/quickstart> documents
+  `https://api.melious.ai/v1`, Bearer keys and the key page. The authentication guide
+  (<https://melious.ai/docs/concepts/authentication>) gives the `sk-mel-` key shape.
+  Chat requires `inference.chat`, while model listing needs a separate
+  `inference.models` scope; the check uses the chat reference's `qwen3.6-35b-a3b`
+  example (<https://melious.ai/docs/reference/chat-completions>) rather than
+  rejecting an inference key that cannot list models.
+- `merge-gateway`: <https://docs.merge.dev/merge-gateway/api-overview> documents
+  `api-gateway.merge.dev`, `mg_` Bearer inference keys and `GET /v1/models`. The
+  separate management key and optional credentials supplied for an upstream provider
+  are not needed for ordinary inference.
+- `minimax` and `minimax-cn`: the OpenAI model-list references
+  (<https://platform.minimax.io/docs/api-reference/models/openai/list-models>,
+  <https://platform.minimaxi.com/docs/api-reference/models/openai/list-models>)
+  document Bearer keys at `api.minimax.io` and `api.minimax.cn` respectively and
+  `GET /v1/models`. The quickstarts link their respective key pages. These ordinary
+  API-key offerings are separate from the existing Coding Plan rows.
+
+Three ids from this batch have neither a row nor a skip; `--missing` still prints them:
+
+- `kuae-cloud-coding-plan`: the provider's page
+  <https://docs.mthreads.com/kuaecloud/kuaecloud-doc-online/coding_plan/> yielded only
+  a heading and footer, not an API host or key presentation. Published Markdown URL
+  variants did not yield instructions either. No third-party host was substituted.
+- `lilac`: its provider-owned quickstart and model guide still document Bearer keys
+  at `api.getlilac.com`, but the model-list endpoint returned HTTP 410,
+  `Lilac inference has been discontinued.`, with bogus and missing keys alike.
+  No row was added for the discontinued service, and the docs do not support one of
+  the approved skip reasons.
+- `llmtech`: <https://llmtech.eu/docs/> still documents Bearer keys at
+  `api.llmtech.eu`, but its model-list endpoint returned HTTP 410 with
+  `error.code: service_closed`, saying the API shut down on 31 October 2026 and
+  keys no longer work. No row or invented skip reason was added.
+
+## Fifth batch from the Fusiform provider list
+
+The selected 25 ids are `mixlayer` through `pareto`, sorted by provider id from
+`ck auth provider-report --missing`. The six earlier gaps (`clarifai`, `ebcloud`,
+`hetzner`, `kuae-cloud-coding-plan`, `lilac` and `llmtech`), whose documentation or
+service limitations are recorded above, are excluded from this batch and remain
+visible in `--missing`.
+Seventeen selected ids now have rows, four have the documented skips below, and
+four remain gaps. All new rows use Bearer authentication. Their bogus-key requests
+ran on a network-enabled Linux build server on 2026-11-11 with redirects disabled;
+chat probes requested at most one output token. No real provider key was used.
+
+The provider-owned sources for the row fields and checks are:
+
+- `mixlayer`: <https://docs.mixlayer.com/quickstart> gives `https://mixlayer.ai/v1`,
+  an explicit `Authorization: Bearer` example and the console's API-key page.
+  <https://docs.mixlayer.com/models> documents `GET /v1/models`; that read rejected
+  the bogus key.
+- `moark`: <https://moark.com/docs/getting-started> shows Bearer authentication at
+  `api.moark.com` and the `DeepSeek-R1` chat example used for the check. The
+  token guide (<https://moark.com/docs/account/access-token>) describes free
+  experience tokens; <https://moark.com/docs/products/apis> links the token page.
+- `model-oracle-ai`: <https://modeloracle.com/setup/> documents the hosted
+  `https://api.modeloracle.com/api/v1` URL, Bearer platform key and `auto` chat
+  request. The row covers that hosted offering, not private deployments. Upstream
+  provider keys managed inside the dashboard are not additional client headers.
+- `modular`: <https://docs.modular.com/quickstart> documents the common API at
+  `api.modular.com`, Bearer authentication, the key page and `minimax/minimax-m3`.
+  <https://docs.modular.com/administration/api-keys> gives the `sk-mod-` format.
+  The check is a one-token chat, not an undocumented key-status route.
+- `moonshotai-cn`: <https://platform.moonshot.cn/docs/get-api-key.md> documents
+  `api.moonshot.cn`, a literal Bearer example and the key-page link at
+  `platform.kimi.com`. <https://platform.moonshot.cn/docs/api/list-models.md>
+  documents the authenticated `GET /v1/models` read and warns that keys from
+  the China and international platforms are not interchangeable.
+- `morph`: <https://docs.morphllm.com/general-inference> documents
+  `api.morphllm.com`, Bearer authentication and `morph-glm53-744b`. The key page
+  is linked from <https://docs.morphllm.com/endpoints.md>. Although its model
+  list returned HTTP 200 for the bogus key, the documented chat rejected it, so
+  the check uses chat. Deployment-specific dedicated endpoints are not included.
+- `munito` and `munito-eu`: <https://docs.munito.ai/quickstart> documents Bearer
+  inference keys and their creation page. <https://docs.munito.ai/regions> lists
+  the fixed global, EU and US hosts (`api.munito.ai`, `api.eu.munito.ai`,
+  `api.us.munito.ai`) and says the same key works across regions. Both rows include
+  those hosts; their checks use their respective global or EU base URL.
+  <https://docs.munito.ai/api/listModels> says a supplied invalid key gets 401
+  even though anonymous callers can list public models. Admin keys are separate
+  from these inference keys.
+- `nan`: <https://nan.builders/docs/getting-started> documents `api.nan.builders`,
+  Bearer `sk-` keys, the key portal and `GET /v1/models`. That read rejected the
+  bogus key. Its pinned Fusiform output modalities also assign the media group.
+- `nearai`: <https://docs.near.ai/cloud/quickstart.md> documents
+  `cloud-api.near.ai`, Bearer authentication and the key dashboard.
+  <https://docs.near.ai/api-reference/attestation/get-attestation-report.md>
+  explicitly describes the attestation read as non-billable and says a supplied
+  key must be valid. The live refusal confirms that it can check a bogus key
+  without inference. Its pinned Fusiform modalities also assign the media group.
+- `nebius`: <https://docs.tokenfactory.nebius.com/quickstart> documents
+  `api.tokenfactory.nebius.com` and Bearer keys; the introduction links the key
+  page. <https://docs.tokenfactory.nebius.com/api-reference/models/list-models.md>
+  documents the authenticated model-list route used for the check.
+- `neuralwatt`: <https://portal.neuralwatt.com/docs> documents
+  `api.neuralwatt.com`, Bearer keys and `glm-5.3`. The key guide is
+  <https://docs.neuralwatt.com/authentication.md>. Because the docs allow anonymous
+  model listing, the check uses the documented chat instead.
+- `ofox`: <https://ofox.ai/docs/develop/authentication> and
+  <https://ofox.ai/docs/api> document the unified key at `api.ofox.ai` and its
+  Bearer presentation for the OpenAI-compatible API. The key page and
+  `GET /v1/user/balance` are documented at
+  <https://ofox.ai/docs/api/openapi/balance>. The live bogus-key request returned
+  HTTP 401 rather than a successful balance response.
+- `opper`: <https://docs.opper.ai/overview/quickstart> documents Bearer runtime
+  keys, their creation page and `api.opper.ai`.
+  <https://docs.opper.ai/build/gateway/drop-in-sdks> also documents the same key at
+  `gw.opper.ai` and `eu.gw.opper.ai`.
+  <https://docs.opper.ai/v3-api-reference/compatibility/list-models> requires
+  authentication on `GET /v3/compat/models`; the public `/v3/models` and health
+  routes would not check a key. The organization management key is not used.
+- `orcarouter`: <https://docs.orcarouter.ai/getting-started/get-api-key> documents
+  `api.orcarouter.ai`, `sk-orca-` Bearer keys and the console. The model-list guide
+  and <https://docs.orcarouter.ai/routing/free-models> say a supplied key is
+  authenticated strictly even when anonymous model-list reads are permitted.
+  The observed `/error/code` was empty; the evidence records the nonempty
+  `/error/type` instead of inventing a code.
+- `ovhcloud`: the official model example at
+  <https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/qwen-guard-gen-06b/>
+  documents Bearer access tokens at `oai.endpoints.kepler.ai.cloud.ovh.net` and
+  `Qwen3Guard-Gen-0.6B`. The catalog marks that model free. The key-creation guide
+  (<https://help.ovhcloud.com/csm/en-public-cloud-ai-endpoints-getting-started?id=kb_article_view&sysparm_article=KB0062908>)
+  describes the Public Cloud project's AI Endpoints API-keys tab. The check sends
+  the key even though the service also permits limited anonymous calls.
+- `pareto`: <https://docs.paretoinference.com/> links the key dashboard and gives
+  the fixed base URL. <https://docs.paretoinference.com/api-reference> documents
+  Bearer authentication and `z-ai/glm-5.3-flash`. Its model list is public, so
+  the check uses the documented one-token chat request instead.
+
+Four selected ids remain uncovered rather than receiving invented skip reasons:
+
+- `modelis`: <https://modelishub.com/pricing> documents direct Bearer keys at
+  `https://modelishub.com/v1` and `modelis-auto`, but two live bogus-key chat
+  probes returned HTTP 502, not an authentication refusal. The separate RapidAPI
+  offering uses a different key and was not substituted for the direct offering.
+- `modelscope`: <https://modelscope.cn/docs/model-service/API-Inference/intro.md>
+  documents `https://api-inference.modelscope.cn/v1/` and an Access Token passed
+  as the OpenAI SDK's `api_key`, but the inspected documentation did not give the
+  literal HTTP key header. SDK compatibility alone was not used to infer it.
+- `neosmith`: <https://neosmith.ai/docs> documents Bearer keys at
+  `https://router.neosmith.ai/v1`, but two live requests could not resolve that
+  hostname. No invalid-key observation was obtained.
+- `nova`: <https://nova.amazon.com/dev/documentation>, its Markdown variant and
+  the quickstart yielded no readable API instructions; `/llms.txt` returned an
+  Amazon sign-in page. No host or key header was inferred from other AWS products.
+
+## Provider-key evidence for Pendra through STACKIT
+
+The selected 25 ids are `pendra` through `stackit`, in provider-id order from
+`ck auth provider-report --missing`. The ten earlier gaps (`clarifai`, `ebcloud`,
+`hetzner`, `kuae-cloud-coding-plan`, `lilac`, `llmtech`, `modelis`, `modelscope`,
+`neosmith` and `nova`) remain listed as gaps in the report. The report began
+with 71 uncovered ids. Thirteen selected ids now have rows, three have reviewed
+skips, and nine remain gaps; the report now lists 55 uncovered ids and 18 skips.
+
+All thirteen rows have authentication refusals obtained with deliberately bogus
+keys on a network-enabled Linux build server on 2026-11-11, with redirects
+disabled. Chat probes requested at most one output token. No real key was used.
+Rows start from `crates/credentials-core/examples/ckdev_provider_rows.rs`, which
+reads the vendored Fusiform provider list: text output gives the LLM group and a
+routing id matching the Fusiform id. Poe, Qiniu and Requesty also have the media
+group because their entries in that list include audio, image or video output.
+The provider-owned sources are:
+
+- `pendra`: <https://pendra.ai/docs/api/authentication> documents Bearer `pdr_sk_`
+  keys, `api.pendra.ai` and the console's API Keys page.
+  <https://pendra.ai/docs/api/models/> documents the authenticated
+  `GET /api/v1/models` check. Catalogue weight links at `get.pendra.ai` do not
+  document API-key presentation, so the row does not send keys to that CDN.
+  Python's default user agent initially hit a Cloudflare 1010 block; curl, both
+  with its normal user agent and with no user agent, got the recorded JSON 401.
+- `perplexity-agent`: <https://docs.perplexity.ai/docs/getting-started> says the
+  APIs share one host and one key. The literal Bearer example and console link at
+  <https://docs.perplexity.ai/docs/getting-started/quickstart> document the
+  Orchestrator chat request using `perplexity/kimi-k3`. That compatible request
+  checks the shared key; it does not exercise Agent-specific Responses behavior.
+  The evidence uses its current `/orchestrator/v1/chat/completions` route.
+  Numeric `/error/code` is not a string;
+  `/error/type` is recorded instead.
+- `pioneer`: the provider's own <https://agent.pioneer.ai/llms.txt> now
+  directs users to Fastino. <https://docs.fastino.ai/authentication.md> documents
+  `fast_sk_` keys, raw `X-API-Key`, `api.fastino.ai` and the key dashboard.
+  <https://docs.fastino.ai/api-reference/inference/model-status.md> documents the
+  readiness read for `fastino/gliner2.5-multi-v1`. The row keeps the published
+  Pioneer id and display name rather than inventing a Fusiform id for the rebrand.
+- `poe`: <https://creator.poe.com/docs/external-applications/openai-compatible-api>
+  gives `api.poe.com/v1`, a literal Bearer header, the key page and the
+  `Claude-Sonnet-4.6` chat example. API usage draws on subscription points.
+- `prime`: <https://docs.primeintellect.ai/inference/overview> documents Bearer
+  keys with Inference permission at `api.pinference.ai/api/v1`.
+  <https://docs.primeintellect.ai/api-reference/api-keys> links the key dashboard;
+  <https://docs.primeintellect.ai/api-reference/inference-models> documents the
+  authenticated models read. Optional team billing is not required for the
+  personal-account request the row checks.
+- `privatemode-ai`: <https://docs.privatemode.ai/api/proxyless-api/> documents
+  Bearer keys at `proxyless-api.privatemode.ai` and the `glm-latest` chat example.
+  <https://docs.privatemode.ai/portal/overview/> links the key portal. The row
+  describes the hosted proxyless API, not the local proxy/SDK's separately
+  verifiable encryption flow. The refusal's empty `/error/type` is not a code.
+- `qiniu-ai`: <https://developer.qiniu.com/aitokenapi/13379/real-time-ai-interface-api>
+  gives `api.qnaigc.com/v1`, a literal Bearer header and `deepseek-v3`.
+  <https://developer.qiniu.com/aitokenapi/12884/how-to-get-api-key> links key
+  creation. The models read returned 200 with the bogus key, so the check uses
+  the documented chat, which returned the recorded 401.
+- `reflection`: <https://developers.reflection.ai/models> documents the Bearer
+  models read at `api.reflection.ai/openai/v1/models`;
+  <https://developers.reflection.ai/quickstart> links the API-key dashboard.
+- `requesty`: <https://docs.requesty.ai/api-reference/endpoint/models-list>
+  explicitly says an invalid supplied key gets 403, even though anonymous model
+  listing succeeds. <https://docs.requesty.ai/features/eu-routing.md> lists the
+  global, EU, US and Asia-Pacific router hosts and says they accept the same key.
+  <https://docs.requesty.ai/quickstart> links the key page. The separate admin-key
+  management API is not part of the inference-key row. The check uses the
+  models-list endpoint, where an invalid supplied key is rejected without inference.
+- `runinfra`: <https://runinfra.ai/docs/api-reference/authentication.md>
+  documents Bearer workspace keys, `api.runinfra.ai` and the key page.
+  <https://runinfra.ai/docs/api-reference/models.md> documents the authenticated
+  model read and explicitly says it reserves no inference credit.
+- `salad-cloud`: <https://docs.salad.com/ai-gateway/explanation/overview>
+  documents Bearer AI Gateway keys at `ai.salad.cloud`, not the account API's
+  `Salad-Api-Key`. Its onboarding guide links <https://portal.salad.com>;
+  <https://docs.salad.com/ai-gateway/reference/models.md> documents the checked
+  `qwen3.6-35b-a3b` chat. Usage is billed per token; the evidence does not label
+  it a free inference call. The problem-details `about:blank` is not an error code.
+- `sambanova`: <https://docs.sambanova.ai/cloud/docs/get-started/quickstart>
+  documents the literal Bearer chat at `api.sambanova.ai` using
+  `Meta-Llama-3.3-70B-Instruct`.
+  <https://docs.sambanova.ai/docs/en/get-started/api-keys-urls.md> links its key page.
+- `sarvam`: <https://docs.sarvam.ai/api/getting-started/quickstart> documents
+  `api.sarvam.ai`, the key page and a `sarvam-105b` chat using only the raw
+  `api-subscription-key` header. <https://docs.sarvam.ai/api-reference/authentication>
+  calls that header preferred and Bearer an alternative. The row follows the
+  quickstart, not the API reference's ambiguous listing of both headers.
+
+Nine selected ids remain uncovered; documentation or transport failures are not
+treated as proof that a provider has no API key:
+
+- `poolside`: <https://docs.poolside.ai/api/overview.md> documents hosted Bearer
+  inference at `inference.poolside.ai`, distinct from self-managed deployments,
+  but Python and curl both failed TLS before a response to the models read.
+- `qihang-ai`: <https://www.qhaigc.net/docs> yielded only a JavaScript shell; the
+  inspected official API-reference pages provided no readable host/header text.
+- `regolo-ai`: <https://docs.regolo.ai/getting-started/quick-start/> documents
+  Bearer keys at `api.regolo.ai`. Both the documented model-group read and chat
+  returned an HTML administrative-rules 403, not a provider authentication error.
+- `routing-run`: <https://docs.routing.run/api-reference/models> failed DNS on
+  the network-enabled server; the documentation reader could not resolve it either.
+- `scaleway`: direct reads of the official Generative APIs docs and their Markdown
+  variants returned 403. An official search excerpt exposed a curl example, but
+  complete readable documentation and the key-creation instructions were not obtained.
+- `scnet-token-plan`: <https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html>
+  documents a plan key but restricts it to interactive tools and prohibits direct
+  API calls. It provides no literal plan API host/header; the general SCNet
+  OpenAPI token instructions were not substituted for the plan's contract.
+- `scx-ai`: <https://platform.scx.ai/docs> returned 403 in both documentation
+  retrieval paths, so no host or header was inferred.
+- `sensenova`: <https://platform.sensenova.cn/docs> yielded no readable API
+  instructions, and attempted quickstart/reference paths returned 404.
+- `stackit`: official shared-model docs give Bearer tokens at
+  `api.openai-compat.model-serving.eu01.onstackit.cloud`, but the models read
+  and chat both returned empty 403 responses. Those replies did not establish
+  an authentication-specific refusal, so no invalid-key evidence was recorded.
+
+## Provider-key evidence for Standard Compute through Volcengine Coding Plan
+
+This batch selected the next 25 unprocessed ids, `standardcompute` through
+`volcengine-coding-plan`, from `ck auth provider-report --missing`. Its initial
+report contained 55 uncovered ids and 18 skips. The ten gaps from earlier batches
+and the nine gaps from Pendra through STACKIT were deferred for later decisions;
+this batch did not re-research them. Eleven unprocessed ids lie beyond this
+batch's 25-id cap: `vultr`, `wallaby`, `wally`, `wandb`, `watsonx`, `xiaomi`,
+`xpersona`, `zai`, `zeldoc`, `zenifra` and `zhipuai`. They remain uncovered, so this
+batch cannot close the complete provider list.
+
+Seventeen selected ids now have rows, one has a reviewed duplicate-offering skip,
+and seven remain uncovered for lack of sufficient documentation. The resulting
+report contains 37 uncovered ids and 19 skips: the 19 reserved gaps, these seven
+newly researched gaps and the eleven ids beyond the cap. A transport or
+documentation failure is not turned into a claim that a provider has no API key.
+
+Rows start from `crates/credentials-core/examples/ckdev_provider_rows.rs`: each
+selected entry has text output and gets its Fusiform id as its routing default.
+StepFun (China) also has audio output and gets the media group. Its catalog key
+is `stepfun-cn` because `stepfun` already identifies the global StepFun API;
+that existing row's identity, categories and routing defaults are unchanged.
+All recorded refusals were obtained live on a network-enabled Linux build server
+on 2026-11-11 with deliberately bogus keys and redirects disabled. Chat checks
+requested at most one output token. No real key was used.
+
+The provider-owned documentation for the added rows is:
+
+- `standardcompute`: <https://docs.standardcompute.com/api/models> documents
+  the authenticated Bearer models read at `api.stdcmpt.com`, not the documentation
+  domain. <https://docs.standardcompute.com/quickstart> links the key dashboard.
+  The refusal has no code field; its `error.type` is recorded instead.
+- `stepfun-cn`: <https://platform.stepfun.com/docs/zh/quickstart> documents
+  Bearer keys from the China portal, `api.stepfun.com` and the `step-5-preview`
+  chat. The regional portals are not treated as interchangeable key issuers.
+- `stepfun-ai-step-plan` and `stepfun-step-plan`: the respective
+  <https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api> and
+  <https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api>
+  explicitly fix their regional API host, Bearer header and
+  `/step_plan/v1/chat/completions` path, with `step-5-preview`. They link each
+  region's interface-key page and require a Step Plan subscription, not a second
+  secret. The checks do not use the ordinary pay-as-you-go chat path.
+- `subconscious`: <https://docs.subconscious.dev/api-reference/models.md>
+  documents Bearer inference keys and the authenticated models read at
+  `api.subconscious.dev`. <https://docs.subconscious.dev/ways-to-use/cloud-api.md>
+  links the inference-key dashboard. The row describes the managed cloud API,
+  not customer-hosted on-prem deployments. Management and partner integration
+  credentials are separate products and are not substituted for inference keys.
+  The deliberately bogus `sk-gw-` key was refused as malformed.
+- `submodel`: the official InstaGen landing page at <https://maas.submodel.ai/>
+  documents the Bearer `MiniMax-M2.7` chat at `maas.clawplay.world`.
+  <https://submodel.gitbook.io/docs/instagen/api-reference> also documents
+  Bearer access keys at `llm.submodel.ai`, and
+  <https://submodel.gitbook.io/docs/instagen/get-started> describes creation of
+  an InstaGen Access Key in Account Settings. Both documented receiving hosts
+  are included. The `llm.submodel.ai` models read returned an empty list with
+  HTTP 200 for the bogus key; the protected chat on the landing page's host
+  returned the recorded 401. Its `error.code` is empty, so its string
+  `error.type` is recorded instead. The two model catalogs are not assumed
+  interchangeable.
+- `tempr`: <https://temprhq.io/docs/gateway-reference> documents the Bearer
+  `tvk_` virtual key and the authenticated models read at `api.temprhq.io`.
+  <https://temprhq.io/docs/quickstart-gateway> links the virtual-key page. The row
+  describes ordinary virtual-key access with upstream keys configured in the
+  account, not the optional pass-through mode that sends two credentials.
+- `tensorx`: <https://docs.tensorx.ai/api-reference/chat-completions>
+  documents Bearer chat at `api.tensorx.ai` with `z-ai/glm-5.2`.
+  <https://docs.tensorx.ai/> links the key dashboard. The documented models read
+  returned a 504 availability error, not an authentication refusal; the protected
+  chat returned the recorded 401. Its code is the string `401`, not a number.
+- `the-grid-ai`: <https://thegrid.ai/docs/api-reference/api-reference.md>
+  documents both fixed inference hosts for Consumption keys;
+  <https://thegrid.ai/docs/api-reference/authentication.md> links key creation.
+  The descriptor uses the OpenAI surface's Bearer presentation. The Messages
+  surface uses the same key value with raw `x-api-key`, not a separate key.
+  <https://thegrid.ai/docs/api-reference/diagnostics.md> documents the Bearer
+  diagnostics read, which verifies the Consumption key without inference.
+- `thinkingmachines`:
+  <https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/anthropic/>
+  documents raw `x-api-key`, the fixed `tinker.thinkingmachines.dev` host and
+  `thinkingmachines/Inkling`. The check sends `anthropic-version: 2023-06-01`.
+  <https://tinker-docs.thinkingmachines.ai/tinker/quickstart/index.md> links the
+  console key page. The refusal has only a detail message, not a code.
+- `tinfoil`: <https://docs.tinfoil.sh/quickstart.md> documents the direct
+  Bearer chat at `inference.tinfoil.sh` using `gpt-oss-120b`.
+  <https://docs.tinfoil.sh/get-api-key.md> gives the dashboard navigation.
+  The direct API does not provide the SDK/proxy's connection-time attestation;
+  this row does not claim that the login check performs attestation.
+- `tokengo`:
+  <https://www.tokengo.com/docs/documentation/getting-started/quickstart>
+  explicitly sends a Bearer key to `api.thorbase.com` with `gpt-4o-mini`.
+  <https://www.tokengo.com/docs/documentation/getting-started/authentication>
+  links the TokenGO console. The refusal's `error.code` is empty, so the recorded
+  string is its `error.type`, `llmapi_error`.
+- `trustedrouter`: <https://trustedrouter.com/docs> documents Bearer keys,
+  the read-only `/v1/key` inspection, the primary and alternate inference hosts,
+  and the account-management host. The row asks for an inference key; creating
+  or replacing keys requires a distinct management-key permission. The refusal's
+  `error.code` is numeric, so its string `error.type` is recorded instead.
+- `unorouter`: <https://unorouter.com/en/docs/platform/platform-api>
+  documents the Bearer API-key usage read at `api.unorouter.com`.
+  <https://unorouter.com/en/docs/platform/quickstart> directs users to the Tokens
+  page. Account access tokens have different permissions and are not this key.
+- `upstage`: <https://console.upstage.ai/api/chat> explicitly specifies
+  `Authorization: Bearer <token>`, `api.upstage.ai/v1` and `solar-pro4`.
+  <https://developers.upstage.ai/docs/getting-started> describes key creation;
+  the live authentication refusal also links the console API-key page.
+- `vivgrid`: <https://vivgrid.com/docs/models/gpt-6-astra> documents Bearer chat
+  at `api.vivgrid.com`, the `gpt-6-astra` model and the example key shape
+  `viv-xxxxxxxxxxxxx`. <https://vivgrid.com/docs/quick-start> links the console
+  and distinguishes Model API keys from skill-building `APP_KEY`/`APP_SECRET`.
+  An arbitrary bogus string first returned a 500 format error, which is not
+  recorded. The documented sample-shaped bogus key returned the recorded 401.
+- `volcengine`: <https://ark.volcengine.com/region:cn-beijing/docs/chat-api>
+  documents Bearer Ark keys at `ark.cn-beijing.volces.com` and the
+  `doubao-seed-2-1-pro-260915` chat. The API-key guide at
+  <https://ark.volcengine.com/region:cn-beijing/docs/api-key> links the key page
+  and describes project-scoped keys, not a host chosen per key. The fixed
+  data-plane host is also explicit in
+  <https://ark.volcengine.com/region:cn-beijing/docs/base-url-and-authentication>.
+  The separate control-plane host uses signed Access Keys, not this API key.
+
+Seven selected ids remain gaps, rather than unsupported skips:
+
+- `tencent-coding-plan`: the cited page for this offering at
+  <https://cloud.tencent.com/document/product/1772/128947> did not yield readable
+  API instructions. Related TokenHub Coding Plan documentation at
+  <https://cloud.tencent.com/document/product/1823/130092> restricts use to
+  supported coding tools and prohibits direct scripted API use. No literal
+  header for this offering was established or standalone probe sent.
+- `tencent-token-plan`: <https://cloud.tencent.com/document/product/1823/130060>
+  documents fixed `tokenhub.tencentmaas.com/plan/v3` and `/plan/anthropic`
+  bases, but the retrieved text did not establish a literal key header/scheme.
+- `tencent-tokenhub`: <https://cloud.tencent.com/document/product/1823/130050>
+  describes dedicated inference endpoints and API-key management, but did not
+  establish a fixed shared API host or literal header. Dedicated endpoints
+  alone do not prove that all keys require a per-account hostname.
+- `tokenrouter`: <https://www.tokenrouter.com/docs/tokenrouter-feature-guide/>
+  and the provider's root, docs and llms pages yielded no extractable API
+  instructions. No host or header was inferred from third-party integrations.
+- `vancine`: <https://vancine.com/docs> yielded no readable API documentation.
+- `vispark`: <https://lab.vispark.in/#vision> yielded no readable host/header
+  instructions.
+- `volcengine-coding-plan`: <https://www.volcengine.com/docs/82379/1928261>
+  documents `ark.cn-beijing.volces.com/api/coding/v3` and coding-tool settings,
+  but not a literal HTTP key header for that path. The FAQ at
+  <https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-faq>
+  says standalone API calls do not consume plan quota and are billed under
+  ordinary Ark rules. No ordinary `/api/v3` check was substituted for the plan.
+
+## Provider-key evidence for Vultr through Zhipu AI
+
+This final batch researched only `vultr`, `wallaby`, `wally`, `wandb`, `watsonx`,
+`xiaomi`, `xpersona`, `zai`, `zeldoc`, `zenifra` and `zhipuai`. The initial report
+contained 37 uncovered ids and 19 skips. Ten ids now have evidence-backed rows;
+`watsonx` remains an open gap. No new skip reason was applied. The final
+`ck auth provider-report --missing` contains 27 uncovered ids and 19 skips:
+the 26 previously researched documentation gaps summarized in the preceding batch
+sections, plus `watsonx`. Those 26 gaps were not re-researched here.
+
+Each new row carries its published Fusiform id as `fusiform_provider_id` and
+its sole default provider id. All eleven entries list only text output in the
+vendored snapshot, so the ten rows default to `llm-provider`, not media. Their
+`serves` lists are empty, matching the earlier Fusiform batches. Existing plan
+rows and their identities, routing defaults, categories and serving assignments
+are unchanged.
+
+The table's ten new refusals were obtained on a network-enabled Linux build
+server on 2026-11-11, using the exact row checks, redirects disabled and obviously
+bogus keys. Chat bodies were `model`, a user message containing `hi`, and
+`max_tokens: 1`. No real provider key was used. Wallaby and Zenifra initially
+returned edge-filter 403 responses (`error code: 1010`) to Python's User-Agent;
+those were not counted as invalid-key evidence. Repeating the same checks with
+no User-Agent, as the login transport sends them, produced the recorded 401s.
+
+The provider-owned documentation for the added rows is:
+
+- `vultr`: <https://api.vultrinference.com/docs/get-started/authentication>
+  documents the shared `api.vultrinference.com` host, Bearer inference keys and
+  <https://console.vultr.com/inference/> key management. No per-account host is
+  required. <https://api.vultrinference.com/docs/reference/list-models> explicitly
+  calls the models list public; it also returned 200 with a fake key. The
+  protected chat instead returned `Invalid API key`. The documented chat at
+  <https://api.vultrinference.com/docs/reference/create-chat-completion> supports
+  `max_tokens` as an alias of `max_completion_tokens`; the docs' overview at
+  <https://api.vultrinference.com/docs> uses `deepseek-v4.1-flash-1017`. The refusal's
+  `error.code` is numeric, so its string `error.type` is recorded.
+- `wallaby`: <https://wallabytoken.com/docs> documents Bearer `sk-` keys,
+  `api.wallabytoken.com/v1`, and the authenticated models read. It directs key
+  creation to <https://api.wallabytoken.com/keys>, Tokens → Add token. The bogus
+  key used the documented prefix. The refusal says `Invalid token`; its
+  `error.code` is empty, so the string `error.type` is recorded instead.
+- `wally`: <https://docs.runanywhere.ai/wally-cloud/api> documents the hosted
+  Bearer API at `inference.runanywhere.ai/v1` and the current key's models read.
+  <https://docs.runanywhere.ai/wally-cloud/quickstart> directs users to Cloud keys
+  in <https://console.runanywhere.ai/> and distinguishes `sk-runa-` Cloud keys
+  from `runa_prod_` on-device SDK credentials. The fake key used `sk-runa-`.
+  This row is the hosted API, not a local server or device SDK license.
+- `wandb`: <https://docs.coreweave.com/products/inference/serverless/api-reference>
+  documents the fixed `api.inference.wandb.ai/v1` host, literal Bearer header and
+  CoreWeave Forge keys created at <https://forge.coreweave.com/settings>.
+  <https://docs.coreweave.com/products/inference/serverless/api-reference/list-models.md>
+  documents the models read. The reference says team/project attribution is
+  optional: without it the service uses the default entity and `inference`
+  project. The check therefore sends no `OpenAI-Project` header. This is the
+  Fusiform `wandb` offering named CoreWeave, not a dedicated inference deployment.
+- `xiaomi`: <https://mimo.mi.com/docs/en-US/api/model/list-models-get>
+  documents `GET https://api.xiaomimimo.com/v1/models` with raw `api-key`.
+  <https://mimo.mi.com/static/docs/quick-start/faq/api-integration.md> specifies
+  `sk-` pay-as-you-go keys and links
+  <https://platform.xiaomimimo.com/#/console/api-keys>. The bogus key used `sk-`.
+  That FAQ explicitly distinguishes `tp-` Token Plan keys and says the two
+  credential types cannot be mixed. The standard host is not any of the three
+  existing Token Plan hosts. The old test exclusion for a row named `xiaomi`
+  is removed because this documented standard API now has its own row.
+- `xpersona`: <https://www.xpersona.co/docs> fixes the inference host as
+  `www.xpersona.co`, documents Bearer `xp_` keys and the authenticated, read-only
+  `/v1/usage` request. The bogus key used `xp_`. The public `/v1/models` route is
+  not used as a key check. Key creation is Dashboard → Connect AI; the row opens
+  the provider's instructions rather than guessing an unpublished dashboard URL.
+- `zai-api` (Fusiform `zai`): <https://docs.z.ai/api-reference/introduction>
+  documents Bearer standard keys and `api.z.ai/api/paas/v4`.
+  <https://docs.z.ai/api-reference/llm/chat-completion> documents `glm-5.3` and
+  a `max_tokens` minimum of one. Keys are created at
+  <https://z.ai/manage-apikey/apikey-list>.
+  <https://docs.z.ai/devpack/notice/api-key-management> distinguishes new Standard
+  keys, billed against account balance or usage bundles, from Coding Plan keys.
+  Existing Compatible keys can have endpoint-dependent billing; that does not
+  make the offerings interchangeable. The existing catalog key `zai` remains
+  the coding-plan key, mapped to `zai-coding-plan` and checking
+  `/api/coding/paas/v4`. The ordinary API uses the new catalog key `zai-api`,
+  without changing any live credential id or the existing web-search category.
+- `zeldoc`: <https://docs.zeldoc.ai/what-is-zeldoc/> documents the Bearer models
+  read at `api.zeldoc.ai/v1`. <https://docs.zeldoc.ai/connect-opencode#generate-an-api-key>
+  explains invitation-based access and dashboard key creation, or a key supplied
+  directly by the team. The row opens those instructions because they do not
+  publish a dashboard URL. A key is not treated as unavailable merely because
+  enrollment requires an invitation.
+- `zenifra`: <https://docs.zenifra.com/en/docs/ai/get-started> fixes the inference
+  base as `ai.zenifra.com/v1` and documents `zenifra/qwen3.8-flash`.
+  <https://docs.zenifra.com/en/docs/ai/examples-nodejs> explicitly uses Bearer
+  authentication. <https://docs.zenifra.com/en/docs/ai> calls the inference models
+  list public, so the row checks chat with `max_tokens: 1` instead. The one-token
+  cap follows the provider's stated OpenAI compatibility, not a Zenifra-specific
+  documented field. The row opens the
+  getting-started instructions for AI Models → On demand → API Keys. It does not
+  ask for a `znf_` organization management key for `api.zenifra.com`; those are
+  different credentials. The `zai_` prefix documented for plan-per-member keys
+  is not assumed for an ordinary on-demand key.
+- `zhipuai`: <https://docs.bigmodel.cn/cn/api/introduction> documents Bearer
+  model-standard keys, `open.bigmodel.cn/api/paas/v4`, `glm-5.3` and key creation
+  at <https://bigmodel.cn/usercenter/proj-mgmt/apikeys>. It explicitly says that
+  model-standard, personal-plan and team-plan keys are managed separately and
+  cannot be mixed. The existing `zhipu-coding-plan` row checks
+  `/api/coding/paas/v4`, as documented by
+  <https://docs.bigmodel.cn/cn/coding-plan/quick-start>. The new standard row
+  therefore does not duplicate the existing plan offering.
+
+One selected id remains uncovered:
+
+- `watsonx`: IBM's
+  <https://www.ibm.com/docs/en/watsonx/saas?topic=resources-credentials-programmatic-access>
+  requires exchanging an API key for an IAM bearer token at
+  `https://iam.cloud.ibm.com/identity/token`; the ordinary API key is not itself
+  the REST Bearer token. The SDK setup at
+  <https://ibm.github.io/watsonx-ai-python-sdk/v1.6.0a/setup_cloud.html> also
+  requires a default project or space id and an endpoint matching the provisioned
+  instance's region. The catalog's plain-key checks cannot express that exchange
+  and context. These documents describe shared regional hosts, not a required
+  per-account hostname or second secret. None of the reasons listed in
+  [Fusiform provider skips](#fusiform-provider-skips) covers that exchange and
+  context alone, so no skip was claimed.
+  No standalone inference probe or invalid-key evidence was recorded.
+
+## Final dispositions for the remaining Fusiform providers
+
+On 2026-11-11 the owner reviewed the remaining 27 uncovered ids and approved
+nine rows and eighteen skips. These decisions supersede the earlier sections'
+uncovered dispositions, without changing any existing row's identity, routing or
+categories. `ck-auth provider-report --missing` now has no uncovered ids before
+its `Skipped:` section; the section still lists all 37 reviewed skips. The
+proposer (`cargo run --locked -p credentials-core --example ckdev_provider_rows`)
+has no remaining row to propose. Regolo AI has text and image output in the
+vendored list, so its new row defaults to both LLM and media; the other eight
+new rows have text output and default to LLM only. All nine use their published
+Fusiform id as the catalog key and routing default, and have no model-vendor
+assignments.
+
+### Rendered documentation and fresh checks
+
+The owner read these four rendered pages in a real browser on 2026-11-11.
+Re-reading them with the documentation reader returned empty pages for
+ModelScope, SenseNova and Vancine, and HTTP 403 for Scaleway. The host/header
+facts below therefore cite the owner's rendered-page quotations, not text
+recovered by that reader:
+
+- `modelscope`: <https://modelscope.cn/docs/model-service/API-Inference/intro>
+  gives base `https://api-inference.modelscope.cn/v1` and literally shows
+  `"Authorization": f"Bearer {…}"`. On 2026-11-11 the Linux bogus-key GET to
+  `/v1/models` returned HTTP 200 with a model list. That public response cannot
+  check a key, so the row is unvalidated and has no invalid-key evidence line.
+- `scaleway`: <https://www.scaleway.com/en/docs/generative-apis/api-cli/using-generative-apis/>
+  says "Authorization: HTTP header with your API key prefixed by Bearer" and
+  shows `curl -H "Authorization: Bearer $SCW_SECRET_KEY" https://api.scaleway.ai/v1/models`.
+  On 2026-11-11 that GET with a bogus key returned HTTP 403,
+  `{"error":{"code":403,"message":"insufficient permissions to access the resource","type":"forbidden","param":""}}`.
+  It does not specifically identify an invalid key, so the row is unvalidated
+  and has no invalid-key evidence line.
+- `sensenova`: <https://platform.sensenova.cn/docs> gives
+  `https://token.sensenova.cn/v1`, says every request carries
+  `Authorization: Bearer $SENSENOVA_API_KEY`, and says keys start `sk-`.
+  On 2026-11-11 the bogus-key models GET returned HTTP 401 with
+  `{"error":{"code":16,"message":"Forbidden"}}`. The row uses that GET check;
+  the numeric code is not coerced to a string in the evidence table.
+- `vancine`: <https://vancine.com/docs> gives `https://vancine.com/v1`,
+  `Authorization: Bearer sk-…`, and "GET /v1/models requires an API key".
+  On 2026-11-11 the bogus-key models GET returned HTTP 401 with message
+  `Invalid token (request id: …)` and `error.type: vancine_error` (the
+  `error.code` string was empty). The row uses that GET check and records the
+  nonempty type at `/error/type`.
+
+These four checks ran on a network-enabled Linux build server with redirects
+disabled and `Authorization: Bearer ck-invalid-provider-probe`. No real key was
+used, no model call was sent, and no public model-list success is treated as a
+successful key check.
+
+### Documented keys checked on first use
+
+The owner approved the following rows without a login probe. Their earlier
+2026-11-11 inconclusive observations remain observations, not authentication
+evidence; each row has `invalid_key: None` and explains why it is stored unchecked.
+
+- `modelis`: <https://modelishub.com/pricing> documents Bearer keys at
+  `https://modelishub.com/v1`. The two earlier bogus-key chat probes returned
+  HTTP 502. The separate RapidAPI key is not substituted.
+- `poolside`: <https://docs.poolside.ai/api/overview.md> documents hosted Bearer
+  inference at `inference.poolside.ai`. The earlier models checks failed TLS
+  before an HTTP response; self-managed deployments are not covered.
+- `regolo-ai`: <https://docs.regolo.ai/getting-started/quick-start/> documents
+  Bearer keys at `api.regolo.ai`. The earlier model-group and chat checks were
+  blocked by an HTML administrative-rules 403, not a key refusal.
+- `stackit`: <https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models>
+  documents Bearer keys at
+  `api.openai-compat.model-serving.eu01.onstackit.cloud`. The earlier models and
+  chat checks returned empty HTTP 403 responses, not authentication-specific errors.
+- `volcengine-coding-plan`: <https://www.volcengine.com/docs/82379/1928261>
+  explicitly names the OpenAI-compatible base
+  `https://ark.cn-beijing.volces.com/api/coding/v3`. Re-read on 2026-11-11,
+  Volcengine's own Ark guide at
+  <https://ark.volcengine.com/region:cn-beijing/docs/base-url-and-authentication>
+  explicitly says to add `Authorization: Bearer $ARK_API_KEY` in the HTTP header
+  and shows that header on `ark.cn-beijing.volces.com`. Together these establish
+  the coding base and the key header for that same host, as the owner required;
+  the coding-tool settings alone are not the header evidence. No reliable free
+  check for the coding path was established. The coding guide warns not to use
+  ordinary `/api/v3` because it incurs charges outside Coding Plan quota, so the
+  ordinary Ark row's chat check is not reused.
+
+### Reviewed skips and availability rechecks
+
+On 2026-11-11 the Linux build server rechecked the five unavailable services:
+
+- `clarifai`: `api.clarifai.com` and `docs.clarifai.com` failed DNS with
+  "Name or service not known". `clarifai.com` still resolved to the parking
+  address `192.64.119.122`; the parked-domain assessment is the owner's ruling.
+- `lilac`: bogus-key GET `https://api.getlilac.com/v1/models` returned HTTP 410,
+  `Lilac inference has been discontinued.`
+- `llmtech`: bogus-key GET `https://api.llmtech.eu/v1/models` returned HTTP 410,
+  `error.code: service_closed`, saying "The LLM Tech API was shut down on
+  31 October 2026 and keys no longer work."
+- `neosmith`: `router.neosmith.ai` failed DNS with "Temporary failure in name
+  resolution"; this observation establishes unreachability from the build
+  server, not proof that the domain was permanently removed.
+- `routing-run`: `docs.routing.run` failed DNS with "Name or service not known".
+
+The two HTTP rechecks used the same bogus Bearer value as above and disabled
+redirects. These five ids use the new discontinued-or-unreachable reason rather
+than claiming that their documentation has no API key.
+
+The owner also approved a public-documentation reason for twelve ids, based on
+the documentation reviewed in the earlier sections: `ebcloud` exposes the host
+only in the signed-in console's sample code; `hetzner` and `nova` put the relevant
+docs behind sign-in; `kuae-cloud-coding-plan`, `qihang-ai`, `scx-ai`, `vispark`,
+`tokenrouter`, `tencent-tokenhub`, `tencent-token-plan`, `tencent-coding-plan` and
+`scnet-token-plan` do not publicly establish both the API host and key header.
+This reason is about the missing public contract, not an assertion that no key
+exists. In addition, the owner confirmed that the Token Plan page
+<https://cloud.tencent.com/document/product/1823/130060> limits the key to AI
+tools such as Claude Code and forbids API use in automated scripts, custom
+backends and non-interactive batch calls. Tencent Coding Plan's related terms
+at <https://cloud.tencent.com/document/product/1823/130092> and SCNet Token Plan
+at <https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html>
+likewise prohibit direct scripted/backend API calls. No probes were sent for
+these restricted plans, and general inference instructions were not substituted
+for their plan contracts.
+
+`watsonx` uses the token-exchange reason. IBM's
+<https://cloud.ibm.com/apidocs/iam-identity-token-api> documents exchanging an API
+key at `/identity/token` using `grant_type=urn:ibm:params:oauth:grant-type:apikey`.
+It says to use the returned `access_token` with the prefix `Bearer` in the HTTP
+`Authorization` header and documents the token's `expires_in` lifetime. The
+inference reference at <https://cloud.ibm.com/docs/apis/watsonx-ai> requires
+either `space_id` or `project_id` for text generation. The pasted IBM API key
+is therefore not itself a fixed-host inference Bearer key in this catalog.
+
 ## Fusiform provider skips
 
-This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. No providers have a
-reviewed skip yet. An uncovered provider stays a gap until its documentation is
-reviewed; an empty key-variable list alone is not a reason to skip it.
+This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
+stays a gap until its documentation is reviewed; an empty key-variable list alone is
+not a reason to skip it.
+
+- `amazon-bedrock`: Bedrock API keys are bound to the AWS Region they were created
+  in, and each Region has its own `bedrock-runtime` host. See
+  <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html>.
+- `atomic-chat`: <https://atomic.chat> describes a local desktop app that works
+  offline with no cloud service, so there is no hosted API key.
+- `azure`: Azure OpenAI sends each key to its own resource's host,
+  `https://YOUR-RESOURCE-NAME.openai.azure.com`. See
+  <https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses>.
+- `azure-cognitive-services`: Fusiform links the same Azure OpenAI documentation, and
+  its keys likewise need the resource name (`AZURE_COGNITIVE_SERVICES_RESOURCE_NAME`)
+  that sets the host.
+- `cloudflare-ai-gateway`: requests go to
+  `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/...`, so a key needs
+  the account and gateway ids. See
+  <https://developers.cloudflare.com/ai-gateway/usage/chat-completion/>.
+- `databricks`: model serving is reached at each workspace's own host,
+  `https://<workspace_host>.databricks.com`. See
+  <https://docs.databricks.com/aws/en/machine-learning/model-serving/query-chat-models>.
+- `github-copilot`: Copilot takes a GitHub account token (an OAuth sign-in or a
+  personal access token), not an inference key, and requires a Copilot license. The
+  Copilot runtime uses the token at a host chosen per account: github.com, or the
+  enterprise's own hostname under GitHub Enterprise Cloud with data residency
+  (`copilot login --host HOSTNAME`). The documentation does not publish the model API's
+  host. See
+  <https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli>.
+- `gitlab`: GitLab Duo Agent Platform runs on GitLab.com, GitLab Self-Managed and
+  GitLab Dedicated instances, and uses "a multi-token authentication chain before
+  requests reach a model provider": the user's token goes to their own instance, which
+  issues short-lived tokens for the AI gateway. See
+  <https://docs.gitlab.com/user/duo_agent_platform/authentication/>.
+- `google-vertex-anthropic`: Claude models on Vertex AI are not in the express-mode
+  model list ("Only the models listed in the preceding table are supported in express
+  mode"), so they are reached at
+  `https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/...`
+  with Google Cloud credentials. See
+  <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
+  and <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude>.
+- `lmstudio`: LM Studio serves models at the user's own local server address and
+  configurable port (default `http://localhost:1234`), not a fixed provider API host.
+  Its optional Bearer token is created in that local server's token manager. See
+  <https://lmstudio.ai/docs/developer/core/server/settings> and
+  <https://lmstudio.ai/docs/developer/core/authentication>.
+- `lynkr`: the provider's self-hosted proxy docs use `http://localhost:8081` for
+  development and `https://your-domain.com` for production. They say any `sk-`
+  placeholder works and real authentication happens between Lynkr and its configured
+  upstream provider. No Lynkr provider API key is documented. See
+  <https://github.com/Fast-Editor/Lynkr/blob/main/documentation/api.md>.
+- `modal`: <https://modal.com/docs/guide/webhook-proxy-auth> requires a proxy token
+  ID and token secret, either in separate headers or combined as a Bearer value.
+  <https://modal.com/docs/guide/endpoints> also documents dedicated inference
+  endpoint URLs chosen per deployment. The combined two-component token is not
+  represented as a single pasted API-key row.
+- `neon`: <https://neon.com/docs/ai-gateway/get-started.md> documents an AI Gateway
+  URL scoped to a branch, with the pattern
+  `br-<name>-api.ai.<cell>.<region>.aws.neon.tech`. A runtime token is not usable
+  without that branch's base URL, so no provider-wide host is substituted.
+- `oci`: <https://docs.oracle.com/en-us/iaas/Content/generative-ai/api-keys.htm>
+  documents GenAI Bearer keys bound to a region, with the regional inference host
+  `inference.generativeai.<region-identifier>.oci.oraclecloud.com`. As with Bedrock,
+  a regional key is not represented by a single fixed-host row. The two alternate
+  secrets Oracle issues for a key are interchangeable, not two required headers.
+- `openreason`: the current site explicitly says "OpenReason is not a proxy" and
+  model requests go straight to Anthropic and OpenAI. Its only documented key is
+  `OR_API_KEY` (`or_ingest_...`) for telemetry ingestion at
+  `api.openreason.app/otlp`, not a model API key. It must not be catalogued as an
+  LLM-provider key. See <https://openreason.app>, <https://docs.openreason.app>
+  and <https://docs.openreason.app/quickstart/or-otel>.
+- `qvac`: the provider's published package README at
+  <https://registry.npmjs.org/@qvac%2fai-sdk-provider> documents a local
+  `qvac serve --openai` runtime, with a configurable loopback address and port,
+  not a vendor-hosted API. As with LM Studio, its keys belong to a user-hosted
+  server rather than a fixed receiving host. LM Studio's table reason now names
+  that local-server constraint explicitly as well; neither provider has a catalog row.
+- `sap-ai-core`: the official SAP SDK configuration reference at
+  <https://help.sap.com/doc/generative-ai-hub-sdk/CLOUD/en-US/_reference/README_sphynx.html>
+  requires `AICORE_CLIENT_ID`, `AICORE_CLIENT_SECRET`, `AICORE_AUTH_URL` and
+  `AICORE_BASE_URL`. Token exchange needs both the client ID and secret, not
+  one pasted inference key.
+- `snowflake-cortex`: <https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api>
+  documents PAT Bearer requests at
+  `https://<account-identifier>.snowflakecomputing.com/api/v2/cortex/v1`.
+  That per-account host cannot be replaced with a shared provider host.
+- `umans-ai`: <https://app.umans.ai/offers/code/docs/orgs> describes organization
+  billing and member keys for the same Umans Code service as the existing
+  `umans` row (`umans-ai-coding-plan`). Its linked
+  <https://app.umans.ai/offers/code/docs> uses the same billing key page,
+  `api.code.umans.ai`, `umans-coder` and raw `x-api-key` Messages request as that
+  row. An organization membership is not a second API-key offering.
 
 Only these reasons are permitted:
 
@@ -115,9 +1415,50 @@ Only these reasons are permitted:
 - no API key in its documentation
 - a duplicate offering of an existing row
 - a second secret or a per-account host in the style of Azure, Bedrock or Vertex
+- a user-hosted local server rather than a fixed provider API
+- the service is discontinued or unreachable
+- its public documentation does not name both the API host and the key header
+- the key is exchanged for a short-lived token before use
 
 | Fusiform id | reason |
 | --- | --- |
+| amazon-bedrock | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| atomic-chat | no API key in its documentation |
+| azure | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| azure-cognitive-services | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| cloudflare-ai-gateway | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| databricks | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| lmstudio | a user-hosted local server rather than a fixed provider API |
+| lynkr | no API key in its documentation |
+| modal | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| neon | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| oci | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| openreason | no API key in its documentation |
+| qvac | a user-hosted local server rather than a fixed provider API |
+| sap-ai-core | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| snowflake-cortex | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| umans-ai | a duplicate offering of an existing row |
+| clarifai | the service is discontinued or unreachable |
+| lilac | the service is discontinued or unreachable |
+| llmtech | the service is discontinued or unreachable |
+| neosmith | the service is discontinued or unreachable |
+| routing-run | the service is discontinued or unreachable |
+| ebcloud | its public documentation does not name both the API host and the key header |
+| hetzner | its public documentation does not name both the API host and the key header |
+| kuae-cloud-coding-plan | its public documentation does not name both the API host and the key header |
+| nova | its public documentation does not name both the API host and the key header |
+| qihang-ai | its public documentation does not name both the API host and the key header |
+| scnet-token-plan | its public documentation does not name both the API host and the key header |
+| scx-ai | its public documentation does not name both the API host and the key header |
+| tencent-coding-plan | its public documentation does not name both the API host and the key header |
+| tencent-token-plan | its public documentation does not name both the API host and the key header |
+| tencent-tokenhub | its public documentation does not name both the API host and the key header |
+| tokenrouter | its public documentation does not name both the API host and the key header |
+| vispark | its public documentation does not name both the API host and the key header |
+| watsonx | the key is exchanged for a short-lived token before use |
 
 ## Hosts without provider documentation
 

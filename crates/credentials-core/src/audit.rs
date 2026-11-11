@@ -60,6 +60,14 @@ pub enum AuditOp {
     SecretFirstRelease,
     SecretQuarantine,
 
+    GhManifestPropose,
+    GhManifestProposalState,
+    GhManifestSign,
+    GhManifestStore,
+    GhManifestActivation,
+    GhManifestRetire,
+    GhManifestOneTapSet,
+
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
     /// A module replaces a cookie whose recorded creator matches that module.
@@ -222,6 +230,14 @@ impl AuditOp {
             AuditOp::SecretGrantExpire => "secret_grant_expire",
             AuditOp::SecretFirstRelease => "secret_first_release",
             AuditOp::SecretQuarantine => "secret_quarantine",
+
+            AuditOp::GhManifestPropose => "gh_manifest_propose",
+            AuditOp::GhManifestProposalState => "gh_manifest_proposal_state",
+            AuditOp::GhManifestSign => "gh_manifest_sign",
+            AuditOp::GhManifestStore => "gh_manifest_store",
+            AuditOp::GhManifestActivation => "gh_manifest_activation",
+            AuditOp::GhManifestRetire => "gh_manifest_retire",
+            AuditOp::GhManifestOneTapSet => "gh_manifest_one_tap_set",
 
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
@@ -472,6 +488,126 @@ pub struct AuditRecord {
     pub actor: String,
     /// An alarm reason when this entry records a detected anomaly.
     pub alarm: Option<AlarmReason>,
+}
+
+/// Public manifest metadata committed by each manifest-specific audit operation.
+/// Signatures commit the manifest directly; other operations frame each field so
+/// different field boundaries cannot produce the same commitment.
+pub enum GhManifestAudit<'a> {
+    Propose {
+        proposal_id: &'a str,
+        agent_id: &'a str,
+        repo: &'a str,
+        base_version: i64,
+        manifest_sha256: &'a str,
+        statement_sha256: &'a str,
+    },
+    ProposalState {
+        proposal_id: &'a str,
+        from: &'a str,
+        to: &'a str,
+    },
+    Sign {
+        manifest_sha256: &'a str,
+    },
+    Store {
+        version: i64,
+        source: &'a str,
+        manifest_sha256: &'a str,
+    },
+    Activation {
+        member_id: &'a str,
+        version: i64,
+        verdict: &'a str,
+    },
+    Retire {
+        member_id: &'a str,
+        retired_at_ms: i64,
+    },
+}
+
+impl GhManifestAudit<'_> {
+    /// Preserve the caller's actor and alarm, but derive the operation and subject
+    /// from the committed metadata rather than trusting a separate operation tag.
+    pub fn record(self, actor: &str, alarm: Option<AlarmReason>) -> AuditRecord {
+        fn hash(fields: &[&str]) -> String {
+            use sha2::{Digest, Sha256};
+
+            let mut bytes = Vec::new();
+            for field in fields {
+                crate::agent_secret::push_field(&mut bytes, field.as_bytes());
+            }
+            hex(&Sha256::digest(bytes))
+        }
+
+        let (op, subject, payload_hash) = match self {
+            Self::Propose {
+                proposal_id,
+                agent_id,
+                repo,
+                base_version,
+                manifest_sha256,
+                statement_sha256,
+            } => (
+                AuditOp::GhManifestPropose,
+                format!("gh-manifest-proposal|{proposal_id}"),
+                hash(&[
+                    agent_id,
+                    repo,
+                    &base_version.to_string(),
+                    manifest_sha256,
+                    statement_sha256,
+                ]),
+            ),
+            Self::ProposalState {
+                proposal_id,
+                from,
+                to,
+            } => (
+                AuditOp::GhManifestProposalState,
+                format!("gh-manifest-proposal|{proposal_id}"),
+                hash(&[from, to]),
+            ),
+            Self::Sign { manifest_sha256 } => (
+                AuditOp::GhManifestSign,
+                crate::store::GH_MANIFEST_ROOT_KEY_ID.to_owned(),
+                manifest_sha256.to_owned(),
+            ),
+            Self::Store {
+                version,
+                source,
+                manifest_sha256,
+            } => (
+                AuditOp::GhManifestStore,
+                format!("gh-manifest|{version}"),
+                hash(&[source, manifest_sha256]),
+            ),
+            Self::Activation {
+                member_id,
+                version,
+                verdict,
+            } => (
+                AuditOp::GhManifestActivation,
+                format!("gh-manifest-activation|{member_id}"),
+                hash(&[&version.to_string(), verdict]),
+            ),
+            Self::Retire {
+                member_id,
+                retired_at_ms,
+            } => (
+                AuditOp::GhManifestRetire,
+                format!("gh-manifest-activation|{member_id}"),
+                hash(&[&retired_at_ms.to_string()]),
+            ),
+        };
+        AuditRecord {
+            op,
+            credential_id: Some(subject),
+            payload_hash: Some(payload_hash),
+            actor: actor.to_owned(),
+            alarm,
+        }
+    }
 }
 
 /// A fully chained audit entry as stored/read back.
@@ -777,6 +913,14 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretFirstRelease => AuditOp::SecretFirstRelease.as_str(),
                 AuditOp::SecretQuarantine => AuditOp::SecretQuarantine.as_str(),
 
+                AuditOp::GhManifestPropose => AuditOp::GhManifestPropose.as_str(),
+                AuditOp::GhManifestProposalState => AuditOp::GhManifestProposalState.as_str(),
+                AuditOp::GhManifestSign => AuditOp::GhManifestSign.as_str(),
+                AuditOp::GhManifestStore => AuditOp::GhManifestStore.as_str(),
+                AuditOp::GhManifestActivation => AuditOp::GhManifestActivation.as_str(),
+                AuditOp::GhManifestRetire => AuditOp::GhManifestRetire.as_str(),
+                AuditOp::GhManifestOneTapSet => AuditOp::GhManifestOneTapSet.as_str(),
+
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
                 AuditOp::Put => AuditOp::Put.as_str(),
@@ -867,6 +1011,17 @@ mod vocabulary_documentation_tests {
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
+        for op in [
+            AuditOp::GhManifestPropose,
+            AuditOp::GhManifestProposalState,
+            AuditOp::GhManifestSign,
+            AuditOp::GhManifestStore,
+            AuditOp::GhManifestActivation,
+            AuditOp::GhManifestRetire,
+            AuditOp::GhManifestOneTapSet,
+        ] {
+            assert!(WIRE_CONTRACT.contains(value(op)));
+        }
         // Backticked, because "seal" alone also matches "sealed" elsewhere in the text.
         assert_documented(section, "audit_log.op", "`seal`");
         assert_eq!(value(AuditOp::Seal), "seal");

@@ -1431,11 +1431,19 @@ async fn serve_one(
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(32);
                 let home = Arc::clone(&relay.home);
                 let member = relay.member.clone();
+                let manifest = method == "federation.manifest_watch";
                 relay.runtime.spawn(async move {
-                    home.remote_watches
-                        .open(&home, pending, &tx, header, &member, &params)
-                        .await
-                        .expect("home watch open");
+                    if manifest {
+                        home.remote_watches
+                            .open_manifest(&home, pending, &tx, header, &member, &params)
+                            .await
+                            .expect("home manifest watch open");
+                    } else {
+                        home.remote_watches
+                            .open(&home, pending, &tx, header, &member, &params)
+                            .await
+                            .expect("home watch open");
+                    }
                 });
                 let writer = Arc::clone(&writer);
                 let observed = Arc::clone(&relay.frames);

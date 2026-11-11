@@ -29,9 +29,11 @@ fn chatgpt_mapping_is_exact_and_unknown_claims_never_guess() {
     for (raw, tier) in [
         (Some("pro"), Some("pro_200")),
         (Some("prolite"), Some("pro_100")),
+        (Some("promax"), Some("pro_500")),
         (Some("plus"), Some("plus")),
         (Some("pro_500"), None),
         (Some("PRO"), None),
+        (Some("PROMAX"), None),
         (Some(""), None),
         (None, None),
     ] {

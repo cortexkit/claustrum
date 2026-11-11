@@ -32,7 +32,10 @@ pub fn valid_provider_header_name(header: &str) -> bool {
         })
 }
 
-/// Shared by CLI preflight and store writes; the store never repairs signed input.
+/// Shared by CLI preflight and store writes. Admin ops arrive authenticated by a message
+/// authentication code (MAC) over their exact bytes, so the store refuses a bad value
+/// instead of normalizing it: a repaired value would no longer be the one the operator
+/// authenticated.
 pub fn validate_registered_provider_settings(
     settings: &RegisteredProviderSettings,
 ) -> Result<(), StoreOpError> {
@@ -422,6 +425,156 @@ mod tests {
         );
     }
 
+    /// The upgrade a vault already at the GitHub manifest step takes: the descriptor
+    /// step runs after it, adds its four columns, and leaves every existing row alone.
+    #[test]
+    fn store_at_manifest_schema_upgrades_to_descriptors_and_conserves_every_row() {
+        assert_eq!(GH_MANIFEST_SCHEMA_VERSION, 41);
+        assert_eq!(REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION, 42);
+        let (root, sqlite) = taxonomy_tests::sqlite("registered-descriptor-upgrade", 196);
+        migrate_through_for_test(&sqlite, GH_MANIFEST_SCHEMA_VERSION).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([196; 32])).unwrap();
+        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 41);
+        store
+            .create_audited(
+                "apikey:custom:existing",
+                &taxonomy_tests::api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "existing-consumer",
+                SelectorKind::Exact,
+                "apikey:custom:existing",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        // Seeded with plain SQL because at step 41 the table has only its four
+        // original columns, which is the shape the live vault holds.
+        store
+            .store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO registered_providers VALUES \
+                     ('custom', '[\"web-search\"]', '[\"custom\"]', 123)",
+                    [],
+                )
+            })
+            .unwrap();
+        let rows = |conn: &rusqlite::Connection, table: &str| {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+            let count = stmt.column_count();
+            let rows = stmt
+                .query_map([], |row| {
+                    (0..count)
+                        .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>();
+            rows
+        };
+        let snapshot = |store: &EncryptedStore| {
+            store
+                .store
+                .with_conn(|conn| {
+                    Ok((
+                        rows(conn, "credentials")?,
+                        rows(conn, "read_grants")?,
+                        rows(conn, "audit_log")?,
+                        rows(conn, "registered_providers")?,
+                    ))
+                })
+                .unwrap()
+        };
+        let before = snapshot(&store);
+        assert_eq!(before.0.len(), 1);
+        assert_eq!(before.1.len(), 1);
+        assert_eq!(before.2.len(), 2, "the put and the grant each audit once");
+        assert_eq!(before.3.len(), 1);
+        let path = root.join("store.db");
+        let providers_before = registered_providers_read_only(&path).unwrap();
+        let grants_before = store.list_read_grants().unwrap();
+        let meta_before = store.list_meta().unwrap();
+        drop(store);
+
+        // Reopen from disk the way the daemon does after an upgrade.
+        use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+        let descriptor = StorageDescriptor {
+            module_id: "claustrum".into(),
+            storage_namespace: "taxonomy-registered-descriptor-upgrade".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([196; 32])).unwrap();
+        EncryptedStore::migrate(&store.store).unwrap();
+        // The daemon migrates to the newest step, so the later gateway settings step
+        // runs here too; it only adds its own table and touches none of these rows.
+        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 43);
+        assert_eq!(newest_migration_version(), 43);
+        let after = snapshot(&store);
+        assert_eq!(
+            after.0, before.0,
+            "sealed credential rows stay byte-identical"
+        );
+        assert_eq!(after.1, before.1, "grant rows stay byte-identical");
+        assert_eq!(after.2, before.2, "no audit row is added or changed");
+        assert_eq!(after.3.len(), 1);
+        assert_eq!(
+            after.3[0][..4],
+            before.3[0][..],
+            "the provider row keeps its original four columns"
+        );
+        assert_eq!(
+            after.3[0][4..],
+            [
+                rusqlite::types::Value::Text("[]".into()),
+                rusqlite::types::Value::Null,
+                rusqlite::types::Value::Null,
+                rusqlite::types::Value::Null,
+            ],
+            "the new descriptor columns take their defaults"
+        );
+        let names = store
+            .store
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT name FROM pragma_table_info('registered_providers')")?;
+                let names = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>();
+                names
+            })
+            .unwrap();
+        assert_eq!(
+            names,
+            [
+                "service",
+                "categories_json",
+                "provider_ids_json",
+                "created_at_ms",
+                "hosts_json",
+                "auth_header",
+                "auth_scheme",
+                "fusiform_provider_id",
+            ]
+        );
+        assert_eq!(store.list_meta().unwrap(), meta_before);
+        assert_eq!(store.list_read_grants().unwrap(), grants_before);
+        let providers_after = store.registered_providers().unwrap();
+        assert_eq!(providers_after, providers_before);
+        assert_eq!(
+            registered_providers_read_only(&path).unwrap(),
+            providers_after
+        );
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
     #[test]
     fn registered_provider_descriptor_changes_write_and_audit_every_column() {
         let (_root, store) = taxonomy_tests::rig("registered-descriptor-audit", 195);
@@ -723,6 +876,7 @@ mod tests {
         assert!(store.registered_providers().unwrap().is_empty());
         // The migrate above runs to the newest step, so it must cross the descriptor
         // step this module adds. Later steps may follow it.
+        assert_eq!(newest_migration_version(), 43);
         assert!(newest_migration_version() >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION);
     }
 

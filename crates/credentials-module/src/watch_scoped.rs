@@ -39,6 +39,9 @@ struct Registry {
 pub(crate) struct WatchHub {
     entries: Arc<Mutex<Registry>>,
     snapshots: Arc<Semaphore>,
+    manifest_upstreams: Arc<crate::federation::manifest_watch::Hub>,
+    #[cfg(test)]
+    pub(crate) completed: watch::Sender<u64>,
 }
 
 impl Default for WatchHub {
@@ -47,6 +50,9 @@ impl Default for WatchHub {
         Self {
             entries: Arc::default(),
             snapshots: Arc::new(Semaphore::new(MAX_WATCHES)),
+            manifest_upstreams: Arc::default(),
+            #[cfg(test)]
+            completed: watch::channel(0).0,
         }
     }
 }
@@ -56,6 +62,16 @@ impl Drop for CloseOnDrop {
     fn drop(&mut self) {
         self.0.watches.close_all();
     }
+}
+
+#[derive(Clone)]
+enum Inventory {
+    Scoped {
+        principal: Option<Principal>,
+        params: Arc<ListScopedParams>,
+    },
+    Connectors(Arc<crate::admin_surface::AdminSurface>),
+    Manifest,
 }
 
 fn process_epoch() -> &'static str {
@@ -68,6 +84,15 @@ fn process_epoch() -> &'static str {
 }
 
 impl WatchHub {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, channel: u16) -> bool {
+        self.entries
+            .lock()
+            .expect("watches")
+            .entries
+            .contains_key(&channel)
+    }
+
     pub(crate) fn close_all(&self) {
         for (_, entry) in self.entries.lock().expect("watches").entries.drain() {
             entry.stop.send_replace(Stop::Silent);
@@ -133,6 +158,43 @@ impl WatchHub {
         principal: Option<Principal>,
         params: ListScopedParams,
     ) -> bool {
+        self.open_inventory(
+            surface,
+            writer,
+            header,
+            Inventory::Scoped {
+                principal,
+                params: Arc::new(params),
+            },
+        )
+    }
+
+    pub(crate) fn open_connectors(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+        admin: Arc<crate::admin_surface::AdminSurface>,
+    ) -> bool {
+        self.open_inventory(surface, writer, header, Inventory::Connectors(admin))
+    }
+
+    pub(crate) fn open_manifest(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+    ) -> bool {
+        self.open_inventory(surface, writer, header, Inventory::Manifest)
+    }
+
+    fn open_inventory(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+        inventory: Inventory,
+    ) -> bool {
         let (stop, stopped) = watch::channel(Stop::Running);
         let (finished, done) = oneshot::channel();
         {
@@ -159,16 +221,21 @@ impl WatchHub {
         let writes = surface.subscribe_writes();
         let entries = Arc::clone(&self.entries);
         let snapshots = Arc::clone(&self.snapshots);
+        let manifest_upstreams = Arc::clone(&self.manifest_upstreams);
+        #[cfg(test)]
+        let completed = self.completed.clone();
         tokio::spawn(async move {
             let mut subscription = Subscription {
                 surface,
                 writer,
                 header,
-                principal,
-                params: Arc::new(params),
+                inventory,
                 stopped,
                 writes,
                 snapshots,
+                manifest_upstreams,
+                #[cfg(test)]
+                completed,
             };
             let _ = subscription.run().await;
             let mut entries = entries.lock().expect("watches");
@@ -232,11 +299,13 @@ struct Subscription {
     surface: Arc<ReadSurface>,
     writer: mpsc::Sender<Frame>,
     header: subc_protocol::EnvelopeHeader,
-    principal: Option<Principal>,
-    params: Arc<ListScopedParams>,
+    inventory: Inventory,
     stopped: watch::Receiver<Stop>,
     writes: watch::Receiver<()>,
     snapshots: Arc<Semaphore>,
+    manifest_upstreams: Arc<crate::federation::manifest_watch::Hub>,
+    #[cfg(test)]
+    completed: watch::Sender<u64>,
 }
 
 async fn snapshot<T: Send + 'static>(
@@ -259,6 +328,13 @@ async fn snapshot<T: Send + 'static>(
 
 impl Subscription {
     async fn run(&mut self) -> Result<(), ModuleError> {
+        if matches!(self.inventory, Inventory::Manifest) {
+            if let credentials_core::store::SecretHomeRole::Remote { home_member } =
+                self.surface.store().secret_home_role()
+            {
+                return self.run_manifest_remote(&home_member).await;
+            }
+        }
         let mut last = None;
         let mut seq = 0u64;
         loop {
@@ -268,19 +344,42 @@ impl Subscription {
             let surface = Arc::clone(&self.surface);
             let writer = self.writer.clone();
             let header = self.header;
-            let principal = self.principal.clone();
-            let params = Arc::clone(&self.params);
+            let inventory = self.inventory.clone();
             let snapshots = Arc::clone(&self.snapshots);
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
                 result = async {
-                    let snapshot = snapshot(snapshots, move || surface.watch_scoped(principal.as_ref(), &params)).await;
+                    if let Inventory::Connectors(admin) = &inventory {
+                        if !crate::connectors::admit(header, &writer, admin, false).await? {
+                            return Ok(false);
+                        }
+                    }
+                    let snapshot = snapshot(snapshots, move || match inventory {
+                        Inventory::Scoped { principal, params } => surface.watch_scoped(principal.as_ref(), &params)
+                            .map(|(view, keys)| json!({"view":view, "keys":keys})),
+                        Inventory::Connectors(_) => crate::connectors::list(surface.store()).and_then(|reply| {
+                            reply["version"].as_str().map(|version| json!({"version":version})).ok_or(ReadError::StoreError)
+                        }),
+                        Inventory::Manifest => {
+                            let reply = crate::manifest::watch_snapshot(surface.store());
+                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
+                        }
+                    }).await;
                     match snapshot {
                         Ok(values) => {
+                            if values.get("error").is_some() {
+                                let body = serde_json::to_vec(&wrap_result(values)).map_err(ModuleError::Json)?;
+                                emit(&writer, header, FrameType::Response, body).await?;
+                                return Ok(false);
+                            }
                             if last.as_ref() != Some(&values) {
                                 seq += 1;
-                                let body = serde_json::to_vec(&json!({"kind":"changed", "epoch":process_epoch(), "seq":seq, "view":values.0, "keys":values.1})).map_err(ModuleError::Json)?;
+                                let mut notice = values.clone();
+                                notice["kind"] = json!("changed");
+                                notice["epoch"] = json!(process_epoch());
+                                notice["seq"] = json!(seq);
+                                let body = serde_json::to_vec(&notice).map_err(ModuleError::Json)?;
                                 emit(&writer, header, FrameType::StreamData, body).await?;
                                 last = Some(values);
                             }
@@ -298,6 +397,8 @@ impl Subscription {
                     }
                 } => { if !result? { return Ok(()); } }
             }
+            #[cfg(test)]
+            self.completed.send_modify(|count| *count += 1);
             tokio::select! {
                 biased;
                 _ = self.stopped.changed() => break,
@@ -309,6 +410,61 @@ impl Subscription {
                 _ = tokio::time::sleep(COALESCE) => {}
             }
             self.writes.borrow_and_update();
+        }
+        if *self.stopped.borrow() != Stop::Silent {
+            emit(&self.writer, self.header, FrameType::StreamEnd, Vec::new()).await?;
+        }
+        Ok(())
+    }
+
+    async fn run_manifest_remote(&mut self, home: &str) -> Result<(), ModuleError> {
+        use crate::federation::manifest_watch::State;
+        let session = self
+            .manifest_upstreams
+            .subscribe(home, self.surface.remote().outbound_client());
+        let mut current = session.current.clone();
+        let mut seq = 0;
+        let mut last = None;
+        loop {
+            let state = current.borrow_and_update().clone();
+            tokio::select! {
+                biased;
+                _ = self.stopped.changed() => break,
+                result = async {
+                    match state {
+                        State::Opening => {}
+                        State::Current(value) => {
+                            if last.as_ref() != Some(&value) {
+                                seq += 1;
+                                let mut notice = value.clone();
+                                notice["kind"] = json!("changed");
+                                notice["epoch"] = json!(process_epoch());
+                                notice["seq"] = json!(seq);
+                                emit(&self.writer, self.header, FrameType::StreamData, serde_json::to_vec(&notice).map_err(ModuleError::Json)?).await?;
+                                last = Some(value);
+                            }
+                        }
+                        State::Refused(reply) => {
+                            emit(&self.writer, self.header, FrameType::Response, serde_json::to_vec(&wrap_result(reply)).map_err(ModuleError::Json)?).await?;
+                            return Ok(false);
+                        }
+                        State::End => {
+                            if seq == 0 {
+                                emit(&self.writer, self.header, FrameType::Response, serde_json::to_vec(&wrap_result(json!({"error":{"code":"home_unavailable","class":"transient"}}))).map_err(ModuleError::Json)?).await?;
+                            } else {
+                                emit(&self.writer, self.header, FrameType::StreamEnd, Vec::new()).await?;
+                            }
+                            return Ok(false);
+                        }
+                    }
+                    Ok::<_, ModuleError>(true)
+                } => { if !result? { return Ok(()); } }
+            }
+            tokio::select! {
+                biased;
+                _ = self.stopped.changed() => break,
+                result = current.changed() => { if result.is_err() { break; } }
+            }
         }
         if *self.stopped.borrow() != Stop::Silent {
             emit(&self.writer, self.header, FrameType::StreamEnd, Vec::new()).await?;

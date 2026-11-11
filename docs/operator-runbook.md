@@ -782,6 +782,23 @@ is a stranger's claim rather than a fact. After approval, grant `enrolled:<name>
 needs. In `enroll list`, `awaiting-poll` means admitted but never collected: a stalled
 handover, not a live consumer.
 
+A plugin can request up to four `read`/`list` grants with its proposal. `enroll list`
+and `enroll approve` show the stored list and how many credentials each grant reaches
+now (including exact ids and the reclassification hint for uncategorized accounts).
+Review that reach: approving a host hands it access to your accounts, and stays a
+manual operator decision. To approve and grant in one transaction, use:
+
+```sh
+ck auth enroll approve --request-id <id> --grant-requested
+```
+
+The grants follow the approved name, including a `--name` override; there is no
+second name to copy into a grant command. With no explicit choice, a terminal asks
+`Approve and grant these? [y/N]`. Without a terminal, choose `--grant-requested` or
+`--no-grants` (approve the enrollment only); the flags are mutually exclusive.
+Requests without proposed grants keep the two-step procedure above. Retrying a
+proposal never changes the stored list the operator sees or approves.
+
 A plugin may also propose a display name, such as `Claude sign-in for Pi`.
 `enroll list` shows it beside the request; approval keeps and prints it. To replace
 the label, use `ck auth enroll approve --request-id <id> --display-name <text>`.
@@ -1435,6 +1452,23 @@ The `gh` routing-manifest root follows its own ceremony: see
 ---
 
 ## 12. Deploy and roll back
+
+### Manifest-binding rollout
+
+Upgrade manifest homes **before members**. The manifest home is the agent-secret
+home. An older home answers forwarded manifest calls with uniform `not_found`,
+which a member's AFT cannot distinguish from an empty manifest store.
+
+After deploy, read Callosum's effective operations for the test Mac and confirm
+that `federation.manifest_latest`, `federation.manifest_watch` and
+`federation.manifest_report_active` are present. Existing vault shares use
+`all_declared`, so newly declared operations are exposed on the next catalog read.
+
+Keep `manifest.one_tap` off (its default) until the iPhone has the build that reads
+the binding statement. This setting gates proposing only; the other manifest
+operations, including approving an already-pending proposal, work while it is off.
+The wire forms and admission rules are in
+[the manifest-binding contract](wire-contract-v1.md#17-github-manifest-bindings-and-activation).
 
 ### Build
 

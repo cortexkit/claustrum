@@ -135,6 +135,12 @@ pub struct EnrollProposeParams {
         deserialize_with = "credentials_core::display_name::deserialize_optional_display_name"
     )]
     pub display_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "credentials_core::enrollment::deserialize_optional_requested_grants"
+    )]
+    pub requested_grants: Option<Vec<credentials_core::enrollment::RequestedGrant>>,
 }
 
 /// Exact parameters for `auth.enroll_poll`. The request secret is the only resumption
@@ -1251,6 +1257,99 @@ mod get_scoped_tests {
     }
 
     #[tokio::test]
+    async fn elevenlabs_existing_records_keep_assignments_and_use_catalog_descriptor() {
+        use credentials_core::store::{SetCategoryMode, SetProvidersMode};
+
+        let (surface, store, db_path, _root) = crate::tests::tmp_surface_with_store(216);
+        let principal = Principal::Reserved {
+            module_id: "descriptor-reader".into(),
+        };
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+                )
+                .unwrap();
+            // Reproduce assignments saved before ElevenLabs had a catalog row.
+            store
+                .set_categories_audited(
+                    id,
+                    SetCategoryMode::Set,
+                    &["web-search".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+            store
+                .set_providers_audited(
+                    id,
+                    SetProvidersMode::Set,
+                    &["legacy-route".into()],
+                    AuditCtx::admin(AuditOp::SetProviders),
+                )
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "descriptor-reader",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+
+        // An older binary could register ElevenLabs; current setters must refuse it.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO registered_providers \
+             (service, categories_json, provider_ids_json, created_at_ms, hosts_json, \
+              auth_header, auth_scheme, fusiform_provider_id) \
+             VALUES ('elevenlabs', '[\"llm-provider\"]', '[\"registered-route\"]', 123, \
+                     '[\"api.openai.com\"]', 'authorization', 'bearer', 'openai')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let registration = store.registered_providers().unwrap();
+
+        for id in ["apikey:elevenlabs", "apikey:elevenlabs:work"] {
+            let record = store.get(id).unwrap().encode().unwrap();
+            let reply = surface
+                .get_scoped(
+                    Some(&principal),
+                    &GetScopedParams {
+                        credential_id: id.into(),
+                        min_ttl_ms: None,
+                        enrollment_token: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                golden_reply(
+                    id,
+                    1,
+                    json!({
+                        "auth": {"header": "xi-api-key", "scheme": "raw"},
+                        "hosts": ["api.elevenlabs.io"],
+                        "invalid_key": {
+                            "status": 401,
+                            "error_code": "unauthorized",
+                            "error_code_field": "/detail/code"
+                        }
+                    })
+                )
+            );
+            assert_eq!(store.categories(id).unwrap(), ["web-search"]);
+            assert_eq!(store.provider_ids(id).unwrap(), ["legacy-route"]);
+            assert_eq!(store.get(id).unwrap().encode().unwrap(), record);
+        }
+        assert_eq!(store.registered_providers().unwrap(), registration);
+    }
+
+    #[tokio::test]
     async fn registered_provider_v2_v3_sequence_projects_current_descriptor_for_every_key() {
         use credentials_core::admin_ops::{apply, AdminOpBody};
         let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(215);
@@ -2211,12 +2310,15 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &EnrollProposeParams,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.engine.store().propose_enrollment_with_display_name_by(
-            Self::observed_principal(principal),
-            &params.proposed_name,
-            &params.request_secret_hash,
-            params.display_name.as_deref(),
-        )
+        self.engine
+            .store()
+            .propose_enrollment_with_requested_grants_by(
+                Self::observed_principal(principal),
+                &params.proposed_name,
+                &params.request_secret_hash,
+                params.display_name.as_deref(),
+                params.requested_grants.as_deref(),
+            )
     }
 
     pub fn enroll_poll(
@@ -3074,11 +3176,21 @@ impl ReadSurface {
         operation: GrantOperation,
         usage: TransferKeyUse,
     ) -> Result<ResolvedKeyAddress, ReadError> {
+        // Handles and grants must not let callers sign with the manifest root key.
+        // Check the resolved id before scoped authorization can record first use;
+        // public-key reads still resolve under Read and remain available to verifiers.
+        let manifest_sign_fenced = |id: &str| {
+            operation == GrantOperation::Sign
+                && id == credentials_core::store::GH_MANIFEST_ROOT_KEY_ID
+        };
         match address {
             KeyAddress::Handle(handle) => {
                 self.check_limiter(connection_id, handle).await;
                 match self.engine.store().resolve_handle_with_incarnation(handle) {
-                    Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                    Ok((id, _))
+                        if manifest_sign_fenced(&id)
+                            || transfer_key_fenced(&id, TransferKeyAccess::Handle) =>
+                    {
                         Err(ReadError::NotFound)
                     }
                     Ok((id, incarnation)) => Ok(ResolvedKeyAddress {
@@ -3091,6 +3203,9 @@ impl ReadSurface {
                 }
             }
             KeyAddress::Scoped(credential_id) => {
+                if manifest_sign_fenced(credential_id) {
+                    return Err(ReadError::NotFound);
+                }
                 let incarnation = self.engine.store().credential_incarnation(credential_id);
                 let resolved_principal = self.authorize_scoped_for(
                     principal,

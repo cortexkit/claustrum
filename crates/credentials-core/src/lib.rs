@@ -35,6 +35,7 @@ pub mod envelope;
 pub mod federation;
 pub mod fusiform_providers;
 pub mod gateway;
+pub mod gh_manifest;
 pub mod google_login;
 pub mod health;
 pub mod http;
@@ -100,6 +101,16 @@ pub use provider_ids::{
     MIN_PROVIDER_ID_LEN,
 };
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
+
+/// Non-secret fields opened for the operator's connectors projection, including
+/// lifecycle states for which ordinary credential reads must not return material.
+#[derive(Clone, Debug)]
+pub struct ConnectorRecordMetadata {
+    pub kind: CredentialKind,
+    pub refresh_adapter: Option<String>,
+    pub identity: record::RecordIdentity,
+    pub detected_plan: Option<plan_detection::DetectedPlan>,
+}
 pub use refresh_adapters::anthropic::AnthropicAdapter;
 pub use refresh_adapters::antigravity::AntigravityAdapter;
 pub use refresh_adapters::cursor::CursorAdapter;

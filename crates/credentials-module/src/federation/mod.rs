@@ -9,6 +9,7 @@
 
 pub mod home_watch;
 pub mod ingress;
+pub mod manifest_watch;
 pub mod member_watch;
 pub mod outbound;
 pub mod remote_read;

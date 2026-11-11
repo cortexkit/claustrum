@@ -67,99 +67,122 @@ the signature.
 
 ## 5. The ceremony
 
-The private key never leaves the daemon. Signing is a route operation (`credential.sign`):
-handle and bytes in, signature out.
+The private key stays in vault custody. Use the master-key-gated manifest admin operation,
+not `credential.sign`: the root is refused by that general signing surface, even through
+a capability handle, principal grant or enrollment token. Its public key remains readable.
 
 1. **The approver answers the section 2 question**, naming the manifest version and what it
    stops routing.
 2. **Require an executed round trip through the holder** before recording approval: one real
    operation per declared verb, on a scratch thread in a repository you own. A placed image or a
    version string proves placement, not that the holder executes what the manifest declares.
-3. **Record the approval** under the master key:
+3. **Approve, sign and retain the version** under the master key:
 
    ```sh
-   ck auth approve --id signing:gh-manifest-root:1 --file <manifest.json> --approver <name>
+    ck auth manifest sign --file <manifest.json> --approver <name>
    ```
 
-   The `approval` audit row binds the approver, the artifact's SHA-256 and the signing
-   credential. It signs nothing.
-4. **Mint a capability handle** for the root (`ck auth mint-handle --id signing:gh-manifest-root:1`).
-   The key sits with zero live handles between signings.
-5. **Call `credential.sign`** with the exact approved bytes. It returns a detached Ed25519
-   signature plus `key_id`, and writes nothing.
-6. **Revoke the handle immediately** (`ck auth revoke-handle --handle <ckh_...>`). Its lifetime is
-   one signing. A mint with no matching revoke is an unfinished ceremony.
-7. **Verify before publishing**: the signature must verify under the public half in the trust
-   set, using the consumer's own fixture as the control.
-8. **Retain the bytes** (section 6).
+   The version must exceed the newest stored version, and parsing and re-serializing must
+   reproduce its bytes exactly. One transaction writes the `approval` row (binding the
+   approver, root credential and SHA-256), `gh_manifest_sign`, `gh_manifest_store`, the
+   `gh_manifests` row with source `ceremony`, and pending-proposal supersede transitions.
+   Signing succeeds only when that transaction commits; no signature is returned on a
+   failed commit. No temporary handle or separate `ck auth approve` is needed.
+4. **Check the command's result.** After commit it writes
+   `<data_dir>/signed-envelopes/v<N>-envelope.json` at mode `0600`, using a temporary
+   sibling and an atomic rename. If publication fails, the command exits non-zero and
+   names the stored version. Do not sign again: recover the retained version with
+   `ck auth manifest export --version <N>`.
+5. **Verify before publishing**: the envelope's detached Ed25519 signature must verify
+   over its exact `manifest_bytes` under the public half in the trust set, using the
+   consumer's own fixture as the control.
 
-The chain proves the order: the `approval` row (with `payload_hash = SHA-256(manifest bytes)`),
-then `mint_handle` opening the window, then `revoke_handle` closing it. Approval and signature
-meet at the hash: the chain proves who approved bytes H before the window opened, and the
-published signature proves the key signed bytes H. A signature whose hash has no approval row is
-visible as an absence. What this does not prove is that exactly one signature was made inside the
-window, which is why step 6 is immediate.
+The approval, signature audit and retained bytes now commit together. The same root signer
+serves phone-approved binding proposals, whose source is `one_tap`. Turning one-tap off
+blocks only new proposals: already-pending approvals, delivery, reporting, import and
+ceremony signing still work. `ck auth manifest one-tap on|off|status` controls that setting;
+missing is off, and unreadable values are treated as off.
 
-### Why `credential.sign` writes no audit entry
+### Transitions, not observations
 
-`credential.sign` is reachable by any holder of a live handle and can be called in a loop. A
-durable write per call would let a handle holder grow the audit chain without bound, and that
-chain can never be trimmed, because trimming is what tamper evidence is defined against. The
-rule: **an untrimmable log takes transitions only; a trimmable table takes every observation.**
-A signature is an observation of a request. Minting and revoking are admin operations under the
-master-key gate, so they bound the window instead.
+**An untrimmable log takes transitions only; a trimmable table takes every observation.**
+The root signer writes once per committed version under the ceremony or phone-approval
+gate, not once per unrestricted signing request. Activation reports update a table on
+every observation, but audit only the first `(member, stored version, verdict)` tuple.
+General `credential.sign` for other signing keys retains its existing audit policy; it
+cannot sign with this root.
 
 ### Why the vault signs rather than serving the key
 
-A readable handle would already be signing power: whoever can read the key bytes can sign with
-any Ed25519 library. Signing in the daemon exercises the same privilege without copying the
-private key into another process's memory, and without a "read, use, drop" discipline to get
-wrong.
+A readable handle would already be signing power: whoever can read the key bytes can sign
+with any Ed25519 library. The manifest admin operation signs within the vault's write
+transaction without handing the private key to the caller or requiring a "read, use, drop"
+discipline.
 
 ### The kind fence
 
-`credential.sign` is served only for records whose kind is `SigningKey`, refusing everything else
-with `kind_not_signable`, so the vault is not a general signing oracle over every stored secret.
-The fence is enforced on the stored kind, not derived from the credential id. A record's kind
-cannot be changed in place without re-supplying its payload, and the mint keeps no second copy,
-so a key minted with the wrong kind must be re-minted under a new key id before any trust set
-includes it.
+The manifest signer requires an active root record of kind `SigningKey`. The root does
+not need, and must not acquire, the general `operator_sign` flag. Other keys keep their
+existing kind and operator-signing fences.
 
 ## 6. Retention and audit
 
 `payload_hash` is a commitment to bytes, not a copy of them. The chain answers *what was approved*
 forever and cannot answer *what did it say*; a signature over bytes nobody holds is uncheckable
-while still reading as verified. **Retention is therefore part of the ceremony:**
+while still reading as verified. **The `gh_manifests` row is the retained copy of every
+version stored from now on**, whether imported, ceremony-signed or phone-approved. It
+holds the exact manifest bytes, their SHA-256, key id, signature, signed time, source and
+approval reference (nullable only for import), and cannot be updated or deleted.
+
+At deployment, import the existing signed version once:
+
+```sh
+ck auth manifest import --envelope <file>
+ck auth manifest list
+```
+
+Import verifies the root key id and Ed25519 signature, requires an increasing version and
+byte-identical re-serialization, and preserves the signed bytes. `list` shows versions,
+sources, hashes and signed times, followed by expected computers and activation rows.
+`ck auth manifest retire-machine --member <member-id>` permanently removes a computer
+from readiness; it does not revoke delivery grants.
+
+Keep the existing legacy payload files in their current directory:
 
 ```
 <data_dir>/signed-payloads/gh-routing-manifest-v<N>.json   0600
 ```
 
-A file is admitted **only** when its SHA-256 equals the `payload_hash` of an `approval` row. The
-hand-off envelope (`{key_id, manifest_bytes, signature}`) is not an approved payload, so keep it
-beside the store, not in it:
+A legacy file is admitted **only** when its SHA-256 equals the `payload_hash` of an
+`approval` row. New versions need no second payload file there. The hand-off envelope
+(`{key_id, manifest_bytes, signature}`) is a derived delivery file, not the approved payload:
 
 ```
 <data_dir>/signed-envelopes/v<N>-envelope.json   0600
 ```
 
-Both directories are backed up through the descriptor the daemon writes at every start
-(`ENGRAM_CATALOG_JSON` in `crates/credentials-module/src/main.rs`). A new directory kept beside
-them needs an entry there; otherwise it is not backed up and nothing warns.
+`ck auth manifest export --version <N>` rewrites that envelope byte-identically from the
+stored row at `0600`, even after a restart. It signs nothing and writes no database row.
+The database and both existing directories are covered by the backup descriptor the
+daemon writes at every start (`ENGRAM_CATALOG_JSON` in
+`crates/credentials-module/src/main.rs`). No new backup directory is introduced.
 
 **Audit in the direction that can find absence.** Scanning retained files against the chain
 iterates what exists, so a missing artifact is not expressible. The scan that finds a gap goes
-from the chain to the files:
+from the chain to retained bytes, in the database or legacy files:
 
 ```sql
 SELECT seq, substr(payload_hash,1,16) FROM audit_log
 WHERE op='approval' AND credential_id='signing:gh-manifest-root:1' ORDER BY seq;
 ```
 
-then check each hash has a file. `scripts/audit-signed-payloads.sh [<data_dir>]` runs both
-directions and also checks that the `manifest_version` inside each file matches the version in
-its filename, which a content hash cannot see. Exit 0 means every arm is clean, 1 a finding, and 2
-that the audit could not run (not the same as clean).
+For each hash, first check for an equal `gh_manifests.manifest_sha256`; a stored row is
+retained even if its envelope file is absent. Otherwise require a matching legacy file.
+`scripts/audit-signed-payloads.sh [<data_dir>]` runs both directions and also checks that
+the `manifest_version` inside each legacy file matches the version in its filename,
+which a content hash cannot see. Old stores without `gh_manifests` still use the legacy
+file check. Exit 0 means every arm is clean, 1 a finding, and 2 that the audit could not
+run (not the same as clean). Missing bytes for legacy payloads remain findings, not exceptions.
 
 ## 7. Proving the signer against someone else's bytes
 

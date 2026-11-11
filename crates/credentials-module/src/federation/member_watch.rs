@@ -34,14 +34,43 @@ pub type PairedComputers = Option<Vec<(String, String)>>;
 const MAX_MEMBER_RETRY_SECONDS: u64 = 600;
 
 #[derive(Default)]
-struct Logged(Mutex<BTreeSet<(String, String)>>);
+struct Logged {
+    rows: Mutex<BTreeSet<(String, String)>>,
+    failing: Mutex<BTreeSet<String>>,
+}
 
 impl Logged {
     fn first(&self, home: &str, id: &str) -> bool {
-        self.0
+        self.rows
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert((home.into(), id.into()))
+    }
+
+    fn failed(&self, home: &str, ending: &SessionEnd) {
+        // Keep this state outside the worker: a refusal can replace the worker
+        // while the same home's watch is still failing.
+        let first = self
+            .failing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(home.into());
+        if first {
+            tracing::warn!(target: "federation", home, ending = ending.kind(), "home watch ended; retrying");
+        } else {
+            tracing::debug!(target: "federation", ?ending, "home watch ended; inventory retained");
+        }
+    }
+
+    fn recovered(&self, home: &str) {
+        if self
+            .failing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(home)
+        {
+            tracing::info!(target: "federation", home, "home watch recovered");
+        }
     }
 }
 
@@ -203,6 +232,7 @@ impl Worker {
             Err(error) => return Some(SessionEnd::Dropped(error)),
         };
         let mut applied = false;
+        let mut received = false;
         let mut retry_at = Instant::now();
         if self.pending_apply {
             retry_at += backoff.next_delay();
@@ -214,12 +244,16 @@ impl Worker {
                 event = subscription.next_event() => event,
                 _ = self.replays.changed() => { self.replay().await; continue; },
                 _ = self.wakes.changed(), if self.pending_apply => {
-                    applied |= self.apply_latest().await;
+                    let latest_applied = self.apply_latest().await;
+                    applied |= latest_applied;
+                    if received && latest_applied { self.logged.recovered(home); }
                     if self.pending_apply { retry_at = Instant::now() + backoff.next_delay(); }
                     continue;
                 },
                 _ = tokio::time::sleep_until(retry_at), if self.pending_apply => {
-                    applied |= self.apply_latest().await;
+                    let latest_applied = self.apply_latest().await;
+                    applied |= latest_applied;
+                    if received && latest_applied { self.logged.recovered(home); }
                     if self.pending_apply { retry_at = Instant::now() + backoff.next_delay(); }
                     continue;
                 },
@@ -232,7 +266,12 @@ impl Worker {
                     self.retained = Some(snapshot);
                     self.skipped.clear();
                     self.pending_apply = true;
-                    applied |= self.apply_latest().await;
+                    received = true;
+                    let latest_applied = self.apply_latest().await;
+                    applied |= latest_applied;
+                    if latest_applied {
+                        self.logged.recovered(home);
+                    }
                     if self.pending_apply {
                         retry_at = Instant::now() + backoff.next_delay();
                     }
@@ -258,6 +297,7 @@ impl Worker {
             let Some(ending) = self.session(&home, &mut backoff).await else {
                 return;
             };
+            self.logged.failed(&home, &ending);
             let retry_at = Instant::now() + backoff.next_delay();
             if ending.removes_home() {
                 // A refusal invalidates even a failed apply. Nothing retained from
@@ -267,8 +307,6 @@ impl Worker {
                 self.pending_apply = false;
                 self.report(HomeEventKind::Remove(RetryStart { backoff, retry_at }));
                 return;
-            } else {
-                tracing::debug!(target: "federation", ?ending, "home watch ended; inventory retained");
             }
             if !self.retry(retry_at).await {
                 return;
@@ -348,6 +386,20 @@ enum SessionEnd {
 }
 
 impl SessionEnd {
+    // Only the code or fixed kind is safe for persistent logs; terminal replies
+    // and transport messages may contain caller-supplied bodies or secrets.
+    fn kind(&self) -> &str {
+        match self {
+            Self::Terminal(SubscriptionEvent::Error { code, .. })
+            | Self::Dropped(OutboundError::Refused { code, .. }) => code,
+            Self::Terminal(SubscriptionEvent::End) => "stream_end",
+            Self::Terminal(SubscriptionEvent::Response(_)) => "response",
+            Self::Terminal(SubscriptionEvent::Data(_)) => "data",
+            Self::Dropped(OutboundError::Unavailable(_)) => "unavailable",
+            Self::Undecodable => "undecodable",
+        }
+    }
+
     fn removes_home(&self) -> bool {
         match self {
             Self::Terminal(SubscriptionEvent::Error { code, detail, .. }) => {
@@ -862,5 +914,91 @@ mod tests {
         assert!((&mut call).await.unwrap());
         assert!(store.remote_record("oauth:x").unwrap().is_some());
         drop(stopped);
+    }
+
+    #[derive(Clone, Default)]
+    struct WatchLogs(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    impl tracing::Subscriber for WatchLogs {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::INFO
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={value:?};", field.name()));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            assert_eq!(event.metadata().target(), "federation");
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), fields.0));
+        }
+    }
+
+    #[test]
+    fn member_watch_failure_logs_warn_once_and_recover_per_home() {
+        let logs = WatchLogs::default();
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let logged = Logged::default();
+        let refused = SessionEnd::Terminal(SubscriptionEvent::Error {
+            code: "not_found".into(),
+            message: "private-message".into(),
+            detail: Some(json!({"private": "payload"})),
+        });
+        let mut observed = Vec::new();
+        for action in ["fail", "fail", "recover", "fail"] {
+            if action == "fail" {
+                logged.failed(HOME, &refused);
+            } else {
+                logged.recovered(HOME);
+            }
+            let events = std::mem::take(&mut *logs.0.lock().unwrap());
+            assert!(events.len() <= 1);
+            for (_, fields) in &events {
+                assert!(fields.contains(HOME), "{fields}");
+                assert!(!fields.contains("private"), "{fields}");
+                if action == "fail" {
+                    assert!(fields.contains("not_found"), "{fields}");
+                }
+            }
+            observed.push(events.first().map(|(level, _)| *level));
+        }
+        assert_eq!(
+            observed,
+            [
+                Some(tracing::Level::WARN),
+                None,
+                Some(tracing::Level::INFO),
+                Some(tracing::Level::WARN)
+            ]
+        );
+        logged.failed(
+            "another-home",
+            &SessionEnd::Dropped(OutboundError::Unavailable("private-transport-error".into())),
+        );
+        let events = std::mem::take(&mut *logs.0.lock().unwrap());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, tracing::Level::WARN);
+        assert!(events[0].1.contains("another-home"));
+        assert!(events[0].1.contains("unavailable"));
+        assert!(!events[0].1.contains("private"));
+        logged.recovered("healthy-home");
+        assert!(logs.0.lock().unwrap().is_empty());
     }
 }

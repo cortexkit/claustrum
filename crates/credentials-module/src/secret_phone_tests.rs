@@ -3,7 +3,14 @@ use crate::federation::{
     ingress::{map_route_caller, map_route_caller_with_phone},
     MappingGate, RouteCaller,
 };
+use credentials_core::{
+    audit::{AuditCtx, AuditOp},
+    gh_manifest::{ManifestBindingEnvelope, MANIFEST_BINDING_ENVELOPE_V1_TAG},
+    record::{CredentialKind, VaultRecord},
+    store::{GhManifestProposal, GhManifestProposalInput, GhManifestSource, GhManifestVersion},
+};
 use credentials_core::{key::MasterKey, test_support::TestTempDir};
+use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use subc_protocol::Principal;
@@ -93,7 +100,7 @@ fn phone_mapping_requires_both_gates_and_exact_authenticated_harness() {
 #[tokio::test]
 async fn phone_allowlist_and_bearers_fail_before_lookup() {
     let (_root, store) = rig("allowlist");
-    assert_eq!(PHONE_OPS.len(), 7);
+    assert_eq!(PHONE_OPS.len(), 8);
     for method in [
         "credential.get",
         "credential.get_scoped",
@@ -506,5 +513,335 @@ fn phone_extended_deposit_accepts_8_rules_and_4_origins_and_refuses_the_next_ent
                 assert!(matches!(parsed, Err(SecretError::LimitExceeded)));
             }
         }
+    }
+}
+
+async fn manifest_phone(store: &Arc<EncryptedStore>, method: &str, params: &Value) -> Value {
+    match serve_with_lookup(
+        Arc::clone(store),
+        FP,
+        method,
+        params,
+        tokio::time::Instant::now() + PHONE_OP_DEADLINE,
+        async { Some(paired()) },
+    )
+    .await
+    {
+        PhoneAnswer::Reply(reply) => reply,
+        _ => panic!("expected a phone result for {method}"),
+    }
+}
+
+#[tokio::test]
+async fn manifest_approve_params_are_exact_and_fail_before_pairing() {
+    let (_root, store) = rig("manifest-grammar");
+    assert!(is_phone_op("manifest.approve"));
+    assert!(matches!(
+        parse("manifest.approve", &json!({"envelope_b64url":"AA", "signature_b64url":"AQ"})),
+        Ok(PhoneOperation::ManifestApprove { envelope, signature })
+            if envelope == [0] && signature == [1]
+    ));
+    for params in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"signature_b64url":"AA"}),
+        json!({"envelope_b64url":"AA"}),
+        json!({"envelope_b64url":false,"signature_b64url":"AA"}),
+        json!({"envelope_b64url":"AA","signature_b64url":null}),
+        json!({"envelope_b64url":"AA","signature_b64url":"AA","card_ref":"card"}),
+        json!({"envelope_b64url":"AA","signature_b64url":"AA","extra":null}),
+        json!({"envelope_b64url":"AB","signature_b64url":"AA"}),
+        json!({"envelope_b64url":"AA","signature_b64url":"AA="}),
+    ] {
+        let polled = AtomicBool::new(false);
+        let result = serve_with_lookup(
+            Arc::clone(&store),
+            FP,
+            "manifest.approve",
+            &params,
+            tokio::time::Instant::now() + PHONE_OP_DEADLINE,
+            async {
+                polled.store(true, Ordering::SeqCst);
+                Some(paired())
+            },
+        )
+        .await;
+        assert_eq!(code(result), "invalid_params", "{params}");
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+}
+
+fn manifest_snapshot(root: &TestTempDir) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let conn = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    [
+        "gh_manifests",
+        "gh_manifest_proposals",
+        "gh_manifest_activations",
+        "gh_manifest_activation_audits",
+        "audit_log",
+    ]
+    .map(|table| {
+        let mut statement = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    })
+    .into()
+}
+
+#[tokio::test]
+async fn manifest_approve_role_and_registration_refusals_precede_envelope_checks() {
+    let (root, store) = rig("manifest-roles");
+    let params = json!({"envelope_b64url":"AA", "signature_b64url":"AA"});
+    let before = manifest_snapshot(&root);
+    assert_eq!(
+        manifest_phone(&store, "manifest.approve", &params).await,
+        SecretError::PhoneNotRegistered.body()
+    );
+    assert_eq!(manifest_snapshot(&root), before);
+    let home = "fed-computer:33333333333333333333333333333333";
+    let member = "fed-computer:22222222222222222222222222222222";
+    let conn = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    conn.execute(
+        "INSERT INTO settings(name,value,updated_at_ms) VALUES('secrets.home_member',?1,0)",
+        [home],
+    )
+    .unwrap();
+    for (self_member, expected) in [
+        (Some(member), "secret_home_elsewhere"),
+        (None, "remote_setup_incomplete"),
+    ] {
+        conn.execute(
+            "DELETE FROM settings WHERE name=?1",
+            [credentials_core::federation::SELF_MEMBER_SETTING],
+        )
+        .unwrap();
+        if let Some(member) = self_member {
+            store
+                .set_federation_self_member_audited(
+                    member,
+                    credentials_core::audit::AuditCtx::admin(
+                        credentials_core::audit::AuditOp::FederationSelfSet,
+                    ),
+                )
+                .unwrap();
+        }
+        let before = manifest_snapshot(&root);
+        let reply = manifest_phone(&store, "manifest.approve", &params).await;
+        assert_eq!(reply["error"]["code"], expected);
+        assert_eq!(reply["error"]["class"], "permanent");
+        if self_member.is_some() {
+            assert_eq!(reply["error"]["remedy_member"], home);
+        }
+        assert_eq!(manifest_snapshot(&root), before);
+    }
+}
+
+async fn pending_manifest(
+    store: &Arc<EncryptedStore>,
+) -> (GhManifestProposal, SigningKey, Vec<u8>) {
+    use ring::signature::KeyPair as _;
+    let der =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(der.as_ref()).unwrap();
+    let public = pair.public_key().as_ref().to_vec();
+    let record = VaultRecord::new_static(
+        CredentialKind::SigningKey,
+        "operator",
+        format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+        )
+        .into_bytes(),
+        None,
+    );
+    store
+        .create_audited(
+            credentials_core::store::GH_MANIFEST_ROOT_KEY_ID,
+            &record,
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    store
+        .set_federation_self_member_audited(
+            "fed-computer:22222222222222222222222222222222",
+            AuditCtx::admin(AuditOp::FederationSelfSet),
+        )
+        .unwrap();
+    let base = include_bytes!("../../credentials-core/tests/fixtures/gh-manifest-v28.json");
+    store
+        .store_gh_manifest(
+            &GhManifestVersion {
+                version: 28,
+                manifest_bytes: base,
+                manifest_sha256: &manifest_hash(base),
+                key_id: &credentials_core::signing::key_id_for_public(&public),
+                signature: &pair.sign(base).as_ref().try_into().unwrap(),
+                signed_at_ms: wall_now_ms(),
+                source: GhManifestSource::Import,
+                approval_audit_seq: None,
+            },
+            AuditCtx::admin(AuditOp::GhManifestStore),
+        )
+        .unwrap();
+    let signer = SigningKey::from_bytes((&[7; 32]).into()).unwrap();
+    let (deposit_pub, _) =
+        credentials_core::kem::public_half(&credentials_core::kem::generate_key().unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest_phone(
+            store,
+            "secret.phone_keys_register",
+            &json!({
+                "deposit_pub":manifest_hex(&deposit_pub),
+                "approval_pub":manifest_hex(signer.verifying_key().to_encoded_point(false).as_bytes()),
+            }),
+        )
+        .await,
+        json!({"status":"stored"})
+    );
+    let prepared = store
+        .prepare_gh_manifest_proposal(GhManifestProposalInput {
+            agent_id: "agent_4444444444444444".into(),
+            app_id: 42,
+            app_slug: "repo-bot".into(),
+            repo: "Octo/New".into(),
+            installation_permissions: std::collections::BTreeMap::from([
+                ("contents".into(), "write".into()),
+                ("metadata".into(), "read".into()),
+            ]),
+        })
+        .unwrap();
+    let proposal = store
+        .propose_gh_manifest_binding(&prepared, "reserved:plexus", || true, wall_now_ms)
+        .unwrap();
+    (proposal, signer, public)
+}
+
+fn manifest_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn manifest_hash(bytes: &[u8]) -> String {
+    manifest_hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
+fn manifest_envelope(proposal: &GhManifestProposal) -> Vec<u8> {
+    ManifestBindingEnvelope {
+        v: String::from_utf8(MANIFEST_BINDING_ENVELOPE_V1_TAG.to_vec()).unwrap(),
+        proposal_id: proposal.proposal_id.clone(),
+        statement_sha256: manifest_hash(&proposal.statement_bytes),
+        decision: "allow".into(),
+        device_fingerprint: FP.into(),
+        issued_at_ms: wall_now_ms() as u64,
+    }
+    .canonical_bytes()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn manifest_approve_phone_commits_verifiable_bytes_and_resends_across_restart() {
+    let (root, store) = rig("manifest-restart");
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    let (proposal, signer, public) = pending_manifest(&store).await;
+    store
+        .set_manifest_one_tap_audited(false, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    assert!(!store.manifest_one_tap_enabled());
+    let envelope = manifest_envelope(&proposal);
+    let signature: Signature = signer.sign(&envelope);
+    let params = json!({
+        "envelope_b64url":URL_SAFE_NO_PAD.encode(&envelope),
+        "signature_b64url":URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
+    });
+    let expected = json!({
+        "status":"approved", "proposal_id":proposal.proposal_id,
+        "version":29, "manifest_sha256":manifest_hash(&proposal.manifest_bytes),
+    });
+    assert_eq!(
+        manifest_phone(&store, "manifest.approve", &params).await,
+        expected
+    );
+    let after = manifest_snapshot(&root);
+    let conn = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    let (bytes, signature, source): (Vec<u8>, Vec<u8>, String) = conn
+        .query_row(
+            "SELECT manifest_bytes,signature,source FROM gh_manifests WHERE version=29",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(bytes, proposal.manifest_bytes);
+    assert_eq!(source, "one_tap");
+    let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public);
+    verifier.verify(&bytes, &signature).unwrap();
+    let mut changed = bytes;
+    changed[0] ^= 1;
+    assert!(verifier.verify(&changed, &signature).is_err());
+    drop(conn);
+    drop(store);
+    let sqlite = cortexkit_store::open_sqlite(&cortexkit_store::StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: "manifest-restart".into(),
+        isolation: cortexkit_store::Isolation::Module,
+        backend: cortexkit_store::StorageBackend::Sqlite {
+            path: root.join("store.db").to_string_lossy().into_owned(),
+        },
+    })
+    .unwrap();
+    let store = Arc::new(EncryptedStore::open(sqlite, MasterKey::from_bytes([91; 32])).unwrap());
+    assert_eq!(
+        manifest_phone(&store, "manifest.approve", &params).await,
+        expected
+    );
+    assert_eq!(manifest_snapshot(&root), after);
+}
+
+#[tokio::test]
+async fn manifest_approve_phone_rejects_cross_domain_envelopes_at_strict_parse() {
+    use credentials_core::agent_secret::{ApprovalEnvelope, ApprovalItem, USE_ENVELOPE_TAG};
+    let (root, store) = rig("manifest-domains");
+    let (proposal, _, _) = pending_manifest(&store).await;
+    let secret_bytes = ApprovalEnvelope {
+        v: String::from_utf8(USE_ENVELOPE_TAG.to_vec()).unwrap(),
+        items: vec![ApprovalItem {
+            request_id: proposal.proposal_id.clone(),
+            statement_sha256: proposal.statement_sha256.clone(),
+        }],
+        decision: "allow".into(),
+        duration: "once".into(),
+        grant_expires_at_ms: 0,
+        device_fingerprint: FP.into(),
+        issued_at_ms: wall_now_ms() as u64,
+    }
+    .canonical_bytes()
+    .unwrap();
+    let manifest_bytes = manifest_envelope(&proposal);
+    assert!(serde_json::from_slice::<ManifestBindingEnvelope>(&secret_bytes).is_err());
+    assert!(serde_json::from_slice::<ApprovalEnvelope>(&manifest_bytes).is_err());
+    for (method, envelope) in [
+        ("manifest.approve", secret_bytes),
+        ("secret.approve", manifest_bytes),
+    ] {
+        let before = manifest_snapshot(&root);
+        // Both strict envelope parsers refuse before the empty signature can be used.
+        assert_eq!(
+            manifest_phone(
+                &store,
+                method,
+                &json!({"envelope_b64url":URL_SAFE_NO_PAD.encode(envelope), "signature_b64url":""}),
+            )
+            .await,
+            SecretError::ApprovalInvalid.body()
+        );
+        assert_eq!(manifest_snapshot(&root), before);
     }
 }

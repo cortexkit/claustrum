@@ -1,0 +1,128 @@
+{
+  "result": {
+    "computer": "fed-computer:11111111111111111111111111111111",
+    "rows": [
+      {
+        "category": "ai_models",
+        "id": "apikey:openai",
+        "incarnation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "api_key",
+        "name": "OpenAI (API Key)",
+        "permissions": [],
+        "setup": [
+          {
+            "remedy": "replace_key",
+            "state": "needed",
+            "step": "key",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "reason": "invalid_api_key",
+          "state": "key_refused"
+        }
+      },
+      {
+        "id": "cookie:damaged",
+        "incarnation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "account",
+        "name": "cookie:damaged",
+        "permissions": [],
+        "setup": [
+          {
+            "remedy": "sign_in_again",
+            "state": "needed",
+            "step": "sign_in",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "state": "damaged"
+        }
+      },
+      {
+        "id": "cookie:signed-out",
+        "incarnation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "account",
+        "name": "cookie:signed-out",
+        "permissions": [],
+        "setup": [
+          {
+            "remedy": "sign_in_again",
+            "state": "needed",
+            "step": "sign_in",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "state": "signed_out"
+        }
+      },
+      {
+        "category": "ai_models",
+        "id": "oauth:anthropic",
+        "identity": "person@example.invalid",
+        "incarnation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "account",
+        "name": "Claude",
+        "permissions": [],
+        "plan": {
+          "source": "detected",
+          "tier": "pro"
+        },
+        "setup": [
+          {
+            "state": "done",
+            "step": "sign_in",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "state": "ok"
+        }
+      },
+      {
+        "category": "ai_models",
+        "id": "oauth:anthropic:copy",
+        "incarnation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "account",
+        "name": "Claude",
+        "permissions": [],
+        "setup": [
+          {
+            "state": "done",
+            "step": "sign_in",
+            "where": "computer"
+          },
+          {
+            "state": "unknown",
+            "step": "home",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "state": "ok"
+        }
+      },
+      {
+        "id": "opaque:id-is-not-kind",
+        "incarnation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "api_key",
+        "name": "opaque:id-is-not-kind",
+        "permissions": [],
+        "setup": [
+          {
+            "state": "done",
+            "step": "key",
+            "where": "computer"
+          }
+        ],
+        "status": {
+          "state": "ok"
+        }
+      }
+    ],
+    "version": "6482b4390255a93a371a1495f4989d03a23f2c37823e9bbc76d8491ece84c07f",
+    "watch": true
+  }
+}

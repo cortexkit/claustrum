@@ -39,6 +39,8 @@ pub fn chatgpt_plan(access_token: &str) -> DetectedPlan {
     let tier = match raw.as_deref() {
         Some("pro") => Some("pro_200"),
         Some("prolite") => Some("pro_100"),
+        // OpenAI's Pro Max plan, $500 a month; Fusiform prices it as `openai/pro_500`.
+        Some("promax") => Some("pro_500"),
         Some("plus") => Some("plus"),
         _ => None,
     };

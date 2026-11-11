@@ -330,10 +330,11 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         // `help <verb>` → the verb's page; bare `help` → the short table.
         match args.first() {
             Some(verb)
-                if verb == "provider"
+                if (verb == "provider"
                     && args
                         .get(1)
-                        .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")) =>
+                        .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
+                    || (verb == "manifest" && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
             }
@@ -343,12 +344,13 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        let page = if command == "provider"
+        let page = if (command == "provider"
             && args
                 .first()
-                .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove"))
+                .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
+            || (command == "manifest" && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
-            format!("provider {}", args[0])
+            format!("{command} {}", args[0])
         } else {
             command.clone()
         };
@@ -417,6 +419,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
         "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
         "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
+        "manifest" => cli_support::manifest_cli::cmd_manifest(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -477,6 +480,9 @@ impl ParsedOptions {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    if command == "manifest" {
+        return cli_support::manifest_cli::guard_args(args).map(|()| ParsedOptions::default());
+    }
     // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
     // the generic scan below cannot judge it. `secret_cli` does, against the table for the
     // verb actually named, and that is the only argument check that runs for this verb.
@@ -577,7 +583,12 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "transfer" => &["--replace"],
         "list" => &["--json"],
         "provider-report" => &["--missing"],
-        "enroll" => &["--keep-grants", "--clear"],
+        "enroll" => &[
+            "--keep-grants",
+            "--clear",
+            "--grant-requested",
+            "--no-grants",
+        ],
         _ => &[],
     };
     let mut options = ParsedOptions::default();
@@ -690,6 +701,7 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
+       manifest            import, sign and track GitHub routing manifests\n\
            put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
@@ -746,6 +758,9 @@ fn usage_short() -> String {
 /// overrides — so they stay discoverable without dumping on every invocation.
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
+    if verb == "manifest" || verb.starts_with("manifest ") {
+        return cli_support::manifest_cli::help_text(verb.strip_prefix("manifest "));
+    }
     let body = match verb {
         "provider" => {
             "ck auth provider list\n\
@@ -1020,6 +1035,7 @@ fn help_verb(verb: &str) -> String {
         "enroll" => {
             "ck auth enroll list\n\
              \x20             approve --request-id <id> [--name <name>] [--keep-grants]\n\
+             \x20                     [--grant-requested | --no-grants]\n\
              \x20                     [--display-name <text>]\n\
              \x20             label --name <name> (--display-name <text> | --clear)\n\
              \x20             deny --request-id <id>\n\
@@ -1031,6 +1047,8 @@ fn help_verb(verb: &str) -> String {
              \x20 --display-name <text>         set or replace the display name\n\
              \x20 --clear                       clear an approved label (label only)\n\
              \x20 --keep-grants                 explicitly inherit existing name grants\n\
+             \x20 --grant-requested             approve with the stored requested grants\n\
+             \x20 --no-grants                   approve without the requested grants\n\
              \n\
              NOTES\n\
              The operator half of consumer enrollment. A consumer proposes a name over the\n\
@@ -6350,6 +6368,11 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "--keep-grants is only valid for enroll approve".into(),
         ));
     }
+    if sub != "approve" && (has_flag(rest, "--grant-requested") || has_flag(rest, "--no-grants")) {
+        return Err(CliError::Usage(
+            "--grant-requested and --no-grants are only valid for enroll approve".into(),
+        ));
+    }
     if sub != "approve" && sub != "label" && optional(rest, "--display-name").is_some() {
         return Err(CliError::Usage(
             "--display-name is only valid for enroll approve or label".into(),
@@ -6399,6 +6422,13 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "approve" => {
+            let grant_requested = has_flag(rest, "--grant-requested");
+            let no_grants = has_flag(rest, "--no-grants");
+            if grant_requested && no_grants {
+                return Err(CliError::Usage(
+                    "--grant-requested and --no-grants are mutually exclusive".into(),
+                ));
+            }
             let request_id = required(rest, "--request-id")?;
             let display_name = optional(rest, "--display-name")
                 .map(|name| {
@@ -6413,6 +6443,39 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             let keep_grants = has_flag(rest, "--keep-grants");
             let rows = credentials_core::store::list_enrollments_read_only(&store_path(global))
                 .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+            let requested = rows
+                .iter()
+                .find(|row| row.key == request_id && row.state == "pending")
+                .and_then(|row| row.requested_grants.as_deref());
+            let grant_requested = if let Some(grants) = requested {
+                print_requested_grants(global, &request_id, grants)?;
+                if grant_requested || no_grants {
+                    grant_requested
+                } else {
+                    use std::io::IsTerminal;
+                    if !std::io::stdin().is_terminal() {
+                        return Err(CliError::Usage(
+                            "this request carries grants; pass --grant-requested or --no-grants"
+                                .into(),
+                        ));
+                    }
+                    eprint!("Approve and grant these? [y/N] ");
+                    std::io::Write::flush(&mut std::io::stderr())
+                        .map_err(|error| CliError::Usage(error.to_string()))?;
+                    let mut answer = String::new();
+                    std::io::stdin()
+                        .read_line(&mut answer)
+                        .map_err(|error| CliError::Usage(error.to_string()))?;
+                    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                        return Err(CliError::Usage(
+                            "approval cancelled; nothing changed".into(),
+                        ));
+                    }
+                    true
+                }
+            } else {
+                false
+            };
             if !live_enrollment_named(&rows, &final_name) {
                 let grants =
                     credentials_core::store::list_read_grants_read_only(&store_path(global))
@@ -6446,6 +6509,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                     final_name: final_name.clone(),
                     keep_grants,
                     display_name,
+                    grant_requested,
                 },
             )?;
             println!("approved {request_id} as enrolled:{final_name}");
@@ -6546,7 +6610,38 @@ fn cmd_enroll_list(global: &GlobalArgs) -> Result<(), CliError> {
     for line in render_enroll_list(&rows) {
         println!("{line}");
     }
+    for row in &rows {
+        if let Some(grants) = &row.requested_grants {
+            print_requested_grants(global, &row.key, grants)?;
+        }
+    }
     print_enroll_store_behind_note(schema);
+    Ok(())
+}
+
+fn print_requested_grants(
+    global: &GlobalArgs,
+    request_id: &str,
+    grants: &[credentials_core::enrollment::RequestedGrant],
+) -> Result<(), CliError> {
+    let (status, _) = request_admin_status_with_schema(global)?;
+    println!("requested grants for {request_id}:");
+    for grant in grants {
+        let (kind, selector) = grant.selector.parts();
+        println!(
+            "  {} {}:{}",
+            grant.operation.as_str(),
+            kind.as_str(),
+            selector.escape_debug()
+        );
+        let report = render_grant_reach(&status, kind, selector, grant.operation);
+        for line in report.stdout {
+            println!("{line}");
+        }
+        for line in report.stderr {
+            eprintln!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -6642,8 +6737,7 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
             row.state,
             proposer,
             row.name,
-            row.display_name
-                .as_ref()
+            row.effective_display_name()
                 .map(|name| format!("  display name: \"{}\"", name.escape_debug()))
                 .unwrap_or_default(),
             width = width,
@@ -7779,6 +7873,7 @@ mod tests {
             key: key.to_string(),
             name: name.to_string(),
             display_name: None,
+            requested_grants: None,
             state: state.to_string(),
             created_at_ms: 0,
             token_generation: generation,
@@ -9203,6 +9298,84 @@ mod login_regressions {
             }))
             .collect();
         assert_eq!(&rows[..rows.len() - 1], expected);
+        assert!(rows.contains(&(
+            "elevenlabs".into(),
+            "ElevenLabs".into(),
+            "apikey:elevenlabs".into(),
+        )));
+        for (key, name) in [
+            ("iteracompute", "IteraCompute"),
+            ("kilo", "Kilo Gateway"),
+            ("minimax-cn", "MiniMax (minimax.cn)"),
+            ("mixlayer", "Mixlayer"),
+            ("moark", "Moark"),
+            ("model-oracle-ai", "Model Oracle AI"),
+            ("modular", "Modular"),
+            ("moonshotai-cn", "Moonshot AI (China)"),
+            ("morph", "Morph"),
+            ("munito", "Munito AI"),
+            ("munito-eu", "Munito AI (EU)"),
+            ("nan", "NaN"),
+            ("nearai", "NEAR AI Cloud"),
+            ("nebius", "Nebius Token Factory"),
+            ("neuralwatt", "Neuralwatt"),
+            ("ofox", "Ofox"),
+            ("opper", "Opper"),
+            ("orcarouter", "OrcaRouter"),
+            ("ovhcloud", "OVHcloud AI Endpoints"),
+            ("pareto", "Pareto Inference"),
+            ("pendra", "Pendra"),
+            ("perplexity-agent", "Perplexity Agent"),
+            ("pioneer", "Pioneer"),
+            ("poe", "Poe"),
+            ("prime", "Prime Inference"),
+            ("privatemode-ai", "Privatemode AI"),
+            ("qiniu-ai", "Qiniu"),
+            ("reflection", "Reflection"),
+            ("requesty", "Requesty"),
+            ("runinfra", "RunInfra"),
+            ("salad-cloud", "SaladCloud AI Gateway"),
+            ("sambanova", "SambaNova"),
+            ("sarvam", "Sarvam AI"),
+            ("standardcompute", "Standard Compute"),
+            ("stepfun-cn", "StepFun (China)"),
+            ("stepfun-ai-step-plan", "StepFun Step Plan (Global)"),
+            ("stepfun-step-plan", "StepFun Step Plan (China)"),
+            ("subconscious", "Subconscious"),
+            ("submodel", "submodel"),
+            ("tempr", "Tempr Gateway"),
+            ("tensorx", "TensorX"),
+            ("the-grid-ai", "The Grid AI"),
+            ("thinkingmachines", "Thinking Machines"),
+            ("tinfoil", "Tinfoil"),
+            ("tokengo", "TokenGo"),
+            ("trustedrouter", "TrustedRouter"),
+            ("unorouter", "UnoRouter"),
+            ("upstage", "Upstage"),
+            ("vivgrid", "Vivgrid"),
+            ("volcengine", "Volcengine Ark"),
+            ("vultr", "Vultr"),
+            ("wallaby", "Wallaby"),
+            ("wally", "Wally"),
+            ("wandb", "CoreWeave"),
+            ("xiaomi", "Xiaomi (Standard API)"),
+            ("xpersona", "Xpersona"),
+            ("zai-api", "Z.AI (Standard API)"),
+            ("zeldoc", "Zeldoc"),
+            ("zenifra", "Zenifra"),
+            ("zhipuai", "Zhipu AI (Standard API)"),
+            ("modelis", "Modelis"),
+            ("modelscope", "ModelScope"),
+            ("poolside", "Poolside"),
+            ("regolo-ai", "Regolo AI"),
+            ("scaleway", "Scaleway"),
+            ("sensenova", "SenseNova (China)"),
+            ("stackit", "STACKIT"),
+            ("vancine", "Vancine"),
+            ("volcengine-coding-plan", "Volcengine Ark Coding Plan"),
+        ] {
+            assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
+        }
         assert_eq!(
             rows.last().unwrap(),
             &(

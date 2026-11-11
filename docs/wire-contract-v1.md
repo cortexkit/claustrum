@@ -347,6 +347,17 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
    bidi controls (U+061C, U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), and
    zero-width characters (U+200B–U+200D, U+FEFF), with `invalid_params`; it never
    truncates. An older vault refuses this field as `invalid_params`.
+   Optional `requested_grants` is a nonempty array of at most four entries, each
+   `{"selector":{"category":"llm-provider"},"operation":"read"}` or
+   `{"selector":{"exact":"apikey:zai"},"operation":"list"}`. Only `read`
+   and `list` are accepted; selectors use the ordinary store grant validation.
+   An empty array, duplicates (same selector and operation), more than four entries,
+   any other operation, malformed selectors, unknown entry fields, or a non-array
+   (including null) refuses as `invalid_params` / `permanent`, with no stored request.
+   Omission retains the original enrollment-only ceremony. Older vaults refuse the
+   field as `invalid_params`; clients must explicitly choose whether to retry without
+   it, since that refusal also identifies malformed grants. A resumed proposal keeps
+   the first request's list and display name; it cannot widen or remove either.
 2. **Wait.** An operator approves with the master key (`ck auth enroll approve`).
    `ck auth enroll list` shows the proposed display name. Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
    a name it does not hold from collecting a token even if approval is granted by mistake.
@@ -372,6 +383,29 @@ Without an override, approval keeps the proposed label. Without either, it store
 no label. The CLI prints the approved label. Only an approved label is stored on
 the enrollment; token rotation preserves it, revocation removes it, and reusing
 the enrollment name does not inherit it.
+
+Optional `grant_requested:true` on `admin.enroll_approve` applies **only the list
+stored with the pending request** to `enrolled:<final_name>`. It defaults to false
+when omitted, preserving older CLI behavior; the approve body never accepts a new
+grant list. Enrollment, ordinary grants, grant-generation changes, and the same
+audit rows as `ck auth grant` commit in one transaction, checked against the store's
+current writer lease so a superseded writer cannot approve. The grant-generation
+counter tells permission readers that grants changed. A grant or audit failure rolls
+all of them back. `keep_grants` remains independent consent
+to inherit any existing name-bound grants. Created grants appear normally in
+`ck auth grants` and `permissions.list` with an enrolled holder.
+
+`ck auth enroll list` and approval show the stored requested grants and their current
+reach (the number of matching credentials) before consent, including exact credential
+ids. A zero-reach warning means no credential matches now, not that approval is invalid. With
+requested grants, interactive approval asks `Approve and grant these? [y/N]` unless
+an explicit choice is supplied. Non-terminal approval requires `--grant-requested`
+or `--no-grants`; combining them refuses. `--no-grants` approves only the enrollment.
+Without a requested list, approval behaves as before. Additive proposal and approve
+request bytes are pinned by `enrollment_requested_grants_wire_golden`; malformed
+grant refusals and the four/five-entry boundary are exercised by
+`enrollment_requested_grants_validates_shapes_and_four_entry_boundary` against the
+same `invalid_params` envelope pinned in the enrollment wire fixture.
 
 **Operator labeling.** The master-key-authenticated `admin.op` body
 `{"op":"admin.enroll_label","v":2,"name":"consumer","display_name":"My plugin"}`
@@ -539,8 +573,17 @@ replacement preserves an existing set. Existing records are never automatically
 remapped. The vault never derives these ids at read time from the credential id,
 catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
 current table without changing any record, taking no writer lease.
-Only the OpenAI and Google API-key rows default to both `llm-provider` and
-`media-provider`; no other row gets the media group. Routing stops choosing a media key
+The OpenAI and Google API-key rows default to both `llm-provider` and
+`media-provider`; ElevenLabs defaults to `media-provider` alone. The 302.AI, Abacus,
+AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan, Alibaba Token
+Plan (China), DigitalOcean, Eden AI, FastRouter, Vertex (express mode), Kenari,
+Kilo Gateway, Merge Gateway, NaN, NEAR AI Cloud, Poe, Qiniu, Regolo AI, Requesty and
+StepFun (China) rows
+(`302ai`, `abacus`, `aihubmix`, `aimlapi`, `alibaba`, `alibaba-cn`,
+`alibaba-token-plan`, `alibaba-token-plan-cn`, `digitalocean`, `edenai`,
+`fastrouter`, `google-vertex`, `kenari`, `kilo`, `merge-gateway`, `nan`, `nearai`,
+`poe`, `qiniu-ai`, `regolo-ai`, `requesty`, `stepfun-cn`) also default to
+both. These are the media rows. Routing stops choosing a media key
 its consumer reported unfunded, and lifts that after a successful run. Category
 defaults apply to creation, not existing records or replacements with stored categories.
 Consumers join on exact provider-id equality, with no fallback. `serves` answers which
@@ -2029,24 +2072,26 @@ Rows name the route principal and, for `reserved:callosum`, the opener harness. 
 is `federation.member_mapping`; phone setting is `secret.phone_mapping`. Each is On, Off or
 Unreadable (a store read that fails), so every row below covers all nine combinations.
 
-| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get |
-|---|---|---|---|---|---|---|
-| callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) |
-| callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF |
-| callosum, `fed-phone:<32 lowercase hex>` | member Off, any phone | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF |
-| callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its six federation ops, §14) | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF |
-| callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
-| callosum, any other `fed-` harness | member On or Unreadable | NF | NF | POR | NF | NF |
-| `reserved:aft` | any | NF | served | POR | served | served (its grants) |
-| `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) |
-| `reserved:cingulate` | any | NF | NF | served | served | served (its grants) |
-| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) |
-| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) |
+| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get | `connectors.list`, `connectors.watch` |
+|---|---|---|---|---|---|---|---|
+| callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) | POR |
+| callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF | served, unless federated scope (POR) |
+| callosum, `fed-phone:<32 lowercase hex>` | member Off, any phone | NF | NF | POR | served (§14 gate-off residual) | NF | NF |
+| callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF | PAO only for member On, phone Off; otherwise NF |
+| callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its six federation ops, §14) | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF | POR |
+| callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF | POR |
+| callosum, any other `fed-` harness | member On or Unreadable | NF | NF | POR | NF | NF | POR |
+| `reserved:aft` | any | NF | served | POR | served | served (its grants) | POR |
+| `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) | POR |
+| `reserved:cingulate` | any | NF | NF | served | served | served (its grants) | served |
+| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) | served only without scope (development admission); otherwise POR |
+| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) | served only without scope (development admission); otherwise POR |
+| `direct` with an agent scope | any | NF | NF | POR | served | NF | POR |
+| `direct` with a flow scope | any | not reached | not reached | not reached | not reached | not reached | bind refused (`flow_scopes_unsupported`); directly recorded bind gets `permissions_operator_required` from the dispatcher |
 
 Gates are read only on `reserved:callosum` routes; every other principal's harness is
 ignored. On a phone channel, bearer params (`handle`, `enrollment_token`) are IP even on
@@ -2054,8 +2099,20 @@ a method the channel otherwise refuses, except `permissions.list` and
 `permissions.revoke`, which are POR for every caller other than `reserved:cingulate`
 whatever their params. `secret.use` is NF for every caller other than the two senders,
 before its params are read, so a non-sender cannot learn the grammar.
-`secret_caller_gate_and_op_matrix_matches_the_wire_contract` drives every row,
-gate combination and column above through the real route dispatcher.
+`secret_caller_gate_and_op_matrix_matches_the_wire_contract` drives the existing secret,
+permission and credential columns through the real route dispatcher. The connectors
+column is driven by `connectors_admission_matrix_uses_real_binds_and_route_dispatch`.
+**PAO** is a `Response` with
+`{"result":{"error":{"code":"phone_access_off","class":"permanent"}}}`.
+For connectors, a federated scope on a phone bind is always POR, before gates.
+An `operator_app` stamp with `app: "alfonso-desktop"` admits the desktop to connectors
+only; a different app stamp or an absent/unverified principal without a stamp is POR.
+The development admission requires plain `direct` with no app stamp and no scope
+stamp of any kind. Agent- and federated-scoped Direct binds are POR for connectors.
+A flow-stamped Direct bind is refused by the existing `flow_scopes_unsupported`
+bind fence before any operation runs; the matrix also records that stamp directly
+with `record_connector_bind` and checks that the dispatcher independently returns
+`permissions_operator_required`.
 
 The operator uses the existing `admin.challenge` / `admin.op` MAC transcript for
 permissions operations: the authenticated `op_body` is
@@ -2082,8 +2139,9 @@ Each stored selector/operation grant is one row:
 
 A `reserved:<id>` principal becomes `holder: {kind: "module", module_id: "<id>"}`;
 an `enrolled:<name>` principal becomes `holder: {kind: "enrolled", name: "<name>"}`.
-When that enrollment has an approved display name, its holder also includes
-`"label":"<approved name>"`; otherwise the `label` key is absent. Module holders
+When that enrollment has a display name, its holder also includes
+`"label":"<display name>"`; otherwise the `label` key is absent. When none was set,
+the label may come from a fixed table of CortexKit plugin names. Module holders
 never receive a vault label: apps get module names from the module's catalog entry.
 Neither holder includes its principal prefix. Other principal kinds are not listed.
 The `scope` is the stored operation: `read`, `list`, `sign`, `open`, `seal`,
@@ -2521,7 +2579,10 @@ stamp's `scope_epoch`; anything else, and every flow-read scope, maps to nothing
 `not_found`). A Worker is also served by an `agent_and_workers` grant on Head H when its
 stamp's parent has H's owner and ref, `parent_state` `linked` and an equal epoch.
 
-**Target rules.** The scheme must be `https` and the port 443. The host is lowercase ASCII
+**Target rules.** A stored API-key scope matches only scheme `https` on port 443. The
+scheme's grammar is checked first (lowercase letters, digits, `+`, `-`, `.`; anything else
+is `invalid_params`), but another scheme or port is not a grammar error: it can never
+match, so it is answered as the uniform `not_found`. The host is lowercase ASCII
 (IDN as A-labels), with no trailing dot and no IP literal, and must equal the record's host.
 The path starts with `/` and holds only RFC 3986 pchar bytes and `/`. Senders strip the
 query and fragment before calling; a path with `?` or `#` is `invalid_params`. Refused,
@@ -3012,6 +3073,9 @@ the message is fixed text and never echoes the request.
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
+| `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
+| `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
+| `expired` | `permanent` | result error | `manifest.approve` only (§17): the proposal, or the envelope's `issued_at_ms`, reached `expires_at_ms` |
 | `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
 | `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
 | `permissions_operator_required` | none | transport Error | `permissions.list` or `permissions.revoke` from a caller other than `reserved:cingulate` or the MAC-authenticated operator; body per `permissions/v1` |
@@ -3330,3 +3394,1062 @@ Implementation of extended-scope vault readers and writers waits until an
 Existing published samples
 outside `multi-host/` stay unchanged. New numeric count boundaries require tests
 on both sides and registration in `docs/threshold-controls.txt` when implemented.
+
+## 16. Vault connectors (`connectors.list`, `connectors.watch`)
+
+Both management operations are queries. `connectors.watch` additionally declares
+`delivery: "watch"`, so Callosum relays its held subscription. Parameters for both
+are the closed empty object `{}`; admitted callers with other parameters receive
+`invalid_params` on the Error lane. Admission precedes parameter decoding.
+
+The vault provides `operator-app/v1` and reads `RouteBindPeer.operator_app` beside
+the control-plane bind. It admits the `alfonso-desktop` stamp, `reserved:cingulate`,
+and the phone route in the matrix above. The one temporary
+`unsigned_desktop_development_admission` also admits plain `direct` so unsigned
+builds work, but only when the bind carries no scope stamp of any kind; scoped
+tool calls are not unsigned desktop reads. It must be removed in the change that
+leaves only the desktop stamp.
+Each call using it writes one fixed, secret-free daemon log line naming that
+admission. No other operation acquires this admission or its log line.
+
+A phone bind must be `reserved:callosum`, have exactly `fed-phone:` plus 32 lowercase
+hex digits as its harness, and carry no `ScopeKind::Federated` stamp. It uses the
+same live member-mapping and phone-setting snapshot as the seven phone operations.
+With member mapping On and the phone setting Off it receives `phone_access_off`
+(permanent); other gate failures receive the phone operations' uniform NF. Every
+other non-admitted caller receives exactly the permissions-list POR refusal.
+
+### Listing
+
+`connectors.list {}` returns this envelope inside the usual `result` wrapper:
+
+```json
+{
+  "version": "<64 lowercase hex SHA-256>",
+  "watch": true,
+  "computer": "fed-computer:<32 lowercase hex>",
+  "rows": []
+}
+```
+
+`computer` is the vault's recorded federation self member, read as by `ck auth`,
+and is omitted when none is recorded. `version` hashes only the canonical rows:
+sort rows by `id`, serialize compact UTF-8 JSON with lexicographically ordered object
+keys and no whitespace, then lowercase-hex encode SHA-256 of those bytes. Token
+bytes, refresh timestamps and record versions do not enter the projection.
+
+One row is emitted for each refresh-adapter OAuth login (except `github_app`),
+cookie, static API key, and local `remote_records` login copy. Classification uses
+the decoded record's kind and adapter, never its id. Vault-held signing and KEM
+keys, opaque values, DSNs, GitHub App records, and the `module-runtime` group are
+excluded; the runtime-group filter and credential permission ids share the
+permissions-list implementation. An undecryptable quarantined record isn't listed,
+because its kind can't be read, and the operator still sees it in `ck auth list`
+and the vault's health counts.
+
+| Field | Value |
+|---|---|
+| `id`, `incarnation` | The credential id and its current incarnation. |
+| `kind` | `account` or `api_key`. |
+| `name` | Catalog display name using the existing boundary-aware id matcher, otherwise the credential id; capped at 80 characters. |
+| `category?` | `llm-provider` or `media-provider` → `ai_models`; otherwise `web-search` → `search`; otherwise `cloud-infrastructure` → `infrastructure`. Otherwise the optional login catalog category (Gmail: `communication`, model logins: `ai_models`). Unknown is absent. |
+| `status` | `{state, reason?}` as below. |
+| `setup` | Computer-only steps as below. |
+| `permissions` | Sorted `cg_…` ids of the visible permissions/v1 credential grants that reach the row by exact id or group; audience grants never reach credentials. |
+| `identity?` | Account email, otherwise organization name, as plain text; omitted above 254 UTF-8 bytes. |
+| `plan?` | `{tier, source}` from the existing effective plan, with `source` `operator` or `detected`; absent when unknown. |
+
+Status maps `active` to `ok`, `needs_reauth` to `needs_sign_in` for accounts and
+`key_refused` for API keys, `retired` to `signed_out`, and `corrupt` to `damaged`.
+Copies map their last home state the same way. Only non-`ok` rows may carry
+`reason`: the newest existing authentication-event reason code, verbatim. No
+reason is invented when there is no recorded reason.
+
+Accounts have one setup step `{step:"sign_in", state:"done"|"needed",
+where:"computer"}`, with `remedy:"sign_in_again"` only when needed. Keys use
+`step:"key"` and `remedy:"replace_key"`. The step is done exactly when status is
+`ok`. Copies also have `{step:"home", state:"done"|"needed"|"unknown",
+where:"computer"}`: unknown when never fetched, done for the last successful
+fetch (`ok`), needed otherwise. Unknown never means done.
+
+Rows carry no `description`, `can`, `usedBy`, `settings`, `counts`, payload, token,
+handle, key material or masked fragment. Reading computes stored metadata only:
+no refresh, network call, OS permission prompt or background timer is started.
+A store failure is `result.error {code:"store_error", class:"transient"}`.
+
+### Watching
+
+`connectors.watch {}` uses the same held watch registry, 64-subscription budget,
+blocking-snapshot budget, 250 ms commit-burst coalescing, cancellation, replacement,
+route teardown and drain/shutdown behavior as `auth.watch_scoped`. The first
+`StreamData` notice has `seq:1`; subsequent notices increment `seq` only if the
+projected version changes:
+
+```json
+{"kind":"changed","epoch":"<process epoch>","seq":1,"version":"<rows hash>"}
+```
+
+Notices never carry rows: read again after a changed version. Refreshes that only
+replace token bytes produce no notice; logout changes status/setup and therefore
+the version. Notices may be dropped under load. Process epochs are random and reset
+on restart.
+Drain finishes the held request with `StreamEnd`; route teardown/shutdown cancels
+publication as for `auth.watch_scoped`. Capacity/draining refusal is the same NF.
+Admission is rechecked before each watch snapshot; changing the phone setting Off
+ends an existing phone watch with the same `phone_access_off` refusal.
+
+Generated samples and their `SHA256SUMS` are in
+`crates/credentials-module/tests/vectors/connectors-v1/`. `inventory.json` includes
+an account with identity and plan, a refused key and its reason, signed-out and
+damaged accounts, a home copy, and the omission of a seeded signing key.
+`empty.json`, `watch.json`, and `phone-access-off.json` cover the other shapes.
+`CK_EMIT_CONNECTOR_VECTORS=1` regenerates them through the real route handler;
+only the random watch epoch is normalized to the sample's fixed value.
+
+## 17. GitHub manifest bindings and activation
+
+This section publishes the contract before its implementation and generated samples.
+It adds no golden blocks or vectors. Consumers call these operations by method name
+over the ManagementSurface; `packages/client/src/index.ts` remains unextended.
+
+### Admission, kinds and wire forms
+
+| Operation | Kind | Admitted caller | Exact params |
+|---|---|---|---|
+| `manifest.propose_binding` | Mutate | `reserved:plexus` | `{agent_id, app_id, app_slug, repo}` |
+| `manifest.approve` | Mutate | phone route only, through the phone-operation pipeline | `{envelope_b64url, signature_b64url}` |
+| `manifest.latest` | Query | `reserved:aft` | `{}` |
+| `manifest.watch` | Query, held subscription (`WATCH` delivery) | `reserved:aft`, `reserved:plexus` | `{}` |
+| `manifest.report_active` | Mutate | `reserved:aft` | `{version, payload_sha256, verdict, reason}` |
+| `manifest.active_status` | Query | `reserved:plexus` | `{version}` |
+
+Callers outside an operation's admitted principal receive the uniform `not_found`,
+indistinguishable from an unknown id. Admission precedes parameter decoding. Params
+are closed objects: an unknown field, wrong type or invalid grammar is a transport
+`Error` frame with `code: "invalid_params"` and **no class**, not a domain refusal.
+Every other refusal is a `Response` with `result.error.{code, class}`; additional
+fields, such as `remedy_member`, sit beside `code` and `class`. Successes are
+`Response` results. The domain-refusal table below does not replace this transport
+distinction (§ 1a).
+
+The manifest home is the agent-secret home, not a separate setting. A `Single` or
+`Home` vault serves all six operations locally. A `Remote` vault forwards latest,
+watch and report_active, refuses propose and active_status with `not_found`, and
+gives approve the phone pipeline's `secret_home_elsewhere` with `remedy_member`
+naming the home, before checking phone registration. `RemoteSetupIncomplete`
+refuses the three forwarded operations with `remote_setup_incomplete`/`permanent`
+and `remedy_member`, refuses propose and active_status with `not_found`, and gives
+approve the phone pipeline's `remote_setup_incomplete` (with `remedy_member` when
+the self id is set). An unreadable role gives `store_error`/`transient`.
+
+For forwarding, the member calls the home's `fed:<fp>:claustrum` surface using
+`federation.manifest_latest` (Query, unary), `federation.manifest_watch` (Query,
+held subscription with `WATCH` delivery), and `federation.manifest_report_active`
+(Mutate, unary). The home admits these under the same pairing and `secret_use`
+member-grant checks as forwarded secret operations. A caller without membership
+or the grant receives uniform `not_found`; for the watch this is a terminal
+`Response`. An unreachable home gives `home_unavailable`/`transient`. These three
+operations are declared in the peer-sharing `vault` share; a Mutate must not be
+relayed as a retryable query.
+
+`manifest.one_tap` is **off by default**. Missing means off; a malformed setting
+is unreadable and treated as off. After the principal check, while the setting is
+off, `manifest.propose_binding` refuses `one_tap_disabled`/`transient` before any
+outbound call, emitting no statement and writing no row. Every other manifest
+operation works regardless, including approval of an already-pending proposal,
+latest, watch, report_active, active_status, import and sign. The operator controls
+the setting with `ck auth manifest one-tap on|off|status`; a real change writes
+one audit row and repeating the current value writes none.
+
+### Proposing one repository
+
+`manifest.propose_binding` accepts exactly:
+
+- `agent_id`: 1–128 bytes from `[A-Za-z0-9_-]`.
+- `app_id`: a positive integer.
+- `app_slug`: 1–100 bytes from `[a-z0-9-]`, GitHub's App slug alphabet.
+- `repo`: `owner/name`, each part 1–100 characters from `[A-Za-z0-9._-]`, neither
+  `.` nor `..`.
+
+Grammar is checked before any outbound call. The home needs an active
+`signing:gh-manifest-root:1`, a stored manifest version and its own federation
+member id; otherwise propose or approve refuses
+`manifest_setup_incomplete`/`permanent`.
+
+A proposal has a 60 s deadline. Exhaustion during the identity check gives
+`identity_unavailable`; later exhaustion gives `github_unavailable`, with nothing
+written. The final write transaction checks the deadline once it holds the writer:
+if not admitted it refuses `github_unavailable` without writing; once admitted it
+commits and returns its reply even if the deadline passes. The caller awaits that
+transaction without a timeout. Checks run in this order, comparing repository
+names ASCII-case-insensitively:
+
+1. **Identity.** Call Entorhinal's `agent.github_identity` with `{agent_id}`.
+   Only an `app` identity with equal `app_id` and `app_slug` and
+   `credential_ref == "github_app:" + app_slug` passes. A null identity,
+   `user_token`, mismatched fields, or Entorhinal's `unknown_agent`, `gone` or
+   `invalid_request` gives `identity_mismatch`; an unreachable Entorhinal gives
+   `identity_unavailable`. The identity reply's per-process `incarnation` is
+   decoded, never refused.
+2. **Installation.** Read the active `github_app:<app_slug>` record, mint an
+   installation token and read that installation's GitHub `permissions` map from
+   the same `/app/installations` record. The token stays in memory; this check
+   changes no credential or audit row. Read installation repository pages of 100,
+   beginning at page 1. On page 1, selection `all` gives `installation_all` and
+   `total_count > 1,000` gives `installation_too_large`, before further pages.
+   Stop when the repository is found or the accumulated count equals page 1's
+   `total_count`. Only a complete listing establishes absence (`not_installed`),
+   as does the adapter's `NotInstalled` outcome. Several installations, a
+   mismatched installation or a suspended installation gives
+   `installation_unusable`. An empty page before completion, a changed
+   `total_count`, more entries than that count, or ten pages without either a
+   match or completion gives `github_unavailable`. So does any other request,
+   transport, timeout or decoding failure, including 401, 403, 404, 429 and 5xx.
+   The matched repository's GitHub `full_name` casing is the binding key from
+   here on.
+3. **Existing binding.** If the newest manifest already binds that repository to
+   the same agent, refuse `already_bound` with `{version, manifest_sha256}` of
+   that newest version; a binding to another agent gives `bound_to_other_agent`.
+4. **Base freshness.** Any non-retired activation reporting a version greater
+   than the newest stored version gives `stale_base`.
+5. **Reproducibility.** If re-serializing the newest version does not reproduce
+   its bytes exactly, refuse `not_reproducible`.
+
+Build N+1 from the newest stored version N by incrementing `manifest_version`,
+setting `issued_at_unix_secs` to now and appending `"<full_name>": "<agent_id>"`
+as the last key in `bindings`, using the same serialization. No other manifest
+content changes. In one serializing write transaction, re-read the newest version:
+if it is no longer N, refuse `stale_base` without writing. Return an unexpired
+pending proposal for the same `(agent_id, repo)` unchanged, so concurrent proposes
+return the same proposal. If that pending proposal has reached its expiry, mark
+it expired and insert a replacement in the same transaction. Storing any new
+manifest version supersedes all pending proposals whose base is older, including
+after import or operator signing.
+
+The success result is exactly
+`{status: "approval_required", proposal_id, statement_b64url, manifest_version, manifest_sha256, expires_at_ms}`.
+`proposal_id` is a ULID. The proposal expires 24 h after creation.
+
+### Statement and proposer-filed consent card
+
+The decoded `statement_b64url` is RFC 8785 JCS (JSON Canonicalization Scheme)
+UTF-8 bytes with fields **exactly**
+`{v, proposal_id, agent_id, app_slug, repo, installation_permissions, manifest_version, manifest_sha256, prior_version, prior_sha256, expires_at_ms}`.
+`v` is `ck-manifest-binding-statement/v1`. `repo` uses GitHub `full_name` casing;
+`prior_version` and `prior_sha256` identify the base. `installation_permissions`
+is the bot installation's GitHub permission map exactly as returned for that
+installation at proposal time, with values `read`, `write` or `admin` and keys
+sorted as JCS sorts every object. It is stored with the proposal so the phone
+never signs without seeing what the bot may do. The statement has no display
+names; the card renders the agent's name from `agent_id`.
+The statement and envelope use unpadded base64url; SHA-256 fields are lowercase
+hex digests of the exact bytes they name.
+
+The proposer, Plexus, files a Cingulate consent card from the propose reply:
+consent kind `manifest_binding`, answer field `manifest_binding_answer`, **one
+repository per card**, expiring at the statement's `expires_at_ms` (24 h).
+Plexus passes the statement through unchanged. Nothing in the vault calls
+Cingulate; the phone's signed envelope commits the vault-built statement and is
+the authority.
+
+### Approving the binding
+
+`manifest.approve` takes exactly `{envelope_b64url, signature_b64url}`: base64url
+encodings of the envelope bytes and a P-256 ECDSA signature with SHA-256 in DER
+form over those bytes. The envelope is JCS with fields **exactly**
+`{v, proposal_id, statement_sha256, decision, device_fingerprint, issued_at_ms}`.
+`v` is `ck-manifest-binding-envelope/v1`; `decision` is `allow` only. A decline
+sends nothing to the vault. `statement_sha256` commits the exact statement bytes.
+
+Domain separation runs both ways. `manifest.approve` refuses a non-manifest `v`
+with `approval_invalid` **before signature verification**, writing no rows.
+`secret.approve` refuses a manifest envelope at its strict parse, before its
+signature check, using its ordinary parse-failure refusal. Neither operation
+accepts the other's envelope even when a signature would otherwise verify.
+
+Approval runs inside the phone pipeline's single serializing write transaction.
+Pairing admission, the home-role refusal and the phone-registration check come
+first, then `manifest_setup_incomplete`, then these checks in order:
+
+1. Strictly parse the envelope (including its `v`); require canonical bytes equal
+   to the received bytes, `device_fingerprint` equal to the route's fingerprint,
+   and a valid P-256 signature over the received bytes using the current pairing's
+   registered `approval_pub`. Require `issued_at_ms` within 120,000 ms of now.
+   Any failure gives `approval_invalid`.
+2. Require a known `proposal_id`, the stored `statement_sha256`, and
+   `issued_at_ms >= created_at_ms`. Re-derive the proposal commitments: the
+   statement hash matches its bytes; its proposal id, agent id, app slug, repo,
+   installation permissions and expiry match the stored proposal; its prior
+   version/hash identify the stored base; its new version is base + 1 and matches
+   the manifest bytes; and its manifest hash matches both the row and those
+   bytes. Require the manifest bytes to equal the build rule applied to the
+   stored base, using the proposal's repo and agent id and the new manifest's
+   `issued_at_unix_secs`. Even mutually consistent rewritten hashes, statement
+   and manifest must not authorize a second binding or any other change. Any
+   failure gives `approval_invalid`, before superseded/expired checks.
+3. For an already-approved proposal, only the stored envelope SHA-256 and device
+   fingerprint pair is an exact resend. With `now <= issued_at_ms + 120,000`,
+   return the first reply without writing, including after a restart. Any other
+   envelope, or a resend after the window, gives `approval_invalid`.
+4. A superseded proposal, or a base version that is no longer newest, gives
+   `superseded`.
+5. An expired proposal, `now >= expires_at_ms`, or
+   `issued_at_ms >= expires_at_ms` gives `expired`.
+
+On success, the transaction signs the manifest with `signing:gh-manifest-root:1`,
+writes the approval, signing and storage audit rows, stores the version with
+source `one_tap` and signed time now, marks the proposal approved with the envelope
+hash/fingerprint pair, and supersedes older-base pending proposals. The result
+is exactly `{status: "approved", proposal_id, version, manifest_sha256}`. A failed
+commit gives `store_error`; no signature is returned from approve. The root key
+signs only through this path or `ck auth manifest sign`; `credential.sign` refuses
+the root id in every address mode with uniform `not_found`, while
+`credential.public_key` still works. An exact Sign grant naming the root id cannot
+be created.
+
+### Reading and watching the newest version
+
+`manifest.latest {}` returns exactly
+`{version, envelope: {key_id, manifest_bytes, signature}}` for the newest stored
+version. These are the existing hand-off encodings: `key_id` is 16 lowercase hex
+digits, `manifest_bytes` is the manifest's UTF-8 text as a JSON string (not
+base64), and `signature` is standard base64 Ed25519 over those manifest bytes.
+Nothing stored gives `not_found`/`permanent`.
+
+`manifest.watch {}` holds a subscription. Its notices are exactly
+`{kind: "changed", epoch, seq, version, manifest_sha256}`. It sends `seq: 1`
+immediately with the newest version; `version` and `manifest_sha256` are both
+null when nothing is stored. Later notices occur only when a new version is
+stored. Epochs, sequence numbers, endings, one watch per route and the 64-watch
+cap follow `auth.watch_scoped` above: a process restart changes the epoch,
+sequence gaps require a fresh read, and normal held-stream endings use
+`STREAM_END`.
+
+A member holds one upstream `federation.manifest_watch` per home, opening it on
+the first local watch. It answers local `seq: 1` from the upstream's current
+notice and relays later notices under its own epoch and sequence numbers. If
+the upstream cannot be opened, the local watch ends with a terminal `Response`
+`home_unavailable`/`transient`. If the upstream is lost later, local watches end
+with `STREAM_END`; AFT then re-subscribes and reads `manifest.latest`. Older
+vaults answer `unknown_method` for manifest operations.
+
+### Reporting activation and checking readiness
+
+`manifest.report_active` takes exactly `{version, payload_sha256, verdict, reason}`:
+
+- `version`: a positive integer.
+- `payload_sha256`: 64 lowercase hex digits.
+- `verdict`: `valid` or `invalid`.
+- `reason`: a string of at most 512 characters for `invalid`, otherwise `null`.
+
+The reporting computer is the local vault's own federation member id, or the
+attested `fed-computer:<fp>` for a forwarded report, **never a param**. A local
+report with no self member id gives `secret_setup_incomplete`/`permanent`.
+The report sets that computer's row to the tuple and `reported_at_ms`. A lower
+version than its current one is still recorded and logs a tracing warning.
+Retired computers' reports are recorded without clearing `retired_at_ms`.
+
+Only the first `(member_id, version, verdict)` for a **stored** version writes
+an activation audit row, together with its deduplication row in the same
+transaction. Changes to reason or hash, repeats, and reports of unstored versions
+update the activation table only. There are at most two activation audit rows per
+member per stored version. The success result is exactly
+`{status: "recorded", member_id, version}`. After a forwarded call has been sent,
+`home_unavailable` is an **unknown outcome**, not proof of refusal: the home may
+have committed. Retrying the same report writes no additional activation audit.
+
+`manifest.active_status` takes exactly `{version}`. A version that is not stored
+refuses `unknown_version`/`transient`. Its success result is exactly
+`{version, manifest_sha256, ready, computers: [{member_id, version, payload_sha256, verdict, reason, reported_at_ms}]}`.
+There is one entry per expected computer sorted by `member_id` bytes. A computer
+without a report has null report fields, not a missing entry. The expected set
+is the home's own member id, all members holding a `secret_use` grant and all
+members with an activation row, minus retired members. `ready` is true only for
+a non-empty set whose every entry reports exactly the requested version, its
+stored SHA-256 and `valid`.
+
+Operator retirement removes a computer from this readiness population and is
+final; reporting never un-retires it. Retirement does not revoke delivery: a
+retired computer retaining `secret_use` can still read, watch and report. Revoke
+that grant to stop delivery.
+
+### Domain refusals
+
+All codes below are `Response` `result.error` refusals with the indicated class.
+In addition, callers outside each operation's admitted principal receive uniform
+`not_found`/`permanent`. Params-shape failures remain classless transport
+`invalid_params` errors, not entries in this table.
+
+| Operation | Class | Codes and conditions |
+|---|---|---|
+| `manifest.propose_binding` | `permanent` | `not_found` (not the home); `manifest_setup_incomplete`; `identity_mismatch`; `not_installed`; `installation_all`; `installation_unusable`; `installation_too_large`; `already_bound` with `{version, manifest_sha256}`; `bound_to_other_agent`; `not_reproducible` |
+| `manifest.propose_binding` | `transient` | `one_tap_disabled`; `identity_unavailable`; `github_unavailable`; `stale_base`; `store_error` |
+| `manifest.approve` — phone preflight | `permanent` | `phone_not_registered`; `secret_home_elsewhere` with `remedy_member`; `remote_setup_incomplete` (with `remedy_member` when known), exactly as `secret.approve` |
+| `manifest.approve` — phone preflight | `transient` | `pairing_unavailable`; `store_error`, exactly as `secret.approve` |
+| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired` |
+| `manifest.approve` — after preflight | `transient` | `store_error` |
+| `manifest.latest` | `permanent` | `not_found` (nothing stored, or forwarded without a grant at the home); `remote_setup_incomplete` |
+| `manifest.latest` | `transient` | `home_unavailable`; `store_error` |
+| `manifest.watch` — terminal `Response` | `permanent` | `not_found`; `remote_setup_incomplete` |
+| `manifest.watch` — terminal `Response` | `transient` | `home_unavailable` (a member's upstream could not be opened) |
+| `manifest.report_active` | `permanent` | `secret_setup_incomplete`; `not_found` (forwarded without a grant); `remote_setup_incomplete` |
+| `manifest.report_active` | `transient` | `home_unavailable` (unknown outcome once sent); `store_error` |
+| `manifest.active_status` | `permanent` | `not_found` (not the home) |
+| `manifest.active_status` | `transient` | `unknown_version` (version not stored); `store_error` |
+
+A refusal decided by the answering vault leaves `gh_manifests`,
+`gh_manifest_proposals`, `gh_manifest_activations`,
+`gh_manifest_activation_audits` and `audit_log` unchanged. Shared paths may still
+write the phone pipeline's pairing observation before a phone-op refusal, or the
+home's diagnostic row for a forwarded `not_found`; neither is a manifest state
+change. A member's `home_unavailable` after forwarding is an unknown outcome,
+not a home-decided refusal.
+
+### Audit rows
+
+Every manifest state change writes its audit row in the same transaction. The
+subject is recorded in `credential_id`; `payload_hash` is lowercase SHA-256.
+Except for signing, the commitment frames each field in the listed order with
+its UTF-8 byte length as a little-endian u64 followed by its bytes (`push_field`);
+integers use decimal text.
+
+| Audit op | Records and subject | `payload_hash` commits |
+|---|---|---|
+| `gh_manifest_propose` | Proposal insertion; `gh-manifest-proposal\|<proposal_id>` | Framed `agent_id, repo, base_version, manifest_sha256, statement_sha256` |
+| `gh_manifest_proposal_state` | A proposal leaving pending; same proposal subject | Framed `from, to` |
+| `gh_manifest_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain manifest SHA-256, without field framing |
+| `gh_manifest_store` | Stored version; `gh-manifest\|<version>` | Framed `source, manifest_sha256` |
+| `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
+| `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |
+| `gh_manifest_one_tap_set` | A real change to `manifest.one_tap`; no subject | Framed `true` or `false` |
+
+### Producer-generated manifest samples
+
+These TEST-ONLY samples use fixed Ed25519 and P-256 keys, a fixed clock and
+proposal ULID. Process epochs and report timestamps are normalized to fixed
+values after validating their wire types. Regenerate only with
+`CK_EMIT_MANIFEST_VECTORS=1 cargo test --locked -p credentials-module
+--features credentials-core/test-support --bin ck-claustrum
+manifest_binding_vectors_and_wire_goldens_are_producer_pinned`.
+The writer also updates `tests/vectors/manifest-binding-v1.json` and its
+`SHA256SUMS` entry. No sample key is trusted outside tests.
+
+<!-- manifest-binding-generated:start -->
+
+<!-- golden:manifest.active_status.not_ready -->
+```json
+{
+  "result": {
+    "computers": [
+      {
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      },
+      {
+        "member_id": "fed-computer:33333333333333333333333333333333",
+        "payload_sha256": null,
+        "reason": null,
+        "reported_at_ms": null,
+        "verdict": null,
+        "version": null
+      }
+    ],
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "ready": false,
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.active_status.ready -->
+```json
+{
+  "result": {
+    "computers": [
+      {
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      },
+      {
+        "member_id": "fed-computer:33333333333333333333333333333333",
+        "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "reason": null,
+        "reported_at_ms": 1794355300123,
+        "verdict": "valid",
+        "version": 29
+      }
+    ],
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "ready": true,
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.approve.reply -->
+```json
+{
+  "result": {
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "proposal_id": "01HF7YAT000000000000000001",
+    "status": "approved",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.approve.request -->
+```json
+{
+  "method": "manifest.approve",
+  "params": {
+    "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+    "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg"
+  }
+}
+```
+
+<!-- golden:manifest.approve.resend -->
+```json
+{
+  "result": {
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "proposal_id": "01HF7YAT000000000000000001",
+    "status": "approved",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.cross.manifest_to_secret -->
+```json
+{
+  "reply": {
+    "result": {
+      "error": {
+        "class": "permanent",
+        "code": "approval_invalid"
+      }
+    }
+  },
+  "request": {
+    "method": "secret.approve",
+    "params": {
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+      "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.cross.secret_to_manifest -->
+```json
+{
+  "reply": {
+    "result": {
+      "error": {
+        "class": "permanent",
+        "code": "approval_invalid"
+      }
+    }
+  },
+  "request": {
+    "method": "manifest.approve",
+    "params": {
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6Im9uY2UiLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+      "signature_b64url": "MEYCIQDDDWb9MS6QQpePnL-LikCFsRQyD3aE2G8vX648DUMsAQIhAO2etZbnlxx-zUkWJhkm8noT5mGSGLtQd48RtMKwVFG9"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.envelope -->
+```json
+{
+  "approval_public_key_sec1_hex": "041e18532fd4754c02f3041d9c75ceb33b83ffd81ac7ce4fe882ccb1c98bc5896ea46c311c4e2ff40dd96a3653e6e45445d32dfe486eced75c7a90c6a18881c0a3",
+  "envelope": {
+    "decision": "allow",
+    "device_fingerprint": "11111111111111111111111111111111",
+    "issued_at_ms": 1794355300123,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+    "v": "ck-manifest-binding-envelope/v1"
+  },
+  "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+  "envelope_utf8": "{\"decision\":\"allow\",\"device_fingerprint\":\"11111111111111111111111111111111\",\"issued_at_ms\":1794355300123,\"proposal_id\":\"01HF7YAT000000000000000001\",\"statement_sha256\":\"eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6\",\"v\":\"ck-manifest-binding-envelope/v1\"}",
+  "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg",
+  "test_only_private_scalar_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+}
+```
+
+<!-- golden:manifest.latest.reply -->
+```json
+{
+  "result": {
+    "envelope": {
+      "key_id": "56fae12f77164627",
+      "manifest_bytes": "{\n  \"artifact_id\": \"gh-routing-manifest\",\n  \"manifest_version\": 29,\n  \"schema_floor\": 1,\n  \"issued_at_unix_secs\": 1794355300,\n  \"detectors\": [\n    {\n      \"name\": \"café 🦀\",\n      \"enabled\": true,\n      \"fallback\": null,\n      \"weight\": 1.5\n    }\n  ],\n  \"tiers\": {\n    \"write\": [\n      \"push\"\n    ],\n    \"read\": []\n  },\n  \"api_rules\": [],\n  \"canonicalization\": {\n    \"z_last\": false,\n    \"a_first\": \"line\\nfeed\"\n  },\n  \"repository_sections\": [],\n  \"bindings\": {\n    \"Zulu/Existing\": \"agent_1111111111111111\",\n    \"Alpha/Other\": \"agent_2222222222222222\",\n    \"cortexkit/opencode-sidebar\": \"agent_3333333333333333\",\n    \"Octo-Owner/New-Repo\": \"agent_4444444444444444\"\n  },\n  \"worker_reads\": []\n}\n",
+      "signature": "iAD7y8ZFicBY9GkwqxcjiPE4QcROuTZ3Cc7NR5vILApdY5BR6jUEMCOzNTaZ5gCXuhWodNffXAUm8rAGa15dAQ=="
+    },
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.propose.reply -->
+```json
+{
+  "result": {
+    "expires_at_ms": 1794441700123,
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "manifest_version": 29,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+    "status": "approval_required"
+  }
+}
+```
+
+<!-- golden:manifest.propose.request -->
+```json
+{
+  "method": "manifest.propose_binding",
+  "params": {
+    "agent_id": "agent_4444444444444444",
+    "app_id": 4617236,
+    "app_slug": "plex-alfonso",
+    "repo": "octo-owner/new-repo"
+  }
+}
+```
+
+<!-- golden:manifest.refusal.already_bound -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "already_bound",
+      "manifest_sha256": "3551b398de3c6bd38903c49abc3d7b975b716b9f6b69fb4f8ce5316caa50cdf4",
+      "version": 30
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.approval_invalid -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "approval_invalid"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.bound_to_other_agent -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "bound_to_other_agent"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.expired -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "expired"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.github_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "github_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.home_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "home_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.identity_mismatch -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "identity_mismatch"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.identity_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "identity_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_all -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_all"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_too_large -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_too_large"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.installation_unusable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "installation_unusable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.invalid_params -->
+```json
+{
+  "code": "invalid_params",
+  "message": "params not decodable: invalid manifest proposal parameters"
+}
+```
+
+<!-- golden:manifest.refusal.manifest_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "manifest_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_found -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_found"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_installed -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_installed"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.not_reproducible -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "not_reproducible"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.one_tap_disabled -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "one_tap_disabled"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.pairing_unavailable -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "pairing_unavailable"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.phone_not_registered -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "phone_not_registered"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.forwarded -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.forwarded_with_remedy -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.remote_setup_incomplete.with_remedy -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "remote_setup_incomplete",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.secret_home_elsewhere -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "secret_home_elsewhere",
+      "remedy_member": "fed-computer:33333333333333333333333333333333"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.secret_setup_incomplete -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "secret_setup_incomplete"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.stale_base -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "stale_base"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.store_error -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "store_error"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.superseded -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "permanent",
+      "code": "superseded"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.refusal.unknown_version -->
+```json
+{
+  "result": {
+    "error": {
+      "class": "transient",
+      "code": "unknown_version"
+    }
+  }
+}
+```
+
+<!-- golden:manifest.report.reply -->
+```json
+{
+  "result": {
+    "member_id": "fed-computer:22222222222222222222222222222222",
+    "status": "recorded",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.report.request -->
+```json
+{
+  "method": "manifest.report_active",
+  "params": {
+    "payload_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "reason": null,
+    "verdict": "valid",
+    "version": 29
+  }
+}
+```
+
+<!-- golden:manifest.statement -->
+```json
+{
+  "statement": {
+    "agent_id": "agent_4444444444444444",
+    "app_slug": "plex-alfonso",
+    "expires_at_ms": 1794441700123,
+    "installation_permissions": {
+      "contents": "read",
+      "issues": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+    "manifest_version": 29,
+    "prior_sha256": "91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5",
+    "prior_version": 28,
+    "proposal_id": "01HF7YAT000000000000000001",
+    "repo": "Octo-Owner/New-Repo",
+    "v": "ck-manifest-binding-statement/v1"
+  },
+  "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+  "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+  "statement_utf8": "{\"agent_id\":\"agent_4444444444444444\",\"app_slug\":\"plex-alfonso\",\"expires_at_ms\":1794441700123,\"installation_permissions\":{\"contents\":\"read\",\"issues\":\"write\",\"metadata\":\"read\",\"pull_requests\":\"write\"},\"manifest_sha256\":\"94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3\",\"manifest_version\":29,\"prior_sha256\":\"91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5\",\"prior_version\":28,\"proposal_id\":\"01HF7YAT000000000000000001\",\"repo\":\"Octo-Owner/New-Repo\",\"v\":\"ck-manifest-binding-statement/v1\"}"
+}
+```
+
+<!-- golden:manifest.watch.empty -->
+```json
+{
+  "epoch": "00112233445566778899aabbccddeeff",
+  "kind": "changed",
+  "manifest_sha256": null,
+  "seq": 1,
+  "version": null
+}
+```
+
+<!-- golden:manifest.watch.stored -->
+```json
+{
+  "epoch": "00112233445566778899aabbccddeeff",
+  "kind": "changed",
+  "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+  "seq": 1,
+  "version": 29
+}
+```
+<!-- manifest-binding-generated:end -->

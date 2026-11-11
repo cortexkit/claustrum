@@ -2,6 +2,145 @@ use super::*;
 use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V2};
 use crate::enrollment::EnrollmentPoll;
 
+#[test]
+fn enrollment_requested_grants_second_audit_failure_rolls_back_everything() {
+    let (_root, store) = super::taxonomy_tests::rig("requested-grants-rollback", 166);
+    let requested =
+        serde_json::from_value::<Vec<crate::enrollment::RequestedGrant>>(serde_json::json!([
+            {"selector":{"category":"llm-provider"},"operation":"read"},
+            {"selector":{"exact":"apikey:one"},"operation":"list"}
+        ]))
+        .unwrap();
+    let request = store
+        .propose_enrollment_with_requested_grants_by(
+            None,
+            "consumer",
+            &"a".repeat(64),
+            None,
+            Some(&requested),
+        )
+        .unwrap();
+    let before = store.audit_tip().unwrap();
+    let generation = store.grants_generation().unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER refuse_second_requested_grant BEFORE INSERT ON audit_log \
+         WHEN NEW.op = 'grant_create' AND NEW.credential_id LIKE 'grant:list:%' \
+         BEGIN SELECT RAISE(ABORT, 'second grant audit refused'); END;",
+            )
+        })
+        .unwrap();
+    assert!(apply(
+        &store,
+        AdminOpBody::EnrollApprove {
+            v: ADMIN_OP_SCHEMA_V2,
+            request_id: request.request_id.clone(),
+            final_name: "consumer".into(),
+            display_name: None,
+            keep_grants: false,
+            grant_requested: true,
+        },
+        "operator"
+    )
+    .is_err());
+    assert_eq!(store.audit_tip().unwrap(), before);
+    assert_eq!(store.grants_generation().unwrap(), generation);
+    assert!(store.list_read_grants().unwrap().is_empty());
+    store
+        .with_raw_conn(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM enrolled_consumers", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT state FROM pending_enrollments", [], |row| row
+                    .get::<_, String>(0))?,
+                "pending"
+            );
+            conn.execute_batch("DROP TRIGGER refuse_second_requested_grant")
+        })
+        .unwrap();
+    apply(
+        &store,
+        AdminOpBody::EnrollApprove {
+            v: ADMIN_OP_SCHEMA_V2,
+            request_id: request.request_id,
+            final_name: "consumer".into(),
+            display_name: None,
+            keep_grants: false,
+            grant_requested: true,
+        },
+        "operator",
+    )
+    .unwrap();
+    assert_eq!(store.list_read_grants().unwrap().len(), 2);
+    assert_eq!(store.grants_generation().unwrap(), generation + 2);
+    assert_eq!(
+        store.audit_tip().unwrap().unwrap().0,
+        before.map_or(0, |tip| tip.0) + 3
+    );
+}
+
+#[test]
+fn enrollment_requested_grants_keep_grants_requires_consent_and_preserves_existing_rows() {
+    let (_root, store) = super::taxonomy_tests::rig("requested-grants-inherit", 166);
+    grant(
+        &store,
+        "enrolled",
+        "consumer",
+        SelectorKind::Exact,
+        GrantOperation::Read,
+    );
+    let existing = store.list_read_grants().unwrap();
+    let requested =
+        serde_json::from_value::<Vec<crate::enrollment::RequestedGrant>>(serde_json::json!([
+            {"selector":{"exact":"apikey:one"},"operation":"read"},
+            {"selector":{"exact":"apikey:one"},"operation":"list"}
+        ]))
+        .unwrap();
+    let request = store
+        .propose_enrollment_with_requested_grants_by(
+            None,
+            "consumer",
+            &"a".repeat(64),
+            None,
+            Some(&requested),
+        )
+        .unwrap();
+    let before = store.audit_tip().unwrap();
+    let generation = store.grants_generation().unwrap();
+    assert!(matches!(
+        store.approve_enrollment_with_requested_grants(
+            &request.request_id,
+            "consumer",
+            false,
+            None,
+            true,
+            "operator"
+        ),
+        Err(StoreOpError::EnrollmentNameHasGrants { .. })
+    ));
+    assert_eq!(store.list_read_grants().unwrap(), existing);
+    assert_eq!(store.audit_tip().unwrap(), before);
+    store
+        .approve_enrollment_with_requested_grants(
+            &request.request_id,
+            "consumer",
+            true,
+            None,
+            true,
+            "operator",
+        )
+        .unwrap();
+    let grants = store.list_read_grants().unwrap();
+    assert_eq!(grants.len(), 2);
+    assert!(grants.contains(&existing[0]));
+    assert_eq!(store.grants_generation().unwrap(), generation + 1);
+    assert_eq!(store.audit_tip().unwrap().unwrap().0, before.unwrap().0 + 2);
+}
+
 fn enroll(store: &EncryptedStore) -> String {
     let secret = "ad".repeat(32);
     let request = store

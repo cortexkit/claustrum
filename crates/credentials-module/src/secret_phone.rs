@@ -16,11 +16,12 @@ pub const PHONE_OP_DEADLINE: std::time::Duration =
     std::time::Duration::from_millis(PHONE_OP_DEADLINE_LIMIT_MS);
 pub const MAX_DEPOSIT_CIPHERTEXT: usize = 16384;
 pub const MAX_SECRET_CARD_REF_BYTES: usize = 64;
-pub const PHONE_OPS: [&str; 7] = [
+pub const PHONE_OPS: [&str; 8] = [
     "secret.phone_keys_register",
     "secret.deposit_keys",
     "secret.deposit",
     "secret.approve",
+    "manifest.approve",
     "secret.list",
     "secret.delete",
     "secret.revoke_grant",
@@ -31,12 +32,12 @@ pub fn is_phone_op(method: &str) -> bool {
 }
 
 /// The phone-callable query that says where this account's agent secrets live. It is
-/// kept apart from [`PHONE_OPS`], the seven ops a vault refuses when the secrets live
+/// kept apart from [`PHONE_OPS`], the ops a vault refuses when the secrets live
 /// elsewhere, because this one answers on every vault: it is how the phone finds the
 /// home.
 pub const HOME_OP: &str = "secret.home";
 
-/// Every op the phone route serves: the seven secret ops and [`HOME_OP`].
+/// Every op the phone route serves: secret and manifest approval ops and [`HOME_OP`].
 pub fn is_phone_route_op(method: &str) -> bool {
     is_phone_op(method) || method == HOME_OP
 }
@@ -291,6 +292,13 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
                 enc,
                 ciphertext,
             }))
+        }
+        "manifest.approve" => {
+            keys(params, &["envelope_b64url", "signature_b64url"], &[])?;
+            Ok(PhoneOperation::ManifestApprove {
+                envelope: base64(text(params, "envelope_b64url")?)?,
+                signature: base64(text(params, "signature_b64url")?)?,
+            })
         }
         "secret.approve" | "secret.delete" if params.get("envelope_b64url").is_some() => {
             keys(

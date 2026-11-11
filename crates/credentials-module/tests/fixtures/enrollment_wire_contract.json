@@ -1,11 +1,12 @@
 {
   "operations": [
     {
-      "op": "admin.enroll_approve",
-      "display_name_success": "{\"result\":{\"display_name\":\"Approved Pi label\",\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}",
       "display_name_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"display_name\":\"Approved Pi label\"}",
-      "request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\"}",
+      "display_name_success": "{\"result\":{\"display_name\":\"Approved Pi label\",\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}",
       "keep_grants_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"keep_grants\":true}",
+      "op": "admin.enroll_approve",
+      "request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\"}",
+      "requested_grants_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"grant_requested\":true}",
       "success": [
         "{\"result\":{\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}"
       ]
@@ -19,30 +20,31 @@
     },
     {
       "op": "credential.account_token",
+      "refusals": [
+        "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
+      ],
       "request": "{\"audience\":\"cortexkit-runners\"}",
       "success": [
         "{\"result\":{\"account\":\"01K00000000000000000000080\",\"audience\":\"cortexkit-runners\",\"expires_at_ms\":1800000900000,\"jwt\":\"e30.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhdWQiOiJjb3J0ZXhraXQtcnVubmVycyIsImRldmljZSI6IjAxTUNDNVJNMDA2TkRLMDFYRDFXVEI3WjFQIiwiZXhwIjoxODAwMDAwOTAwLCJpYXQiOjE4MDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBOSEJZQk5NWEVHMTZBOUNYIn0.fake-signature\"}}"
-      ],
-      "refusals": [
-        "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
       ]
     },
     {
       "op": "auth.watch_scoped",
       "request": "{}",
-      "success_cases": [
-        "initial snapshot seq 1 (epoch normalized)",
-        "changed snapshot seq 2 (epoch normalized)"
-      ],
       "success": [
         "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":1,\"view\":\"rPhZ9o1s0Wch9jJpeg+26jdk2qZprdASbtIqmCl+UAs=\"}",
         "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":2,\"view\":\"JXPDNv9w8FmY4sWcMnCsBojYO47GMGxdKyWRcdJ16Ko=\"}"
+      ],
+      "success_cases": [
+        "initial snapshot seq 1 (epoch normalized)",
+        "changed snapshot seq 2 (epoch normalized)"
       ]
     },
     {
-      "op": "auth.enroll_propose",
       "display_name_request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"display_name\":\"Claude sign-in for Pi\"}",
+      "op": "auth.enroll_propose",
       "request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+      "requested_grants_request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"requested_grants\":[{\"selector\":{\"category\":\"llm-provider\"},\"operation\":\"read\"}]}",
       "success": [
         "{\"result\":{\"request_id\":\"request-id\"}}"
       ]
@@ -64,12 +66,12 @@
       ]
     },
     {
+      "list_only_reply": "{\"result\":{\"credentials\":[{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"list\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_5x\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"detected\",\"provider\":\"anthropic\",\"provider_ids\":[\"anthropic\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"list\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"}],\"grants\":1,\"view\":\"Xqi9f8zrVXEj+oY9i33BPScGE8JAedPfEwj5rD/GGpk=\"}}",
       "op": "credential.list_scoped",
-      "request": "{\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"}",
-      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload",
-      "row": "{\"id\":\"oauth:anthropic\",\"provider\":\"anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"plan_tier_observed_at_ms\":null,\"categories\":[\"llm-provider\"],\"type\":\"oauth\",\"serves\":[\"anthropic\"],\"refresh_adapter\":\"anthropic\",\"state\":\"active\",\"record_version\":232,\"operations\":[\"read\"],\"provider_ids\":[\"anthropic\"],\"plan_tier\":\"max_5x\",\"plan_tier_source\":\"operator\",\"auth_method\":\"oauth\"}",
       "reply": "{\"result\":{\"credentials\":[{\"auth_method\":\"antigravity\",\"categories\":[\"llm-provider\"],\"id\":\"antigravity:google\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":\"antigravity\",\"provider_ids\":[\"google-antigravity\"],\"record_version\":5,\"refresh_adapter\":\"antigravity\",\"serves\":[\"google\",\"anthropic\",\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"auth_method\":\"apikey\",\"categories\":[\"llm-provider\"],\"fusiform_provider_id\":\"openrouter\",\"hosts\":[\"openrouter.ai\"],\"id\":\"apikey:openrouter\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":\"openrouter\",\"provider_ids\":[\"openrouter\"],\"record_version\":3,\"serves\":[\"anthropic\",\"openai\",\"google\",\"xai\",\"deepseek\",\"mistral\",\"moonshot\",\"zhipu\",\"meta\",\"qwen\",\"perplexity\",\"nvidia\",\"minimax\",\"xiaomi\",\"stepfun\",\"inception\"],\"state\":\"active\",\"type\":\"apikey\"},{\"auth_method\":\"chatgpt\",\"categories\":[\"llm-provider\"],\"id\":\"chatgpt:openai\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier\":\"pro_200\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"detected\",\"provider\":\"openai\",\"provider_ids\":[],\"record_version\":11,\"refresh_adapter\":\"openai\",\"serves\":[\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"categories\":[\"github-app-native\"],\"id\":\"github_app:plex-alfonso\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":null,\"provider_ids\":[],\"record_version\":2,\"refresh_adapter\":\"github_app\",\"serves\":[],\"state\":\"active\",\"type\":\"github_app\"},{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"anthropic-native\",\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_20x\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"operator\",\"provider\":\"anthropic\",\"provider_ids\":[\"anthropic\",\"claude-code\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"read\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"},{\"operation\":\"read\",\"selector\":\"github-app-native\",\"selector_kind\":\"category\"}],\"grants\":2,\"view\":\"kehakvIMhQw4gPUf4l6aG9YnOTL4SyubRengxfCPZ0I=\"}}",
-      "list_only_reply": "{\"result\":{\"credentials\":[{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"list\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_5x\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"detected\",\"provider\":\"anthropic\",\"provider_ids\":[\"anthropic\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"list\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"}],\"grants\":1,\"view\":\"Xqi9f8zrVXEj+oY9i33BPScGE8JAedPfEwj5rD/GGpk=\"}}"
+      "request": "{\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"}",
+      "row": "{\"id\":\"oauth:anthropic\",\"provider\":\"anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"plan_tier_observed_at_ms\":null,\"categories\":[\"llm-provider\"],\"type\":\"oauth\",\"serves\":[\"anthropic\"],\"refresh_adapter\":\"anthropic\",\"state\":\"active\",\"record_version\":232,\"operations\":[\"read\"],\"provider_ids\":[\"anthropic\"],\"plan_tier\":\"max_5x\",\"plan_tier_source\":\"operator\",\"auth_method\":\"oauth\"}",
+      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload"
     },
     {
       "op": "credential.get_scoped",
@@ -95,15 +97,15 @@
     {
       "op": "credential.public_key",
       "request": "{\"credential_id\":\"signing:wire-fixture\"}",
-      "x25519_request": "{\"credential_id\":\"kem:wire-fixture\"}",
+      "success": [
+        "{\"result\":{\"algorithm\":\"ed25519\",\"key_id\":\"56475aa75463474c\",\"public_key_hex\":\"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8\"}}",
+        "{\"result\":{\"algorithm\":\"x25519\",\"key_id\":\"a0289810032eb417\",\"public_key_hex\":\"358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254\"}}"
+      ],
       "success_cases": [
         "Ed25519 signing key (request)",
         "X25519 KEM key (x25519_request)"
       ],
-      "success": [
-        "{\"result\":{\"algorithm\":\"ed25519\",\"key_id\":\"56475aa75463474c\",\"public_key_hex\":\"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8\"}}",
-        "{\"result\":{\"algorithm\":\"x25519\",\"key_id\":\"a0289810032eb417\",\"public_key_hex\":\"358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254\"}}"
-      ]
+      "x25519_request": "{\"credential_id\":\"kem:wire-fixture\"}"
     },
     {
       "hpke": {
@@ -154,81 +156,81 @@
     },
     {
       "op": "credential.get",
-      "success_cases": [
-        "every optional field present",
-        "every optional field absent"
-      ],
       "success": [
         "{\"result\":{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"credential_id\":\"oauth:example\",\"email\":\"consumer@example.invalid\",\"expires_at_ms\":1900000000000,\"org_name\":\"Example Org\",\"payload\":[102,105,120,116,117,114,101,45,110,111,116,45,97,45,115,101,99,114,101,116],\"project_id\":\"example-project-000000\",\"record_version\":42}}",
         "{\"result\":{\"expires_at_ms\":null,\"payload\":[102,105,120,116,117,114,101,45,110,111,116,45,97,45,115,101,99,114,101,116],\"record_version\":7}}"
+      ],
+      "success_cases": [
+        "every optional field present",
+        "every optional field absent"
       ]
     },
     {
       "op": "credential.status",
-      "success_cases": [
-        "handle resolved to an active credential",
-        "handle did not resolve (unknown or revoked)"
-      ],
       "success": [
         "{\"result\":{\"credential_id\":\"apikey:active\",\"last_error_code\":null,\"lease_held\":true,\"ready\":true,\"record_version\":1,\"stale_pending\":false}}",
         "{\"result\":{\"last_error_code\":\"not_found\",\"lease_held\":true,\"ready\":false}}"
+      ],
+      "success_cases": [
+        "handle resolved to an active credential",
+        "handle did not resolve (unknown or revoked)"
       ]
     }
   ],
   "refusals": [
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"pending_exists\"}}}",
       "op": "auth.enroll_propose",
       "outcome": "name already has a live request",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"pending_exists\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"transient\",\"code\":\"pending_queue_full\"}}}",
       "op": "auth.enroll_propose",
       "outcome": "16 live rows",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"transient\",\"code\":\"pending_queue_full\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}",
       "op": "auth.enroll_propose",
       "outcome": "malformed name or hash",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}",
       "op": "auth.enroll_poll",
       "outcome": "unknown request_id or wrong secret",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}",
       "op": "auth.enroll_poll",
       "outcome": "malformed secret",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"already_consumed\"}}}",
       "op": "auth.enroll_poll",
       "outcome": "already delivered",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"already_consumed\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"superseded\"}}}",
       "op": "auth.enroll_poll",
       "outcome": "revoked, reissued past, or expired-approved",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"superseded\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"stale_generation\"}}}",
       "op": "auth.enroll_rotate",
       "outcome": "wrong expected_token_generation",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"stale_generation\"}}}"
+      "transport_status": "response"
     },
     {
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}",
       "op": "auth.enroll_rotate and scoped operations",
       "outcome": "unknown, revoked, or rotated-away token",
-      "transport_status": "response",
-      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
+      "transport_status": "response"
     }
   ]
 }

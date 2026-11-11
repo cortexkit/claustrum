@@ -89,6 +89,27 @@ pub enum AdminOpBody {
         id: String,
         payload_b64: String,
     },
+    #[serde(rename = "admin.manifest_import")]
+    ManifestImport {
+        v: u32,
+        envelope: crate::store::GhManifestHandoffEnvelope,
+    },
+    #[serde(rename = "admin.manifest_sign")]
+    ManifestSign {
+        v: u32,
+        manifest_bytes: String,
+        approver: String,
+    },
+    #[serde(rename = "admin.manifest_export")]
+    ManifestExport { v: u32, version: i64 },
+    #[serde(rename = "admin.manifest_list")]
+    ManifestList { v: u32 },
+    #[serde(rename = "admin.manifest_retire_machine")]
+    ManifestRetireMachine { v: u32, member_id: String },
+    #[serde(rename = "admin.manifest_one_tap_set")]
+    ManifestOneTapSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.manifest_one_tap_status")]
+    ManifestOneTapStatus { v: u32 },
     #[serde(rename = "admin.store")]
     Store {
         v: u32,
@@ -225,6 +246,9 @@ pub enum AdminOpBody {
         /// Explicitly allow the new consumer to inherit existing name-bound grants.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_grants: bool,
+        /// Apply only the permissions stored on the pending request, never caller-supplied grants.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        grant_requested: bool,
     },
     /// Set or clear the display name of a live, approved enrollment.
     #[serde(rename = "admin.enroll_label")]
@@ -506,6 +530,29 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("service", service)
                 .finish(),
+            AdminOpBody::ManifestImport { v, .. } | AdminOpBody::ManifestSign { v, .. } => f
+                .debug_struct(self.op_name())
+                .field("v", v)
+                .field("manifest_bytes", &"<redacted>")
+                .finish(),
+            AdminOpBody::ManifestExport { v, version } => f
+                .debug_struct("ManifestExport")
+                .field("v", v)
+                .field("version", version)
+                .finish(),
+            AdminOpBody::ManifestList { v } | AdminOpBody::ManifestOneTapStatus { v } => {
+                f.debug_struct(self.op_name()).field("v", v).finish()
+            }
+            AdminOpBody::ManifestRetireMachine { v, member_id } => f
+                .debug_struct("ManifestRetireMachine")
+                .field("v", v)
+                .field("member_id", member_id)
+                .finish(),
+            AdminOpBody::ManifestOneTapSet { v, enabled } => f
+                .debug_struct("ManifestOneTapSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::OperatorSign { v, id, .. } => f
                 .debug_struct("OperatorSign")
                 .field("v", v)
@@ -646,6 +693,7 @@ impl std::fmt::Debug for AdminOpBody {
                 final_name,
                 keep_grants,
                 display_name,
+                grant_requested,
             } => f
                 .debug_struct("EnrollApprove")
                 .field("v", v)
@@ -653,6 +701,7 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("final_name", final_name)
                 .field("display_name", display_name)
                 .field("keep_grants", keep_grants)
+                .field("grant_requested", grant_requested)
                 .finish(),
             AdminOpBody::EnrollLabel {
                 v,
@@ -931,6 +980,13 @@ impl AdminOpBody {
             | AdminOpBody::ProviderSet { v, .. }
             | AdminOpBody::ProviderRemove { v, .. }
             | AdminOpBody::OperatorSign { v, .. }
+            | AdminOpBody::ManifestImport { v, .. }
+            | AdminOpBody::ManifestSign { v, .. }
+            | AdminOpBody::ManifestExport { v, .. }
+            | AdminOpBody::ManifestList { v }
+            | AdminOpBody::ManifestRetireMachine { v, .. }
+            | AdminOpBody::ManifestOneTapSet { v, .. }
+            | AdminOpBody::ManifestOneTapStatus { v }
             | AdminOpBody::StoreWithIdentityPolicy { v, .. }
             | AdminOpBody::SetIdentity { v, .. }
             | AdminOpBody::Invalidate { v, .. }
@@ -1001,7 +1057,14 @@ impl AdminOpBody {
                     ADMIN_OP_SCHEMA_V2
                 }
             }
-            AdminOpBody::GrantCreateV2 { .. }
+            AdminOpBody::ManifestImport { .. }
+            | AdminOpBody::ManifestSign { .. }
+            | AdminOpBody::ManifestExport { .. }
+            | AdminOpBody::ManifestList { .. }
+            | AdminOpBody::ManifestRetireMachine { .. }
+            | AdminOpBody::ManifestOneTapSet { .. }
+            | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
@@ -1107,7 +1170,15 @@ impl AdminOpBody {
             AdminOpBody::TransferInit { .. } | AdminOpBody::TransferRecover { .. } => {
                 Some(crate::federation::VAULT_TRANSFER_ID)
             }
+            AdminOpBody::ManifestSign { .. } | AdminOpBody::ManifestImport { .. } => {
+                Some(crate::store::GH_MANIFEST_ROOT_KEY_ID)
+            }
             AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::ManifestExport { .. }
+            | AdminOpBody::ManifestList { .. }
+            | AdminOpBody::ManifestRetireMachine { .. }
+            | AdminOpBody::ManifestOneTapSet { .. }
+            | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::RevokeHandleByHash { .. }
@@ -1165,6 +1236,13 @@ impl AdminOpBody {
     pub fn op_name(&self) -> &'static str {
         match self {
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
+            AdminOpBody::ManifestImport { .. } => "admin.manifest_import",
+            AdminOpBody::ManifestSign { .. } => "admin.manifest_sign",
+            AdminOpBody::ManifestExport { .. } => "admin.manifest_export",
+            AdminOpBody::ManifestList { .. } => "admin.manifest_list",
+            AdminOpBody::ManifestRetireMachine { .. } => "admin.manifest_retire_machine",
+            AdminOpBody::ManifestOneTapSet { .. } => "admin.manifest_one_tap_set",
+            AdminOpBody::ManifestOneTapStatus { .. } => "admin.manifest_one_tap_status",
             AdminOpBody::ProviderSet { .. } => "admin.provider_set",
             AdminOpBody::ProviderRemove { .. } => "admin.provider_remove",
             AdminOpBody::Store { .. } => "admin.store",
@@ -1233,6 +1311,13 @@ impl AdminOpBody {
             | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::OperatorSign { .. }
+            | AdminOpBody::ManifestImport { .. }
+            | AdminOpBody::ManifestSign { .. }
+            | AdminOpBody::ManifestExport { .. }
+            | AdminOpBody::ManifestList { .. }
+            | AdminOpBody::ManifestRetireMachine { .. }
+            | AdminOpBody::ManifestOneTapSet { .. }
+            | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
             | AdminOpBody::Invalidate { .. }
@@ -1385,6 +1470,38 @@ pub fn apply(
         return Err(requires_daemon_refusal(&op));
     }
     match op {
+        AdminOpBody::ManifestImport { envelope, .. } => {
+            store.import_gh_manifest_admin(&envelope, actor)
+        }
+        AdminOpBody::ManifestSign {
+            manifest_bytes,
+            approver,
+            ..
+        } => store.sign_gh_manifest_admin(&manifest_bytes, &approver, actor),
+        AdminOpBody::ManifestExport { version, .. } => {
+            let envelope = store.export_gh_manifest_admin(version)?;
+            serde_json::to_value(envelope).map_err(|e| StoreOpError::Encode(e.to_string()))
+        }
+        AdminOpBody::ManifestList { .. } => store.list_gh_manifests_admin(),
+        AdminOpBody::ManifestRetireMachine { member_id, .. } => {
+            crate::federation::check_member_id(&member_id)?;
+            store.retire_gh_manifest_member(
+                &member_id,
+                wall_now_ms(),
+                AuditCtx::route_admin(AuditOp::GhManifestRetire, actor),
+            )?;
+            Ok(serde_json::json!({"retired": true, "member_id": member_id}))
+        }
+        AdminOpBody::ManifestOneTapSet { enabled, .. } => {
+            let changed = store.set_manifest_one_tap_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::GhManifestOneTapSet, actor),
+            )?;
+            Ok(serde_json::json!({"one_tap": enabled, "changed": changed}))
+        }
+        AdminOpBody::ManifestOneTapStatus { .. } => {
+            Ok(serde_json::json!({"one_tap": store.manifest_one_tap_status()}))
+        }
         AdminOpBody::ProviderSet {
             v,
             service,
@@ -1481,13 +1598,15 @@ pub fn apply(
             final_name,
             keep_grants,
             display_name,
+            grant_requested,
             ..
         } => {
-            let (enrollment_id, display_name) = store.approve_enrollment_with_display_name(
+            let (enrollment_id, display_name) = store.approve_enrollment_with_requested_grants(
                 &request_id,
                 &final_name,
                 keep_grants,
                 display_name.as_deref(),
+                grant_requested,
                 actor,
             )?;
             // The token is deliberately absent: approval admits a NAME, and only the
@@ -2495,6 +2614,65 @@ mod admin_schema_v2_tests {
         let v1 = ADMIN_OP_SCHEMA_V1;
         let v2 = ADMIN_OP_SCHEMA_V2;
         let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
+            (
+                "ManifestImport",
+                AdminOpBody::ManifestImport {
+                    v: v2,
+                    envelope: crate::store::GhManifestHandoffEnvelope {
+                        key_id: "a".repeat(16),
+                        manifest_bytes: "{}".into(),
+                        signature: "".into(),
+                    },
+                },
+                v2,
+                Some(crate::store::GH_MANIFEST_ROOT_KEY_ID),
+            ),
+            (
+                "ManifestSign",
+                AdminOpBody::ManifestSign {
+                    v: v2,
+                    manifest_bytes: "{}".into(),
+                    approver: "operator".into(),
+                },
+                v2,
+                Some(crate::store::GH_MANIFEST_ROOT_KEY_ID),
+            ),
+            (
+                "ManifestExport",
+                AdminOpBody::ManifestExport { v: v2, version: 28 },
+                v2,
+                None,
+            ),
+            (
+                "ManifestList",
+                AdminOpBody::ManifestList { v: v2 },
+                v2,
+                None,
+            ),
+            (
+                "ManifestRetireMachine",
+                AdminOpBody::ManifestRetireMachine {
+                    v: v2,
+                    member_id: "member".into(),
+                },
+                v2,
+                None,
+            ),
+            (
+                "ManifestOneTapSet",
+                AdminOpBody::ManifestOneTapSet {
+                    v: v2,
+                    enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "ManifestOneTapStatus",
+                AdminOpBody::ManifestOneTapStatus { v: v2 },
+                v2,
+                None,
+            ),
             (
                 "OperatorSign",
                 AdminOpBody::OperatorSign {

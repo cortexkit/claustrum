@@ -175,6 +175,60 @@ async fn cp_reply(
 }
 
 #[tokio::test]
+async fn permissions_credential_grants_default_display_names_are_read_only_and_exact() {
+    let (surface, admin, store) = cp_rig(160);
+    for name in [
+        "anthropic-auth-pi",
+        "openai-auth-opencode-x",
+        "xopenai-auth-opencode",
+    ] {
+        let request = store.propose_enrollment(name, &"a".repeat(64)).unwrap();
+        store.approve_enrollment(&request.request_id, name, "operator").unwrap();
+        store.create_read_grant_audited(
+            "enrolled", name, SelectorKind::Exact, CP_LONG_ID, GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        ).unwrap();
+    }
+    let pending = "openai-auth-pi";
+    store.propose_enrollment(pending, &"a".repeat(64)).unwrap();
+    store.create_read_grant_audited(
+        "enrolled", pending, SelectorKind::Exact, CP_LONG_ID, GrantOperation::Read,
+        AuditCtx::admin(AuditOp::GrantCreate),
+    ).unwrap();
+    for (index, stored) in [None, Some("My Claude"), None].into_iter().enumerate() {
+        if index > 0 {
+            credentials_core::admin_ops::apply(&store, credentials_core::admin_ops::AdminOpBody::EnrollLabel {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                name: "anthropic-auth-pi".into(),
+                display_name: stored.map(str::to_owned),
+            }, "operator").unwrap();
+        }
+        let before = store.with_raw_conn(|conn| {
+            conn.query_row("SELECT display_name FROM enrolled_consumers WHERE name='anthropic-auth-pi'", [], |row| row.get::<_, Option<String>>(0))
+        }).unwrap();
+        assert_eq!(before.as_deref(), stored);
+        let tip = store.audit_tip().unwrap();
+        let reply = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+        let body: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        let rows = body["result"]["grants"].as_array().unwrap();
+        let row = rows.iter().find(|row| row["holder"]["name"] == "anthropic-auth-pi").unwrap();
+        assert_eq!(row["holder"], json!({
+            "kind":"enrolled", "name":"anthropic-auth-pi",
+            "label":stored.unwrap_or("Claude sign-in for Pi"),
+        }));
+        for name in ["openai-auth-opencode-x", "xopenai-auth-opencode", pending] {
+            let row = rows.iter().find(|row| row["holder"]["name"] == name).unwrap();
+            assert!(row["holder"].get("label").is_none(), "{row}");
+        }
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        let after = store.with_raw_conn(|conn| {
+            conn.query_row("SELECT display_name FROM enrolled_consumers WHERE name='anthropic-auth-pi'", [], |row| row.get::<_, Option<String>>(0))
+        }).unwrap();
+        assert_eq!(after, before);
+    }
+}
+
+#[tokio::test]
 async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -523,4 +577,39 @@ async fn permissions_credential_grants_reach_changes_without_changing_identity_o
     let mut expected = row(&before);
     expected["scope_label"] = json!("can read the secrets of 2 credentials in this group");
     assert_eq!(row(&after), expected);
+}
+
+#[tokio::test]
+async fn enrollment_requested_grants_appear_as_ordinary_enrolled_permission_rows() {
+    let (surface, admin, store) = cp_rig(151);
+    let grants = serde_json::from_value::<Vec<credentials_core::enrollment::RequestedGrant>>(json!([
+        {"selector":{"exact":CP_LONG_ID},"operation":"read"},
+        {"selector":{"category":"llm-provider"},"operation":"list"}
+    ])).unwrap();
+    let request = store
+        .propose_enrollment_with_requested_grants_by(
+            None, "one-step-plugin", &"a".repeat(64), None, Some(&grants),
+        )
+        .unwrap();
+    store
+        .approve_enrollment_with_requested_grants(
+            &request.request_id, "one-step-plugin", false, None, true, "operator",
+        )
+        .unwrap();
+    let reply = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+    let body: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    let rows: Vec<_> = body["result"]["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["holder"]["name"] == "one-step-plugin")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for grant in grants {
+        let (kind, selector) = grant.selector.parts();
+        let id = cp_id("enrolled", "one-step-plugin", kind, selector, grant.operation);
+        let row = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["holder"], json!({"kind":"enrolled","name":"one-step-plugin"}));
+        assert_eq!(row["scope"], grant.operation.as_str());
+    }
 }

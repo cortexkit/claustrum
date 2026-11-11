@@ -396,7 +396,7 @@ fn gateway_create_remove_cleans_settings_even_without_foreign_keys_and_reuse_get
 
 #[test]
 fn gateway_migration_adds_only_settings_and_leaves_old_readers_and_rows_unchanged() {
-    assert_eq!(GATEWAY_SETTINGS_SCHEMA_VERSION, 41);
+    assert_eq!(GATEWAY_SETTINGS_SCHEMA_VERSION, 43);
     let (root, sqlite) = sqlite("gateway-migration", 210);
     migrate_through_for_test(&sqlite, GATEWAY_SETTINGS_SCHEMA_VERSION - 1).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([210; 32])).unwrap();
@@ -422,17 +422,17 @@ fn gateway_migration_adds_only_settings_and_leaves_old_readers_and_rows_unchange
         .map(|name| (name.clone(), rows(&store, name)))
         .collect();
     let (_, version) = list_meta_read_only_with_schema(&root.join("store.db")).unwrap();
-    assert_eq!(version, 40);
+    assert_eq!(version, 42);
     count_refresh_intents_read_only(&root.join("store.db")).unwrap();
     assert_eq!(table_names(), before_tables);
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 40);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 42);
     migrate_through_for_test(&store.store, GATEWAY_SETTINGS_SCHEMA_VERSION).unwrap();
     let added: Vec<_> = table_names()
         .into_iter()
         .filter(|name| !before_tables.contains(name))
         .collect();
     assert_eq!(added, ["credential_gateway_settings"]);
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 41);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 43);
     assert!(rows(&store, "credential_gateway_settings").is_empty());
     for (table, before) in before_rows {
         assert_eq!(rows(&store, &table), before, "migration changed {table}");
@@ -454,4 +454,142 @@ fn gateway_migration_adds_only_settings_and_leaves_old_readers_and_rows_unchange
         "the table must have at most one settings row per credential"
     );
     assert_eq!(rows(&store, "credential_gateway_settings"), before);
+}
+
+/// The upgrade a live vault takes: it sits at the registered-provider descriptor step
+/// (42) and the next daemon applies only the gateway settings step (43), which adds
+/// an empty `credential_gateway_settings` table and leaves every existing row alone.
+#[test]
+fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_row() {
+    assert_eq!(REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION, 42);
+    assert_eq!(GATEWAY_SETTINGS_SCHEMA_VERSION, 43);
+    let (root, sqlite) = sqlite("gateway-upgrade-from-descriptors", 211);
+    migrate_through_for_test(&sqlite, REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 42);
+    store
+        .create_audited(
+            "apikey:custom:existing",
+            &api_record(),
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "existing-consumer",
+            SelectorKind::Exact,
+            "apikey:custom:existing",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let descriptor = RegisteredProviderSettings {
+        hosts: vec!["api.example.com".into()],
+        auth_header: Some("x-api-key".into()),
+        auth_scheme: Some("raw".into()),
+        fusiform_provider_id: Some("openai".into()),
+    };
+    assert!(store
+        .set_registered_provider_settings_audited(
+            "custom",
+            &["llm-provider".into()],
+            &["custom".into()],
+            Some(&descriptor),
+            AuditCtx::admin(AuditOp::ProviderSet),
+        )
+        .unwrap());
+    let table_names = |store: &EncryptedStore| {
+        store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?;
+                let result = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>();
+                result
+            })
+            .unwrap()
+    };
+    // Every table's raw rows, except the store's own bookkeeping: the schema version
+    // marker the migration bumps and the writer fence that every reopen advances.
+    let snapshot = |store: &EncryptedStore, tables: &[String]| {
+        tables
+            .iter()
+            .filter(|name| {
+                !matches!(
+                    name.as_str(),
+                    "cortexkit_schema_version" | "cortexkit_fence"
+                )
+            })
+            .map(|name| (name.clone(), rows(store, name)))
+            .collect::<Vec<_>>()
+    };
+    let tables_before = table_names(&store);
+    assert!(!tables_before.contains(&"credential_gateway_settings".to_string()));
+    let before = snapshot(&store, &tables_before);
+    let count = |table: &str| {
+        before
+            .iter()
+            .find(|(name, _)| name == table)
+            .map(|(_, rows)| rows.len())
+            .unwrap()
+    };
+    assert_eq!(count("credentials"), 1);
+    assert_eq!(count("read_grants"), 1);
+    assert_eq!(count("registered_providers"), 1);
+    assert_eq!(
+        count("audit_log"),
+        3,
+        "the put, grant and provider set each audit once"
+    );
+    let providers_before = store.registered_providers().unwrap();
+    assert_eq!(providers_before[0].hosts, ["api.example.com"]);
+    assert_eq!(
+        providers_before[0].auth_header.as_deref(),
+        Some("x-api-key")
+    );
+    assert_eq!(providers_before[0].auth_scheme.as_deref(), Some("raw"));
+    assert_eq!(
+        providers_before[0].fusiform_provider_id.as_deref(),
+        Some("openai")
+    );
+    let grants_before = store.list_read_grants().unwrap();
+    let meta_before = store.list_meta().unwrap();
+    drop(store);
+
+    // Reopen from disk the way the upgraded daemon does, then migrate to the newest step.
+    let path = root.join("store.db");
+    let descriptor = cortexkit_store::StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: "taxonomy-gateway-upgrade-from-descriptors".into(),
+        isolation: cortexkit_store::Isolation::Module,
+        backend: cortexkit_store::StorageBackend::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
+    EncryptedStore::migrate(&store.store).unwrap();
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 43);
+    assert_eq!(newest_migration_version(), 43);
+    let added: Vec<_> = table_names(&store)
+        .into_iter()
+        .filter(|name| !tables_before.contains(name))
+        .collect();
+    assert_eq!(added, ["credential_gateway_settings"]);
+    assert!(rows(&store, "credential_gateway_settings").is_empty());
+    for ((table, after), (_, before)) in snapshot(&store, &tables_before).iter().zip(&before) {
+        assert_eq!(after, before, "the upgrade changed rows in {table}");
+    }
+    assert_eq!(store.registered_providers().unwrap(), providers_before);
+    assert_eq!(
+        registered_providers_read_only(&path).unwrap(),
+        providers_before
+    );
+    assert_eq!(store.list_read_grants().unwrap(), grants_before);
+    let meta_after = store.list_meta().unwrap();
+    assert_eq!(meta_after, meta_before);
+    assert!(meta_after.iter().all(|(_, meta)| meta.gateway.is_none()));
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
 }

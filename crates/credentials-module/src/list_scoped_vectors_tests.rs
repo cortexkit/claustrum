@@ -321,13 +321,34 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             .unwrap();
     let baselines = non_gateway_scoped_baseline_vectors().await;
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let mut sums = format!(
-        "{}  list-scoped-v2.json\n{}  get-scoped-v1.json\n",
-        hex_digest(&emitted), hex_digest(&get_emitted),
-    );
+    // SHA256SUMS lists every vector file in the directory, one line each. This test
+    // owns only the lines for the files it produces (the two vector files and the
+    // non-gateway baselines), so other files' entries must not affect it.
+    let mut produced: Vec<(&str, &[u8])> = vec![
+        ("get-scoped-v1.json", get_emitted.as_slice()),
+        ("list-scoped-v2.json", emitted.as_slice()),
+    ];
     for (name, bytes) in &baselines {
-        sums.push_str(&format!("{}  {name}\n", hex_digest(bytes)));
+        produced.push((*name, bytes.as_slice()));
     }
+    produced.sort_by(|a, b| a.0.cmp(b.0));
+    let owned_by_us = |entry: &str| {
+        produced
+            .iter()
+            .any(|(name, _)| entry.ends_with(&format!("  {name}")))
+    };
+    let lines: Vec<String> = produced
+        .iter()
+        .map(|(name, bytes)| format!("{}  {name}", hex_digest(bytes)))
+        .collect();
+    let ours = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|entry| owned_by_us(entry))
+            .map(str::to_owned)
+            .collect()
+    };
+    let sums_path = directory.join("SHA256SUMS");
+    let sums = std::fs::read_to_string(&sums_path).expect("pinned vector hash");
     if std::env::var("CK_EMIT_LIST_SCOPED_VECTORS").as_deref() == Ok("1")
         || std::env::var("CK_EMIT_SECRET_VECTORS").as_deref() == Ok("1")
     {
@@ -336,8 +357,17 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         for (name, bytes) in &baselines {
             std::fs::write(directory.join(name), bytes).unwrap();
         }
-        std::fs::write(directory.join("SHA256SUMS"), &sums).unwrap();
-        println!("emitted six list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and SHA256SUMS");
+        let mut all: Vec<String> = sums
+            .lines()
+            .filter(|entry| !owned_by_us(entry))
+            .map(str::to_owned)
+            .chain(lines.iter().cloned())
+            .collect();
+        all.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
+        std::fs::write(&sums_path, format!("{}\n", all.join("\n"))).unwrap();
+        println!(
+            "emitted six list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and their SHA256SUMS lines"
+        );
     } else {
         assert_eq!(
             emitted,
@@ -357,8 +387,9 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             );
         }
         assert_eq!(
-            sums,
-            std::fs::read_to_string(directory.join("SHA256SUMS")).expect("pinned vector hash")
+            ours(&sums),
+            lines,
+            "SHA256SUMS must list each file this test produces once, with these hashes"
         );
     }
 }

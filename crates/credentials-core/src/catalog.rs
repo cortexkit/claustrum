@@ -1763,8 +1763,9 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         account_id_prompt: None,
     },
     // Rows below were taken from each provider's own documentation, starting from the
-    // `ckdev_provider_rows` proposal for its Fusiform id. Checks that answered a
-    // deliberately bogus key are recorded in docs/provider-key-evidence.md.
+    // proposal that `cargo run -p credentials-core --example ckdev_provider_rows` prints
+    // for its Fusiform id. Checks that answered a deliberately bogus key are recorded in
+    // docs/provider-key-evidence.md.
     //
     // 302.AI's OpenAI SDK guide sets this base URL with the key as the SDK's API key,
     // which the SDK sends as a Bearer token.

@@ -130,8 +130,21 @@ are unchanged.
 | orcarouter | https://api.orcarouter.ai/v1/models | 2026-11-11 | 401 | orcarouter_api_error | /error/type |
 | ovhcloud | https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions | 2026-11-11 | 403 | - | - |
 | pareto | https://api.paretoinference.com/v1/chat/completions | 2026-11-11 | 401 | 401 | /error/code |
+| pendra | https://api.pendra.ai/api/v1/models | 2026-11-11 | 401 | - | - |
 | perplexity | https://api.perplexity.ai/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/type |
+| perplexity-agent | https://api.perplexity.ai/orchestrator/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/type |
+| pioneer | https://api.fastino.ai/v1/model-status/fastino/gliner2.5-multi-v1 | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| poe | https://api.poe.com/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| prime | https://api.pinference.ai/api/v1/models | 2026-11-11 | 401 | - | - |
+| privatemode-ai | https://proxyless-api.privatemode.ai/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| qiniu-ai | https://api.qnaigc.com/v1/chat/completions | 2026-11-11 | 401 | auth_api_key_missing | /error/code |
 | qwen-portal | https://portal.qwen.ai/v1/chat/completions | 2026-11-10 | 401 | invalid_api_key | /error/code |
+| reflection | https://api.reflection.ai/openai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| requesty | https://router.requesty.ai/v1/models | 2026-11-11 | 403 | - | - |
+| runinfra | https://api.runinfra.ai/v1/models | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| salad-cloud | https://ai.salad.cloud/v1/chat/completions | 2026-11-11 | 401 | - | - |
+| sambanova | https://api.sambanova.ai/v1/chat/completions | 2026-11-11 | 401 | invalid_api_key | /error/code |
+| sarvam | https://api.sarvam.ai/v1/chat/completions | 2026-11-11 | 403 | invalid_api_key_error | /error/code |
 | siliconflow | https://api.siliconflow.com/v1/models | 2026-11-10 | 401 | - | - |
 | siliconflow-cn | https://api.siliconflow.cn/v1/models | 2026-11-10 | 401 | - | - |
 | singularityapi-dev | https://api.singularityapi.dev/v1/models | 2026-11-10 | 401 | invalid_api_key | /error/code |
@@ -749,6 +762,123 @@ Four selected ids remain uncovered rather than receiving invented skip reasons:
   the quickstart yielded no readable API instructions; `/llms.txt` returned an
   Amazon sign-in page. No host or key header was inferred from other AWS products.
 
+## Provider-key evidence for Pendra through STACKIT
+
+The selected 25 ids are `pendra` through `stackit`, in provider-id order from
+`ck auth provider-report --missing`. The ten earlier gaps (`clarifai`, `ebcloud`,
+`hetzner`, `kuae-cloud-coding-plan`, `lilac`, `llmtech`, `modelis`, `modelscope`,
+`neosmith` and `nova`) remain listed as gaps in the report. The report began
+with 71 uncovered ids. Thirteen selected ids now have rows, three have reviewed
+skips, and nine remain gaps; the report now lists 55 uncovered ids and 18 skips.
+
+All thirteen rows have authentication refusals obtained with deliberately bogus
+keys on a network-enabled Linux build server on 2026-11-11, with redirects
+disabled. Chat probes requested at most one output token. No real key was used.
+Rows start from `crates/credentials-core/examples/ckdev_provider_rows.rs`, which
+reads the vendored Fusiform provider list: text output gives the LLM group and a
+routing id matching the Fusiform id. Poe, Qiniu and Requesty also have the media
+group because their entries in that list include audio, image or video output.
+The provider-owned sources are:
+
+- `pendra`: <https://pendra.ai/docs/api/authentication> documents Bearer `pdr_sk_`
+  keys, `api.pendra.ai` and the console's API Keys page.
+  <https://pendra.ai/docs/api/models/> documents the authenticated
+  `GET /api/v1/models` check. Catalogue weight links at `get.pendra.ai` do not
+  document API-key presentation, so the row does not send keys to that CDN.
+  Python's default user agent initially hit a Cloudflare 1010 block; curl, both
+  with its normal user agent and with no user agent, got the recorded JSON 401.
+- `perplexity-agent`: <https://docs.perplexity.ai/docs/getting-started> says the
+  APIs share one host and one key. The literal Bearer example and console link at
+  <https://docs.perplexity.ai/docs/getting-started/quickstart> document the
+  Orchestrator chat request using `perplexity/kimi-k3`. That compatible request
+  checks the shared key; it does not exercise Agent-specific Responses behavior.
+  The evidence uses its current `/orchestrator/v1/chat/completions` route.
+  Numeric `/error/code` is not a string;
+  `/error/type` is recorded instead.
+- `pioneer`: the provider's own <https://agent.pioneer.ai/llms.txt> now
+  directs users to Fastino. <https://docs.fastino.ai/authentication.md> documents
+  `fast_sk_` keys, raw `X-API-Key`, `api.fastino.ai` and the key dashboard.
+  <https://docs.fastino.ai/api-reference/inference/model-status.md> documents the
+  readiness read for `fastino/gliner2.5-multi-v1`. The row keeps the published
+  Pioneer id and display name rather than inventing a Fusiform id for the rebrand.
+- `poe`: <https://creator.poe.com/docs/external-applications/openai-compatible-api>
+  gives `api.poe.com/v1`, a literal Bearer header, the key page and the
+  `Claude-Sonnet-4.6` chat example. API usage draws on subscription points.
+- `prime`: <https://docs.primeintellect.ai/inference/overview> documents Bearer
+  keys with Inference permission at `api.pinference.ai/api/v1`.
+  <https://docs.primeintellect.ai/api-reference/api-keys> links the key dashboard;
+  <https://docs.primeintellect.ai/api-reference/inference-models> documents the
+  authenticated models read. Optional team billing is not required for the
+  personal-account request the row checks.
+- `privatemode-ai`: <https://docs.privatemode.ai/api/proxyless-api/> documents
+  Bearer keys at `proxyless-api.privatemode.ai` and the `glm-latest` chat example.
+  <https://docs.privatemode.ai/portal/overview/> links the key portal. The row
+  describes the hosted proxyless API, not the local proxy/SDK's separately
+  verifiable encryption flow. The refusal's empty `/error/type` is not a code.
+- `qiniu-ai`: <https://developer.qiniu.com/aitokenapi/13379/real-time-ai-interface-api>
+  gives `api.qnaigc.com/v1`, a literal Bearer header and `deepseek-v3`.
+  <https://developer.qiniu.com/aitokenapi/12884/how-to-get-api-key> links key
+  creation. The models read returned 200 with the bogus key, so the check uses
+  the documented chat, which returned the recorded 401.
+- `reflection`: <https://developers.reflection.ai/models> documents the Bearer
+  models read at `api.reflection.ai/openai/v1/models`;
+  <https://developers.reflection.ai/quickstart> links the API-key dashboard.
+- `requesty`: <https://docs.requesty.ai/api-reference/endpoint/models-list>
+  explicitly says an invalid supplied key gets 403, even though anonymous model
+  listing succeeds. <https://docs.requesty.ai/features/eu-routing.md> lists the
+  global, EU, US and Asia-Pacific router hosts and says they accept the same key.
+  <https://docs.requesty.ai/quickstart> links the key page. The separate admin-key
+  management API is not part of the inference-key row. The check uses the
+  models-list endpoint, where an invalid supplied key is rejected without inference.
+- `runinfra`: <https://runinfra.ai/docs/api-reference/authentication.md>
+  documents Bearer workspace keys, `api.runinfra.ai` and the key page.
+  <https://runinfra.ai/docs/api-reference/models.md> documents the authenticated
+  model read and explicitly says it reserves no inference credit.
+- `salad-cloud`: <https://docs.salad.com/ai-gateway/explanation/overview>
+  documents Bearer AI Gateway keys at `ai.salad.cloud`, not the account API's
+  `Salad-Api-Key`. Its onboarding guide links <https://portal.salad.com>;
+  <https://docs.salad.com/ai-gateway/reference/models.md> documents the checked
+  `qwen3.6-35b-a3b` chat. Usage is billed per token; the evidence does not label
+  it a free inference call. The problem-details `about:blank` is not an error code.
+- `sambanova`: <https://docs.sambanova.ai/cloud/docs/get-started/quickstart>
+  documents the literal Bearer chat at `api.sambanova.ai` using
+  `Meta-Llama-3.3-70B-Instruct`.
+  <https://docs.sambanova.ai/docs/en/get-started/api-keys-urls.md> links its key page.
+- `sarvam`: <https://docs.sarvam.ai/api/getting-started/quickstart> documents
+  `api.sarvam.ai`, the key page and a `sarvam-105b` chat using only the raw
+  `api-subscription-key` header. <https://docs.sarvam.ai/api-reference/authentication>
+  calls that header preferred and Bearer an alternative. The row follows the
+  quickstart, not the API reference's ambiguous listing of both headers.
+
+Nine selected ids remain uncovered; documentation or transport failures are not
+treated as proof that a provider has no API key:
+
+- `poolside`: <https://docs.poolside.ai/api/overview.md> documents hosted Bearer
+  inference at `inference.poolside.ai`, distinct from self-managed deployments,
+  but Python and curl both failed TLS before a response to the models read.
+- `qihang-ai`: <https://www.qhaigc.net/docs> yielded only a JavaScript shell; the
+  inspected official API-reference pages provided no readable host/header text.
+- `regolo-ai`: <https://docs.regolo.ai/getting-started/quick-start/> documents
+  Bearer keys at `api.regolo.ai`. Both the documented model-group read and chat
+  returned an HTML administrative-rules 403, not a provider authentication error.
+- `routing-run`: <https://docs.routing.run/api-reference/models> failed DNS on
+  the network-enabled server; the documentation reader could not resolve it either.
+- `scaleway`: direct reads of the official Generative APIs docs and their Markdown
+  variants returned 403. An official search excerpt exposed a curl example, but
+  complete readable documentation and the key-creation instructions were not obtained.
+- `scnet-token-plan`: <https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html>
+  documents a plan key but restricts it to interactive tools and prohibits direct
+  API calls. It provides no literal plan API host/header; the general SCNet
+  OpenAPI token instructions were not substituted for the plan's contract.
+- `scx-ai`: <https://platform.scx.ai/docs> returned 403 in both documentation
+  retrieval paths, so no host or header was inferred.
+- `sensenova`: <https://platform.sensenova.cn/docs> yielded no readable API
+  instructions, and attempted quickstart/reference paths returned 404.
+- `stackit`: official shared-model docs give Bearer tokens at
+  `api.openai-compat.model-serving.eu01.onstackit.cloud`, but the models read
+  and chat both returned empty 403 responses. Those replies did not establish
+  an authentication-specific refusal, so no invalid-key evidence was recorded.
+
 ## Fusiform provider skips
 
 This table mirrors `FUSIFORM_PROVIDER_SKIPS` in the catalog. An uncovered provider
@@ -822,6 +952,21 @@ not a reason to skip it.
   `api.openreason.app/otlp`, not a model API key. It must not be catalogued as an
   LLM-provider key. See <https://openreason.app>, <https://docs.openreason.app>
   and <https://docs.openreason.app/quickstart/or-otel>.
+- `qvac`: the provider's published package README at
+  <https://registry.npmjs.org/@qvac%2fai-sdk-provider> documents a local
+  `qvac serve --openai` runtime, with a configurable loopback address and port,
+  not a vendor-hosted API. As with LM Studio, its keys belong to a user-hosted
+  server rather than a fixed receiving host. LM Studio's table reason now names
+  that local-server constraint explicitly as well; neither provider has a catalog row.
+- `sap-ai-core`: the official SAP SDK configuration reference at
+  <https://help.sap.com/doc/generative-ai-hub-sdk/CLOUD/en-US/_reference/README_sphynx.html>
+  requires `AICORE_CLIENT_ID`, `AICORE_CLIENT_SECRET`, `AICORE_AUTH_URL` and
+  `AICORE_BASE_URL`. Token exchange needs both the client ID and secret, not
+  one pasted inference key.
+- `snowflake-cortex`: <https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api>
+  documents PAT Bearer requests at
+  `https://<account-identifier>.snowflakecomputing.com/api/v2/cortex/v1`.
+  That per-account host cannot be replaced with a shared provider host.
 
 Only these reasons are permitted:
 
@@ -829,6 +974,7 @@ Only these reasons are permitted:
 - no API key in its documentation
 - a duplicate offering of an existing row
 - a second secret or a per-account host in the style of Azure, Bedrock or Vertex
+- a user-hosted local server rather than a fixed provider API
 
 | Fusiform id | reason |
 | --- | --- |
@@ -841,12 +987,15 @@ Only these reasons are permitted:
 | github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
-| lmstudio | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| lmstudio | a user-hosted local server rather than a fixed provider API |
 | lynkr | no API key in its documentation |
 | modal | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | neon | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | oci | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | openreason | no API key in its documentation |
+| qvac | a user-hosted local server rather than a fixed provider API |
+| sap-ai-core | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| snowflake-cortex | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 
 ## Hosts without provider documentation
 

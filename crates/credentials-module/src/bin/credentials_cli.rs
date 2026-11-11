@@ -9037,6 +9037,19 @@ mod login_regressions {
             ("orcarouter", "OrcaRouter"),
             ("ovhcloud", "OVHcloud AI Endpoints"),
             ("pareto", "Pareto Inference"),
+            ("pendra", "Pendra"),
+            ("perplexity-agent", "Perplexity Agent"),
+            ("pioneer", "Pioneer"),
+            ("poe", "Poe"),
+            ("prime", "Prime Inference"),
+            ("privatemode-ai", "Privatemode AI"),
+            ("qiniu-ai", "Qiniu"),
+            ("reflection", "Reflection"),
+            ("requesty", "Requesty"),
+            ("runinfra", "RunInfra"),
+            ("salad-cloud", "SaladCloud AI Gateway"),
+            ("sambanova", "SambaNova"),
+            ("sarvam", "Sarvam AI"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

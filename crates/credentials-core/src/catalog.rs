@@ -333,7 +333,7 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
     // not a fixed hosted API; authentication is optional on that server.
     (
         "lmstudio",
-        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+        "a user-hosted local server rather than a fixed provider API",
     ),
     // Lynkr is a self-hosted proxy. Its sk- placeholder is not a provider API key;
     // authentication to models happens with the configured upstream's credentials.
@@ -357,6 +357,21 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
     // OpenReason now documents telemetry ingestion, not a model API. Its ingestion
     // key does not authenticate model requests to an OpenReason inference service.
     ("openreason", "no API key in its documentation"),
+    // QVAC serves its API from a local runtime at the user's chosen address and port.
+    (
+        "qvac",
+        "a user-hosted local server rather than a fixed provider API",
+    ),
+    // SAP AI Core exchanges a client ID and client secret for an access token.
+    (
+        "sap-ai-core",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // Cortex PATs are sent to the user's own <account-identifier>.snowflakecomputing.com.
+    (
+        "snowflake-cortex",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
 ];
 
 /// The permitted dispositions for a provider researched but not added to the catalog.
@@ -365,6 +380,7 @@ pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
     "no API key in its documentation",
     "a duplicate offering of an existing row",
     "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    "a user-hosted local server rather than a fixed provider API",
 ];
 
 use ModelVendor::{
@@ -3914,6 +3930,267 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    ApiKeyProvider {
+        key: "pendra",
+        fusiform_provider_id: Some("pendra"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.pendra.ai"],
+        hosts_doc: "https://pendra.ai/docs/api/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["pendra"],
+        display_name: "Pendra",
+        default_id: "apikey:pendra",
+        dashboard_url: "https://console.pendra.ai",
+        placeholder: "pdr_sk_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.pendra.ai/api/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "perplexity-agent",
+        fusiform_provider_id: Some("perplexity-agent"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.perplexity.ai"],
+        hosts_doc: "https://docs.perplexity.ai/docs/getting-started/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["perplexity-agent"],
+        display_name: "Perplexity Agent",
+        default_id: "apikey:perplexity-agent",
+        dashboard_url: "https://console.perplexity.ai",
+        placeholder: "API key",
+        // All Perplexity APIs share a key; Orchestrator accepts the supported chat probe.
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.perplexity.ai/orchestrator/v1",
+            model: "perplexity/kimi-k3",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "pioneer",
+        fusiform_provider_id: Some("pioneer"),
+        auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.fastino.ai"],
+        hosts_doc: "https://docs.fastino.ai/authentication.md",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["pioneer"],
+        display_name: "Pioneer",
+        default_id: "apikey:pioneer",
+        dashboard_url: "https://agent.fastino.ai",
+        placeholder: "fast_sk_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.fastino.ai/v1/model-status/fastino/gliner2.5-multi-v1",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "poe",
+        fusiform_provider_id: Some("poe"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.poe.com"],
+        hosts_doc: "https://creator.poe.com/docs/external-applications/openai-compatible-api",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["poe"],
+        display_name: "Poe",
+        default_id: "apikey:poe",
+        dashboard_url: "https://poe.com/api/keys",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.poe.com/v1",
+            model: "Claude-Sonnet-4.6",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "prime",
+        fusiform_provider_id: Some("prime"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.pinference.ai"],
+        hosts_doc: "https://docs.primeintellect.ai/inference/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["prime"],
+        display_name: "Prime Inference",
+        default_id: "apikey:prime",
+        dashboard_url: "https://app.primeintellect.ai/dashboard/tokens",
+        placeholder: "API key with Inference permission",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.pinference.ai/api/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "privatemode-ai",
+        fusiform_provider_id: Some("privatemode-ai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["proxyless-api.privatemode.ai"],
+        hosts_doc: "https://docs.privatemode.ai/api/proxyless-api/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["privatemode-ai"],
+        display_name: "Privatemode AI",
+        default_id: "apikey:privatemode-ai",
+        dashboard_url: "https://portal.privatemode.ai",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://proxyless-api.privatemode.ai/v1",
+            model: "glm-latest",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "qiniu-ai",
+        fusiform_provider_id: Some("qiniu-ai"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.qnaigc.com"],
+        hosts_doc: "https://developer.qiniu.com/aitokenapi/13379/real-time-ai-interface-api",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("auth_api_key_missing"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["qiniu-ai"],
+        display_name: "Qiniu",
+        default_id: "apikey:qiniu-ai",
+        dashboard_url: "https://portal.qiniu.com/ai-inference/api-key",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.qnaigc.com/v1",
+            model: "deepseek-v3",
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "reflection",
+        fusiform_provider_id: Some("reflection"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.reflection.ai"],
+        hosts_doc: "https://developers.reflection.ai/models",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["reflection"],
+        display_name: "Reflection",
+        default_id: "apikey:reflection",
+        dashboard_url: "https://platform.reflection.ai",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.reflection.ai/openai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "requesty",
+        fusiform_provider_id: Some("requesty"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["router.ap.requesty.ai", "router.eu.requesty.ai", "router.requesty.ai", "router.us.requesty.ai"],
+        hosts_doc: "https://docs.requesty.ai/api-reference/endpoint/models-list",
+        invalid_key: Some(InvalidKeyEvidence { status: 403, error_code: None, error_code_field: None }),
+        default_provider_ids: &["requesty"],
+        display_name: "Requesty",
+        default_id: "apikey:requesty",
+        dashboard_url: "https://app.requesty.ai/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://router.requesty.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "runinfra",
+        fusiform_provider_id: Some("runinfra"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.runinfra.ai"],
+        hosts_doc: "https://runinfra.ai/docs/api-reference/authentication.md",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["runinfra"],
+        display_name: "RunInfra",
+        default_id: "apikey:runinfra",
+        dashboard_url: "https://runinfra.ai/settings/api-keys",
+        placeholder: "Workspace API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.runinfra.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "salad-cloud",
+        fusiform_provider_id: Some("salad-cloud"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["ai.salad.cloud"],
+        hosts_doc: "https://docs.salad.com/ai-gateway/explanation/overview",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["salad-cloud"],
+        display_name: "SaladCloud AI Gateway",
+        default_id: "apikey:salad-cloud",
+        dashboard_url: "https://portal.salad.com",
+        placeholder: "AI Gateway key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://ai.salad.cloud/v1",
+            model: "qwen3.6-35b-a3b",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "sambanova",
+        fusiform_provider_id: Some("sambanova"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.sambanova.ai"],
+        hosts_doc: "https://docs.sambanova.ai/cloud/docs/get-started/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["sambanova"],
+        display_name: "SambaNova",
+        default_id: "apikey:sambanova",
+        dashboard_url: "https://cloud.sambanova.ai/apis",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.sambanova.ai/v1",
+            model: "Meta-Llama-3.3-70B-Instruct",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "sarvam",
+        fusiform_provider_id: Some("sarvam"),
+        auth: Some(AuthDescriptor { header: "api-subscription-key", scheme: AuthScheme::Raw }),
+        hosts: &["api.sarvam.ai"],
+        hosts_doc: "https://docs.sarvam.ai/api/getting-started/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 403, error_code: Some("invalid_api_key_error"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["sarvam"],
+        display_name: "Sarvam AI",
+        default_id: "apikey:sarvam",
+        dashboard_url: "https://indus.sarvam.ai/key-management?ref=docs",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.sarvam.ai/v1",
+            model: "sarvam-105b",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4712,6 +4989,22 @@ mod tests {
             (
                 "ovhcloud",
                 "OVHcloud documents AI Endpoints on ovhcloud.com; inference uses the shared ovh.net host",
+            ),
+            (
+                "pioneer",
+                "Pioneer's documentation now directs API keys to Fastino's api.fastino.ai",
+            ),
+            (
+                "prime",
+                "Prime Intellect documents its inference API on the separate pinference.ai domain",
+            ),
+            (
+                "qiniu-ai",
+                "Qiniu documents its AI API on qiniu.com; keys go to api.qnaigc.com",
+            ),
+            (
+                "salad-cloud",
+                "Salad documents AI Gateway on salad.com; gateway keys go to ai.salad.cloud",
             ),
         ];
         let mut unchecked_exemptions = std::collections::BTreeSet::new();
@@ -5707,6 +6000,19 @@ mod tests {
             ("orcarouter", &["orcarouter"]),
             ("ovhcloud", &["ovhcloud"]),
             ("pareto", &["pareto"]),
+            ("pendra", &["pendra"]),
+            ("perplexity-agent", &["perplexity-agent"]),
+            ("pioneer", &["pioneer"]),
+            ("poe", &["poe"]),
+            ("prime", &["prime"]),
+            ("privatemode-ai", &["privatemode-ai"]),
+            ("qiniu-ai", &["qiniu-ai"]),
+            ("reflection", &["reflection"]),
+            ("requesty", &["requesty"]),
+            ("runinfra", &["runinfra"]),
+            ("salad-cloud", &["salad-cloud"]),
+            ("sambanova", &["sambanova"]),
+            ("sarvam", &["sarvam"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -5746,9 +6052,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, ElevenLabs for media, and 100 rows proposed from Fusiform's
+        // 9 search APIs, ElevenLabs for media, and 113 rows proposed from Fusiform's
         // provider list.
-        assert_eq!(API_KEY_PROVIDERS.len(), 167);
+        assert_eq!(API_KEY_PROVIDERS.len(), 180);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -5996,6 +6302,19 @@ mod tests {
         "orcarouter",
         "ovhcloud",
         "pareto",
+        "pendra",
+        "perplexity-agent",
+        "pioneer",
+        "poe",
+        "prime",
+        "privatemode-ai",
+        "qiniu-ai",
+        "reflection",
+        "requesty",
+        "runinfra",
+        "salad-cloud",
+        "sambanova",
+        "sarvam",
     ];
 
     /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
@@ -6018,6 +6337,9 @@ mod tests {
         "merge-gateway",
         "nan",
         "nearai",
+        "poe",
+        "qiniu-ai",
+        "requesty",
     ];
 
     /// Catalogued keys used by both model and web-search consumers.
@@ -6850,6 +7172,19 @@ mod source_ownership_tests {
                 ("orcarouter", vec![]),
                 ("ovhcloud", vec![]),
                 ("pareto", vec![]),
+                ("pendra", vec![]),
+                ("perplexity-agent", vec![]),
+                ("pioneer", vec![]),
+                ("poe", vec![]),
+                ("prime", vec![]),
+                ("privatemode-ai", vec![]),
+                ("qiniu-ai", vec![]),
+                ("reflection", vec![]),
+                ("requesty", vec![]),
+                ("runinfra", vec![]),
+                ("salad-cloud", vec![]),
+                ("sambanova", vec![]),
+                ("sarvam", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

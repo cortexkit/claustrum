@@ -290,6 +290,26 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
     ),
     // Atomic Chat is a local desktop app with no hosted API or API key.
     ("atomic-chat", "no API key in its documentation"),
+    // Azure OpenAI sends each key to its own resource's {resource}.openai.azure.com host.
+    (
+        "azure",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // Azure Cognitive Services keys likewise belong to one resource and its host.
+    (
+        "azure-cognitive-services",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // AI Gateway requests carry the Cloudflare account id and gateway id in the URL.
+    (
+        "cloudflare-ai-gateway",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
+    // Databricks model serving is reached through each workspace's own host.
+    (
+        "databricks",
+        "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
+    ),
 ];
 
 /// The permitted dispositions for a provider researched but not added to the catalog.
@@ -2247,6 +2267,414 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    // Ant Group's Ling guide sends Bearer tokens to api.ant-ling.com. That host refused
+    // requests from outside China during review, so no check could be observed.
+    ApiKeyProvider {
+        key: "bailing",
+        fusiform_provider_id: Some("bailing"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.ant-ling.com"],
+        hosts_doc: "https://alipaytbox.yuque.com/org-wiki-knowledgepie-mvkzao/pxit93/get_started",
+        invalid_key: None,
+        default_provider_ids: &["bailing"],
+        display_name: "Bailing",
+        default_id: "apikey:bailing",
+        dashboard_url: "https://chat.ant-ling.com/platform/api",
+        placeholder: "API token",
+        validation: KeyValidation::Unvalidated {
+            reason: "Ling's API host answered requests from outside China with an HTML block page, so no check has been confirmed to tell a bad key from a good one",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Bee's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "bee",
+        fusiform_provider_id: Some("bee"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.bee.heossi.com"],
+        hosts_doc: "https://bee.heossi.com/docs/sdks",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("unauthorized"), error_code_field: Some("/error") }),
+        default_provider_ids: &["bee"],
+        display_name: "Bee by HEOSSI",
+        default_id: "apikey:bee",
+        dashboard_url: "https://workspace.bee.heossi.com/account/api-keys",
+        placeholder: "bee_sk_live_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.bee.heossi.com/bee",
+            model: "bee-cell",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Berget.AI's model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "berget",
+        fusiform_provider_id: Some("berget"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.berget.ai"],
+        hosts_doc: "https://docs.berget.ai/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["berget"],
+        display_name: "Berget.AI",
+        default_id: "apikey:berget",
+        dashboard_url: "https://console.berget.ai/api-keys",
+        placeholder: "sk_ber_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.berget.ai/v1",
+            model: "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "blueclaw",
+        fusiform_provider_id: Some("blueclaw"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["openai.blueclaw.network"],
+        hosts_doc: "https://blueclaw.network/quickstart.html",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["blueclaw"],
+        display_name: "Blue Claw",
+        default_id: "apikey:blueclaw",
+        dashboard_url: "https://portal.blueclaw.network/",
+        placeholder: "bc_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://openai.blueclaw.network/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Bothub's API guide sets this base URL with the access token as the OpenAI SDK's
+    // API key, which the SDK sends as a Bearer token.
+    ApiKeyProvider {
+        key: "bothub",
+        fusiform_provider_id: Some("bothub"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["openai.bothub.chat"],
+        hosts_doc: "https://bothub.ru/free",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("UNAUTHORIZED"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["bothub"],
+        display_name: "Bothub",
+        default_id: "apikey:bothub",
+        dashboard_url: "https://bothub.ru/profile/for-developers",
+        placeholder: "access token",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://openai.bothub.chat/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Boundless also accepts the key in `x-api-key`; the row uses the documented Bearer
+    // form. The check is the documented balance read, which uses the inference key.
+    ApiKeyProvider {
+        key: "boundless",
+        fusiform_provider_id: Some("boundless"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inference.boundless.network"],
+        hosts_doc: "https://inference.boundless.network/docs/api-compatibility",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("authentication_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["boundless"],
+        display_name: "Boundless",
+        default_id: "apikey:boundless",
+        dashboard_url: "https://inference.boundless.network/settings/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.inference.boundless.network/v1/credits",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Chutes serves inference on llm.chutes.ai and its platform API on api.chutes.ai,
+    // both with the same key. Its model list does not need a key, so the check is the
+    // documented account read.
+    ApiKeyProvider {
+        key: "chutes",
+        fusiform_provider_id: Some("chutes"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.chutes.ai", "llm.chutes.ai"],
+        hosts_doc: "https://chutes.ai/docs/getting-started/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["chutes"],
+        display_name: "Chutes",
+        default_id: "apikey:chutes",
+        dashboard_url: "https://chutes.ai/app/settings/api-keys",
+        placeholder: "cpk_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.chutes.ai/users/me",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Claudinio also accepts the key in `x-api-key`; the row uses the Bearer form.
+    ApiKeyProvider {
+        key: "claudinio",
+        fusiform_provider_id: Some("claudinio"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.claudin.io"],
+        hosts_doc: "https://claudin.io/docs/api-reference/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("token_not_found_in_db"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["claudinio"],
+        display_name: "Claudinio",
+        default_id: "apikey:claudinio",
+        dashboard_url: "https://claudin.io/dashboard",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.claudin.io/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    ApiKeyProvider {
+        key: "cloudferro-sherlock",
+        fusiform_provider_id: Some("cloudferro-sherlock"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api-sherlock.cloudferro.com"],
+        hosts_doc: "https://docs.cloudferro.com/en/latest/sherlock/Package-installation-and-examples-of-Sherlock-AI-code-on-CloudFerro-Cloud.html",
+        invalid_key: Some(InvalidKeyEvidence { status: 403, error_code: None, error_code_field: None }),
+        default_provider_ids: &["cloudferro-sherlock"],
+        display_name: "CloudFerro Sherlock",
+        default_id: "apikey:cloudferro-sherlock",
+        dashboard_url: "https://portal.cloudferro.com/en/sherlock",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api-sherlock.cloudferro.com/openai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Cohere's API reference uses api.cohere.com; its OpenAI compatibility API uses
+    // api.cohere.ai with the same key.
+    ApiKeyProvider {
+        key: "cohere",
+        fusiform_provider_id: Some("cohere"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.cohere.ai", "api.cohere.com"],
+        hosts_doc: "https://docs.cohere.com/reference/list-models",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["cohere"],
+        display_name: "Cohere",
+        default_id: "apikey:cohere",
+        dashboard_url: "https://dashboard.cohere.com/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.cohere.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // The check is the documented balance read, which works at a zero balance.
+    ApiKeyProvider {
+        key: "coralbricks",
+        fusiform_provider_id: Some("coralbricks"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["inference.coralbricks.ai"],
+        hosts_doc: "https://www.coralbricks.ai/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["coralbricks"],
+        display_name: "CoralBricks",
+        default_id: "apikey:coralbricks",
+        dashboard_url: "https://www.coralbricks.ai/api-keys",
+        placeholder: "cb_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://inference.coralbricks.ai/v1/quota",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Cortecs' model list does not need a key, so the check is a chat.
+    ApiKeyProvider {
+        key: "cortecs",
+        fusiform_provider_id: Some("cortecs"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.cortecs.ai"],
+        hosts_doc: "https://docs.cortecs.ai/api/api-compatibility",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("auth_error"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["cortecs"],
+        display_name: "Cortecs",
+        default_id: "apikey:cortecs",
+        dashboard_url: "https://cortecs.ai/userArea/console?tab=credentials",
+        placeholder: "API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.cortecs.ai/v1",
+            model: "glm-5.3-flash",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // CrossModel serves its OpenAI and Anthropic surfaces from one host. The Anthropic
+    // surface also accepts `x-api-key`; the row uses the Bearer form both accept.
+    ApiKeyProvider {
+        key: "crossmodel",
+        fusiform_provider_id: Some("crossmodel"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.crossmodel.ai"],
+        hosts_doc: "https://www.crossmodel.ai/docs/authentication",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["crossmodel"],
+        display_name: "CrossModel",
+        default_id: "apikey:crossmodel",
+        dashboard_url: "https://www.crossmodel.ai/docs/authentication",
+        placeholder: "cm-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.crossmodel.ai/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Crusoe's serverless inference guide sets this base URL with the key as the OpenAI
+    // SDK's API key, which the SDK sends as a Bearer token.
+    ApiKeyProvider {
+        key: "crusoe",
+        fusiform_provider_id: Some("crusoe"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.inference.crusoecloud.com"],
+        hosts_doc: "https://docs.crusoe.ai/quickstart/getting-started-with-serverless-inference/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["crusoe"],
+        display_name: "Crusoe",
+        default_id: "apikey:crusoe",
+        dashboard_url: "https://console.crusoecloud.com/foundry/models",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.inference.crusoecloud.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // DaoXE's quickstart host. Alternative routes that its route list may return are
+    // not covered.
+    ApiKeyProvider {
+        key: "daoxe",
+        fusiform_provider_id: Some("daoxe"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.daoxe.com"],
+        hosts_doc: "https://daoxe.com/docs/start/quickstart",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: None, error_code_field: None }),
+        default_provider_ids: &["daoxe"],
+        display_name: "DaoXE",
+        default_id: "apikey:daoxe",
+        dashboard_url: "https://daoxe.com/console",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.daoxe.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // DigitalOcean's serverless inference accepts a model access key or a personal
+    // access token. This row is separate from the `oauth:digitalocean` login, which
+    // stores a cloud-infrastructure token.
+    ApiKeyProvider {
+        key: "digitalocean",
+        fusiform_provider_id: Some("digitalocean"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["inference.do-ai.run"],
+        hosts_doc: "https://docs.digitalocean.com/products/inference/how-to/si-endpoints/",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("Unauthorized"), error_code_field: Some("/id") }),
+        default_provider_ids: &["digitalocean"],
+        display_name: "DigitalOcean",
+        default_id: "apikey:digitalocean",
+        dashboard_url: "https://cloud.digitalocean.com/model-studio/manage-keys",
+        placeholder: "model access key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://inference.do-ai.run/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM_AND_MEDIA,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // DInference's API page sets this base URL with the key as the OpenAI SDK's API
+    // key, which the SDK sends as a Bearer token.
+    ApiKeyProvider {
+        key: "dinference",
+        fusiform_provider_id: Some("dinference"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.dinference.com"],
+        hosts_doc: "https://dinference.com/docs",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("token_not_found_in_db"), error_code_field: Some("/error/type") }),
+        default_provider_ids: &["dinference"],
+        display_name: "DInference",
+        default_id: "apikey:dinference",
+        dashboard_url: "https://panel.dinference.com/login",
+        placeholder: "API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.dinference.com/v1/models",
+            extra_headers: &[],
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // D.Run's pay-per-token host. Dedicated instances use per-region hosts that this
+    // row does not cover.
+    ApiKeyProvider {
+        key: "drun",
+        fusiform_provider_id: Some("drun"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["chat.d.run"],
+        hosts_doc: "https://docs.d.run/en/models/api-call",
+        invalid_key: None,
+        default_provider_ids: &["drun"],
+        display_name: "D.Run (China)",
+        default_id: "apikey:drun",
+        dashboard_url: "https://console.d.run/",
+        placeholder: "sk-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "D.Run's API host reset connections from outside China during review, so no check has been confirmed to tell a bad key from a good one",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
+    // Echo keys belong to a workspace, and every documented request path names the
+    // workspace, which the key alone does not reveal.
+    ApiKeyProvider {
+        key: "echo",
+        fusiform_provider_id: Some("echo"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["echo.tracerml.ai"],
+        hosts_doc: "https://echo.tracerml.ai/docs/api",
+        invalid_key: None,
+        default_provider_ids: &["echo"],
+        display_name: "Echo",
+        default_id: "apikey:echo",
+        dashboard_url: "https://echo.tracerml.ai/company?view=settings#api",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Echo's API paths include the key's workspace id, which the key alone does not reveal, so there is no request to check it with",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3005,6 +3433,18 @@ mod tests {
             (
                 "alibaba-token-plan-cn",
                 "Alibaba Cloud documents Token Plan on alibabacloud.com; APIs use aliyuncs.com",
+            ),
+            (
+                "bailing",
+                "Ant Group documents Ling on yuque.com; keys go to api.ant-ling.com",
+            ),
+            (
+                "bothub",
+                "Bothub documents its API on bothub.ru; keys go to openai.bothub.chat",
+            ),
+            (
+                "digitalocean",
+                "DigitalOcean documents serverless inference on digitalocean.com; it runs on do-ai.run",
             ),
         ];
         let mut unchecked_exemptions = std::collections::BTreeSet::new();
@@ -3923,6 +4363,25 @@ mod tests {
             ("anyapi", &["anyapi"]),
             ("arcee", &["arcee"]),
             ("auriko", &["auriko"]),
+            ("bailing", &["bailing"]),
+            ("bee", &["bee"]),
+            ("berget", &["berget"]),
+            ("blueclaw", &["blueclaw"]),
+            ("bothub", &["bothub"]),
+            ("boundless", &["boundless"]),
+            ("chutes", &["chutes"]),
+            ("claudinio", &["claudinio"]),
+            ("cloudferro-sherlock", &["cloudferro-sherlock"]),
+            ("cohere", &["cohere"]),
+            ("coralbricks", &["coralbricks"]),
+            ("cortecs", &["cortecs"]),
+            ("crossmodel", &["crossmodel"]),
+            ("crusoe", &["crusoe"]),
+            ("daoxe", &["daoxe"]),
+            ("digitalocean", &["digitalocean"]),
+            ("dinference", &["dinference"]),
+            ("drun", &["drun"]),
+            ("echo", &["echo"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -3962,9 +4421,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, ElevenLabs for media, and 23 rows proposed from Fusiform's
+        // 9 search APIs, ElevenLabs for media, and 42 rows proposed from Fusiform's
         // provider list.
-        assert_eq!(API_KEY_PROVIDERS.len(), 90);
+        assert_eq!(API_KEY_PROVIDERS.len(), 109);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -4135,6 +4594,25 @@ mod tests {
         "anyapi",
         "arcee",
         "auriko",
+        "bailing",
+        "bee",
+        "berget",
+        "blueclaw",
+        "bothub",
+        "boundless",
+        "chutes",
+        "claudinio",
+        "cloudferro-sherlock",
+        "cohere",
+        "coralbricks",
+        "cortecs",
+        "crossmodel",
+        "crusoe",
+        "daoxe",
+        "digitalocean",
+        "dinference",
+        "drun",
+        "echo",
     ];
 
     /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
@@ -4148,6 +4626,7 @@ mod tests {
         "alibaba-cn",
         "alibaba-token-plan",
         "alibaba-token-plan-cn",
+        "digitalocean",
     ];
 
     /// Catalogued keys used by both model and web-search consumers.
@@ -4375,6 +4854,9 @@ mod tests {
                 "jina",
                 "searxng",
                 "agentrouter",
+                "bailing",
+                "drun",
+                "echo",
             ]
         );
     }
@@ -4899,6 +5381,25 @@ mod source_ownership_tests {
                 ("anyapi", vec![]),
                 ("arcee", vec![]),
                 ("auriko", vec![]),
+                ("bailing", vec![]),
+                ("bee", vec![]),
+                ("berget", vec![]),
+                ("blueclaw", vec![]),
+                ("bothub", vec![]),
+                ("boundless", vec![]),
+                ("chutes", vec![]),
+                ("claudinio", vec![]),
+                ("cloudferro-sherlock", vec![]),
+                ("cohere", vec![]),
+                ("coralbricks", vec![]),
+                ("cortecs", vec![]),
+                ("crossmodel", vec![]),
+                ("crusoe", vec![]),
+                ("daoxe", vec![]),
+                ("digitalocean", vec![]),
+                ("dinference", vec![]),
+                ("drun", vec![]),
+                ("echo", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

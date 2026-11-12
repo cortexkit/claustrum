@@ -23,8 +23,11 @@ brief.
   Rust file you changed, so the formatted files come back; a build-server job's file
   changes are otherwise discarded. Don't format on the Mac.
 - Before you deliver, also run: `cargo fmt --all -- --check`; clippy with
-  `--features credentials-core/test-support --all-targets -- -D warnings` for every crate
-  you touched; `python3 scripts/endpoint-hosts.py`; the script tests in
+  `--all-targets -- -D warnings` for every crate you touched, adding
+  `--features credentials-core/test-support` for the two vault crates (`credentials-core`,
+  `credentials-module`). The Rust client (`cortexkit-claustrum-client`) does not depend on
+  them: run its clippy once as is and once with `--no-default-features`.
+  Also run `python3 scripts/endpoint-hosts.py`; the script tests in
   `scripts/tests` for any script you touched; and `bun test` on the test files you changed
   plus `bun run typecheck` if you touched `packages/`. Report which checks ran and their
   results.

@@ -19,6 +19,7 @@
 //! assert_eq!(tracker.notice(&notice), WatchAction::Reread { inventory: true, keys: true });
 //! ```
 
+use std::collections::BTreeMap;
 #[cfg(all(test, feature = "transport"))]
 use std::collections::VecDeque;
 use std::future::Future;
@@ -197,6 +198,10 @@ pub struct ResolvedCredential {
     pub auth: Option<AuthDescriptor>,
     pub hosts: Option<Vec<String>>,
     pub invalid_key: Option<InvalidKeyEvidence>,
+    /// API root for a gateway credential; absent for ordinary provider keys.
+    pub base_url: Option<String>,
+    /// Fixed non-secret request headers, including an empty map on gateways without any.
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
 /// How a provider accepts a key in a request header.
@@ -381,6 +386,8 @@ impl ResolvedCredential {
             auth: None,
             hosts: None,
             invalid_key: None,
+            base_url: None,
+            headers: None,
         }
     }
 
@@ -402,6 +409,8 @@ impl std::fmt::Debug for ResolvedCredential {
             .field("auth", &self.auth)
             .field("hosts", &self.hosts)
             .field("invalid_key", &self.invalid_key)
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
             .finish()
     }
 }
@@ -1700,6 +1709,24 @@ fn decode_optional_hosts(row: &Value) -> Result<Option<Vec<String>>, String> {
     }
 }
 
+fn decode_optional_headers(row: &Value) -> Result<Option<BTreeMap<String, String>>, String> {
+    let headers = match row.get("headers") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(headers)) => headers,
+        Some(_) => return Err("headers is not an object".into()),
+    };
+    headers
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), value.to_owned()))
+                .ok_or_else(|| "headers contains a non-string value".to_string())
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map(Some)
+}
+
 fn decode_optional_auth(row: &Value) -> Result<Option<AuthDescriptor>, String> {
     let auth = match row.get("auth") {
         None | Some(Value::Null) => return Ok(None),
@@ -2337,6 +2364,8 @@ pub fn decode_credential_reply(
     credential.auth = decode_optional_auth(&result).map_err(invalid_metadata)?;
     credential.hosts = decode_optional_hosts(&result).map_err(invalid_metadata)?;
     credential.invalid_key = decode_optional_invalid_key(&result).map_err(invalid_metadata)?;
+    credential.base_url = decode_optional_string(&result, "base_url").map_err(invalid_metadata)?;
+    credential.headers = decode_optional_headers(&result).map_err(invalid_metadata)?;
     Ok(credential)
 }
 

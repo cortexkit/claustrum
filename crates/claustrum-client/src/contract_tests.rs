@@ -64,6 +64,107 @@ fn producer_vector_reply(file: &str, case: &str) -> Value {
         .clone()
 }
 
+fn gateway_producer_reply(file: &str) -> Value {
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../credentials-module/tests/vectors");
+    let bytes = std::fs::read(directory.join(file)).expect("gateway producer sample exists");
+    let checksums = std::fs::read_to_string(directory.join("SHA256SUMS"))
+        .expect("producer sample checksums exist");
+    let expected = checksums
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let digest = fields.next()?;
+            (fields.next()? == file).then_some(digest)
+        })
+        .unwrap_or_else(|| panic!("{file} is missing from producer SHA256SUMS"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        expected,
+        "producer sample checksum mismatch: {file}"
+    );
+    serde_json::from_slice(&bytes).expect("gateway producer sample is JSON")
+}
+
+#[test]
+fn producer_gateway_list_scoped_decodes_gateway_method_and_ipv6_hosts() {
+    let listing =
+        decode_list_scoped_reply(gateway_producer_reply("gateway-list-scoped-v1.json")).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    assert!(listing.undecodable_grants.is_empty());
+    assert_eq!(listing.credentials.len(), 2);
+    assert_eq!(
+        listing
+            .credentials
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["apikey:anthropic-gw-acme", "apikey:anthropic-gw-acme:empty"]
+    );
+    for row in listing.credentials {
+        assert_eq!(row.auth_method.as_deref(), Some("gateway"));
+        assert_eq!(row.hosts, Some(vec!["[::1]".into()]));
+        assert_eq!(row.categories, ["llm-gateway"]);
+        assert_eq!(row.provider_ids, ["anthropic-gw-acme"]);
+        assert_eq!(row.serves, ["anthropic"]);
+        assert_eq!(row.fusiform_provider_id, None);
+    }
+}
+
+#[test]
+fn producer_gateway_get_scoped_decodes_settings_and_ipv6_hosts() {
+    for (file, expected_headers) in [
+        (
+            "gateway-get-scoped-v1.json",
+            BTreeMap::from([
+                ("x-a".into(), "a\"b\\c".into()),
+                ("x-z".into(), "engineering".into()),
+            ]),
+        ),
+        ("gateway-get-scoped-empty-headers-v1.json", BTreeMap::new()),
+    ] {
+        let decoded = decode_credential_reply(gateway_producer_reply(file)).unwrap();
+        assert_eq!(decoded.expose(), b"vector-test-key");
+        assert_eq!(decoded.base_url.as_deref(), Some("http://[::1]:4000/v1"));
+        assert_eq!(decoded.headers, Some(expected_headers));
+        assert_eq!(decoded.hosts, Some(vec!["[::1]".into()]));
+        assert_eq!(
+            decoded.auth,
+            Some(AuthDescriptor {
+                header: "authorization".into(),
+                scheme: AuthScheme::Bearer,
+            })
+        );
+        assert_eq!(decoded.invalid_key, None);
+    }
+}
+
+#[test]
+fn producer_gateway_get_scoped_refuses_malformed_settings() {
+    let reply = gateway_producer_reply("gateway-get-scoped-v1.json");
+    for (field, malformed) in [
+        ("base_url", json!(1)),
+        ("base_url", json!([])),
+        ("base_url", json!({})),
+        ("headers", json!([])),
+        ("headers", json!("x-a=a")),
+        ("headers", json!({"x-a": 1})),
+        ("headers", json!({"x-a": null})),
+        ("headers", json!({"x-a": []})),
+        ("headers", json!({"x-a": {}})),
+    ] {
+        let mut malformed_reply = reply.clone();
+        malformed_reply["result"][field] = malformed;
+        let error = decode_credential_reply(malformed_reply).unwrap_err();
+        assert_eq!(
+            error.class,
+            CredentialErrorClass::InvalidResponse,
+            "{field}"
+        );
+        assert!(error.to_string().contains(field));
+    }
+}
+
 fn producer_operation(op: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../credentials-module/tests/fixtures/enrollment_wire_contract.json");
@@ -181,6 +282,8 @@ fn producer_get_scoped_decodes_real_auth_hosts_and_invalid_key() {
         let reply = producer_vector_reply("get-scoped-v1.json", case);
         let decoded = decode_credential_reply(reply.clone()).unwrap();
         assert_eq!(decoded.expose(), b"vector-test-key");
+        assert_eq!(decoded.base_url, None);
+        assert_eq!(decoded.headers, None);
         assert_eq!(
             decoded.auth,
             Some(AuthDescriptor {
@@ -251,7 +354,7 @@ fn producer_get_scoped_decodes_descriptor_values_missing_from_vectors() {
 fn producer_get_scoped_decodes_omitted_and_null_descriptors_as_absent() {
     for null in [false, true] {
         let mut reply = producer_vector_reply("get-scoped-v1.json", "catalog_with_evidence");
-        for field in ["auth", "hosts", "invalid_key"] {
+        for field in ["auth", "hosts", "invalid_key", "base_url", "headers"] {
             if null {
                 reply["result"][field] = Value::Null;
             } else {
@@ -262,6 +365,8 @@ fn producer_get_scoped_decodes_omitted_and_null_descriptors_as_absent() {
         assert_eq!(decoded.auth, None);
         assert_eq!(decoded.hosts, None);
         assert_eq!(decoded.invalid_key, None);
+        assert_eq!(decoded.base_url, None);
+        assert_eq!(decoded.headers, None);
     }
 }
 

@@ -140,6 +140,20 @@ fn producer_gateway_get_scoped_decodes_settings_and_ipv6_hosts() {
 }
 
 #[test]
+fn gateway_debug_shows_header_names_but_never_values_or_the_key() {
+    let decoded =
+        decode_credential_reply(gateway_producer_reply("gateway-get-scoped-v1.json")).unwrap();
+    let rendered = format!("{decoded:?}");
+    assert!(
+        rendered.contains("x-a") && rendered.contains("x-z"),
+        "{rendered}"
+    );
+    for value in ["engineering", "vector-test-key", "b\\\\c"] {
+        assert!(!rendered.contains(value), "{value} leaked: {rendered}");
+    }
+}
+
+#[test]
 fn producer_gateway_get_scoped_refuses_malformed_settings() {
     let reply = gateway_producer_reply("gateway-get-scoped-v1.json");
     for (field, malformed) in [

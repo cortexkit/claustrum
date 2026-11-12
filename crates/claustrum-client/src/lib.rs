@@ -410,7 +410,15 @@ impl std::fmt::Debug for ResolvedCredential {
             .field("hosts", &self.hosts)
             .field("invalid_key", &self.invalid_key)
             .field("base_url", &self.base_url)
-            .field("headers", &self.headers)
+            // Gateway header values are meant to be non-secret, but an operator can still
+            // paste a token into one, so a log line made from this shows names only.
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(|headers| headers.keys().collect::<Vec<_>>()),
+            )
             .finish()
     }
 }

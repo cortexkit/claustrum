@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.0
+
+Unpublished: release awaits owner approval after the gateway-capable vault is live.
+
+- `listScoped` accepts `gateway` as the fifth `authMethod` value. Other unknown
+  values still refuse rather than silently dropping a row.
+- `getScoped` and `getScopedBytes` expose optional `baseUrl` and `headers` gateway
+  settings. A present `base_url` must be a string and `headers` a string-to-string
+  object; null and malformed values refuse. Older vaults and ordinary credentials
+  may omit both fields. `hosts` preserves bracketed IPv6 loopback strings.
+
 ## 0.18.0
 
 - `enrollPropose` takes an optional `requestedGrants`: up to four `read` or `list`

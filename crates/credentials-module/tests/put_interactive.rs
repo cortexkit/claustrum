@@ -1639,6 +1639,9 @@ fn login_other_picker_lists_every_existing_row_before_other() {
             .iter()
             .map(|row| row.display_name),
     )
+    // The gateway entry sits between the catalog rows and Other, so the cursor must
+    // step past it too before Enter lands on Other.
+    .chain(["Company AI gateway (LiteLLM, Portkey, Cloudflare)"])
     .collect();
     let mut steps: Vec<(&str, &[u8], bool)> = names
         .iter()

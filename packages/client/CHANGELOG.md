@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.0
+
+Unpublished until the vault runs database step 44; release still requires owner approval.
+
+- `listScoped` exposes optional `planTierSinceMs`, the operator-supplied effective
+  start of a plan. Consumers use it when present and fall back to
+  `planTierObservedAtMs` otherwise. Present values must be non-negative integers.
+
 ## 0.19.0
 
 Unpublished: release awaits owner approval after the gateway-capable vault is live.

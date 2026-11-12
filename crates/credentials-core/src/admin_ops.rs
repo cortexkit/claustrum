@@ -297,6 +297,12 @@ pub enum AdminOpBody {
         v: u32,
         credential_id: String,
         plan_tier: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        since_ms: Option<serde_json::Value>,
     },
     #[serde(rename = "admin.reclassify")]
     Reclassify { v: u32, force: bool },
@@ -788,11 +794,13 @@ impl std::fmt::Debug for AdminOpBody {
                 v,
                 credential_id,
                 plan_tier,
+                since_ms,
             } => f
                 .debug_struct("SetPlan")
                 .field("v", v)
                 .field("credential_id", credential_id)
                 .field("plan_tier", plan_tier)
+                .field("since_ms", since_ms)
                 .finish(),
             AdminOpBody::Reclassify { v, force } => f
                 .debug_struct("Reclassify")
@@ -1979,11 +1987,16 @@ pub fn apply(
         AdminOpBody::SetPlan {
             credential_id,
             plan_tier,
+            since_ms,
             ..
         } => {
-            let resulting = store.set_plan_audited(
+            let since_ms = since_ms
+                .map(|value| value.as_u64().ok_or(StoreOpError::InvalidPlanTier))
+                .transpose()?;
+            let resulting = store.set_plan_since_audited(
                 &credential_id,
                 plan_tier.as_deref(),
+                since_ms,
                 AuditCtx::route_admin(AuditOp::SetPlan, actor),
             )?;
             Ok(serde_json::json!({ "plan_tier": resulting }))
@@ -2262,6 +2275,7 @@ pub fn status_result(
                 "plan_tier": m.plan_tier,
                 "incarnation": m.incarnation,
                 "plan_tier_observed_at_ms": m.plan_tier_observed_at_ms,
+                "plan_tier_since_ms": m.plan_tier_since_ms,
                 "provider": crate::catalog::provider(id),
             });
             if let Some(gateway) = &m.gateway {
@@ -2384,6 +2398,7 @@ mod tests {
         RecordMeta {
             incarnation: Some("fixture-incarnation".into()),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             record_version: 1,
             key_id_hex: "00".into(),
             state: crate::record::RecordState::Active,
@@ -2402,7 +2417,7 @@ mod tests {
         let result = status_result(&[("apikey:custom".into(), inventory_meta())], &[], 0, false);
         assert_eq!(
             serde_json::to_string(&result["credentials"][0]).unwrap(),
-            r#"{"categories":["llm-gateway"],"id":"apikey:custom","incarnation":"fixture-incarnation","plan_tier":null,"plan_tier_observed_at_ms":null,"provider":null,"provider_ids":[],"record_version":1,"state":"active"}"#
+            r#"{"categories":["llm-gateway"],"id":"apikey:custom","incarnation":"fixture-incarnation","plan_tier":null,"plan_tier_observed_at_ms":null,"plan_tier_since_ms":null,"provider":null,"provider_ids":[],"record_version":1,"state":"active"}"#
         );
     }
 
@@ -2970,6 +2985,7 @@ mod admin_schema_v2_tests {
                     v: v2,
                     credential_id: "id".into(),
                     plan_tier: Some("pro_200".into()),
+                    since_ms: None,
                 },
                 v2,
                 Some("id"),

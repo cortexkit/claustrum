@@ -881,6 +881,51 @@ fn new_remote(id: &str) -> NewRemoteRecord {
     }
 }
 
+#[test]
+fn remote_operator_plan_since_roundtrips_and_does_not_inherit_on_tier_change() {
+    let (_root, store) = rig("remote-plan-since", 213);
+    let id = "oauth:anthropic:remote";
+    add_remote(&store, id);
+    store
+        .set_plan_since_audited(id, Some("plus"), Some(1), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(
+        store.remote_inventory().unwrap()[0].plan_tier_since_ms,
+        Some(1)
+    );
+    let observed = store.remote_inventory().unwrap()[0].plan_tier_observed_at_ms;
+    let audit = store.read_audit(None).unwrap();
+    store
+        .set_plan_since_audited(id, Some("plus"), Some(1), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(store.read_audit(None).unwrap(), audit);
+    store
+        .set_plan_since_audited(id, Some("plus"), Some(2), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(
+        store.remote_inventory().unwrap()[0].plan_tier_observed_at_ms,
+        observed
+    );
+    store
+        .set_plan_audited(id, Some("pro"), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(
+        store.remote_inventory().unwrap()[0].plan_tier_since_ms,
+        None
+    );
+    store
+        .set_plan_since_audited(id, Some("pro"), Some(2), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    store
+        .set_plan_audited(id, None, AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(
+        store.remote_inventory().unwrap()[0].plan_tier_since_ms,
+        None
+    );
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
 fn add_remote(store: &EncryptedStore, id: &str) -> crate::federation::RemoteRecord {
     store
         .remote_add_audited(&new_remote(id))
@@ -3113,7 +3158,7 @@ fn remote_record_source_readers_default_to_operator_at_schema_38() {
         store.store.with_conn(read_schema_version).unwrap(),
         newest_migration_version()
     );
-    assert_eq!(newest_migration_version(), 43);
+    assert_eq!(newest_migration_version(), 44);
     for record in &expected {
         assert_eq!(
             store.remote_record(&record.credential_id).unwrap().as_ref(),

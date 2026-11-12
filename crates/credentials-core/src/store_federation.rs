@@ -974,6 +974,9 @@ impl EncryptedStore {
                         )
                         .optional()?;
                     out.push(RemoteInventoryRow {
+                        plan_tier_since_ms: if read_schema_version(&tx)? >= crate::store::PLAN_TIER_SINCE_SCHEMA_VERSION {
+                            tx.query_row("SELECT since_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
+                        } else { None },
                         plan_tier_observed_at_ms: if read_schema_version(&tx)? >= crate::store::PLAN_TIER_OBSERVED_SCHEMA_VERSION {
                             tx.query_row("SELECT observed_at_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
                         } else { None },

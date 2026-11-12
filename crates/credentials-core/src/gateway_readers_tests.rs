@@ -152,6 +152,7 @@ fn gateway_readers_below_migration_keep_existing_output_and_never_change_schema(
         RecordMeta {
             incarnation: Some(store.credential_incarnation(ID).unwrap()),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             record_version: 1,
             key_id_hex: store.key_id().to_hex(),
             state: RecordState::Active,
@@ -207,7 +208,7 @@ fn gateway_readers_expose_exact_settings_incarnation_host_and_derived_vendor() {
     let live = store.list_meta().unwrap();
     assert_eq!(live[0].1.gateway, Some(expected.clone()));
     let (readonly, version) = list_meta_read_only_with_schema(&root.join("store.db")).unwrap();
-    assert_eq!(version, GATEWAY_SETTINGS_SCHEMA_VERSION);
+    assert_eq!(version, newest_migration_version());
     assert_eq!(readonly, live);
     assert_eq!(list_meta_read_only(&root.join("store.db")).unwrap(), live);
     assert_eq!(store.gateway_settings("apikey:missing").unwrap(), None);

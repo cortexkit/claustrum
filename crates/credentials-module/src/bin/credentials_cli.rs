@@ -532,7 +532,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "set-identity" => &["--account-id", "--email", "--org-name"],
         "set-category" => &["--set", "--add", "--remove"],
         "set-providers" => &["--id"],
-        "set-plan" => &["--id", "--tier"],
+        "set-plan" => &["--id", "--tier", "--since"],
         "login" => &[
             "--provider",
             "--approve-on",
@@ -710,7 +710,7 @@ fn usage_short() -> String {
          set-identity        attach non-secret account metadata to one credential\n\
          set-category        replace/add/remove authorization categories\n\
            set-providers       replace/add/remove catalog provider ids\n\
-           set-plan            set/clear an operator-asserted subscription tier\n\
+           set-plan            set/clear a subscription tier and optional start date\n\
           reclassify          apply registry category defaults atomically\n\
         mint-handle         mint a capability handle for a credential\n\
         revoke-handle       revoke one capability handle\n\
@@ -849,17 +849,20 @@ fn help_verb(verb: &str) -> String {
         }
         "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
-            "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
+            "ck auth set-plan --id <credential-id> (--tier <id> [--since <date>] | --clear)\n\
              \n\
              \x20 --id <credential-id>  credential whose subscription tier is edited\n\
              \x20 --tier <id>           operator assertion of the plan tier\n\
+             \x20 --since <date>        effective start: YYYY-MM-DD, RFC 3339 or epoch ms\n\
              \x20 --clear               remove the override (detected tier reappears)\n\
              \n\
              NOTES\n\
              Choose exactly one of --tier and --clear. Tiers start with a lowercase\n\
              letter, contain only lowercase ASCII letters, digits and _, and are\n\
              1-32 characters. Pricing owns the override vocabulary. Automatic detection\n\
-             cannot verify an operator override; clear it to use the detected tier."
+             cannot verify an operator override; clear it to use the detected tier.\n\
+             A bare date means midnight UTC. The start must be positive and not future.\n\
+             --since requires --tier; omitting it clears any previous start date."
         }
         "set-providers" => {
             "ck auth set-providers --id <credential-id> (--add | --remove | --set)\n\
@@ -992,7 +995,7 @@ fn help_verb(verb: &str) -> String {
              Each row carries id, state, record_version, categories,\n\
               provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
               Rows also carry provider (service name), incarnation and\n\
-              plan_tier_observed_at_ms (null when the tier's start is unknown).\n\
+              plan_tier_observed_at_ms and plan_tier_since_ms (null when unknown).\n\
              auth_method is apikey, chatgpt, antigravity, oauth or gateway, and null when the\n\
              credential has no subscription or API plane. plan_tier and plan_tier_source\n\
              are null when unset; creator is null when none. No payloads, tokens,\n\
@@ -1887,12 +1890,19 @@ fn cmd_set_plan(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     {
         return Err(CliError::Store(StoreOpError::InvalidPlanTier));
     }
+    let since_ms = optional(args, "--since")
+        .map(|value| parse_plan_since(&value))
+        .transpose()?;
+    if since_ms.is_some() && tier.is_none() {
+        return Err(CliError::Store(StoreOpError::InvalidPlanTier));
+    }
     let reply = commit_admin(
         global,
         AdminOpBody::SetPlan {
             v: ADMIN_OP_SCHEMA_V2,
             credential_id: id.clone(),
             plan_tier: tier,
+            since_ms: since_ms.map(serde_json::Value::from),
         },
     )?;
     let tier = match reply.get("plan_tier") {
@@ -1910,6 +1920,34 @@ fn cmd_set_plan(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     };
     println!("{id}  {tier}");
     Ok(())
+}
+
+fn parse_plan_since(value: &str) -> Result<u64, CliError> {
+    let invalid = || CliError::Store(StoreOpError::InvalidPlanTier);
+    let since = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse::<u64>().map_err(|_| invalid())?
+    } else {
+        let timestamp = if value.len() == 10 {
+            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map_err(|_| invalid())?
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(invalid)?
+                .and_utc()
+                .timestamp_millis()
+        } else {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| invalid())?
+                .timestamp_millis()
+        };
+        u64::try_from(timestamp).map_err(|_| invalid())?
+    };
+    if !credentials_core::plan_tier::valid_plan_tier_since_ms(
+        since,
+        chrono::Utc::now().timestamp_millis() as u64,
+    ) {
+        return Err(invalid());
+    }
+    Ok(since)
 }
 
 fn cmd_set_providers(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -5049,7 +5087,18 @@ fn render_inventory_row(
         } else {
             ""
         };
-        format!("  {tier}{marker}")
+        let since = row
+            .filter(|row| row["plan_tier_source"] == "operator")
+            .and_then(|row| row["plan_tier_since_ms"].as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|date| {
+                format!(
+                    " since={}",
+                    date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                )
+            })
+            .unwrap_or_default();
+        format!("  {tier}{marker}{since}")
     } else {
         String::new()
     };
@@ -6523,6 +6572,7 @@ fn inventory_json_rows(
                     "provider": credentials_core::store::RegisteredProvider::service_for_id(&registered, id),
                     "incarnation": entry.and_then(|row| row.get("incarnation")).cloned().unwrap_or(serde_json::Value::Null),
                     "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
+                    "plan_tier_since_ms": entry.and_then(|row| row.get("plan_tier_since_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,
                 });
                 if let Some(gateway) = entry.filter(|row| row.get("base_url").is_some()) {
@@ -9532,6 +9582,49 @@ mod login_regressions {
         let help = help_verb("login");
         assert!(help.contains("Gateway enrollment is picker-only"));
         assert!(usage_short().contains("picker also enrolls gateways"));
+    }
+
+    #[test]
+    fn set_plan_help_and_verb_row_describe_the_optional_start_date() {
+        let help = help_verb("set-plan");
+        for text in [
+            "--since",
+            "YYYY-MM-DD",
+            "RFC 3339",
+            "epoch ms",
+            "midnight UTC",
+            "omitting it clears",
+        ] {
+            assert!(help.contains(text), "missing {text}: {help}");
+        }
+        assert!(help.lines().all(|line| line.len() <= 80), "{help}");
+        assert!(usage_short()
+            .lines()
+            .any(|line| line.contains("set-plan") && line.contains("start date")));
+    }
+
+    #[test]
+    fn set_plan_since_parses_dates_offsets_and_epoch_milliseconds() {
+        for value in [
+            "2025-01-01",
+            "2025-01-01T00:00:00Z",
+            "2025-01-01T01:00:00+01:00",
+            "1735689600000",
+        ] {
+            assert_eq!(parse_plan_since(value).unwrap(), 1_735_689_600_000);
+        }
+        for value in [
+            "",
+            "0",
+            "-1",
+            "1.5",
+            "2025-02-30",
+            "2025-01-01T00:00:00",
+            "9999-01-01",
+            "9007199254740992",
+        ] {
+            assert!(parse_plan_since(value).is_err(), "{value}");
+        }
     }
 
     /// The picker is the only way an operator who runs a bare `ck auth login` reaches a

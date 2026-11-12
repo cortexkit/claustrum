@@ -9598,6 +9598,7 @@ mod tests {
             provider: credentials_core::catalog::provider(stored.id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             id: stored.id.into(),
             categories: stored.categories.iter().map(|c| (*c).to_string()).collect(),
             state: RecordState::Active,
@@ -12432,6 +12433,65 @@ mod tests {
     }
 
     #[test]
+    fn list_scoped_plan_date_only_edits_preserve_observation_and_restore_original_view() {
+        let (surface, store, db, _root) = tmp_surface_with_store(214);
+        let id = "apikey:exa";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"test-key".to_vec(), None);
+        store.create(id, &record).unwrap();
+        store
+            .set_plan_audited(id, Some("plus"), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        // Fix the initial observation independently of the wall clock, so a tier
+        // change cannot appear to preserve it merely by landing in the same millisecond.
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE credential_plan_tiers SET observed_at_ms = 100 WHERE credential_id = ?1",
+                [id],
+            )
+            .unwrap();
+        grant_for(&store, "catalog-field-reader", id, GrantOperation::List);
+        let listing = || {
+            surface
+                .list_scoped(
+                    Some(&reserved("catalog-field-reader")),
+                    &read_surface::ListScopedParams {
+                        enrollment_token: None,
+                    },
+                )
+                .unwrap()
+        };
+        let original = listing();
+        assert_eq!(original.credentials[0].plan_tier_observed_at_ms, Some(100));
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        store
+            .set_plan_since_audited(id, Some("plus"), Some(1), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        let dated = listing();
+        assert_eq!(dated.credentials[0].plan_tier_observed_at_ms, Some(100));
+        assert_eq!(dated.credentials[0].plan_tier_since_ms, Some(1));
+        assert_ne!(dated.view, original.view);
+        store
+            .set_plan_audited(id, Some("plus"), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&listing()).unwrap(),
+            original_bytes,
+            "date-only set/clear restores the real listing bytes, including its view"
+        );
+        store
+            .set_plan_since_audited(id, Some("plus"), Some(2), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        store
+            .set_plan_audited(id, Some("pro_200"), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        let changed = listing();
+        assert!(changed.credentials[0].plan_tier_observed_at_ms.unwrap() > 100);
+        assert_eq!(changed.credentials[0].plan_tier_since_ms, None);
+    }
+
+    #[test]
     fn list_scoped_plan_tier_observed_time_does_not_move_on_same_value_refresh() {
         let (surface, store, _db, _root) = tmp_surface_with_store(203);
         let id = "apikey:exa";
@@ -13006,6 +13066,7 @@ mod tests {
                 RecordMeta {
                     incarnation: None,
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     record_version: 1,
                     key_id_hex: "00".repeat(8),
                     state,

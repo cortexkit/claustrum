@@ -2,6 +2,11 @@
 //! the vault checks only that a tier is a safe, bounded identifier.
 
 pub const MAX_PLAN_TIER_LEN: usize = 32;
+pub const MAX_PLAN_TIER_SINCE_MS: u64 = crate::agent_secret::MAX_SECRET_JSON_INTEGER;
+
+pub fn valid_plan_tier_since_ms(since_ms: u64, now_ms: u64) -> bool {
+    (1..=MAX_PLAN_TIER_SINCE_MS).contains(&since_ms) && since_ms <= now_ms
+}
 
 pub fn valid_plan_tier(tier: &str) -> bool {
     (1..=MAX_PLAN_TIER_LEN).contains(&tier.len())
@@ -14,6 +19,19 @@ pub fn valid_plan_tier(tier: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_tier_since_checks_positive_exact_integer_and_now_boundaries() {
+        assert!(valid_plan_tier_since_ms(1, 1));
+        assert!(!valid_plan_tier_since_ms(0, 1));
+        assert!(valid_plan_tier_since_ms(100, 100));
+        assert!(!valid_plan_tier_since_ms(101, 100));
+        assert!(valid_plan_tier_since_ms(MAX_PLAN_TIER_SINCE_MS, u64::MAX));
+        assert!(!valid_plan_tier_since_ms(
+            MAX_PLAN_TIER_SINCE_MS + 1,
+            u64::MAX
+        ));
+    }
 
     #[test]
     fn plan_tiers_check_syntax_not_a_pricing_vocabulary() {

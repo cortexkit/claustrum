@@ -616,9 +616,22 @@ Three additive fields are present on every current row:
   detection instant. A Claude profile fetched after token renewal waits in a durable
   side table until the next token commit; its detection time, not that later commit
   time, is the time used when its tier becomes effective.
-  Same-value refreshes do not move it. An operator tier uses its `set-plan` commit
+   Same-value refreshes and date-only operator edits do not move it. An operator tier uses its initial `set-plan` commit
   time; clearing the override restores the detected value's time. Like the tier,
   this time requires read/list coverage; sign/open-only rows carry `null`.
+
+`plan_tier_since_ms` is an optional effective start in Unix milliseconds for an
+operator-set tier (migration 44). It is emitted only when the effective tier source
+is `operator` and the operator supplied a date, and only on account-identity rows
+with read/list coverage. Otherwise the key is omitted. Consumers price from
+`plan_tier_since_ms` when present, falling back to `plan_tier_observed_at_ms` when
+absent. It is not a detection or token-refresh time. Both clients decode it as an
+optional non-negative integer; a present wrong type refuses decoding, as with the
+other plan fields (row-local in Rust, whole-reply in TypeScript).
+
+Migration 44 adds nullable `since_ms` columns to both `credential_plan_tiers` and
+`remote_record_plan_tiers`, without backfill. Remote operator assertions belong to
+this computer and are not sent to the home vault; no federation wire field changes.
 
 Migration 36 adds nullable times for operator assertions and remote detections.
 Local current-value detection times are sealed beside the existing detection
@@ -627,7 +640,8 @@ tier next changes. Reasserting an unchanged operator value is still a no-op.
 Both clients decode these three fields as optional; omission by an older vault and
 explicit `null` both mean absent. The TypeScript names are `provider`, `incarnation`
 and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
-`ck auth list --json` includes the same fields (and nulls) in each ordinary twelve-key row.
+`ck auth list --json` includes the same fields (and nulls), including
+`plan_tier_since_ms`, in each ordinary row.
 Gateway rows additionally carry `base_url` and `headers`.
 
 `auth_method` is `gateway` when the credential has gateway settings; otherwise it is
@@ -680,7 +694,10 @@ Provider-id and tier edits do not bump `record_version`: observers use `view`. I
 `org_name` optional-string frame, append a u32 provider-id count and each string-framed id
 in ascending byte order, then `auth_method` as an optional string, then `plan_tier` and `plan_tier_source` as
 optional strings, then `provider` as an optional string, `incarnation` as a string,
-and `plan_tier_observed_at_ms` as an optional decimal-string frame. Next frame
+and `plan_tier_observed_at_ms` as an optional decimal-string frame. Only when
+`plan_tier_since_ms` is present, append byte 3 and its length-prefixed decimal
+string. No bytes are appended for an absent date, preserving existing undated
+views. Next frame
 `fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
 byte 0 when absent, or byte 1, a u32 host count, and each host as a length-prefixed
 string in served order. The absent optional frame is used whenever the JSON key is
@@ -966,6 +983,7 @@ Modules and enrolled consumers cannot write tiers. Set and clear request bodies:
 
 ```json
 {"op":"admin.set_plan","v":2,"credential_id":"oauth:anthropic","plan_tier":"max_20x"}
+{"op":"admin.set_plan","v":2,"credential_id":"oauth:anthropic","plan_tier":"max_20x","since_ms":1735689600000}
 {"op":"admin.set_plan","v":2,"credential_id":"oauth:anthropic","plan_tier":null}
 ```
 
@@ -976,9 +994,23 @@ starting with a letter. Syntax is checked before credential lookup. Bad syntax r
 with permanent `invalid_plan_tier`; an unknown credential refuses with `credential not
 found`, including a clear. Refusals change neither metadata nor audit.
 
-Only actual old-to-new transitions write an HMAC audit row with op `set_plan` and target
+Optional `since_ms` applies only to a tier set in the same operation. It must be a
+positive integer no greater than 9007199254740991 (the exact JSON-integer bound)
+and no later than the vault's current time. Wrong types, zero, negative, fractional,
+out-of-bound or future values, or supplying it without a tier, refuse with the same
+permanent `invalid_plan_tier` code. Setting a tier without `since_ms` stores NULL,
+never inheriting a previous date. Clearing removes both the override and its date.
+Repeating the same tier and date is a no-op; changing only the date is a real edit
+with one audit row, updating the row in place and preserving its observation time.
+A real tier change resets the observation time to now. `ck auth set-plan --since` accepts a UTC `YYYY-MM-DD` date
+(midnight UTC), an RFC 3339 timestamp, or epoch milliseconds. `ck auth list` shows
+the supplied date beside the operator tier; JSON lists use `plan_tier_since_ms` or null.
+
+Only actual tier/date transitions write an HMAC audit row with op `set_plan` and target
 `plan:<credential-id>|<old-tier>|<new-tier>`. An absent old or new tier is the empty field;
 parse by splitting off the **last two** `|` delimiters. Automatic account-change clears
+remove the date with the override. A date-only edit retains the same old/new tier
+in this target; the audit format does not embed timestamps. Automatic clears
 use the replacement actor and the same audit format. Manual tier edits never open or
 re-seal the envelope, and never change provider ids or authorization categories.
 

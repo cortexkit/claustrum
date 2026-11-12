@@ -1939,6 +1939,11 @@ impl RemoteReader {
                 detected_plan.as_ref(),
             );
             rows.push(ScopedListRow {
+                plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") {
+                    entry.plan_tier_since_ms
+                } else {
+                    None
+                },
                 provider: credentials_core::store::RegisteredProvider::service_for_id(
                     &providers,
                     &record.credential_id,

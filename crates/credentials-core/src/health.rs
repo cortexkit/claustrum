@@ -237,6 +237,7 @@ mod tests {
             RecordMeta {
                 incarnation: None,
                 plan_tier_observed_at_ms: None,
+                plan_tier_since_ms: None,
                 record_version: 1,
                 key_id_hex: "deadbeef".to_string(),
                 state,

@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn plan_since_decodes_optional_non_negative_integer_and_rejects_present_wrong_type() {
+    let reply = producer_vector_reply("list-scoped-v2.json", "catalog_and_lifecycle");
+    assert!(decode_list_scoped_reply(reply.clone())
+        .unwrap()
+        .credentials
+        .iter()
+        .all(|row| row.plan_tier_since_ms.is_none()));
+    for since in [0, 1, 1_700_000_000_000u64] {
+        let mut dated = reply.clone();
+        dated["result"]["credentials"][0]["plan_tier_since_ms"] = json!(since);
+        assert_eq!(
+            decode_list_scoped_reply(dated).unwrap().credentials[0].plan_tier_since_ms,
+            Some(since)
+        );
+    }
+    for malformed in [
+        json!(null),
+        json!("1"),
+        json!(true),
+        json!([]),
+        json!({}),
+        json!(-1),
+        json!(1.5),
+    ] {
+        let mut broken = reply.clone();
+        broken["result"]["credentials"][0]["plan_tier_since_ms"] = malformed;
+        let listing = decode_list_scoped_reply(broken).unwrap();
+        assert_eq!(listing.credentials.len(), 3);
+        assert_eq!(listing.undecodable_credentials.len(), 1);
+        assert!(listing.undecodable_credentials[0].contains("plan_tier_since_ms"));
+    }
+}
+
+#[test]
 fn provider_catalog_client_decodes_real_new_rows_and_old_or_null_metadata() {
     let reply = producer_vector_reply("list-scoped-v2.json", "catalog_and_lifecycle");
     let listing = decode_list_scoped_reply(reply.clone()).unwrap();
@@ -489,6 +523,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("antigravity".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     fusiform_provider_id: None,
                     hosts: None,
                     id: "antigravity:google".into(),
@@ -511,6 +546,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("openrouter".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     fusiform_provider_id: Some("openrouter".into()),
                     hosts: Some(vec!["openrouter.ai".into()]),
                     id: "apikey:openrouter".into(),
@@ -553,6 +589,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("openai".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     fusiform_provider_id: None,
                     hosts: None,
                     id: "chatgpt:openai".into(),
@@ -575,6 +612,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: None,
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     fusiform_provider_id: None,
                     hosts: None,
                     id: "github_app:plex-alfonso".into(),
@@ -597,6 +635,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     provider: Some("anthropic".into()),
                     incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                     plan_tier_observed_at_ms: None,
+                    plan_tier_since_ms: None,
                     fusiform_provider_id: None,
                     hosts: None,
                     id: "oauth:anthropic".into(),
@@ -646,6 +685,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 provider: Some("anthropic".into()),
                 incarnation: Some("0123456789abcdef0123456789abcdef".into()),
                 plan_tier_observed_at_ms: None,
+                plan_tier_since_ms: None,
                 fusiform_provider_id: None,
                 hosts: None,
                 id: "oauth:anthropic".into(),

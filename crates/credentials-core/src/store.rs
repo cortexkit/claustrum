@@ -120,6 +120,9 @@ pub const REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION: u32 = 42;
 /// Per-credential gateway settings, bound to the credential's incarnation.
 pub const GATEWAY_SETTINGS_SCHEMA_VERSION: u32 = 43;
 
+/// Optional operator-supplied effective starts for local and remote plan tiers.
+pub const PLAN_TIER_SINCE_SCHEMA_VERSION: u32 = 44;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -1107,6 +1110,11 @@ const MIGRATIONS: &[Migration] = &[
                          headers_json TEXT NOT NULL\
                      );",
     },
+    Migration {
+        version: PLAN_TIER_SINCE_SCHEMA_VERSION,
+        statements: "ALTER TABLE credential_plan_tiers ADD COLUMN since_ms INTEGER; \
+                     ALTER TABLE remote_record_plan_tiers ADD COLUMN since_ms INTEGER;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1223,6 +1231,7 @@ pub struct RecordMeta {
     pub incarnation: Option<String>,
     /// Commit time of the current operator assertion; absent on older rows.
     pub plan_tier_observed_at_ms: Option<i64>,
+    pub plan_tier_since_ms: Option<i64>,
     /// The stored record's monotonic version.
     pub record_version: u64,
     /// Hex fingerprint of the master key this row is sealed under.
@@ -1456,6 +1465,7 @@ pub struct ScopedListRow {
     pub provider: Option<String>,
     pub incarnation: String,
     pub plan_tier_observed_at_ms: Option<i64>,
+    pub plan_tier_since_ms: Option<i64>,
     pub id: String,
     pub categories: Vec<String>,
     pub state: RecordState,
@@ -1761,7 +1771,7 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidServiceName { service } => write!(f, "Provider service {service:?} is invalid; use a non-empty name without colons, whitespace, control characters, '|' or the reserved '-gw-' marker."),
             StoreOpError::ServiceInProviderCatalog { service } => write!(f, "Provider service {service:?} is in the fixed provider catalog and cannot be registered."),
             StoreOpError::InvalidDisplayName => f.write_str("invalid_params/permanent: invalid display_name"),
-            StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31}"),
+            StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31} and an optional positive, exact-integer since_ms no later than now"),
             // Labelled fields, so a value that happens to spell a rule token (`count`)
             // cannot be read as a second rule.
             StoreOpError::InvalidProviderId { rule, value } => {
@@ -2632,16 +2642,18 @@ impl EncryptedStore {
                     &format!("SELECT record_version, key_id, state, stale_pending, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category\
-                     )), ''), created_by, {}, {} \
+                     )), ''), created_by, {}, {}, {} \
                      FROM credentials WHERE credential_id = ?1",
                      if read_schema_version(conn)? >= 33 { "incarnation" } else { "NULL" },
-                     plan_tier_observed_column(read_schema_version(conn)?)),
+                     plan_tier_observed_column(read_schema_version(conn)?),
+                     plan_tier_since_column(read_schema_version(conn)?)),
                     rusqlite::params![credential_id],
                     |row| {
                         let categories: String = row.get(4)?;
                         Ok(RecordMeta {
                             incarnation: row.get(6)?,
                             plan_tier_observed_at_ms: row.get(7)?,
+                            plan_tier_since_ms: row.get(8)?,
                             record_version: row.get::<_, i64>(0)? as u64,
                             key_id_hex: row.get(1)?,
                             state: RecordState::from_str(&row.get::<_, String>(2)?),
@@ -3987,10 +3999,10 @@ impl EncryptedStore {
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                      )), ''), {}, {}, {}, {} FROM credentials ORDER BY credential_id",
+                      )), ''), {}, {}, {}, {}, {} FROM credentials ORDER BY credential_id",
                     provider_ids_column(schema_version), plan_tier_column(schema_version),
                     if schema_version >= 33 { "incarnation" } else { "''" },
-                    plan_tier_observed_column(schema_version)
+                    plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version)
                 ))?;
                 let candidates = stmt
                     .query_map([], |row| {
@@ -4004,6 +4016,7 @@ impl EncryptedStore {
                             row.get::<_, Option<String>>(6)?,
                             row.get::<_, String>(7)?,
                             row.get::<_, Option<i64>>(8)?,
+                            row.get::<_, Option<i64>>(9)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4011,7 +4024,7 @@ impl EncryptedStore {
 
                 let mut rows = Vec::new();
                 let mut keys = Vec::new();
-                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier, incarnation, operator_observed_at_ms) in
+                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier, incarnation, operator_observed_at_ms, operator_since_ms) in
                     candidates
                 {
                     if crate::agent_secret::is_deposit_key(&id) {
@@ -4096,6 +4109,7 @@ impl EncryptedStore {
                         identity.as_ref().and(plan_tier), detected_plan.as_ref(),
                     );
                     rows.push(ScopedListRow {
+                        plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") { operator_since_ms } else { None },
                         provider: RegisteredProvider::service_for_id(&registered_providers, &id).map(str::to_owned),
                         incarnation,
                         plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
@@ -4397,14 +4411,38 @@ impl EncryptedStore {
         plan_tier: Option<&str>,
         ctx: AuditCtx<'_>,
     ) -> Result<Option<String>, StoreOpError> {
+        self.set_plan_since_audited(credential_id, plan_tier, None, ctx)
+    }
+
+    pub fn set_plan_since_audited(
+        &self,
+        credential_id: &str,
+        plan_tier: Option<&str>,
+        since_ms: Option<u64>,
+        ctx: AuditCtx<'_>,
+    ) -> Result<Option<String>, StoreOpError> {
         if plan_tier.is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier)) {
+            return Err(StoreOpError::InvalidPlanTier);
+        }
+        if since_ms.is_some_and(|since| {
+            plan_tier.is_none()
+                || !crate::plan_tier::valid_plan_tier_since_ms(since, now_ms() as u64)
+        }) {
             return Err(StoreOpError::InvalidPlanTier);
         }
         self.fenced_write(|tx| {
             let Some(tables) = metadata_tables_for(tx, credential_id)? else {
                 return Ok(Err(StoreOpError::NotFound));
             };
-            write_plan_tier_in_tx(tx, &self.audit_key, tables, credential_id, plan_tier, ctx)?;
+            write_plan_tier_in_tx(
+                tx,
+                &self.audit_key,
+                tables,
+                credential_id,
+                plan_tier,
+                since_ms.map(|time| time as i64),
+                ctx,
+            )?;
             Ok(Ok(plan_tier.map(str::to_owned)))
         })?
     }
@@ -7706,6 +7744,14 @@ fn plan_tier_observed_column(schema_version: u32) -> &'static str {
     }
 }
 
+fn plan_tier_since_column(schema_version: u32) -> &'static str {
+    if schema_version >= PLAN_TIER_SINCE_SCHEMA_VERSION {
+        "(SELECT since_ms FROM credential_plan_tiers WHERE credential_id = credentials.credential_id)"
+    } else {
+        "NULL"
+    }
+}
+
 fn plan_tier_from_conn(
     conn: &rusqlite::Connection,
     id: &str,
@@ -7729,7 +7775,7 @@ fn write_plan_tier_tx(
     tier: Option<&str>,
     ctx: AuditCtx<'_>,
 ) -> rusqlite::Result<()> {
-    write_plan_tier_in_tx(tx, audit_key, MetadataTables::Local, id, tier, ctx)
+    write_plan_tier_in_tx(tx, audit_key, MetadataTables::Local, id, tier, None, ctx)
 }
 
 /// Set or clear one id's plan tier in the given table family, auditing only a change.
@@ -7739,6 +7785,7 @@ fn write_plan_tier_in_tx(
     tables: MetadataTables,
     id: &str,
     tier: Option<&str>,
+    since_ms: Option<i64>,
     ctx: AuditCtx<'_>,
 ) -> rusqlite::Result<()> {
     let old = match tables {
@@ -7751,33 +7798,64 @@ fn write_plan_tier_in_tx(
             )
             .optional()?,
     };
-    if old.as_deref() == tier {
+    let schema_version = read_schema_version(tx)?;
+    let old_since: Option<i64> = if schema_version >= PLAN_TIER_SINCE_SCHEMA_VERSION {
+        tx.query_row(
+            &format!(
+                "SELECT since_ms FROM {} WHERE credential_id = ?1",
+                tables.plan_tiers()
+            ),
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten()
+    } else {
+        None
+    };
+    if old.as_deref() == tier && old_since == since_ms {
         return Ok(());
     }
-    tx.execute(
-        &format!(
-            "DELETE FROM {} WHERE credential_id = ?1",
-            tables.plan_tiers()
-        ),
-        [id],
-    )?;
-    if let Some(tier) = tier {
-        if read_schema_version(tx)? >= PLAN_TIER_OBSERVED_SCHEMA_VERSION {
-            tx.execute(
-                &format!(
+    if old.as_deref() == tier {
+        // A date edit changes the assertion, not when the vault first saw its tier.
+        tx.execute(
+            &format!(
+                "UPDATE {} SET since_ms = ?2 WHERE credential_id = ?1",
+                tables.plan_tiers()
+            ),
+            rusqlite::params![id, since_ms],
+        )?;
+    } else {
+        tx.execute(
+            &format!(
+                "DELETE FROM {} WHERE credential_id = ?1",
+                tables.plan_tiers()
+            ),
+            [id],
+        )?;
+        if let Some(tier) = tier {
+            if schema_version >= PLAN_TIER_SINCE_SCHEMA_VERSION {
+                tx.execute(
+                &format!("INSERT INTO {} (credential_id, plan_tier, observed_at_ms, since_ms) VALUES (?1, ?2, ?3, ?4)", tables.plan_tiers()),
+                rusqlite::params![id, tier, now_ms(), since_ms],
+            )?;
+            } else if schema_version >= PLAN_TIER_OBSERVED_SCHEMA_VERSION {
+                tx.execute(
+                    &format!(
                     "INSERT INTO {} (credential_id, plan_tier, observed_at_ms) VALUES (?1, ?2, ?3)",
                     tables.plan_tiers()
                 ),
-                rusqlite::params![id, tier, now_ms()],
-            )?;
-        } else {
-            tx.execute(
-                &format!(
-                    "INSERT INTO {} (credential_id, plan_tier) VALUES (?1, ?2)",
-                    tables.plan_tiers()
-                ),
-                rusqlite::params![id, tier],
-            )?;
+                    rusqlite::params![id, tier, now_ms()],
+                )?;
+            } else {
+                tx.execute(
+                    &format!(
+                        "INSERT INTO {} (credential_id, plan_tier) VALUES (?1, ?2)",
+                        tables.plan_tiers()
+                    ),
+                    rusqlite::params![id, tier],
+                )?;
+            }
         }
     }
     append_audit_tx(
@@ -8309,14 +8387,15 @@ fn list_meta_from_conn(
     let sql = sql.replace(
         "FROM credentials ORDER BY",
         &format!(
-            ", {creator}, {providers}, {}, {}, {} FROM credentials ORDER BY",
+            ", {creator}, {providers}, {}, {}, {}, {} FROM credentials ORDER BY",
             plan_tier_column(schema_version),
             if schema_version >= 33 {
                 "incarnation"
             } else {
                 "NULL"
             },
-            plan_tier_observed_column(schema_version)
+            plan_tier_observed_column(schema_version),
+            plan_tier_since_column(schema_version)
         ),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -8336,6 +8415,7 @@ fn list_meta_from_conn(
                     plan_tier: row.get(8)?,
                     incarnation: row.get(9)?,
                     plan_tier_observed_at_ms: row.get(10)?,
+                    plan_tier_since_ms: row.get(11)?,
                     gateway: None,
                 },
             ))
@@ -14107,7 +14187,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            43,
+            44,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16120,6 +16200,90 @@ mod migration_10_tests {
         }).unwrap();
     }
 
+    #[test]
+    fn migration_44_preserves_every_step_43_row_and_leaves_plan_starts_unknown() {
+        let (_root, sqlite) = sqlite("plan-since-upgrade", 212);
+        migrate_through_for_test(&sqlite, 43).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([212; 32])).unwrap();
+        let id = "apikey:plan-upgrade";
+        store
+            .create_audited(id, &api_record(), AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .set_plan_audited(id, Some("plus"), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "upgrade-reader",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::List,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let gateway = super::gateway_create_tests::settings();
+        crate::admin_ops::apply(
+            &store,
+            crate::admin_ops::AdminOpBody::GatewayCreate {
+                v: crate::admin_ops::ADMIN_OP_SCHEMA_V2,
+                id: "apikey:anthropic-gw-upgrade".into(),
+                record: Box::new(api_record()),
+                audit_op: crate::admin_ops::AdminAuditOp::Put,
+                base_url: gateway.base_url,
+                auth_header: gateway.auth.header,
+                auth_scheme: gateway.auth.scheme,
+                headers: gateway.headers,
+                provider_ids: vec!["anthropic-gw-upgrade".into()],
+            },
+            "operator",
+        )
+        .unwrap();
+        let remote = "oauth:anthropic:upgrade";
+        store
+            .remote_add_audited(&crate::federation::NewRemoteRecord {
+                credential_id: remote.into(),
+                home_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: crate::record::RecordIdentity::default(),
+                home_version: 7,
+                categories: vec![],
+            })
+            .unwrap();
+        store
+            .set_plan_audited(remote, Some("pro"), AuditCtx::admin(AuditOp::SetPlan))
+            .unwrap();
+        let before = every_table_row(&store.store);
+        assert_eq!(before["credentials"].len(), 2);
+        assert_eq!(before["credential_plan_tiers"].len(), 1);
+        assert_eq!(before["remote_record_plan_tiers"].len(), 1);
+        assert_eq!(before["credential_gateway_settings"].len(), 1);
+        assert_eq!(before["read_grants"].len(), 1);
+        EncryptedStore::migrate(&store.store).unwrap();
+        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 44);
+        let mut after = every_table_row(&store.store);
+        for table in ["credential_plan_tiers", "remote_record_plan_tiers"] {
+            for row in after.get_mut(table).unwrap() {
+                assert_eq!(
+                    row.pop(),
+                    Some(rusqlite::types::Value::Null),
+                    "{table} must not invent a start"
+                );
+            }
+        }
+        assert_eq!(
+            after, before,
+            "every pre-existing column in every table is byte-identical"
+        );
+        assert_eq!(store.meta(id).unwrap().plan_tier_since_ms, None);
+        assert_eq!(
+            store.remote_inventory().unwrap()[0].plan_tier_since_ms,
+            None
+        );
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
     /// Every row of every vault table, sorted by all of its columns, keyed by table name.
     /// Used to show a DDL-only migration copied every row of every table unchanged. Sorted
     /// rather than in rowid order because a rebuilt table assigns fresh rowids, and the
@@ -17057,6 +17221,24 @@ mod migration_10_tests {
         };
 
         for (table, expected) in [
+            (
+                "credential_plan_tiers",
+                vec![
+                    column("credential_id", "TEXT", true, None, true),
+                    column("plan_tier", "TEXT", true, None, false),
+                    column("observed_at_ms", "INTEGER", false, None, false),
+                    column("since_ms", "INTEGER", false, None, false),
+                ],
+            ),
+            (
+                "remote_record_plan_tiers",
+                vec![
+                    column("credential_id", "TEXT", true, None, true),
+                    column("plan_tier", "TEXT", true, None, false),
+                    column("observed_at_ms", "INTEGER", false, None, false),
+                    column("since_ms", "INTEGER", false, None, false),
+                ],
+            ),
             (
                 "gh_manifests",
                 vec![

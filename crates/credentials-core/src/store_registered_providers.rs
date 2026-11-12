@@ -515,8 +515,8 @@ mod tests {
         EncryptedStore::migrate(&store.store).unwrap();
         // The daemon migrates to the newest step, so the later gateway settings step
         // runs here too; it only adds its own table and touches none of these rows.
-        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 43);
-        assert_eq!(newest_migration_version(), 43);
+        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 44);
+        assert_eq!(newest_migration_version(), 44);
         let after = snapshot(&store);
         assert_eq!(
             after.0, before.0,
@@ -876,7 +876,7 @@ mod tests {
         assert!(store.registered_providers().unwrap().is_empty());
         // The migrate above runs to the newest step, so it must cross the descriptor
         // step this module adds. Later steps may follow it.
-        assert_eq!(newest_migration_version(), 43);
+        assert_eq!(newest_migration_version(), 44);
         assert!(newest_migration_version() >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION);
     }
 

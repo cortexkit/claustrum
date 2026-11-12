@@ -318,7 +318,7 @@ mod scoped_watch {
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;
         let mut previous = rig.notice(1, 11, 1).await;
-        for (index, mutation) in ["grant", "category", "provider", "plan", "state"]
+        for (index, mutation) in ["grant", "category", "provider", "plan", "plan-since", "plan-since-clear", "state"]
             .iter()
             .enumerate()
         {
@@ -352,6 +352,13 @@ mod scoped_watch {
                             AuditCtx::admin(AuditOp::SetPlan),
                         )
                         .unwrap();
+                }
+                "plan-since" | "plan-since-clear" => {
+                    rig.store.set_plan_since_audited(
+                        "apikey:active", Some("pro"),
+                        (*mutation == "plan-since").then_some(1),
+                        AuditCtx::admin(AuditOp::SetPlan),
+                    ).unwrap();
                 }
                 "state" => rig.store.invalidate("apikey:active").unwrap(),
                 _ => unreachable!(),
@@ -503,6 +510,7 @@ mod scoped_watch {
         let mut rig = Rig::new();
         let record = roster_oauth_record();
         rig.store.create("oauth:watch-refresh", &record).unwrap();
+        rig.store.set_plan_since_audited("oauth:watch-refresh", Some("pro"), Some(1), AuditCtx::admin(AuditOp::SetPlan)).unwrap();
         rig.grant("watcher", "oauth:watch-refresh");
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;

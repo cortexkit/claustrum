@@ -4,14 +4,19 @@ Rust client for the claustrum credential vault, used by subc-supervised CortexKi
 modules. The vault owns this client alongside its TypeScript client so the wire
 decoders can be tested against the producer's serialized replies.
 
+Version 0.10.0 is unpublished until the vault runs database step 44 and the owner
+approves release. It adds optional `plan_tier_since_ms` on listed credentials:
+use the operator's effective start when present, otherwise fall back to
+`plan_tier_observed_at_ms`.
+
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.8.0"
+cortexkit-claustrum-client = "0.10.0"
 ```
 
 The default `transport` feature provides the resolver and live watch connection.
 If you already own a bus connection, use `cortexkit-claustrum-client = { version =
-"0.8.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.10.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.

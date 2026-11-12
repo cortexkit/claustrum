@@ -154,10 +154,10 @@ fn every_cli_command_runs_in_the_isolated_home() {
     isolated_cli::assert_isolated(&cli());
 }
 
-/// The twelve keys every `--json` row carries, in the documented order. Pinned
+/// The thirteen keys every `--json` row carries, in the documented order. Pinned
 /// literally so a later field (a handle, a token, an email) cannot slip into
 /// the script surface without reddening here first.
-const JSON_ROW_KEYS: [&str; 12] = [
+const JSON_ROW_KEYS: [&str; 13] = [
     "id",
     "state",
     "record_version",
@@ -170,6 +170,7 @@ const JSON_ROW_KEYS: [&str; 12] = [
     "provider",
     "incarnation",
     "plan_tier_observed_at_ms",
+    "plan_tier_since_ms",
 ];
 
 fn seed_three_credentials(vault: &JsonVault) {
@@ -198,12 +199,12 @@ fn seed_three_credentials(vault: &JsonVault) {
         .status
         .success());
 }
-/// Every row carries exactly the twelve documented keys, rows arrive sorted by
+/// Every row carries exactly the thirteen documented keys, rows arrive sorted by
 /// id, and the top-level version is 1. The exact-set assertion is the secret
 /// guard: a new field lands here first, and anything secret (a token, handle,
 /// or email) fails this test before it can reach a script.
 #[test]
-fn list_json_reports_the_exact_twelve_key_set_sorted_by_id() {
+fn list_json_reports_the_exact_thirteen_key_set_sorted_by_id() {
     let vault = JsonVault::new("list-json-keys");
     seed_three_credentials(&vault);
 
@@ -270,6 +271,7 @@ fn list_json_reports_the_exact_twelve_key_set_sorted_by_id() {
     for row in &rows {
         assert_eq!(row["incarnation"].as_str().unwrap().len(), 32);
         assert!(row["plan_tier_observed_at_ms"].is_null());
+        assert!(row["plan_tier_since_ms"].is_null());
     }
     let db = vault.data_dir.join("store.db");
     let conn = rusqlite::Connection::open(&db).expect("open store for creator probe");
@@ -560,4 +562,58 @@ fn list_json_never_prints_secret_material() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("apikey:deepseek"));
     assert!(stdout.contains("oauth:anthropic"));
+}
+
+#[test]
+fn set_plan_since_roundtrips_dates_timestamps_and_epoch_ms_and_clears_old_date() {
+    let vault = JsonVault::new("list-json-plan-since");
+    seed_three_credentials(&vault);
+    let run = |args: &[&str]| {
+        let out = vault.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    for since in ["2025-01-01", "2025-01-01T01:00:00+01:00", "1735689600000"] {
+        run(&[
+            "set-plan",
+            "--id",
+            "apikey:deepseek",
+            "--tier",
+            "plus",
+            "--since",
+            since,
+        ]);
+        let rows = vault.list_json();
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == "apikey:deepseek")
+            .unwrap();
+        assert_eq!(row["plan_tier_since_ms"], 1_735_689_600_000i64);
+        assert_eq!(row["plan_tier_source"], "operator");
+        assert!(run(&["list"]).contains("plus since=2025-01-01T00:00:00.000Z"));
+    }
+    assert!(!vault
+        .run(&[
+            "set-plan",
+            "--id",
+            "apikey:deepseek",
+            "--clear",
+            "--since",
+            "2025-01-01"
+        ])
+        .status
+        .success());
+    run(&["set-plan", "--id", "apikey:deepseek", "--tier", "pro_200"]);
+    let rows = vault.list_json();
+    assert!(rows
+        .iter()
+        .find(|row| row["id"] == "apikey:deepseek")
+        .unwrap()["plan_tier_since_ms"]
+        .is_null());
+    run(&["set-plan", "--id", "apikey:deepseek", "--clear"]);
+    assert!(run(&["verify-audit"]).contains("intact"));
 }

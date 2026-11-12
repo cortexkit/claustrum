@@ -2,6 +2,20 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { decodeCredential, decodeScopedInventory } from '../wire.js'
 
+test('plan start decodes optional non-negative integers from a producer inventory', () => {
+  expect(decodeScopedInventory(producerReply(), () => {}).rows.every((row) => row.planTierSinceMs === undefined)).toBe(true)
+  for (const since of [0, 1, 1_700_000_000_000]) {
+    const reply = producerReply()
+    reply.result.credentials[0].plan_tier_since_ms = since
+    expect(decodeScopedInventory(reply, () => {}).rows[0]!.planTierSinceMs).toBe(since)
+  }
+  for (const malformed of [null, '1', true, [], {}, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const reply = producerReply()
+    reply.result.credentials[0].plan_tier_since_ms = malformed
+    expect(() => decodeScopedInventory(reply, () => {})).toThrow()
+  }
+})
+
 function producerReply(caseName = 'catalog_and_lifecycle'): any {
   const vector = JSON.parse(readFileSync(new URL('../../../../crates/credentials-module/tests/vectors/list-scoped-v2.json', import.meta.url), 'utf8'))
   const entry = vector.cases.find((row: { case: string }) => row.case === caseName)

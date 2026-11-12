@@ -10,6 +10,140 @@ use crate::store::taxonomy_tests::{api_record, rig, sqlite};
 const ID: &str = "apikey:plan";
 
 #[test]
+fn plan_since_is_cleared_on_tier_change_and_repeats_are_unaudited() {
+    let (_root, store) = rig("plan-since", 192);
+    store.create(ID, &record(Some("account"))).unwrap();
+    let op = |tier: Option<&str>, since_ms: Option<u64>| AdminOpBody::SetPlan {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: ID.into(),
+        plan_tier: tier.map(str::to_owned),
+        since_ms: since_ms.map(serde_json::Value::from),
+    };
+    apply(&store, op(Some("plus"), Some(1)), "operator").unwrap();
+    assert_eq!(store.meta(ID).unwrap().plan_tier_since_ms, Some(1));
+    let observed = store.meta(ID).unwrap().plan_tier_observed_at_ms;
+    let audit = plan_audit(&store);
+    apply(&store, op(Some("plus"), Some(1)), "operator").unwrap();
+    assert_eq!(plan_audit(&store), audit);
+    apply(&store, op(Some("plus"), Some(2)), "operator").unwrap();
+    assert_eq!(store.meta(ID).unwrap().plan_tier_observed_at_ms, observed);
+    assert_eq!(plan_audit(&store).len(), audit.len() + 1);
+    assert_eq!(store.meta(ID).unwrap().plan_tier_since_ms, Some(2));
+    apply(&store, op(Some("pro_200"), None), "operator").unwrap();
+    assert_eq!(
+        store.meta(ID).unwrap().plan_tier_since_ms,
+        None,
+        "a changed tier must not inherit the previous tier's effective start"
+    );
+    apply(&store, op(Some("pro_200"), Some(3)), "operator").unwrap();
+    apply(&store, op(Some("pro_200"), None), "operator").unwrap();
+    assert_eq!(store.meta(ID).unwrap().plan_tier_since_ms, None);
+    apply(&store, op(Some("plus"), Some(4)), "operator").unwrap();
+    apply(&store, op(None, None), "operator").unwrap();
+    assert_eq!(store.meta(ID).unwrap().plan_tier_since_ms, None);
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
+fn plan_since_admin_refuses_wrong_types_ranges_future_and_clear_with_date() {
+    let (_root, store) = rig("plan-since-invalid", 193);
+    store.create(ID, &record(None)).unwrap();
+    let before = store.read_audit(None).unwrap();
+    for since_ms in [
+        serde_json::json!(null),
+        serde_json::json!("1"),
+        serde_json::json!(true),
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!(1.5),
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(u64::MAX),
+        serde_json::json!(crate::plan_tier::MAX_PLAN_TIER_SINCE_MS + 1),
+        serde_json::json!(now_ms() + 60_000),
+    ] {
+        let op: AdminOpBody = serde_json::from_value(serde_json::json!({
+            "op":"admin.set_plan", "v":2, "credential_id":ID, "plan_tier":"plus", "since_ms": since_ms
+        })).unwrap();
+        assert!(
+            matches!(
+                apply(&store, op, "operator"),
+                Err(StoreOpError::InvalidPlanTier)
+            ),
+            "{since_ms}"
+        );
+    }
+    for tier in [serde_json::json!(null), serde_json::json!("plus")] {
+        let mut value =
+            serde_json::json!({"op":"admin.set_plan", "v":2, "credential_id":ID, "since_ms":1});
+        if tier.is_null() {
+            value["plan_tier"] = tier;
+        }
+        assert!(matches!(
+            apply(&store, serde_json::from_value(value).unwrap(), "operator"),
+            Err(StoreOpError::InvalidPlanTier)
+        ));
+    }
+    assert_eq!(store.read_audit(None).unwrap(), before);
+    assert_eq!(store.meta(ID).unwrap().plan_tier, None);
+}
+
+#[test]
+fn plan_since_follows_operator_identity_visibility_and_survives_token_refresh() {
+    let (_root, store) = rig("plan-since-visibility", 194);
+    let mut incoming = record(Some("account"));
+    incoming.detected_plan = Some(crate::plan_detection::DetectedPlan {
+        tier: Some("plus".into()),
+        raw: None,
+        observed_at_ms: 100,
+    });
+    store.create(ID, &incoming).unwrap();
+    for (principal, operation) in [
+        ("reader", GrantOperation::List),
+        ("signer", GrantOperation::Sign),
+        ("opener", GrantOperation::Open),
+    ] {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                principal,
+                SelectorKind::Exact,
+                ID,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+    let row = |principal| {
+        store
+            .list_scoped_snapshot("reserved", principal)
+            .unwrap()
+            .rows
+            .remove(0)
+    };
+    assert_eq!(row("reader").plan_tier_source.as_deref(), Some("detected"));
+    assert_eq!(row("reader").plan_tier_since_ms, None);
+    store
+        .set_plan_since_audited(
+            ID,
+            Some("pro_200"),
+            Some(50),
+            AuditCtx::admin(AuditOp::SetPlan),
+        )
+        .unwrap();
+    assert_eq!(row("reader").plan_tier_since_ms, Some(50));
+    for principal in ["signer", "opener"] {
+        assert_eq!(row(principal).plan_tier, None);
+        assert_eq!(row(principal).plan_tier_since_ms, None);
+    }
+    store.commit_refresh(ID, 1, &incoming).unwrap();
+    assert_eq!(row("reader").plan_tier_since_ms, Some(50));
+    set(&store, ID, None);
+    assert_eq!(row("reader").plan_tier_since_ms, None);
+    assert_eq!(row("reader").plan_tier_source.as_deref(), Some("detected"));
+}
+
+#[test]
 fn plan_observed_time_tracks_value_changes_not_refreshes_and_clear_restores_detection_time() {
     let (_root, store) = rig("plan-value-time", 189);
     let mut incoming = record(Some("account"));
@@ -180,7 +314,7 @@ fn migration_16_adds_only_an_empty_tier_table_and_behind_readers_tolerate_absenc
     assert_eq!(store.list_meta().unwrap(), before);
     assert_eq!(store.read_audit(None).unwrap(), audit_before);
     assert_eq!(audit.len(), 1);
-    assert_eq!(newest_migration_version(), 43);
+    assert_eq!(newest_migration_version(), 44);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 
@@ -204,6 +338,7 @@ fn set_plan_validates_syntax_refuses_unknown_and_audits_only_old_to_new_transiti
         v: ADMIN_OP_SCHEMA_V2,
         credential_id: id.into(),
         plan_tier: tier.map(str::to_owned),
+        since_ms: None,
     };
     assert_eq!(
         apply(&store, op(ID, Some("pro_200")), "operator").unwrap(),

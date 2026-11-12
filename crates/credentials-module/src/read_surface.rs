@@ -296,6 +296,8 @@ pub struct ListScopedCredential {
     pub provider: Option<String>,
     pub incarnation: String,
     pub plan_tier_observed_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_tier_since_ms: Option<i64>,
     pub categories: Vec<String>,
     #[serde(rename = "type")]
     pub credential_type: String,
@@ -1950,6 +1952,12 @@ pub(crate) fn list_scoped_view(
                 .map(|time| time.to_string())
                 .as_deref(),
         );
+        // Undated tiers retain their old digest. Byte 3 marks a dated extension;
+        // the following optional provider-card frame always starts with 0 or 1.
+        if let Some(since_ms) = credential.plan_tier_since_ms {
+            digest_input.push(3);
+            push_string(&mut digest_input, &since_ms.to_string());
+        }
         push_optional_string(
             &mut digest_input,
             credential.fusiform_provider_id.as_deref(),
@@ -2023,6 +2031,7 @@ fn project_list_scoped_with_providers(
                 provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
+                plan_tier_since_ms: row.plan_tier_since_ms,
                 credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
                 serves: gateway.map_or_else(
                     || {
@@ -5190,6 +5199,7 @@ mod list_scoped_tests {
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             id: id.into(),
             categories: categories
                 .iter()
@@ -5266,6 +5276,7 @@ mod list_scoped_tests {
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             id: id.to_owned(),
             categories: vec!["llm-provider".to_owned()],
             state: RecordState::Active,
@@ -5564,6 +5575,7 @@ mod list_scoped_tests {
             provider: None,
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
+            plan_tier_since_ms: None,
             id: "oauth:x".into(),
             categories: vec!["llm-provider".into()],
             credential_type: "oauth".into(),
@@ -5869,6 +5881,28 @@ mod list_scoped_tests {
                 assert_eq!(
                     view, expected,
                     "Fusiform id {fusiform_id:?}, hosts {hosts:?}"
+                );
+                assert!(serde_json::to_value(&credential)
+                    .unwrap()
+                    .get("plan_tier_since_ms")
+                    .is_none());
+                credential.plan_tier_since_ms = Some(12);
+                let dated = list_scoped_view(std::slice::from_ref(&credential), &[]);
+                assert_ne!(dated, expected, "setting an effective start moves the view");
+                assert_eq!(
+                    serde_json::to_value(&credential).unwrap()["plan_tier_since_ms"],
+                    12
+                );
+                credential.plan_tier_since_ms = Some(13);
+                assert_ne!(
+                    list_scoped_view(std::slice::from_ref(&credential), &[]),
+                    dated
+                );
+                credential.plan_tier_since_ms = None;
+                assert_eq!(
+                    list_scoped_view(std::slice::from_ref(&credential), &[]),
+                    expected,
+                    "clearing the date restores the independently assembled pre-date digest"
                 );
                 assert!(views.insert(view), "every id/host frame must be distinct");
                 let wire = serde_json::to_value(&credential).unwrap();

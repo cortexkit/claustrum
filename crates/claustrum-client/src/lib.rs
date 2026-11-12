@@ -329,6 +329,8 @@ pub struct ListedCredential {
     pub hosts: Option<Vec<String>>,
     pub incarnation: Option<String>,
     pub plan_tier_observed_at_ms: Option<i64>,
+    /// Operator-supplied effective start; fall back to the observation time if absent.
+    pub plan_tier_since_ms: Option<u64>,
     /// The vault credential ID, returned verbatim (for example `oauth:anthropic:yiyi`).
     pub id: String,
     pub categories: Vec<String>,
@@ -1781,6 +1783,14 @@ fn decode_optional_invalid_key(row: &Value) -> Result<Option<InvalidKeyEvidence>
 
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
+        plan_tier_since_ms: row
+            .get("plan_tier_since_ms")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| "plan_tier_since_ms is not a non-negative integer".to_string())
+            })
+            .transpose()?,
         provider: decode_optional_string(row, "provider")?,
         fusiform_provider_id: decode_optional_string(row, "fusiform_provider_id")?,
         hosts: decode_optional_hosts(row)?,

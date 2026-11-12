@@ -1769,6 +1769,7 @@ mod tests {
                     v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
                     credential_id: id.to_owned(),
                     plan_tier: tier.map(str::to_owned),
+                    since_ms: None,
                 }
                 .to_bytes()
                 .unwrap(),

@@ -425,6 +425,7 @@ pub struct RemoteHomeSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteInventoryRow {
     pub plan_tier_observed_at_ms: Option<i64>,
+    pub plan_tier_since_ms: Option<i64>,
     pub record: RemoteRecord,
     pub categories: Vec<String>,
     pub provider_ids: Vec<String>,

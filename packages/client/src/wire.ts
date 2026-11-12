@@ -724,6 +724,8 @@ export interface ScopedInventoryRow {
   readonly incarnation?: string
   /** First observation of the effective tier; absent when unknown. */
   readonly planTierObservedAtMs?: number
+  /** Operator's effective start; fall back to planTierObservedAtMs when absent. */
+  readonly planTierSinceMs?: number
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
@@ -876,6 +878,11 @@ export function decodeScopedInventory(
     const hosts = row.hosts ?? undefined
     const incarnation = row.incarnation ?? undefined
     const planTierObservedAtMs = row.plan_tier_observed_at_ms ?? undefined
+    const planTierSinceMs = row.plan_tier_since_ms
+    if (planTierSinceMs !== undefined &&
+      (typeof planTierSinceMs !== 'number' || !Number.isSafeInteger(planTierSinceMs) || planTierSinceMs < 0)) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     if (
       !isOptionalString(provider) || !isOptionalString(fusiformProviderId) ||
       (hosts !== undefined && !isStringArray(hosts)) || !isOptionalString(incarnation) ||
@@ -908,6 +915,7 @@ export function decodeScopedInventory(
       hosts,
       incarnation,
       planTierObservedAtMs,
+      planTierSinceMs,
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),

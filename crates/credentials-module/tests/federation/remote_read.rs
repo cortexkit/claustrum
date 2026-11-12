@@ -2248,7 +2248,12 @@ async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_
         )
         .unwrap();
     store
-        .set_plan_audited(TOKEN_ID, Some("max_5x"), AuditCtx::admin(AuditOp::SetPlan))
+        .set_plan_since_audited(
+            TOKEN_ID,
+            Some("max_5x"),
+            Some(1),
+            AuditCtx::admin(AuditOp::SetPlan),
+        )
         .unwrap();
     store
         .create_read_grant_audited(
@@ -2268,6 +2273,7 @@ async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_
     assert_eq!(row.provider_ids, vec!["anthropic".to_string()]);
     assert_eq!(row.plan_tier.as_deref(), Some("max_5x"));
     assert_eq!(row.plan_tier_source.as_deref(), Some("operator"));
+    assert_eq!(row.plan_tier_since_ms, Some(1));
     assert_eq!(row.operations, vec![GrantOperation::Read]);
     assert!(
         store
@@ -2275,4 +2281,8 @@ async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_
             .unwrap()
             .covered
     );
+    store
+        .set_plan_audited(TOKEN_ID, Some("max_5x"), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    assert_eq!(rig.b_row(TOKEN_ID).plan_tier_since_ms, None);
 }

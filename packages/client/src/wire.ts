@@ -122,6 +122,10 @@ export type ServedCredential = {
   auth?: AuthDescriptor
   hosts?: readonly string[]
   invalidKey?: InvalidKeyEvidence
+  /** Gateway API root; absent for ordinary credentials and older vaults. */
+  baseUrl?: string
+  /** Fixed, non-secret gateway headers, including an empty map when none are set. */
+  headers?: Readonly<Record<string, string>>
 }
 
 /** The same credential metadata with opaque payload bytes, without text conversion. */
@@ -182,6 +186,10 @@ function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
+function isStringRecord(value: unknown): value is Readonly<Record<string, string>> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string')
+}
+
 function isAuthDescriptor(value: unknown): value is AuthDescriptor {
   return isRecord(value) && typeof value.header === 'string' &&
     (value.scheme === 'bearer' || value.scheme === 'raw')
@@ -238,6 +246,8 @@ function decodeCredentialBytes(
   const orgName = result?.org_name
   const auth = result?.auth ?? undefined
   const hosts = result?.hosts ?? undefined
+  const baseUrl = result?.base_url
+  const headers = result?.headers
   if (
     !isOptionalString(credentialId) ||
     !isOptionalString(projectId) ||
@@ -245,7 +255,9 @@ function decodeCredentialBytes(
     !isOptionalString(email) ||
     !isOptionalString(orgName) ||
     (auth !== undefined && !isAuthDescriptor(auth)) ||
-    (hosts !== undefined && !isStringArray(hosts))
+    (hosts !== undefined && !isStringArray(hosts)) ||
+    !isOptionalString(baseUrl) ||
+    (headers !== undefined && !isStringRecord(headers))
   ) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
@@ -277,6 +289,8 @@ function decodeCredentialBytes(
     auth,
     hosts,
     invalidKey,
+    baseUrl,
+    headers,
   }
 }
 
@@ -727,7 +741,7 @@ export interface ScopedInventoryRow {
    */
   readonly planTier?: string
   readonly planTierSource?: 'operator' | 'detected'
-  readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'
+  readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth' | 'gateway'
   /**
    * Which provider protocol this credential speaks. Absent for static keys.
    *
@@ -877,7 +891,7 @@ export function decodeScopedInventory(
     if (
       authMethod !== undefined &&
       authMethod !== 'apikey' && authMethod !== 'chatgpt' &&
-      authMethod !== 'antigravity' && authMethod !== 'oauth'
+      authMethod !== 'antigravity' && authMethod !== 'oauth' && authMethod !== 'gateway'
     ) {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }

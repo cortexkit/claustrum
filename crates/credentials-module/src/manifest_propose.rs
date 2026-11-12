@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use credentials_core::{
+    gh_manifest::validate_installation_permissions,
     http::ReqwestTransport,
     refresh_adapters::{
         github_app::{check_github_repository, GithubRepositoryCheck},
@@ -231,6 +232,9 @@ async fn checked_proposal(
             return refusal("github_unavailable", "transient")
         }
     };
+    if validate_installation_permissions(&permissions).is_err() {
+        return refusal("installation_permissions_invalid", "permanent");
+    }
     let prepared = store.prepare_gh_manifest_proposal(GhManifestProposalInput {
         agent_id: params.agent_id,
         app_id: params.app_id,

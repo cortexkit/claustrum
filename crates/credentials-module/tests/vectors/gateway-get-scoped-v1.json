@@ -1,0 +1,1 @@
+{"result":{"auth":{"header":"authorization","scheme":"bearer"},"base_url":"http://[::1]:4000/v1","credential_id":"apikey:anthropic-gw-acme","expires_at_ms":null,"headers":{"x-a":"a\"b\\c","x-z":"engineering"},"hosts":["[::1]"],"invalid_key":null,"payload":[118,101,99,116,111,114,45,116,101,115,116,45,107,101,121],"record_version":1}}

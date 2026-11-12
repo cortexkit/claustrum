@@ -63,9 +63,9 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `vault_locked` | transient | the master key could not be resolved |
 | `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
-| `invalid_service_name` | permanent | an API-key service is empty or contains a colon, whitespace, control character or `\|` |
+| `invalid_service_name` | permanent | an API-key service is empty, contains `-gw-`, or contains a colon, whitespace, control character or `\|` |
 | `service_in_provider_catalog` | permanent | a provider registration names a service already owned by the fixed API-key catalog |
-| `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
+| `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, `reserved`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
 | `enrollment_name_has_grants` | permanent | enrollment approval needs explicit consent to inherit existing name-bound grants; revoke them first or pass `--keep-grants` |
@@ -480,12 +480,14 @@ includes it splits one account into a new pool per refresh.
 `credential.get_scoped` also projects an API-key descriptor from this vault's catalog
 or provider registry when the credential id resolves to a row with hosts and auth,
 including labeled ids such as `apikey:openai:work`. The fixed catalog takes precedence
-over registrations. The three top-level fields are served together:
+over registrations. Local gateway settings take precedence over both (see
+Company AI gateway credentials below). The three top-level fields are served together:
 
 - `auth: {header, scheme}`: `header` is a lowercase HTTP header name; `scheme` is
   `bearer` (`Bearer <key>`) or `raw` (the key alone).
 - `hosts: [..]`: exact lowercase receiving host names, sorted without duplicates,
-  with no scheme, port, path or wildcard.
+  with no scheme, port, path or wildcard. A gateway's IPv6 loopback host is the
+  bracketed string `[::1]`.
 - `invalid_key: {status, error_code, error_code_field} | null`: an observation of
   what a deliberately bogus key returned. `status` is the HTTP status;
   `error_code_field` is an RFC 6901 JSON Pointer to the observed string `error_code`.
@@ -496,8 +498,8 @@ over registrations. The three top-level fields are served together:
 All three fields are absent for OAuth and other login-provider records,
 no-descriptor catalog rows, registered providers without hosts, and non-provider
 records such as cookies or manual ids. Absence is not the same as `invalid_key: null`.
-The fields are read-time projections, not stored credential metadata. Registered
-providers always serve `invalid_key: null`. Remote records use this vault's catalog
+The fields are read-time projections of provider or per-credential gateway settings.
+Registered providers always serve `invalid_key: null`. Remote records use this vault's catalog
 and registry lookup by credential id too; no descriptor fields cross federation.
 `credential.get` (and its handle-based batch form) never serves these fields.
 
@@ -592,8 +594,8 @@ assigned to this credential. They are not interchangeable.
 
 List rows also carry `hosts` exactly when `credential.get_scoped` would serve an
 API-key descriptor for that id: a nonempty array of exact receiving host names from
-this vault's catalog or registry, in served order. Otherwise the field is omitted,
-not null or `[]`. This applies equally to local and remote rows, including labeled
+this vault's gateway settings, catalog or registry, in served order. Otherwise the
+field is omitted, not null or `[]`. This applies equally to local and remote rows, including labeled
 ids. Like the descriptor, it is a read-time projection, never a stored routing fact;
 no remote descriptor is trusted or sent across federation.
 
@@ -625,9 +627,11 @@ tier next changes. Reasserting an unchanged operator value is still a no-op.
 Both clients decode these three fields as optional; omission by an older vault and
 explicit `null` both mean absent. The TypeScript names are `provider`, `incarnation`
 and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
-`ck auth list --json` includes the same fields (and nulls) in each twelve-key row.
+`ck auth list --json` includes the same fields (and nulls) in each ordinary twelve-key row.
+Gateway rows additionally carry `base_url` and `headers`.
 
-`auth_method` is derived only from the unsealed record's `(CredentialKind, refresh_adapter)`.
+`auth_method` is `gateway` when the credential has gateway settings; otherwise it is
+derived from the unsealed record's `(CredentialKind, refresh_adapter)`.
 It is present only on read/list-covered rows when the table below yields a value; otherwise
 the key is omitted, never null or `""`. Sign/open-only rows remain sealed and omit it,
 including rows with corrupt envelopes; their stored `provider_ids` are still returned.
@@ -636,14 +640,16 @@ and without identity, so one quarantined credential never hides the rest of the 
 An unseal/decode failure on a read/list row still stored as readable fails the whole
 snapshot with `store_error`: that is corruption the vault hasn't recorded yet.
 
-The closed values are `apikey`, `chatgpt`, `antigravity`, and `oauth`. Adding a value is a
-breaking wire change and requires a breaking client bump (minor while the client is 0.x).
+The closed values are `apikey`, `chatgpt`, `antigravity`, `oauth`, and `gateway`.
+Adding a value is a breaking wire change and requires a breaking client bump
+(minor while the client is 0.x).
 Unlike the id-derived `type`, this field never parses the id and does not rewrite `type`
 or `refresh_adapter`. Both `chatgpt:openai` and `oauth:openai` store adapter `openai` and
 report `chatgpt`; antigravity still has `type: "oauth"`.
 
 | Credential kind | Stored refresh adapter | `auth_method` |
 |---|---|---|
+| `ApiKey` with gateway settings (takes precedence) | absent | `gateway` |
 | `ApiKey` | absent or any string | `apikey` |
 | `Oauth` | `anthropic` | `oauth` |
 | `Oauth` | `openai` | `chatgpt` |
@@ -704,6 +710,147 @@ by the library. Grant tuples require non-empty string `selector_kind`, `selector
 `operation`; malformed tuples are skipped into `undecodable_grants`, leaving healthy
 tuples available. This differs from the TypeScript client's whole-reply refusal above.
 
+### Company AI gateway credentials
+
+A gateway credential is one sealed API key and non-secret, per-credential settings.
+It is created atomically by the create-only `admin.gateway_create` op, never by an
+`admin.store` fallback. Its id is `apikey:<provider-id>[:<label>]`, its kind is
+`ApiKey`, and it has no refresh adapter. Its sole provider id is
+`<fusiform-id>-gw-<slug>`, equal to the service part of the id. The prefix is one of
+the 16 model-vendor Fusiform ids, split at the first `-gw-`; the slug is 1–32 bytes,
+starting with a lowercase ASCII letter and continuing with lowercase letters,
+digits or hyphens. `serves` is the prefix's model vendor (for example,
+`moonshotai-gw-x` serves `["moonshot"]`), not a parsed routing instruction.
+
+Creation assigns exactly `["llm-gateway"]`, never `llm-provider`. **Category
+membership is not a gateway discriminator:** operators can also assign an ordinary
+API key to `llm-gateway`. Readers select gateway rows by `auth_method: "gateway"`
+in listings, and by a present `base_url` in `credential.get_scoped`. A service name
+containing `-gw-` alone does not make an ordinary key a gateway.
+
+For a local gateway, `credential.get_scoped` serves these top-level fields together:
+
+- `base_url`: the API root (scheme, host, optional port and path prefix).
+- `auth: {header, scheme}`: the configured lowercase header and `bearer` or `raw`.
+- `hosts`: exactly the base URL's host without its port, including brackets for
+  `[::1]`. `credential.list_scoped` serves the same single host.
+- `headers`: a name-to-value object of fixed non-secret headers, in ascending byte
+  order by name. It is always present, including `{}` when none were configured.
+- `invalid_key: null`: no key-check observation is made at enrollment.
+
+Settings override both catalog and registry descriptors. A read serves settings
+only for the incarnation of the record whose key it read; removal and re-creation
+cannot pair an earlier key with later settings and instead answers `not_found`.
+Non-gateway replies omit `base_url` and `headers` entirely, never sending nulls;
+their existing descriptor bytes are unchanged. Remote records retain the catalog
+and registry descriptor lookup and never acquire gateway fields. Gateway list rows
+have no `fusiform_provider_id`. Admin inventory and `ck auth list --json` append
+`base_url` and `headers` only to gateway rows, preserving existing keys and order.
+The human list shows the base URL and fixed-header names, not their values.
+
+Normal form is checked by the shared core validator: lowercase URL scheme and host,
+no trailing slash, lowercase header names, trimmed header values, and strictly
+ascending, unique header names. The CLI normalizes input; the store refuses
+non-normal-form input rather than repairing it. The URL is at most 512 bytes,
+contains no query, fragment, user info, percent encoding or dot path segments, and
+does not end in `/messages` or `/v1/messages` (ASCII-case-insensitive). `https`
+accepts a lowercase DNS name or the exact loopback literals `127.a.b.c` and `[::1]`;
+`http` accepts only those literals or exact `localhost`. DNS labels follow the
+registry's lowercase label grammar, with no empty labels or trailing dot; the last
+label cannot be all digits or `0x` followed by zero or more hex digits. IPv4 parts
+are decimal 0–255 without leading zero; other IP spellings are refused. A port is
+1–65535 in 1–5 decimal digits without leading zero, and an explicit default port
+is preserved. Auth and fixed-header names are 1–64-byte lowercase HTTP tokens.
+There are 0–8 fixed headers; each value is 1–1,024 bytes of ASCII 0x20–0x7E without
+surrounding spaces, and must not parse as a JSON object or array. Fixed headers
+cannot use the auth header name, `host`, `content-length`, `transfer-encoding`,
+`connection`, `keep-alive`, `proxy-connection`, `te`, `trailer`, `upgrade`, `cookie`,
+`authorization`, `proxy-authorization`, or `x-api-key`. These guards do not prove a
+value is non-secret; that remains the operator's responsibility.
+
+Settings are fixed until removal and re-creation. Replacing the key keeps settings,
+categories and provider ids, but refuses a non-API-key kind or refresh adapter.
+Category/provider changes refuse; requests resulting in the current set remain
+silent no-ops. Reclassification skips gateways, even when forced. An ordinary
+credential cannot acquire a provider id containing `-gw-` through `set` or `add`;
+`remove` can repair an old stored id. Registered-provider defaults cannot contain
+that marker, nor can a registered service name.
+
+Every refusal below leaves the credential, version, incarnation, settings,
+categories, provider ids and audit log unchanged. A refused creation writes none
+of them. The admin refusal envelope gains no fields. The first two codes carry
+`rule=<token>` in the message and never echo a header value.
+
+| Operation / refused input | Code | Rule or reason |
+|---|---|---|
+| Creation: wrong id shape | `invalid_gateway_settings` | `rule=credential_id` |
+| Creation: non-API-key kind or refresh adapter | `invalid_gateway_settings` | `rule=kind` |
+| Replacement: non-API-key kind or refresh adapter | `gateway_fixed` | `rule=kind` |
+| URL shape, host or port | `invalid_gateway_settings` | `rule=base_url` |
+| URL endpoint suffix | `invalid_gateway_settings` | `rule=base_url_path` |
+| URL over 512 bytes | `invalid_gateway_settings` | `rule=base_url_length` |
+| Auth header or scheme | `invalid_gateway_settings` | `rule=auth` |
+| More than 8 headers | `invalid_gateway_settings` | `rule=header_count` |
+| Header name grammar, length, ordering, repeat or refused name | `invalid_gateway_settings` | `rule=header_name` |
+| Header value bytes, length or JSON | `invalid_gateway_settings` | `rule=header_value` |
+| Category change | `gateway_fixed` | `rule=category` |
+| Creation: provider count, shape, prefix, slug or service mismatch | `invalid_gateway_settings` | `rule=provider_id` |
+| Provider-id change | `gateway_fixed` | `rule=provider_id` |
+| Ordinary key's added id or registered default contains `-gw-` | `invalid_provider_id` | `rule=reserved` |
+| Registering a service containing `-gw-` | `invalid_service_name` | none |
+| Federation transfer | `transfer_ineligible` | `reason: "gateway"` |
+
+Gateway keys never leave the vault through federation. Remote reads under exact or
+category grants answer `not_found` (diagnostic `ineligible`), and peer watch rows
+exclude gateways. The transfer refusal is the `Ineligible::Gateway` reason.
+
+`ck auth put` accepts `--gateway-base-url`, `--gateway-auth-header`,
+`--gateway-auth-scheme` and repeatable `--gateway-header name=value`, plus exactly
+one `--provider-id`. Any gateway flag without the base URL, or with `--replace` or
+`--expected-hash`, is a CLI usage error before any op. Without gateway flags,
+explicit reserved provider ids, and any `--provider-id` on a marker service, are
+also refused before sending an op. Inherited legacy reserved defaults are refused
+before storing, naming the registered service and `ck auth provider set` repair.
+
+Creation appends exactly two audit rows: the normal bare-id birth row holding the
+keyed payload fingerprint, then `gateway_create` with null `payload_hash` and target
+`gateway:<credential-id>|<digest>`. The digest is SHA-256 as 64 lowercase hex digits
+over UTF-8 compact JSON of normal-form settings, with keys in this exact order:
+`base_url`, `auth` (keys `header`, then `scheme`), `headers` (names ascending by
+byte). There is no whitespace; strings use `serde_json` escaping. Provider ids and
+the secret key are not digest inputs. The producer-pinned settings sample listed below
+contains the input and expected digest.
+
+#### Producer-generated gateway samples
+
+TEST-ONLY samples in `crates/credentials-module/tests/vectors/` are generated by
+the vault's real handlers and CLI, with hashes in `SHA256SUMS`:
+
+| File | Coverage |
+|---|---|
+| `gateway-list-scoped-v1.json` | Gateway listing, including `hosts: ["[::1]"]`. |
+| `gateway-get-scoped-v1.json` | Gateway key and descriptor with fixed headers. |
+| `gateway-get-scoped-empty-headers-v1.json` | Gateway descriptor with `headers: {}`. |
+| `get-scoped-non-gateway-baseline-v1.json` | Ordinary API-key reply, byte-identical to the pre-gateway capture. |
+| `list-scoped-non-gateway-baseline-v1.json` | Ordinary listing, byte-identical to the pre-gateway capture. |
+| `gateway-list-json-v1.json` | `ck auth list --json` inventory rows. |
+| `gateway-refusals-v1.json` | Every refusal row above, with code and rule or reason. |
+| `gateway-settings-digest-v1.json` | Normal-form settings input and expected digest. |
+
+Regenerate deliberately with these commands, run serially; never edit sample
+bytes or hashes by hand:
+
+```sh
+CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --features credentials-core/test-support --bin ck-claustrum tests::scoped_watch::gateway_scoped_vectors_are_producer_generated_and_pinned -- --exact --nocapture
+CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --features credentials-core/test-support --bin ck-claustrum admin_surface::tests::gateway_refusal_vectors_are_producer_generated_and_pinned -- --exact --nocapture
+CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --features credentials-core/test-support --test cli_admin gateway_list_cli::gateway_list_json_vectors_are_producer_generated_and_pinned -- --exact --nocapture
+```
+
+The scoped generator checks ordinary reply bytes against the captured baselines
+even in emission mode, so regeneration cannot silently replace the baseline. The release
+tag `gateway-keys-vectors-v1` is immutable once created; it is applied only after
+gateway credential support and these samples are on master and CI is green.
+
 ### `admin.set_providers`
 
 Only the operator's master-key HMAC authorizes this op;
@@ -721,8 +868,9 @@ are successful no-ops. The set read, validation, write, and transition audit are
 No envelope is opened or re-sealed, and refusals change neither metadata nor audit.
 
 Checks run in this order: each requested id's `charset` then `length`, then request
-`duplicate` (naming the second occurrence), then credential existence, then resulting-set
-`count`. Ids must start with a lowercase ASCII letter and contain only lowercase ASCII
+`duplicate` (naming the second occurrence), then credential existence, then gateway
+immutability and reserved-id checks, then resulting-set `count`. Ids must start with
+a lowercase ASCII letter and contain only lowercase ASCII
 letters, digits, and hyphens; length is 2–64 bytes. At most 32 ids may result. Count names
 the first requested addition crossing the cap; removing more than 32 valid ids is allowed.
 An unknown credential refuses with `credential not found` live (the store's NotFound
@@ -1983,7 +2131,7 @@ does not turn the protocol Error into a classified read verdict.
 | `callosum_unavailable` | transient | Required admin/transfer pairing or key lookup failed. |
 | `federation_requires_daemon` | permanent | Outbound admin op attempted through the synchronous offline path; no write. |
 | `transfer_body_invalid` | permanent | Ineligible or invalid transfer body. |
-| `transfer_ineligible` | permanent | Send refused an ineligible kind/OAuth payload/adapter; optional `reason` describes the eligibility failure. |
+| `transfer_ineligible` | permanent | Send refused an ineligible kind/OAuth payload/adapter or a gateway credential; optional `reason` describes the eligibility failure (`gateway` for a gateway). |
 | `transfer_gone` | permanent | Resume names an outgoing row no longer stored. |
 | `transfer_abandoned` | permanent | Resume names an envelope abandoned when its sender key was replaced; send afresh. |
 | `credential_exists` | permanent | Accept would replace an existing local id without `--replace`. |
@@ -2154,6 +2302,7 @@ uses the credential id, and an audience selector uses
 | Category | Subject label |
 | --- | --- |
 | `llm-provider` | Model provider logins and keys |
+| `llm-gateway` | Company AI gateway keys |
 | `web-search` | Web search keys |
 | `media-provider` | Speech and media keys |
 | `browser-session` | Browser sign-ins |

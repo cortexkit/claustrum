@@ -1,0 +1,21 @@
+{
+  "digest_input_utf8": "{\"base_url\":\"http://[::1]:4000/v1\",\"auth\":{\"header\":\"authorization\",\"scheme\":\"bearer\"},\"headers\":{\"x-a\":\"a\\\"b\\\\c\",\"x-z\":\"engineering\"}}",
+  "settings": {
+    "auth": {
+      "header": "authorization",
+      "scheme": "bearer"
+    },
+    "base_url": "http://[::1]:4000/v1",
+    "headers": [
+      {
+        "name": "x-a",
+        "value": "a\"b\\c"
+      },
+      {
+        "name": "x-z",
+        "value": "engineering"
+      }
+    ]
+  },
+  "sha256": "90caac4c9b3dd070931ecae98a77811120806a5fa56d7712bfc0fe4f29b03e45"
+}

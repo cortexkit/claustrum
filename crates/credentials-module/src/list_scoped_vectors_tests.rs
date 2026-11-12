@@ -25,6 +25,115 @@ fn hex_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+include!("../tests/support/gateway_vector_pin.rs");
+
+#[tokio::test]
+async fn gateway_scoped_vectors_are_producer_generated_and_pinned() {
+    use credentials_core::{GatewayAuth, GatewayHeader, GatewaySettings};
+
+    let (surface, store, db, _root) = tmp_surface_with_store(149);
+    let engine = Arc::new(RefreshEngine::new(
+        Arc::clone(&store),
+        Vec::new(),
+        Arc::new(crate::test_support::NoHttp),
+    ));
+    let key = MasterKey::from_bytes([149; MASTER_KEY_LEN]);
+    let admin = Arc::new(admin_surface::AdminSurface::new(
+        engine,
+        credentials_core::admin_auth::AdminMacKey::derive(&key),
+        credentials_core::vault_id_for(db.parent().unwrap()).unwrap(),
+        key.key_id(),
+    ));
+    let (control, control_rx) = mpsc::channel(8);
+    let (route, rx) = mpsc::channel(16);
+    let mut rig = Rig {
+        surface,
+        admin,
+        store,
+        routes: Arc::new(RouteEpochs::default()),
+        egress: Egress { control, route },
+        rx,
+        _control: control_rx,
+    };
+    rig.bind(1, reserved("gateway-vector-reader"));
+    for operation in [GrantOperation::Read, GrantOperation::List] {
+        rig.store.create_read_grant_audited(
+            "reserved", "gateway-vector-reader", SelectorKind::Category,
+            "llm-gateway", operation, AuditCtx::admin(AuditOp::GrantCreate),
+        ).unwrap();
+    }
+    let mut produced = Vec::new();
+    let settings = GatewaySettings {
+        base_url: "http://[::1]:4000/v1".into(),
+        auth: GatewayAuth { header: "authorization".into(), scheme: "bearer".into() },
+        headers: vec![
+            GatewayHeader { name: "x-a".into(), value: "a\"b\\c".into() },
+            GatewayHeader { name: "x-z".into(), value: "engineering".into() },
+        ],
+    };
+    for (index, (id, filename, with_headers)) in [
+        ("apikey:anthropic-gw-acme", "gateway-get-scoped-v1.json", true),
+        ("apikey:anthropic-gw-acme:empty", "gateway-get-scoped-empty-headers-v1.json", false),
+    ].into_iter().enumerate() {
+        let mut input = settings.clone();
+        if !with_headers { input.headers.clear(); }
+        rig.store.gateway_create_audited(
+            id,
+            &VaultRecord::new_static(CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None),
+            &input, &["anthropic-gw-acme".into()], AuditCtx::admin(AuditOp::Put),
+        ).unwrap();
+        let incarnation = format!("{:032x}", index + 1);
+        rig.store.force_credential_incarnation_for_test(id, &incarnation);
+        // Both rows describe one incarnation; fix both identities before producing bytes.
+        rusqlite::Connection::open(&db).unwrap().execute(
+            "UPDATE credential_gateway_settings SET incarnation = ?1 WHERE credential_id = ?2",
+            [&incarnation, id],
+        ).unwrap();
+        rig.dispatch(1, 1 + index as u64, FrameType::Request, OP_GET_SCOPED, json!({"credential_id": id})).await;
+        let frame = rig.next().await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let reply: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        let result = &reply["result"];
+        assert_eq!(result["credential_id"], id);
+        assert_eq!(result["payload"], json!(b"vector-test-key".to_vec()));
+        assert_eq!(result["base_url"], input.base_url);
+        assert_eq!(result["auth"], json!({"header":"authorization","scheme":"bearer"}));
+        assert_eq!(result["hosts"], json!(["[::1]"]));
+        assert_eq!(result.get("invalid_key"), Some(&serde_json::Value::Null));
+        assert_eq!(result["headers"], if with_headers {
+            json!({"x-a":"a\"b\\c", "x-z":"engineering"})
+        } else { json!({}) });
+        produced.push((filename, frame.body));
+    }
+    rig.dispatch(1, 3, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let frame = rig.next().await;
+    assert_eq!(frame.header.ty, FrameType::Response);
+    let reply: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+    let rows = reply["result"]["credentials"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["auth_method"], "gateway");
+        assert_eq!(row["categories"], json!(["llm-gateway"]));
+        assert_eq!(row["provider_ids"], json!(["anthropic-gw-acme"]));
+        assert_eq!(row["serves"], json!(["anthropic"]));
+        assert_eq!(row["hosts"], json!(["[::1]"]));
+        assert!(row.get("fusiform_provider_id").is_none());
+    }
+    produced.push(("gateway-list-scoped-v1.json", frame.body));
+    let digest = credentials_core::gateway::gateway_settings_digest(&settings);
+    let compact = r#"{"base_url":"http://[::1]:4000/v1","auth":{"header":"authorization","scheme":"bearer"},"headers":{"x-a":"a\"b\\c","x-z":"engineering"}}"#;
+    assert_eq!(digest, hex_digest(compact.as_bytes()));
+    produced.push(("gateway-settings-digest-v1.json", serde_json::to_vec_pretty(&json!({
+        "settings": settings, "digest_input_utf8": compact, "sha256": digest,
+    })).unwrap()));
+    for (name, bytes) in non_gateway_scoped_baseline_vectors().await {
+        // Emission must not bless a changed ordinary reply as a new baseline.
+        assert_eq!(bytes, std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors").join(name)).unwrap(), "non-gateway baseline changed: {name}");
+        produced.push((name, bytes));
+    }
+    pin_gateway_vectors(&produced);
+}
+
 async fn non_gateway_scoped_baseline_vectors() -> [(&'static str, Vec<u8>); 2] {
     let mut rig = Rig::new();
     let id = "apikey:openai";

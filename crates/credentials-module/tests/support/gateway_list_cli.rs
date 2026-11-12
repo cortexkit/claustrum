@@ -1,5 +1,91 @@
 use super::*;
 
+include!("gateway_vector_pin.rs");
+
+#[test]
+fn gateway_list_json_vectors_are_producer_generated_and_pinned() {
+    let vault = GrantCliVault::new("gateway-list-vectors");
+    vault.bootstrap();
+    let payload = payload_file("vector-test-key");
+    run(
+        &vault,
+        None,
+        &["put", "--id", "apikey:openai", "--payload-file", &payload],
+    );
+    run(
+        &vault,
+        None,
+        &["set-category", "apikey:openai", "--set", "llm-gateway"],
+    );
+    for (id, extra) in [
+        (
+            "apikey:anthropic-gw-acme",
+            vec![
+                "--gateway-header",
+                "x-z=engineering",
+                "--gateway-header",
+                "x-a=a\"b\\c",
+            ],
+        ),
+        ("apikey:anthropic-gw-acme:empty", vec![]),
+    ] {
+        let mut args = vec![
+            "put",
+            "--id",
+            id,
+            "--payload-file",
+            &payload,
+            "--gateway-base-url",
+            "http://[::1]:4000/v1",
+            "--gateway-auth-header",
+            "authorization",
+            "--gateway-auth-scheme",
+            "bearer",
+            "--provider-id",
+            "anthropic-gw-acme",
+        ];
+        args.extend(extra);
+        run(&vault, None, &args);
+    }
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    for (index, id) in [
+        "apikey:anthropic-gw-acme",
+        "apikey:anthropic-gw-acme:empty",
+        "apikey:openai",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let incarnation = format!("{:032x}", index + 1);
+        for table in ["credentials", "credential_gateway_settings"] {
+            conn.execute(
+                &format!("UPDATE {table} SET incarnation = ?1 WHERE credential_id = ?2"),
+                [&incarnation, id],
+            )
+            .unwrap();
+        }
+    }
+    drop(conn);
+    let output = run(&vault, None, &["list", "--json"]);
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = reply["credentials"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["auth_method"], "gateway");
+    assert_eq!(rows[0]["base_url"], "http://[::1]:4000/v1");
+    assert_eq!(
+        rows[0]["headers"],
+        serde_json::json!({"x-a":"a\"b\\c","x-z":"engineering"})
+    );
+    assert_eq!(rows[1]["auth_method"], "gateway");
+    assert_eq!(rows[1]["headers"], serde_json::json!({}));
+    assert_eq!(rows[2]["categories"], serde_json::json!(["llm-gateway"]));
+    assert_eq!(rows[2]["auth_method"], "apikey");
+    assert!(rows[2].get("base_url").is_none());
+    assert!(rows[2].get("headers").is_none());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("vector-test-key"));
+    pin_gateway_vectors(&[("gateway-list-json-v1.json", output.stdout)]);
+}
+
 fn run(
     vault: &GrantCliVault,
     peer: Option<&ProviderRoutePeer>,

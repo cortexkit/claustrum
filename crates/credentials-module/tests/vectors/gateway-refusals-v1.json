@@ -1,0 +1,692 @@
+{
+  "cases": [
+    {
+      "case": "credential_id",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=credential_id"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "oauth:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "creation_kind",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=kind"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "dsn",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "base_url",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=base_url"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://gateway.example",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "base_url_path",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=base_url_path"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "https://gateway.example/v1/messages",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "base_url_length",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=base_url_length"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "https://gateway.example/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "auth",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=auth"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "basic",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "header_count",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=header_count"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-0",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-1",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-2",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-3",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-4",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-5",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-6",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-7",
+            "value": "gateway-header-value-must-not-leak"
+          },
+          {
+            "name": "x-8",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "header_name",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=header_name"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "authorization",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "header_value",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=header_value"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "{\"canary\":\"gateway-header-value-must-not-leak\"}"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "creation_provider_id",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_gateway_settings/permanent: rule=provider_id"
+      },
+      "request": {
+        "audit_op": "put",
+        "auth_header": "authorization",
+        "auth_scheme": "bearer",
+        "base_url": "http://[::1]:4000/v1",
+        "headers": [
+          {
+            "name": "x-team",
+            "value": "gateway-header-value-must-not-leak"
+          }
+        ],
+        "id": "apikey:anthropic-gw-new",
+        "op": "admin.gateway_create",
+        "provider_ids": [
+          "openrouter-gw-new"
+        ],
+        "record": {
+          "expires_at_ms": null,
+          "kind": "api_key",
+          "oauth": null,
+          "payload": [
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 2
+      }
+    },
+    {
+      "case": "replacement_kind",
+      "reply": {
+        "code": "admin_refused",
+        "message": "gateway_fixed/permanent: rule=kind"
+      },
+      "request": {
+        "audit_op": "put",
+        "id": "apikey:anthropic-gw-acme",
+        "mode": {
+          "kind": "replace_unconditional"
+        },
+        "op": "admin.store",
+        "record": {
+          "expires_at_ms": null,
+          "kind": "dsn",
+          "oauth": null,
+          "payload": [
+            114,
+            101,
+            112,
+            108,
+            97,
+            99,
+            101,
+            109,
+            101,
+            110,
+            116,
+            45,
+            118,
+            101,
+            99,
+            116,
+            111,
+            114,
+            45,
+            116,
+            101,
+            115,
+            116,
+            45,
+            107,
+            101,
+            121
+          ],
+          "record_version": 1,
+          "refresh_adapter": null,
+          "schema_version": 1,
+          "source": "vector"
+        },
+        "v": 1
+      }
+    },
+    {
+      "case": "category",
+      "reply": {
+        "code": "admin_refused",
+        "message": "gateway_fixed/permanent: rule=category"
+      },
+      "request": {
+        "categories": [
+          "llm-provider"
+        ],
+        "credential_id": "apikey:anthropic-gw-acme",
+        "mode": "set",
+        "op": "admin.set_category",
+        "v": 2
+      }
+    },
+    {
+      "case": "fixed_provider_id",
+      "reply": {
+        "code": "admin_refused",
+        "message": "gateway_fixed/permanent: rule=provider_id"
+      },
+      "request": {
+        "credential_id": "apikey:anthropic-gw-acme",
+        "mode": "set",
+        "op": "admin.set_providers",
+        "provider_ids": [
+          "openai"
+        ],
+        "v": 2
+      }
+    },
+    {
+      "case": "reserved_provider_id",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_provider_id/permanent: rule=reserved value=anthropic-gw-new"
+      },
+      "request": {
+        "credential_id": "apikey:openai",
+        "mode": "add",
+        "op": "admin.set_providers",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "v": 2
+      }
+    },
+    {
+      "case": "reserved_registered_default",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_provider_id/permanent: rule=reserved value=anthropic-gw-new"
+      },
+      "request": {
+        "categories": [],
+        "op": "admin.provider_set",
+        "provider_ids": [
+          "anthropic-gw-new"
+        ],
+        "service": "custom",
+        "v": 2
+      }
+    },
+    {
+      "case": "reserved_service",
+      "reply": {
+        "code": "admin_refused",
+        "message": "invalid_service_name/permanent"
+      },
+      "request": {
+        "categories": [],
+        "op": "admin.provider_set",
+        "provider_ids": [],
+        "service": "anthropic-gw-new",
+        "v": 2
+      }
+    },
+    {
+      "case": "transfer",
+      "reply": {
+        "code": "admin_refused",
+        "message": "transfer_ineligible/permanent: reason=gateway"
+      },
+      "request": {
+        "credential_id": "apikey:anthropic-gw-acme",
+        "op": "admin.transfer_send",
+        "to": "fed-computer:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "v": 2
+      }
+    }
+  ],
+  "v": "ck-gateway-refusals/v1"
+}

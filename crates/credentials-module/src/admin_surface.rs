@@ -1093,11 +1093,14 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             }
         }
     }
-    // Keep provider-id details and enrollment grant guidance instead of reducing them
-    // to a bare code/class. Display also gives the offline CLI the same explanation.
+    // Keep rule tokens and enrollment grant guidance instead of reducing them to a
+    // bare code/class. These Display implementations never include header values.
     if matches!(
         e,
-        StoreOpError::InvalidProviderId { .. } | StoreOpError::EnrollmentNameHasGrants { .. }
+        StoreOpError::InvalidProviderId { .. }
+            | StoreOpError::InvalidGatewaySettings { .. }
+            | StoreOpError::GatewayFixed { .. }
+            | StoreOpError::EnrollmentNameHasGrants { .. }
     ) {
         return AdminOutcome::Refused(e.to_string());
     }
@@ -2023,8 +2026,7 @@ mod tests {
     }
 
     /// A provider-id refusal reaches the caller as the labelled Display, the same string
-    /// the offline path prints, rather than the bare `invalid_provider_id/permanent` code
-    /// that every other coded store error renders as.
+    /// the offline path prints, rather than losing its rule to a bare code/class.
     #[tokio::test]
     async fn a_provider_id_refusal_renders_its_rule_and_value() {
         let r = rig(22);
@@ -2059,6 +2061,186 @@ mod tests {
             store_err(StoreOpError::InvalidCategoryName),
             AdminOutcome::Refused(ref m) if m == "invalid_category_name/permanent"
         ));
+    }
+
+    include!("../tests/support/gateway_vector_pin.rs");
+
+    fn gateway_database_snapshot(r: &Rig) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        let conn = rusqlite::Connection::open(r._root.join("store.db")).unwrap();
+        let names: Vec<String> = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        names
+            .into_iter()
+            .map(|name| {
+                let quoted = name.replace('"', "\"\"");
+                let mut statement = conn
+                    .prepare(&format!("SELECT * FROM \"{quoted}\""))
+                    .unwrap();
+                let count = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| {
+                        (0..count)
+                            .map(|i| row.get(i))
+                            .collect::<Result<Vec<rusqlite::types::Value>, _>>()
+                    })
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                (name, rows)
+            })
+            .collect()
+    }
+
+    async fn gateway_authenticated_refusal(r: &Rig, op: &serde_json::Value) -> String {
+        let body = serde_json::to_string(op).unwrap();
+        let (tag, _) = challenge_and_sign(r, 5, &body);
+        let AdminOutcome::Refused(message) = r.admin.execute(5, body.as_bytes(), &tag).await else {
+            panic!("gateway operation must refuse");
+        };
+        message
+    }
+
+    fn gateway_vector_create_op() -> serde_json::Value {
+        serde_json::json!({
+            "op":"admin.gateway_create", "v":2, "id":"apikey:anthropic-gw-new",
+            "record":VaultRecord::new_static(CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None),
+            "audit_op":"put", "base_url":"http://[::1]:4000/v1",
+            "auth_header":"authorization", "auth_scheme":"bearer",
+            "headers":[{"name":"x-team","value":"gateway-header-value-must-not-leak"}],
+            "provider_ids":["anthropic-gw-new"],
+        })
+    }
+
+    #[tokio::test]
+    async fn gateway_admin_refusals_keep_rule_tokens_without_header_values() {
+        let r = rig(231);
+        r.admin.record_bind(5, Principal::Direct);
+        let mut op = gateway_vector_create_op();
+        op["headers"][0]["name"] = serde_json::json!("authorization");
+        let before = gateway_database_snapshot(&r);
+        let message = gateway_authenticated_refusal(&r, &op).await;
+        assert_eq!(
+            message,
+            "invalid_gateway_settings/permanent: rule=header_name"
+        );
+        assert!(!message.contains("gateway-header-value-must-not-leak"));
+        assert!(!message.contains("vector-test-key"));
+        assert_eq!(before, gateway_database_snapshot(&r));
+    }
+
+    #[tokio::test]
+    async fn gateway_refusal_vectors_are_producer_generated_and_pinned() {
+        use serde_json::json;
+        let r = rig(232);
+        r.admin.record_bind(5, Principal::Direct);
+        let mut stored = gateway_vector_create_op();
+        stored["id"] = json!("apikey:anthropic-gw-acme");
+        stored["provider_ids"] = json!(["anthropic-gw-acme"]);
+        let body = serde_json::to_string(&stored).unwrap();
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Ok(_)
+        ));
+        r.store
+            .create(
+                "apikey:openai",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "vector",
+                    b"ordinary-vector-test-key".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        init_transfer_key(
+            &r.store,
+            &format!("fed-computer:{}", "a".repeat(32)),
+            "vector",
+        )
+        .unwrap();
+        let mut cases = Vec::new();
+        let creation = gateway_vector_create_op();
+        let mut inputs = Vec::new();
+        for (case, field, value, rule) in [
+            ("credential_id", "id", json!("oauth:anthropic-gw-new"), "credential_id"),
+            ("creation_kind", "record", serde_json::to_value(VaultRecord::new_static(CredentialKind::Dsn, "vector", b"vector-test-key".to_vec(), None)).unwrap(), "kind"),
+            ("base_url", "base_url", json!("http://gateway.example"), "base_url"),
+            ("base_url_path", "base_url", json!("https://gateway.example/v1/messages"), "base_url_path"),
+            ("base_url_length", "base_url", json!(format!("https://gateway.example/{}", "x".repeat(512))), "base_url_length"),
+            ("auth", "auth_scheme", json!("basic"), "auth"),
+            ("header_count", "headers", json!((0..9).map(|i| json!({"name":format!("x-{i}"),"value":"gateway-header-value-must-not-leak"})).collect::<Vec<_>>()), "header_count"),
+            ("header_name", "headers", json!([{"name":"authorization","value":"gateway-header-value-must-not-leak"}]), "header_name"),
+            ("header_value", "headers", json!([{"name":"x-team","value":"{\"canary\":\"gateway-header-value-must-not-leak\"}"}]), "header_value"),
+            ("creation_provider_id", "provider_ids", json!(["openrouter-gw-new"]), "provider_id"),
+        ] {
+            let mut op = creation.clone();
+            op[field] = value;
+            inputs.push((case, op, "invalid_gateway_settings", Some(rule), None));
+        }
+        inputs.extend([
+            ("replacement_kind", json!({"op":"admin.store","v":1,"id":"apikey:anthropic-gw-acme","record":VaultRecord::new_static(CredentialKind::Dsn,"vector",b"replacement-vector-test-key".to_vec(),None),"audit_op":"put","mode":{"kind":"replace_unconditional"}}), "gateway_fixed", Some("kind"), None),
+            ("category", json!({"op":"admin.set_category","v":2,"credential_id":"apikey:anthropic-gw-acme","mode":"set","categories":["llm-provider"]}), "gateway_fixed", Some("category"), None),
+            ("fixed_provider_id", json!({"op":"admin.set_providers","v":2,"credential_id":"apikey:anthropic-gw-acme","mode":"set","provider_ids":["openai"]}), "gateway_fixed", Some("provider_id"), None),
+            ("reserved_provider_id", json!({"op":"admin.set_providers","v":2,"credential_id":"apikey:openai","mode":"add","provider_ids":["anthropic-gw-new"]}), "invalid_provider_id", Some("reserved"), None),
+            ("reserved_registered_default", json!({"op":"admin.provider_set","v":2,"service":"custom","categories":[],"provider_ids":["anthropic-gw-new"]}), "invalid_provider_id", Some("reserved"), None),
+            ("reserved_service", json!({"op":"admin.provider_set","v":2,"service":"anthropic-gw-new","categories":[],"provider_ids":[]}), "invalid_service_name", None, None),
+            ("transfer", json!({"op":"admin.transfer_send","v":2,"credential_id":"apikey:anthropic-gw-acme","to":format!("fed-computer:{}", "b".repeat(32))}), "transfer_ineligible", None, Some("gateway")),
+        ]);
+        for (case, op, code, rule, reason) in inputs {
+            let before = gateway_database_snapshot(&r);
+            let message = gateway_authenticated_refusal(&r, &op).await;
+            assert!(
+                message.starts_with(&format!("{code}/permanent")),
+                "{case}: {message}"
+            );
+            if let Some(rule) = rule {
+                assert!(
+                    message.contains(&format!("rule={rule}")),
+                    "{case}: {message}"
+                );
+            }
+            if let Some(reason) = reason {
+                assert!(
+                    message.contains(&format!("reason={reason}")),
+                    "{case}: {message}"
+                );
+            }
+            for canary in ["gateway-header-value-must-not-leak", "vector-test-key"] {
+                assert!(
+                    !message.contains(canary),
+                    "{case} leaked a header value or key"
+                );
+            }
+            assert_eq!(
+                before,
+                gateway_database_snapshot(&r),
+                "{case} changed durable state"
+            );
+            let (writer, mut reader) = tokio::sync::mpsc::channel(1);
+            crate::send_route_error(
+                &writer,
+                crate::PROTOCOL_VERSION,
+                5,
+                1,
+                1,
+                "admin_refused",
+                &message,
+            )
+            .await
+            .unwrap();
+            let frame = reader.recv().await.unwrap();
+            assert_eq!(frame.header.ty, subc_protocol::FrameType::Error);
+            // Request payloads are test-only. Keep the actual transport error body intact.
+            cases.push(json!({"case":case,"request":op,"reply":serde_json::from_slice::<serde_json::Value>(&frame.body).unwrap()}));
+        }
+        assert_eq!(cases.len(), 17);
+        pin_gateway_vectors(&[(
+            "gateway-refusals-v1.json",
+            serde_json::to_vec_pretty(&json!({"v":"ck-gateway-refusals/v1","cases":cases}))
+                .unwrap(),
+        )]);
     }
 
     #[tokio::test]

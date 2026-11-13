@@ -16,6 +16,7 @@ pub mod manifest_active_report;
 pub mod manifest_identity;
 #[cfg(not(test))]
 pub mod manifest_propose;
+mod plan_warnings;
 pub mod secret_phone;
 pub mod secret_use;
 

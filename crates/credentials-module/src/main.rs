@@ -28,6 +28,7 @@ mod manifest;
 mod manifest_active_report;
 mod manifest_identity;
 mod manifest_propose;
+mod plan_warnings;
 mod read_surface;
 mod secret_phone;
 mod secret_use;
@@ -18564,9 +18565,10 @@ mod tests {
     /// or an id that is sensitive only because of where it appeared.
     ///
     /// So the policy is structural rather than filter-based: ordinary consumer bytes
-    /// never reach a log line. One exception records a bounded, escaped credential id
-    /// and a fixed invalid-container message for a corrupt stored KEM payload so
-    /// operators can repair the record without exposing private bytes. The sites are:
+    /// never reach a log line. Exceptions record a bounded, escaped credential id
+    /// for a corrupt stored KEM payload or an unmapped subscription plan, so operators
+    /// can repair the record or update the pricing map without exposing private bytes.
+    /// The sites are:
     ///
     ///   println!  `--version`, before any connection exists
     ///   eprintln! the logger failed to install (no request has been read yet)
@@ -18587,12 +18589,14 @@ mod tests {
     ///             existing fixed text, row/home ids, and error or ending values
     ///   warn!     manifest activation downgrade: member id and two version integers,
     ///             never manifest bytes, hashes or the caller's reason
+    ///   warn!     unmapped subscription plan: bounded escaped credential id and raw
+    ///             provider plan, plus the fixed provider family; never token fields
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers twelve source files linked
+    /// the one shape every secret read must take. Covers thirteen source files linked
     /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -18618,6 +18622,7 @@ mod tests {
                 "/src/manifest_active_report.rs"
             )),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/manifest.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/plan_warnings.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18634,7 +18639,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 16, 0),
+            (1, 2, 17, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18653,6 +18658,13 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        // Pin every argument, not just secret reads: a token field must fail even
+        // when its value was prepared outside the logging macro.
+        let plan_sites: Vec<_> = output_site_arguments(sources[12], &shapes)
+            .into_iter()
+            .map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .collect();
+        assert_eq!(plan_sites, vec![("warn".into(), "target: \"claustrum.plan\", credential_id = %credential_id, provider = observation.provider, raw = %raw, \"provider reported a plan the vault cannot map\"".into())]);
         assert_eq!(output_site_arguments(sources[10], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![("warn".into(), "member_id, reported = lower.reported, active = lower.active, \"lower manifest version reported\"".into())]);
         assert_eq!(output_site_arguments(sources[9], &shapes), vec![
             ("debug".into(), "target: \"federation\", ?ending, \"home watch ended; inventory retained\"".into()),

@@ -1841,9 +1841,11 @@ impl HomeVault {
         let id = credential_id.to_string();
         let incarnation = incarnation.to_string();
         let read = tokio::spawn(async move {
-            engine
+            let served = engine
                 .get_in_incarnation(&id, &incarnation, min_ttl_ms, false)
-                .await
+                .await?;
+            crate::plan_warnings::report(served.unmapped_plan.as_ref());
+            Ok(served)
         });
         match tokio::time::timeout_at(budget, read).await {
             Err(_) => Err(Refusal::HomeUnavailable),

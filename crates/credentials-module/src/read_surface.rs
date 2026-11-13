@@ -2904,6 +2904,7 @@ impl ReadSurface {
             .await
         {
             Ok(refreshed) => {
+                crate::plan_warnings::report(refreshed.unmapped_plan.as_ref());
                 // A refusal is sound only after THIS request minted once for its stated
                 // demand. The status excludes static reads and a single-flight follower
                 // that merely observed another writer's newer version, neither of which
@@ -3803,6 +3804,7 @@ impl ReadSurface {
             .await
         {
             Ok(refreshed) => {
+                crate::plan_warnings::report(refreshed.unmapped_plan.as_ref());
                 // Identical to the handle path: a refusal is sound only after THIS
                 // request minted once for its stated demand. Static reads and
                 // single-flight followers are excluded, because neither proves a fresh

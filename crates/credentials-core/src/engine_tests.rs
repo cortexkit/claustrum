@@ -1606,6 +1606,74 @@ async fn hung_anthropic_profile_does_not_delay_refresh_or_bump_version() {
 }
 
 #[tokio::test]
+async fn anthropic_refresh_returns_only_committed_unmapped_plan_observations() {
+    for (raw, unknown) in [
+        (Some("default_claude_ultra"), true),
+        (Some("default_claude_max_20x"), false),
+        (None, false),
+    ] {
+        let (_root, descriptor) = tmp_descriptor();
+        let store = open_store(&descriptor, 197);
+        let id = "oauth:anthropic:x";
+        store.create(id, &anthropic_plan_record()).unwrap();
+        let http = plan_http(
+            vec![
+                Ok(crate::refresh_adapters::HttpResponse {
+                    status: 200,
+                    body: serde_json::to_vec(&serde_json::json!({
+                        "organization": {"rate_limit_tier": raw}
+                    }))
+                    .unwrap(),
+                }),
+                Err(RefreshError::Transport("offline".into())),
+            ],
+            2,
+            false,
+        );
+        let engine = RefreshEngine::new(
+            Arc::new(store),
+            vec![Arc::new(
+                crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+            )],
+            http.clone(),
+        );
+        let first = engine
+            .get_with_refresh_status(id, None, true)
+            .await
+            .unwrap();
+        assert_eq!(first.unmapped_plan, None, "profile has not committed yet");
+        http.observed.notified().await;
+        let second = engine
+            .get_with_refresh_status(id, None, true)
+            .await
+            .unwrap();
+        http.observed.notified().await;
+        assert_eq!(second.record.record_version, 3);
+        assert_eq!(
+            second.unmapped_plan,
+            if unknown {
+                Some(crate::engine::UnmappedPlanObservation {
+                    credential_id: id.into(),
+                    provider: "anthropic",
+                    raw: "default_claude_ultra".into(),
+                })
+            } else {
+                None
+            }
+        );
+        assert_eq!(engine.store().get(id).unwrap(), second.record);
+        let fresh = engine
+            .get_with_refresh_status(id, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.unmapped_plan, None,
+            "a fresh read is not a refresh observation"
+        );
+    }
+}
+
+#[tokio::test]
 async fn anthropic_profile_lands_on_next_refresh_without_extra_version_bump() {
     let (_root, descriptor) = tmp_descriptor();
     let store = open_store(&descriptor, 193);
@@ -1819,7 +1887,23 @@ async fn chatgpt_refresh_detects_each_new_token_in_the_token_commit() {
         .into_iter()
         .enumerate()
     {
-        let record = engine.get("chatgpt:openai", None, true).await.unwrap();
+        let served = engine
+            .get_with_refresh_status("chatgpt:openai", None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            served.unmapped_plan,
+            if index == 2 {
+                Some(crate::engine::UnmappedPlanObservation {
+                    credential_id: "chatgpt:openai".into(),
+                    provider: "chatgpt",
+                    raw: "future".into(),
+                })
+            } else {
+                None
+            }
+        );
+        let record = served.record;
         assert_eq!(record.record_version, index as u64 + 2);
         assert_eq!(record.detected_plan.as_ref().unwrap().tier.as_deref(), tier);
     }

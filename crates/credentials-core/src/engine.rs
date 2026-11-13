@@ -150,6 +150,9 @@ pub struct GetWithRefreshStatus {
     pub incarnation: String,
     pub record: VaultRecord,
     pub refreshed_for_min_ttl: bool,
+    /// An unmapped plan stored by this read's successful refresh commit. Diagnostic
+    /// data for the daemon only; never projected onto consumer replies.
+    pub unmapped_plan: Option<UnmappedPlanObservation>,
     /// On the engine clock, when a refresh this read wanted becomes allowed: set only
     /// when the report cooldown held that refresh back. A caller that can only answer
     /// with durations subtracts engine-clock now to get the time left.
@@ -163,6 +166,34 @@ pub struct GetWithRefreshStatus {
     /// beside the record and never recomputed from it, so the two cannot describe
     /// different rows.
     pub stored_digest_hex: String,
+}
+
+/// Provider plan metadata only: no tokens, headers or account identity. The raw
+/// string is untrusted provider text; the daemon must escape and bound its output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmappedPlanObservation {
+    pub credential_id: String,
+    pub provider: &'static str,
+    pub raw: String,
+}
+
+impl UnmappedPlanObservation {
+    fn committed(credential_id: &str, record: &VaultRecord) -> Option<Self> {
+        let provider = match record.refresh_adapter.as_deref()? {
+            "anthropic" => "anthropic",
+            "openai" => "chatgpt",
+            _ => return None,
+        };
+        let plan = record.detected_plan.as_ref()?;
+        if plan.tier.is_some() {
+            return None;
+        }
+        Some(Self {
+            credential_id: credential_id.to_owned(),
+            provider,
+            raw: plan.raw.clone()?,
+        })
+    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -346,6 +377,7 @@ impl RefreshEngine {
                 incarnation,
                 record: initial.record,
                 refreshed_for_min_ttl: false,
+                unmapped_plan: None,
                 refresh_deferred_until_ms: None,
                 stored_digest_hex: initial.stored_digest_hex,
             });
@@ -366,6 +398,7 @@ impl RefreshEngine {
                 incarnation,
                 record: initial.record,
                 refreshed_for_min_ttl: false,
+                unmapped_plan: None,
                 refresh_deferred_until_ms: None,
                 stored_digest_hex: initial.stored_digest_hex,
             });
@@ -395,6 +428,7 @@ impl RefreshEngine {
                 incarnation,
                 record: replacement.record,
                 refreshed_for_min_ttl: false,
+                unmapped_plan: None,
                 refresh_deferred_until_ms: None,
                 stored_digest_hex: replacement.stored_digest_hex,
             });
@@ -410,6 +444,7 @@ impl RefreshEngine {
                 incarnation,
                 record: served.record,
                 refreshed_for_min_ttl: false,
+                unmapped_plan: None,
                 refresh_deferred_until_ms: None,
                 stored_digest_hex: served.stored_digest_hex,
             });
@@ -436,6 +471,7 @@ impl RefreshEngine {
                 incarnation,
                 record: served.record,
                 refreshed_for_min_ttl: false,
+                unmapped_plan: None,
                 refresh_deferred_until_ms: Some(deferred_until_ms),
                 stored_digest_hex: served.stored_digest_hex,
             });
@@ -443,10 +479,12 @@ impl RefreshEngine {
 
         self.do_refresh(credential_id, &served.record).await?;
         let refreshed = self.store.get_snapshot(credential_id, &incarnation)?;
+        let unmapped_plan = UnmappedPlanObservation::committed(credential_id, &refreshed.record);
         Ok(GetWithRefreshStatus {
             incarnation,
             record: refreshed.record,
             refreshed_for_min_ttl: refresh_requested_by_min_ttl,
+            unmapped_plan,
             refresh_deferred_until_ms: None,
             stored_digest_hex: refreshed.stored_digest_hex,
         })

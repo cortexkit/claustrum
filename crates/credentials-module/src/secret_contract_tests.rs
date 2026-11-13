@@ -1548,6 +1548,100 @@ async fn forwarded_statements_are_v2_and_match_the_pinned_vectors() {
     assert!(local_statement.get("asking_member_id").is_none());
 }
 
+fn secret_worker_call(attributes: serde_json::Value) -> serde_json::Value {
+    let mut call = secret_golden("use.request.api_key");
+    call["stamp"]["kind"] = json!("worker");
+    call["stamp"]["ref"] = json!("W");
+    call["stamp"]["attributes"] = attributes;
+    call["stamp"]["parent"] = json!({
+        "owner": call["stamp"]["owner"], "ref": "H", "scope_epoch": 7,
+    });
+    call["stamp"]["parent_state"] = json!("linked");
+    call
+}
+
+fn secret_asking_statement(reply: &serde_json::Value) -> serde_json::Value {
+    assert_eq!(reply["status"], "approval_required", "{reply}");
+    serde_json::from_slice(&sc_unb64(reply["statement_b64url"].as_str().unwrap())).unwrap()
+}
+
+#[tokio::test]
+async fn secret_worker_agent_attribution_survives_approval_and_both_listings() {
+    let flow = SecretFlow::new(230).await;
+    flow.deposit_both().await;
+    let call = secret_worker_call(json!({"on_behalf_of_agent":"agent_x"}));
+    let asked = flow.use_secret("aft", &call);
+    let statement = secret_asking_statement(&asked);
+    assert_eq!(statement["v"], "ck-secret-use-statement/v1");
+    assert_eq!(statement["agent_id"], "agent_x");
+    assert_eq!(statement["scope"]["kind"], "worker");
+    assert_eq!(statement["scope"]["ref"], "W");
+    assert_eq!(statement["coverage"], "scope");
+    let approved = flow.approve(&asked, "permanent", false).await;
+    assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+    let listed = flow.phone("secret.list", json!({})).await;
+    let key = listed["secrets"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "key").unwrap();
+    assert_eq!(key["grants"][0]["agent_id"], "agent_x");
+    assert_eq!(key["grants"][0]["scope"]["kind"], "worker");
+    let permissions = flow.store.secret_permissions_list(Some("agent_x"), sc_now_ms()).unwrap();
+    assert_eq!(permissions["grants"].as_array().unwrap().len(), 1, "{permissions}");
+    assert_eq!(permissions["grants"][0]["agent_id"], "agent_x");
+    assert_eq!(permissions["grants"][0]["holder"]["agent_id"], "agent_x");
+    assert_eq!(flow.use_secret("aft", &call)["status"], "released");
+    // Naming the head on the card must not let a worker-only grant serve the head.
+    let mut head = secret_golden("use.request.api_key");
+    head["stamp"]["attributes"]["agent_id"] = json!("agent_x");
+    assert_eq!(flow.use_secret("aft", &head)["status"],
+        "approval_required");
+}
+
+#[tokio::test]
+async fn secret_worker_without_attribution_names_no_agent_despite_linked_parent() {
+    let flow = SecretFlow::new(231).await;
+    flow.deposit_both().await;
+    let statement = secret_asking_statement(&flow.use_secret("aft", &secret_worker_call(json!({}))));
+    assert_eq!(statement.get("agent_id"), Some(&serde_json::Value::Null));
+    assert_eq!(statement["scope"]["kind"], "worker");
+}
+
+#[tokio::test]
+async fn secret_worker_ignores_head_style_agent_id() {
+    let flow = SecretFlow::new(232).await;
+    flow.deposit_both().await;
+    for (index, (attributes, expected)) in [
+        (json!({"agent_id":"must-not-name-worker"}), json!(null)),
+        (json!({"agent_id":"must-not-name-worker", "on_behalf_of_agent":"agent_x"}), json!("agent_x")),
+    ].into_iter().enumerate() {
+        let mut call = secret_worker_call(attributes);
+        call["stamp"]["ref"] = json!(format!("W{index}"));
+        let statement = secret_asking_statement(&flow.use_secret("aft", &call));
+        assert_eq!(statement.get("agent_id"), Some(&expected));
+    }
+}
+
+#[tokio::test]
+async fn secret_head_and_ephemeral_agent_attribution_and_head_coverage_are_unchanged() {
+    let flow = SecretFlow::new(233).await;
+    flow.deposit_both().await;
+    let mut head = secret_golden("use.request.api_key");
+    let statement = secret_asking_statement(&flow.use_secret("aft", &head));
+    assert_eq!(statement["agent_id"], "agent-A");
+    assert_eq!(statement["scope"]["kind"], "head");
+    let mut ephemeral = secret_worker_call(json!({"agent_id":"ephemeral-agent"}));
+    ephemeral["stamp"]["kind"] = json!("ephemeral");
+    ephemeral["stamp"]["parent"]["ref"] = json!("ephemeral-H");
+    let statement = secret_asking_statement(&flow.use_secret("aft", &ephemeral));
+    assert_eq!(statement["agent_id"], "ephemeral-agent");
+    assert_eq!(statement["scope"]["kind"], "head");
+    head["coverage"] = json!("agent_and_workers");
+    let asked = flow.use_secret("aft", &head);
+    let approved = flow.approve(&asked, "permanent", false).await;
+    assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+    let worker = secret_worker_call(json!({"on_behalf_of_agent":"agent_x"}));
+    assert_eq!(flow.use_secret("aft", &worker)["status"], "released");
+}
+
 #[test]
 fn every_secret_golden_example_in_the_wire_contract_is_checked() {
     let marker = "<!-- golden:";

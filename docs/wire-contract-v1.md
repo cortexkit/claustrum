@@ -2748,7 +2748,7 @@ in the subconscious repository, at the version locked in `Cargo.lock`):
 | `owner_authorized` | yes | boolean | required by the decoder; grants no authority here |
 | `parent` | no | `{owner, ref, scope_epoch}`, with `owner` a principal object as above and `scope_epoch` at most 2^53 − 1 | Ephemeral mapping and Worker-under-Head coverage |
 | `parent_state` | no | `"linked"`, `"pending"` or `"ended"`; only `linked` counts as live | as `parent` |
-| `attributes` | no | object with optional `agent_id`, `on_behalf_of_agent`, `delegates`, `flow_id`, `run_id`; unknown attribute keys are refused | `agent_id` names the agent in statements and the permissions listing; a present `flow_id` (a flow-read scope) maps to nothing |
+| `attributes` | no | object with optional `agent_id`, `on_behalf_of_agent`, `delegates`, `flow_id`, `run_id`; unknown attribute keys are refused | `agent_id` (or a worker's `on_behalf_of_agent`) names the agent in statements and the permissions listing; a present `flow_id` (a flow-read scope) maps to nothing |
 | `workdir`, `project_id`, `expires_at_ms` | no | as subc defines them | ignored |
 
 Other top-level stamp keys are ignored, as subc's decoder does. A stamp missing any required
@@ -3155,8 +3155,14 @@ agent_id, coverage, secret: {name, kind, incarnation}, use, durations,
 request_expires_at_ms}`:
 
 * `scope` is the mapped asking scope; `owner` is rendered as in the stamp grammar.
-* `agent_id` is the stamp's `attributes.agent_id`, or `null` when the stamp has none. It
-  is an identifier, not a display name: the approval card supplies the human name.
+* `agent_id` is `attributes.agent_id` for a `head` stamp. For a `worker` stamp it is
+  only `attributes.on_behalf_of_agent`, or `null` when absent; `attributes.agent_id`
+  is ignored, with no parent or other identity fallback. Ephemeral and other scopes
+  keep the existing `attributes.agent_id`-or-`null` behavior. This is display
+  attribution, not authority: the grant stays bound to the mapped asking scope.
+  The approval card supplies the human name. Worker v1, forwarded v2, multi-host v3,
+  unnamed-worker and grant-listing samples are pinned in
+  `crates/credentials-core/tests/vectors/secret-worker-agent-v1.json`.
 * `use` is taken from the record's sealed scope: `{host, path_prefix, location}` for an
   API key (`path_prefix` is `""` for every path) or `{origin}` for a login. It never
   carries the requested path.

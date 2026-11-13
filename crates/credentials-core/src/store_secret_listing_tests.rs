@@ -523,3 +523,143 @@ fn a_grant_approved_for_an_agent_lists_that_exact_agent_id() {
         .unwrap();
     assert_eq!(listed["secrets"][0]["grants"][0]["agent_id"], "agent-A");
 }
+
+#[test]
+fn secret_worker_agent_vectors_are_emitted_by_real_statements_and_listing() {
+    const REQUEST_ID: &str = "01HF7YAT000000000000000001";
+    const ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    let mut worker = call();
+    worker.scope.kind = "worker".into();
+    worker.scope.scope_ref = "W".into();
+    // The module derives this display attribution from a worker stamp's
+    // on_behalf_of_agent; the core stores it without granting head authority.
+    worker.agent_id = Some("agent_x".into());
+    let multi_host = SecretScope::ApiKeyRules {
+        rules: vec![
+            agent_secret::SecretRule {
+                host: "x.test".into(),
+                path_prefix: Some("/repos/a".into()),
+            },
+            agent_secret::SecretRule {
+                host: "y.test".into(),
+                path_prefix: None,
+            },
+        ],
+        location: "header:X-Api-Key".into(),
+    };
+    let local =
+        agent_secret::approval_statement(REQUEST_ID, MEMBER, INC, &worker, &scope(), NOW + 600_000);
+    let forwarded = agent_secret::approval_statement_for_asker(
+        REQUEST_ID,
+        MEMBER,
+        INC,
+        &worker,
+        &scope(),
+        NOW + 600_000,
+        ASKER,
+    );
+    let extended = agent_secret::approval_statement(
+        REQUEST_ID,
+        MEMBER,
+        INC,
+        &worker,
+        &multi_host,
+        NOW + 600_000,
+    );
+    let mut anonymous = call();
+    anonymous.scope = worker.scope.clone();
+    anonymous.agent_id = None;
+    let unnamed = agent_secret::approval_statement(
+        REQUEST_ID,
+        MEMBER,
+        INC,
+        &anonymous,
+        &scope(),
+        NOW + 600_000,
+    );
+    let mut vectors = Vec::new();
+    for (case, statement, version, expected_agent) in [
+        (
+            "worker-local-v1",
+            local,
+            "ck-secret-use-statement/v1",
+            json!("agent_x"),
+        ),
+        (
+            "worker-forwarded-v2",
+            forwarded,
+            "ck-secret-use-statement/v2",
+            json!("agent_x"),
+        ),
+        (
+            "worker-multi-host-v3",
+            extended,
+            "ck-secret-use-statement/v3",
+            json!("agent_x"),
+        ),
+        (
+            "worker-without-agent",
+            unnamed,
+            "ck-secret-use-statement/v1",
+            Value::Null,
+        ),
+    ] {
+        assert_eq!(statement["v"], version);
+        assert_eq!(statement.get("agent_id"), Some(&expected_agent));
+        assert_eq!(statement["scope"]["kind"], "worker");
+        let bytes = serde_json::to_vec(&statement).unwrap();
+        vectors.push(json!({
+            "case": case, "statement": statement,
+            "statement_b64url": URL_SAFE_NO_PAD.encode(&bytes),
+            "statement_sha256": phone::hex(&payload_hash(&bytes)),
+        }));
+    }
+
+    let (_root, store) = list_setup("worker-agent-vectors");
+    seed(
+        &store,
+        "key",
+        &scope(),
+        &SecretMaterial::ApiKey(Secret::new(b"material-canary".to_vec())),
+    );
+    let asked = use_reply(&store, &worker, NOW);
+    assert_eq!(asked["status"], "approval_required", "{asked}");
+    let statement = URL_SAFE_NO_PAD
+        .decode(asked["statement_b64url"].as_str().unwrap())
+        .unwrap();
+    let approval = envelope(
+        vec![json!({
+            "request_id": asked["request_id"],
+            "statement_sha256": phone::hex(&payload_hash(&statement)),
+        })],
+        "permanent",
+        NOW,
+    );
+    let approved = phone(&store, &signed(&approval, false), NOW).unwrap();
+    assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+    let listed = phone(&store, &PhoneOperation::List, NOW).unwrap();
+    let mut row = listed["secrets"][0]["grants"][0].clone();
+    assert_eq!(row["agent_id"], "agent_x");
+    assert_eq!(row["scope"]["kind"], "worker");
+    assert!(row["grant_id"].is_string());
+    // Approval generates a fresh random grant id. Only that opaque id is replaced
+    // for the phone fixture; all other fields are the real secret.list row.
+    row["grant_id"] = json!("01HF7YAT000000000000000002");
+    vectors.push(json!({"case":"worker-grant-secret-list", "grant":row}));
+    let emitted = json!({"vectors":vectors});
+    let pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/vectors/secret-worker-agent-v1.json");
+    if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+        std::fs::write(&pinned, serde_json::to_vec_pretty(&emitted).unwrap()).unwrap();
+        println!("emitted worker agent statement and listing vectors");
+    } else {
+        let expected: Value = serde_json::from_slice(
+            &std::fs::read(&pinned).expect("pinned worker agent statement and listing vectors"),
+        )
+        .unwrap();
+        assert_eq!(
+            emitted, expected,
+            "vault-emitted worker agent vectors changed"
+        );
+    }
+}

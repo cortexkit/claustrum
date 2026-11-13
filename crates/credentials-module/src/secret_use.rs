@@ -27,9 +27,9 @@ pub enum UseAnswer {
 
 /// The closed `secret.use` key set. There is deliberately no caller-supplied agent name:
 /// a sender has no trusted human name for an agent, and the approval statement is
-/// signed, so the statement names the agent only by the stamp's `agent_id`. The
-/// approval card (Cingulate) is what shows a person-readable name. A sender that still
-/// passes `display_name` is refused as an unknown field.
+/// signed, so the statement names the agent only by the stamp's attribution: a worker's
+/// `on_behalf_of_agent`, otherwise `agent_id`. The approval card shows a person-readable
+/// name. A sender that still passes `display_name` is refused as an unknown field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Params {
@@ -266,7 +266,13 @@ fn parse_use(
         scope,
         worker_parent,
         coverage: params.coverage,
-        agent_id: stamp.attributes.agent_id,
+        // Worker attribution names its head for display, without inheriting the
+        // head's identity or changing the scope to which approval is bound.
+        agent_id: if stamp.kind == ScopeKind::Worker {
+            stamp.attributes.on_behalf_of_agent
+        } else {
+            stamp.attributes.agent_id
+        },
         target,
     })
 }

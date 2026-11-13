@@ -772,6 +772,36 @@ fn walk(value: &Value, visit: &mut dyn FnMut(Option<&str>, &Value)) {
 // The flows
 // ---------------------------------------------------------------------------------
 
+#[tokio::test]
+async fn forwarded_worker_statements_name_only_on_behalf_of_agent() {
+    let rig = Rig::new("secret-forward-worker-agent").await;
+    for (index, (attributes, expected)) in [
+        (json!({"on_behalf_of_agent":"agent_x"}), json!("agent_x")),
+        (json!({}), json!(null)),
+        (json!({"agent_id":"must-not-name-worker"}), json!(null)),
+        (
+            json!({"agent_id":"must-not-name-worker", "on_behalf_of_agent":"agent_x"}),
+            json!("agent_x"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut call = golden("use.request.api_key");
+        call["stamp"]["kind"] = json!("worker");
+        call["stamp"]["ref"] = json!(format!("W{index}"));
+        call["stamp"]["attributes"] = attributes;
+        let asked = rig.use_on_b("aft", &call).await;
+        let asking = statement(&asked);
+        assert_eq!(asking["v"], "ck-secret-use-statement/v2");
+        assert_eq!(asking.get("agent_id"), Some(&expected));
+        assert_eq!(asking["scope"]["kind"], "worker");
+        assert_eq!(asking["scope"]["ref"], call["stamp"]["ref"]);
+        assert_eq!(asking["asking_member_id"], rig.requester().as_str());
+        assert_eq!(asking["member_id"], rig.home_id().as_str());
+    }
+}
+
 /// An AFT `secret.use` on B is answered `approval_required` with a v2 statement naming
 /// A as the home and B as the asking computer. The phone's envelope, sent to A, grants
 /// it, and B's retry is released with the key's exact bytes, opened from a sealed

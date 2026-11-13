@@ -112,10 +112,7 @@ impl From<ValidationError> for SecretError {
 /// `secret|<name>` target form the operator delete uses, so the two namespaces stay
 /// disjoint and an operator delete can never address the vault's own deposit key.
 pub fn is_deposit_key(id: &str) -> bool {
-    if !id.starts_with(DEPOSIT_KEY_PREFIX) || id.contains('|') {
-        return false;
-    }
-    true
+    id.starts_with(DEPOSIT_KEY_PREFIX) && !id.contains('|')
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

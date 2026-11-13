@@ -57,6 +57,11 @@ brief.
 - **Limits.** A new numeric limit needs a test on both sides of its boundary (the last
   accepted value and the first refused one), registered in `docs/threshold-controls.txt`,
   which `scripts/threshold-controls.py` checks.
+- **New daemon source files.** A new file under `crates/credentials-module/src/` must be
+  classified in the source list of `the_manifest_shows_no_read_surface_op_can_trigger_a_send`
+  (`crates/credentials-module/tests/federation/admin.rs`): may or may not name the transfer
+  sender. Filtered test runs skip that test, so a missing entry otherwise surfaces only in
+  the fast check. Run it by name when you add a file.
 - **Help pages.** A new or changed `ck auth` verb updates its help page and the verb table,
   and keeps every help line within 80 columns.
 - **Test timing.** Tests check order and outcome, not duration. Wait on explicit signals.

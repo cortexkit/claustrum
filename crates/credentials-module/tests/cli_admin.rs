@@ -9953,3 +9953,69 @@ fn member_list_shows_sources_and_revoke_refuses_switch_grants() {
         String::from_utf8_lossy(&revoked.stderr)
     );
 }
+
+#[test]
+fn login_sharing_status_reads_isolated_jsonc_without_daemon_or_vault_key() {
+    let root = tmp_root("login-sharing-status");
+    let config = root.join("config");
+    let path = config.join("cortexkit/claustrum.jsonc");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let status = || {
+        let out = cli()
+            .env("XDG_CONFIG_HOME", &config)
+            .env("APPDATA", &config)
+            .args(["federation", "sharing", "status"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains(&format!("path: {}", path.display())));
+        text
+    };
+    assert!(status().contains("login sharing: on\nsource: default"));
+    for (text, expected) in [
+        ("{/*comment*/\"login_sharing\":false,}", "off"),
+        (r#"{"login_sharing":true}"#, "on"),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        assert!(status().contains(&format!("login sharing: {expected}\nsource: file")));
+    }
+    std::fs::write(&path, r#"{"login_sharing":"private-marker"}"#).unwrap();
+    let invalid = status();
+    assert!(invalid.contains("login sharing: invalid\nsource: invalid configuration at line"));
+    assert!(!invalid.contains("private-marker"));
+    for action in ["on", "off"] {
+        assert!(!cli()
+            .args(["federation", "sharing", action])
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+}
+
+#[test]
+fn login_sharing_status_help_and_verb_table_explain_file_only_live_setting() {
+    let top = cli().arg("help").output().unwrap();
+    let top = String::from_utf8(top.stdout).unwrap();
+    assert!(top.lines().any(
+        |line| line.trim_start().starts_with("federation ") && line.contains("sharing status")
+    ));
+    for args in [
+        vec!["help", "federation"],
+        vec!["help", "federation", "sharing", "status"],
+        vec!["federation", "sharing", "status", "--help"],
+    ] {
+        let out = cli().args(args).output().unwrap();
+        assert!(out.status.success());
+        let page = String::from_utf8(out.stdout).unwrap();
+        assert!(page.contains("federation sharing status"));
+        assert!(page.contains("edit") || page.contains("Edit"));
+        assert!(page.contains("claustrum.jsonc"));
+        assert!(page.lines().all(|line| line.chars().count() <= 80));
+    }
+}

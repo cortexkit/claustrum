@@ -3,9 +3,8 @@
 //! another member's vault may do here).
 //!
 //! Every write here is a fenced transaction that commits its audit row with the
-//! mutation, as everywhere else in the store. The federation settings have no other
-//! writer, so "written only through audited admin ops" holds by construction: the only
-//! callers are `admin_ops::apply` and the federation admin paths built on it.
+//! mutation, as everywhere else in the store. Settings are changed by audited admin
+//! operations or by the daemon's config-file reader.
 
 use super::*;
 use crate::federation::{
@@ -58,6 +57,15 @@ fn write_setting_tx(tx: &rusqlite::Transaction, name: &str, value: &str) -> rusq
 /// fails closed, so damage can never switch member mapping on.
 fn gate_from_stored(value: Option<&str>) -> bool {
     value == Some("true")
+}
+
+const LOGIN_SHARING_SETTING: &str = "federation.login_sharing";
+
+fn login_sharing_conn(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    Ok(matches!(
+        read_setting(conn, LOGIN_SHARING_SETTING)?.as_deref(),
+        None | Some("true")
+    ))
 }
 
 fn mint_incarnation() -> Result<String, StoreOpError> {
@@ -426,6 +434,76 @@ fn remove_remote_watch_tx(
 }
 
 impl EncryptedStore {
+    pub fn login_sharing(&self) -> Result<bool, StoreOpError> {
+        self.store
+            .with_conn(login_sharing_conn)
+            .map_err(StoreOpError::from)
+    }
+
+    /// Commit the setting and all automatic-state removals together. In-flight
+    /// reconcilers recheck this setting in their own transaction before inserting.
+    pub fn set_login_sharing_audited(
+        &self,
+        enabled: bool,
+        actor: &str,
+    ) -> Result<bool, StoreOpError> {
+        let wanted = if enabled { "true" } else { "false" };
+        if self
+            .store
+            .with_conn(|conn| read_setting(conn, LOGIN_SHARING_SETTING))?
+            .as_deref()
+            == Some(wanted)
+        {
+            return Ok(false);
+        }
+        self.fenced_write(|tx| {
+            if read_setting(tx, LOGIN_SHARING_SETTING)?.as_deref() == Some(wanted) {
+                return Ok(false);
+            }
+            write_setting_tx(tx, LOGIN_SHARING_SETTING, wanted)?;
+            if !enabled {
+                for grant in member_grants_conn(tx)?
+                    .into_iter()
+                    .filter(|g| g.source == MemberGrantSource::SharingSwitch)
+                {
+                    revoke_member_grant_tx(tx, &self.audit_key, &grant)?;
+                }
+                let homes = {
+                    let mut stmt = tx.prepare(
+                        "SELECT DISTINCT home_member FROM remote_records WHERE source='home_watch'",
+                    )?;
+                    let homes = stmt
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    homes
+                };
+                for home in homes {
+                    for record in remote_watch_records_conn(tx, &home)? {
+                        remove_remote_watch_tx(tx, &self.audit_key, &record)?;
+                    }
+                }
+            }
+            append_audit_tx(
+                tx,
+                &self.audit_key,
+                &AuditRecord {
+                    op: AuditOp::LoginSharingSet,
+                    credential_id: None,
+                    payload_hash: Some(
+                        payload_hash(wanted.as_bytes())
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect(),
+                    ),
+                    actor: actor.to_owned(),
+                    alarm: None,
+                },
+            )?;
+            Ok(true)
+        })
+        .map_err(StoreOpError::from)
+    }
+
     /// Whether the federation member-mapping gate is on. Read from the store on every
     /// call, so a change made by the admin op takes effect without a restart. Unset,
     /// or a store from before federation, reads as off.
@@ -772,6 +850,9 @@ impl EncryptedStore {
             }
         }
         let preflight = self.store.with_conn(|conn| {
+            if !login_sharing_conn(conn)? {
+                return Ok((true, RemoteWatchApplyResult::default()));
+            }
             let diff =
                 remote_watch_diff_conn(conn, home_member, pairing_id, rows, mode, retained_ids)?;
             Ok((diff.is_empty(), diff.result()))
@@ -781,6 +862,9 @@ impl EncryptedStore {
         }
         self.fenced_write(|tx| {
             let diff = remote_watch_diff_conn(tx, home_member, pairing_id, rows, mode, retained_ids)?;
+            if !login_sharing_conn(tx)? {
+                return Ok(RemoteWatchApplyResult::default());
+            }
             let result = diff.result();
             let now = now_ms();
             for row in diff.inserts {
@@ -1235,7 +1319,16 @@ impl EncryptedStore {
     pub(super) fn reconcile_vault_sharing_inner(
         &self,
         members: &[VaultSharingMember],
+        after_write: impl FnMut(),
+    ) -> Result<(usize, usize), StoreOpError> {
+        self.reconcile_vault_sharing_before_write(members, after_write, || {})
+    }
+
+    pub(super) fn reconcile_vault_sharing_before_write(
+        &self,
+        members: &[VaultSharingMember],
         mut after_write: impl FnMut(),
+        before_write: impl FnOnce(),
     ) -> Result<(usize, usize), StoreOpError> {
         let now = now_ms();
         let mut wanted = Vec::new();
@@ -1261,6 +1354,9 @@ impl EncryptedStore {
         }
         // A no-op commit would wake inventory streams even though no grant changed.
         let unchanged = self.store.with_conn(|conn| {
+            if !login_sharing_conn(conn)? {
+                return Ok(true);
+            }
             let existing = member_grants_conn(conn)?;
             let (created, revoked) = vault_sharing_diff(&existing, &wanted);
             Ok(created.is_empty() && revoked.is_empty())
@@ -1268,7 +1364,12 @@ impl EncryptedStore {
         if unchanged {
             return Ok((0, 0));
         }
+        before_write();
         self.fenced_write(|tx| {
+            // The Callosum snapshot may predate an opt-out committed after preflight.
+            if !login_sharing_conn(tx)? {
+                return Ok((0, 0));
+            }
             let existing = member_grants_conn(tx)?;
             let (to_create, to_revoke) = vault_sharing_diff(&existing, &wanted);
             let mut revoked = 0;

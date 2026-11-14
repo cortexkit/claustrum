@@ -118,6 +118,7 @@ struct Worker {
 impl Worker {
     fn current(&self) -> bool {
         !*self.stop.borrow()
+            && self.store.login_sharing().unwrap_or(false)
             && self.pairings.borrow().as_ref().is_some_and(|pairs| {
                 pairs
                     .iter()
@@ -681,10 +682,21 @@ async fn supervise(
     endings: &mut mpsc::UnboundedReceiver<HomeEvent>,
 ) {
     let mut inventory_changed = true;
+    let mut writes = reconciler.store.subscribe_writes();
+    let mut sharing_enabled = None;
     loop {
         if inventory_changed {
             let inventory = pairings.borrow_and_update().clone();
-            if let Some(inventory) = inventory {
+            let store = Arc::clone(&reconciler.store);
+            let enabled = tokio::task::spawn_blocking(move || store.login_sharing())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(false);
+            sharing_enabled = Some(enabled);
+            if !enabled {
+                reconciler.inventory(Vec::new()).await;
+            } else if let Some(inventory) = inventory {
                 reconciler.inventory(inventory).await;
             }
             inventory_changed = false;
@@ -704,6 +716,13 @@ async fn supervise(
             .min();
         tokio::select! {
             biased;
+            changed = writes.changed() => {
+                if changed.is_err() { return; }
+                let store = Arc::clone(&reconciler.store);
+                let enabled = tokio::task::spawn_blocking(move || store.login_sharing())
+                    .await.ok().and_then(Result::ok).unwrap_or(false);
+                inventory_changed |= sharing_enabled != Some(enabled);
+            }
             changed = pairings.changed() => {
                 if changed.is_err() {
                     for (_, task) in reconciler.tasks { task.stop().await; }

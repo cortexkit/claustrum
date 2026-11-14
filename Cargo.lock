@@ -453,9 +453,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-paths"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d14cf5bd9d4b76fcf4d5380550dd11f9191598309ecaacc4805e317b2d6deb90"
+checksum = "57e7ea934b88f1cd195c79fdeb56bda1a4595252a444eba543689fda561ea7a4"
 
 [[package]]
 name = "cortexkit-store"
@@ -536,6 +536,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "subc-jsonc",
  "subc-os",
  "subtle",
  "tokio",
@@ -2209,6 +2210,15 @@ dependencies = [
  "serde",
  "serde_json",
  "subc-protocol",
+]
+
+[[package]]
+name = "subc-jsonc"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3e08ea5f235659538702975b865583bdde9d303ebfa658585565d9f3c2af4e6"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

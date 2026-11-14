@@ -201,16 +201,32 @@ pub async fn run_with_reconcilers(
     member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) {
     let mut retries = RetryState::default();
-    loop {
-        let delay = match watch(
-            Arc::clone(&store),
-            &client,
-            &mut retries,
-            home_watches.as_deref(),
-            member_pairings.as_ref(),
-        )
-        .await
-        {
+    let mut writes = store.subscribe_writes();
+    let mut enabled = store.login_sharing().unwrap_or(false);
+    'watching: loop {
+        let outcome = {
+            let attempt = watch(
+                Arc::clone(&store),
+                &client,
+                &mut retries,
+                home_watches.as_deref(),
+                member_pairings.as_ref(),
+            );
+            tokio::pin!(attempt);
+            loop {
+                tokio::select! {
+                    result = &mut attempt => break result,
+                    changed = writes.changed() => {
+                        if changed.is_err() { return; }
+                        let current = store.login_sharing().unwrap_or(false);
+                        let turned_on = !enabled && current;
+                        enabled = current;
+                        if turned_on { continue 'watching; }
+                    }
+                }
+            }
+        };
+        let delay = match outcome {
             Err(error) => {
                 let (delay, warn) = retries.failed(&error);
                 if warn {

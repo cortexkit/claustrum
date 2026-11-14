@@ -45,6 +45,116 @@ mod remote_watch {
         store.remote_record(id).unwrap().unwrap()
     }
 
+    #[test]
+    fn login_sharing_off_transaction_removes_only_automatic_state_and_audits_once() {
+        use crate::federation::{MemberGrantSource, VaultSharingMember};
+        let (_root, store) = rig("login-sharing-off", 253);
+        let members = [VaultSharingMember {
+            member_id: HOME.into(),
+            pairing_id: "pair".into(),
+        }];
+        store
+            .set_login_sharing_audited(true, "config:claustrum.jsonc")
+            .unwrap();
+        store.reconcile_vault_sharing_audited(&members).unwrap();
+        store
+            .create_member_grant_audited(
+                OTHER,
+                MemberGrantOperation::RemoteRead,
+                &MemberGrantSelector::Exact("oauth:operator".into()),
+                "pair",
+            )
+            .unwrap();
+        let input = row("oauth:automatic");
+        full(&store, &[input]);
+        store
+            .remote_add_audited(&new_remote("oauth:operator"))
+            .unwrap();
+        let grants = store.list_member_grants().unwrap();
+        let records = store.list_remote_records().unwrap();
+        let audits = store.read_audit(None).unwrap();
+        // A failure on the setting's audit must roll back its value and every removal.
+        store.with_raw_conn(|conn| conn.execute_batch("CREATE TRIGGER reject_config_audit BEFORE INSERT ON audit_log WHEN NEW.op='login_sharing_set' BEGIN SELECT RAISE(ABORT,'config audit failed'); END;")).unwrap();
+        assert!(store
+            .set_login_sharing_audited(false, "config:claustrum.jsonc")
+            .is_err());
+        assert!(store.login_sharing().unwrap());
+        assert_eq!(store.list_member_grants().unwrap(), grants);
+        assert_eq!(store.list_remote_records().unwrap(), records);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        store
+            .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER reject_config_audit"))
+            .unwrap();
+        assert!(store
+            .set_login_sharing_audited(false, "config:claustrum.jsonc")
+            .unwrap());
+        assert!(!store.login_sharing().unwrap());
+        assert!(store
+            .list_member_grants()
+            .unwrap()
+            .iter()
+            .all(|g| g.source == MemberGrantSource::Operator));
+        assert_eq!(store.list_member_grants().unwrap().len(), 1);
+        assert_eq!(store.list_remote_records().unwrap().len(), 1);
+        assert_eq!(
+            store.list_remote_records().unwrap()[0].source,
+            RemoteRecordSource::Operator
+        );
+        let changes = audit_rows(&store, AuditOp::LoginSharingSet);
+        assert_eq!(AuditOp::LoginSharingSet.as_str(), "login_sharing_set");
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes.last().unwrap().actor, "config:claustrum.jsonc");
+        assert_eq!(audit_rows(&store, AuditOp::MemberGrantRevoke).len(), 2);
+        assert_eq!(audit_rows(&store, AuditOp::RemoteRemove).len(), 1);
+        let audits = store.read_audit(None).unwrap();
+        let writes = store.subscribe_writes();
+        assert!(!store
+            .set_login_sharing_audited(false, "config:claustrum.jsonc")
+            .unwrap());
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert!(!writes.has_changed().unwrap());
+        assert_eq!(
+            full(&store, &[row("oauth:late")]),
+            RemoteWatchApplyResult::default()
+        );
+        assert!(store.remote_record("oauth:late").unwrap().is_none());
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn login_sharing_reconciler_snapshot_racing_off_cannot_restore_grants() {
+        use crate::federation::VaultSharingMember;
+        let (_root, store) = rig("login-sharing-race", 253);
+        let members = [VaultSharingMember {
+            member_id: HOME.into(),
+            pairing_id: "pair".into(),
+        }];
+        let result = store
+            .reconcile_vault_sharing_before_write(
+                &members,
+                || {},
+                || {
+                    store
+                        .set_login_sharing_audited(false, "config:claustrum.jsonc")
+                        .unwrap();
+                },
+            )
+            .unwrap();
+        assert_eq!(result, (0, 0));
+        assert!(store.list_member_grants().unwrap().is_empty());
+        assert_eq!(
+            store.reconcile_vault_sharing_audited(&members).unwrap(),
+            (0, 0)
+        );
+        store
+            .set_login_sharing_audited(true, "config:claustrum.jsonc")
+            .unwrap();
+        assert_eq!(
+            store.reconcile_vault_sharing_audited(&members).unwrap(),
+            (2, 0)
+        );
+    }
+
     fn assert_watch_audit(
         store: &EncryptedStore,
         op: AuditOp,

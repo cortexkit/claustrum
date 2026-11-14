@@ -479,8 +479,28 @@ fn member_op(args: &[String]) -> Result<AdminOpBody, CliError> {
     })
 }
 
-/// `ck auth federation self <member>` and `ck auth federation mapping on|off`.
+/// Federation setup and read-only config-file sharing status.
 pub fn cmd_federation(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    if args.first().is_some_and(|arg| arg == "sharing") {
+        if args.len() != 2 || args[1] != "status" {
+            return Err(CliError::Usage(
+                "federation sharing takes only status; edit claustrum.jsonc to change it".into(),
+            ));
+        }
+        use credentials_core::login_sharing::{config_path, read_input, resolve, Resolution};
+        let path =
+            config_path().map_err(|_| CliError::Usage("cannot resolve config path".into()))?;
+        let (state, source) = match resolve(&read_input(&path)) {
+            Resolution::Default => ("on", "default".to_owned()),
+            Resolution::File(enabled) => (if enabled { "on" } else { "off" }, "file".to_owned()),
+            Resolution::Invalid(reason) => ("invalid", reason),
+        };
+        println!(
+            "path: {}\nlogin sharing: {state}\nsource: {source}",
+            path.display()
+        );
+        return Ok(());
+    }
     let op = federation_op(args)?;
     let reply = commit_admin(global, op.clone())?;
     let changed = if reply.get("changed").and_then(Value::as_bool) == Some(false) {
@@ -500,7 +520,7 @@ pub fn cmd_federation(global: &GlobalArgs, args: &[String]) -> Result<(), CliErr
 }
 
 fn federation_op(args: &[String]) -> Result<AdminOpBody, CliError> {
-    let (sub, rest) = subcommand(args, "federation", "self|mapping")?;
+    let (sub, rest) = subcommand(args, "federation", "self|mapping|sharing")?;
     let v = ADMIN_OP_SCHEMA_V2;
     let value = single_positional(rest, &[], sub)?;
     match sub {
@@ -513,7 +533,11 @@ fn federation_op(args: &[String]) -> Result<AdminOpBody, CliError> {
             "off" => Ok(AdminOpBody::FederationGateSet { v, enabled: false }),
             _ => Err(CliError::Usage("federation mapping takes on or off".into())),
         },
-        other => Err(unknown_subcommand("federation", other, "self|mapping")),
+        other => Err(unknown_subcommand(
+            "federation",
+            other,
+            "self|mapping|sharing",
+        )),
     }
 }
 

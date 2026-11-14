@@ -212,6 +212,8 @@ pub enum AuditOp {
     FederationGateSet,
     /// The vault's own member id was set or changed.
     FederationSelfSet,
+    /// The config file changed the applied automatic login-sharing setting.
+    LoginSharingSet,
 }
 
 impl AuditOp {
@@ -284,6 +286,7 @@ impl AuditOp {
             AuditOp::RemoteRemove => "remote_remove",
             AuditOp::FederationGateSet => "federation_gate_set",
             AuditOp::FederationSelfSet => "federation_self_set",
+            AuditOp::LoginSharingSet => "login_sharing_set",
         }
     }
 }
@@ -966,6 +969,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::RemoteRemove => AuditOp::RemoteRemove.as_str(),
                 AuditOp::FederationGateSet => AuditOp::FederationGateSet.as_str(),
                 AuditOp::FederationSelfSet => AuditOp::FederationSelfSet.as_str(),
+                AuditOp::LoginSharingSet => AuditOp::LoginSharingSet.as_str(),
             }
         }
 
@@ -1011,6 +1015,7 @@ mod vocabulary_documentation_tests {
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
+        assert!(WIRE_CONTRACT.contains(value(AuditOp::LoginSharingSet)));
         for op in [
             AuditOp::GhManifestPropose,
             AuditOp::GhManifestProposalState,

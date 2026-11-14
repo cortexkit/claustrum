@@ -215,6 +215,12 @@ impl Registry {
 }
 
 impl RemoteWatchHub {
+    /// Observe cancellation reaching the home, rather than waiting on elapsed time.
+    #[cfg(feature = "test-support")]
+    pub fn registered_for_test(&self) -> usize {
+        self.registry.lock().expect("remote watches").entries.len()
+    }
+
     /// Let socket integration tests wait until a stream has woken for a change. A
     /// woken stream then sleeps through its 250 ms coalescing window before it
     /// re-reads, so a test advances its paused clock only after this returns.
@@ -568,6 +574,9 @@ impl Subscription {
                         .map(|value| value.map(Projection::Manifest))
                         .map_err(|_| ())
                 } else {
+                    if !store.login_sharing().map_err(|_| ())? {
+                        return Ok(None);
+                    }
                     HomeVault::project_remote_watch(&store, &member, &pairing)
                         .map(|rows| Some(Projection::Logins(rows)))
                         .map_err(|_| ())

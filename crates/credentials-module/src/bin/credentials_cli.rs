@@ -329,6 +329,9 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     if command == "help" || command == "--help" || command == "-h" {
         // `help <verb>` → the verb's page; bare `help` → the short table.
         match args.first() {
+            Some(verb) if verb == "federation" && args.get(1).is_some_and(|a| a == "sharing") => {
+                println!("{}", help_verb("federation sharing status"))
+            }
             Some(verb)
                 if (verb == "provider"
                     && args
@@ -344,6 +347,10 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
+        if command == "federation" && args.first().is_some_and(|a| a == "sharing") {
+            println!("{}", help_verb("federation sharing status"));
+            return Ok(());
+        }
         let page = if (command == "provider"
             && args
                 .first()
@@ -615,7 +622,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
             "provider" => &["list", "set", "remove"],
-            "federation" => &["self", "mapping"],
+            "federation" => &["self", "mapping", "sharing", "status"],
             // Every secret verb name and its one positional action, so none is eaten
             // here. `secret`'s FLAGS are checked by `secret_cli::guard_args` instead: this
             // table is keyed on the command name alone and could not say which sub-verb a
@@ -727,7 +734,7 @@ fn usage_short() -> String {
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
-        federation          set this vault's member id or the mapping gate\n\
+         federation          member setup and config-file sharing status\n\
          secret              agent secrets; phone-gate and multi-host settings\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
@@ -1148,12 +1155,26 @@ fn help_verb(verb: &str) -> String {
         "federation" => {
             "ck auth federation self <member>\n\
              \x20 federation mapping on|off\n\
+             \x20 federation sharing status\n\
              \n\
              NOTES\n\
              self changes this vault's member id. It needs the running daemon: callosum\n\
              computes this computer's id from its own key, and an id that differs, or one\n\
              that cannot be checked, is refused. mapping switches the member-mapping gate;\n\
-             it takes effect at once, without a restart."
+             it takes effect at once, without a restart.\n\
+             sharing status reads claustrum.jsonc without a daemon; edit that file to\n\
+             change login_sharing. Run ck auth help federation sharing status for details."
+        }
+        "federation sharing status" => {
+            "ck auth federation sharing status\n\
+             \n\
+             Read-only; no daemon or vault key needed. Prints path, on/off/invalid and\n\
+             source (default, file or invalid reason). Edit the JSONC file to change it:\n\
+             <config home>/cortexkit/claustrum.jsonc\n\
+             {\"login_sharing\": false}\n\
+             Missing file or field defaults on. The daemon polls every 2 seconds.\n\
+             Invalid config never turns sharing on: startup applies off, and an invalid\n\
+             edit keeps the applied value. There are no sharing on/off commands."
         }
         "mint-kem-key" => {
             "ck auth mint-kem-key --id kem:<name> [--replace]\n\

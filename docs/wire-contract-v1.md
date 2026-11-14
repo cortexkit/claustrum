@@ -1728,6 +1728,26 @@ switch row with `member_grant_sharing_switch` and directs the operator to
 `ck callosum share <device> claustrum/vault off`; manual revocation would be undone
 by the next snapshot. Operator rows remain manually revocable.
 
+### Computer-local login sharing opt-out
+
+`<config home>/cortexkit/claustrum.jsonc` can set `login_sharing` to `false` (default
+`true`). This is a local live setting, not a new wire operation. While off, no
+`sharing_switch` grants or `home_watch` remote copies exist on that vault. The setting
+and automatic-state removals commit in one transaction, with a `login_sharing_set`
+audit row (actor `config:<path>`) and the existing per-removal audit rows. Reapplying
+the current value writes nothing. Operator grants and records are preserved;
+operator-granted `remote_token` and `secret_use` behavior is unchanged.
+
+Both new and open `federation.remote_watch` streams at an off home receive the
+**existing** relayed Error frame, not a completion or a new refusal code:
+`{"code":"not_found","message":"not found","detail":{"class":"permanent"}}`.
+Peers treat it as no longer shared and remove only that home's automatic copies,
+not operator records. Local receiving watches close while off. Turning on rereads
+Callosum's current switches and reopens watches, restoring grants and copies from
+live state. Invalid input never enables sharing: startup is off; later invalid edits
+retain the applied value. The daemon reads the file directly until the supervisor
+delivers `config.gate`; no gate control operation is advertised in this version.
+
 ### Channel identity and harness mapping
 
 The canonical member id is `fed-computer:<fp>`, where `<fp>` is 32 lowercase hex characters
@@ -2190,6 +2210,7 @@ versions JSON numbers, and reasons refusal codes.
 | `remote_add` / `remote_remove` | id | home | `{incarnation}` |
 | `federation_gate_set` | none | admin | `{value}` |
 | `federation_self_set` | none | admin | `{member}` |
+| `login_sharing_set` | none | config:&lt;path&gt; | applied boolean (`true` or `false`) |
 
 Issuance dedup and audit commit before token release, keyed by member/id/version/encrypted
 material digest, so retries/restarts add no row but a recreated id at version 1 is audited

@@ -379,6 +379,15 @@ where
     let (surface, admin) = build_surface(&ack, &config.module_id).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
+    let config_path = credentials_core::login_sharing::config_path()
+        .map_err(|_| ModuleError::Message("cannot resolve login sharing config path".into()))?;
+    let mut login_sharing =
+        federation::login_sharing::ConfigPoll::new(config_path, Arc::clone(surface.store()));
+    login_sharing
+        .poll()
+        .await
+        .map_err(|_| ModuleError::Message("cannot apply login sharing config".into()))?;
+    let _login_sharing_guard = AbortOnDrop(tokio::spawn(login_sharing.run()));
     // The outbound client: this vault's own connection to subc for calls it makes as a
     // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
     // from the module id and the launch nonce `ModuleConfig::from_env` already read;
@@ -18591,6 +18600,8 @@ mod tests {
     ///             never manifest bytes, hashes or the caller's reason
     ///   warn!     unmapped subscription plan: bounded escaped credential id and raw
     ///             provider plan, plus the fixed provider family; never token fields
+    ///   warn!     login-sharing config: path and resolver-redacted location/reason,
+    ///             or fixed apply-failure text; never config bytes or parser messages
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
@@ -18623,6 +18634,10 @@ mod tests {
             )),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/manifest.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/plan_warnings.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/login_sharing.rs"
+            )),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -18639,7 +18654,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 17, 0),
+            (1, 2, 19, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -18658,6 +18673,10 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[13], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![
+            ("warn".into(), "target: \"federation\", path = %self.path.display(), %reason, \"invalid login sharing configuration; applied value retained or off at startup\"".into()),
+            ("warn".into(), "target: \"federation\", path = %self.path.display(), \"login sharing configuration apply failed; retrying\"".into()),
+        ]);
         // Pin every argument, not just secret reads: a token field must fail even
         // when its value was prepared outside the logging macro.
         let plan_sites: Vec<_> = output_site_arguments(sources[12], &shapes)

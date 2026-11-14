@@ -42,6 +42,7 @@ pub mod http;
 pub mod kem;
 pub mod key;
 pub mod list_auth_method;
+pub mod login_sharing;
 pub mod oauth;
 pub mod oauth_login;
 pub mod plan_detection;

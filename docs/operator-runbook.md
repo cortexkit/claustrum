@@ -1655,6 +1655,35 @@ and run `scripts/accept-deploy.sh` against the rev you rolled back to.
 
 ### Federation setup and recovery
 
+#### Keep this computer's vault separate
+
+Edit `<config home>/cortexkit/claustrum.jsonc` to opt this computer out of automatic
+login sharing:
+
+```jsonc
+{ "login_sharing": false }
+```
+
+The config home is `XDG_CONFIG_HOME` (normally `~/.config` on Unix); Windows also
+accepts that override and otherwise uses roaming `APPDATA`. Missing file or field
+defaults to `true`. Comments and trailing commas are accepted; unknown fields and
+non-boolean values are invalid. The daemon applies the file before federation starts
+and polls every 2 seconds, so no restart is needed. `ck auth federation sharing status`
+prints the path and resolved value without a daemon or vault key. Change the file,
+not a CLI on/off command.
+
+Off removes all `sharing_switch` member grants and `home_watch` automatic copies in
+one audited transaction with the applied setting. Open and new remote login watches
+receive the existing `not_found` refusal; peers remove automatic copies of this home's
+logins. Receiving watches close too. Operator grants and hand-added remote records
+remain, as do local logins; operator-granted token reads and secret use still work.
+Turning the setting on triggers a fresh Callosum read and reopens receiving watches;
+grants and copies return from live state, without manual recreation.
+
+Invalid configuration never turns sharing on: startup applies off, while an invalid
+edit keeps the last applied value. A WARN names the path and redacted reason once per
+distinct invalid content, never the file's contents.
+
 Federation needs Callosum on every computer, for the member ids, the pairing and the
 transport between vaults. Callosum is not in the public release index yet, so a public
 install cannot federate. Until it is, run one vault per computer and sign in on each one

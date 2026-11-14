@@ -979,3 +979,282 @@ async fn member_resilience_real_not_found_open_removes_rows() {
     rig.protected_rows();
     rig.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn login_sharing_home_off_relays_not_found_and_on_restores_live_state() {
+    let mut rig = Rig::new("login-sharing-home", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    rig.a
+        .store
+        .create_member_grant_audited(
+            rig.vaults.requester_member(),
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Exact(OPERATOR.into()),
+            "pair-1",
+        )
+        .unwrap();
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    let other_home = "fed-computer:00000000000000000000000000000001";
+    rig.b
+        .store
+        .remote_watch_apply_audited(
+            other_home,
+            "other-pair",
+            &[credentials_core::federation::RemoteWatchRow {
+                credential_id: "oauth:other-home".into(),
+                state: RemoteHomeState::Active,
+                refresh_adapter: Some("anthropic".into()),
+                identity: Default::default(),
+                categories: vec!["llm-provider".into()],
+                detected_plan: None,
+                home_version: 1,
+            }],
+            credentials_core::federation::RemoteWatchApplyMode::Full,
+            &[],
+        )
+        .unwrap();
+    let other_copy = rig.row("oauth:other-home");
+    let mut writes = rig.a.store.subscribe_writes();
+    let store = Arc::clone(&rig.a.store);
+    wait_for_signal(tokio::task::spawn_blocking(move || {
+        store.set_login_sharing_audited(false, "config:claustrum.jsonc")
+    }))
+    .await
+    .unwrap()
+    .unwrap();
+    wait_for_signal(writes.changed()).await.unwrap();
+    wait_for_signal(rig.home.remote_watches.waking_for_test()).await;
+    tokio::time::advance(Duration::from_millis(250)).await;
+    wait_for_signal(rig.home.remote_watches.refreshed_for_test()).await;
+    wait_until(|| rig.b.store.remote_record(LOGIN).unwrap().is_none()).await;
+    rig.protected_rows();
+    assert_eq!(
+        rig.row("oauth:other-home"),
+        other_copy,
+        "another home's automatic copy stays"
+    );
+    wait_until(|| {
+        rig.relay
+            .frames()
+            .iter()
+            .any(|f| f.header.ty == FrameType::Error)
+    })
+    .await;
+    let terminal = rig
+        .relay
+        .frames()
+        .into_iter()
+        .find(|f| f.header.ty == FrameType::Error)
+        .expect("terminal Error, not a completion");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&terminal.body).unwrap(),
+        json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
+    );
+    let mut opened = wait_for_signal(rig.vaults.b.outbound.subscribe(
+        "off-open",
+        RouteCall {
+            target: management_surface(&crate::support::fed_provider_name(
+                rig.vaults.home_member(),
+            )),
+            prelude: None,
+            request: json!({"method":OP_REMOTE_WATCH,"params":{}}),
+        },
+        ADMIN_OP_BUDGET,
+    ))
+    .await
+    .unwrap();
+    assert!(
+        matches!(wait_for_signal(opened.next_event()).await.unwrap(),
+        claustrum_module_probe::federation::outbound::SubscriptionEvent::Error { code, .. } if code == "not_found")
+    );
+    let RemoteAnswer::Served(token) =
+        wait_for_signal(rig.reader.get(&rig.row(OPERATOR), None)).await
+    else {
+        panic!("operator grant must still serve remote_token while off");
+    };
+    assert_eq!(token.payload, b"access-from-a");
+    assert_eq!(rig.row(OPERATOR).incarnation, rig.operator.incarnation);
+    // The explicit token read updates fetch diagnostics, not the row's ownership.
+    rig.operator = rig.row(OPERATOR);
+    let grants = rig.a.store.list_member_grants().unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].source, MemberGrantSource::Operator);
+    let reads = rig
+        .vaults
+        .callosum
+        .methods("callosum")
+        .iter()
+        .filter(|m| *m == READ)
+        .count();
+    let store = Arc::clone(&rig.a.store);
+    wait_for_signal(tokio::task::spawn_blocking(move || {
+        store.set_login_sharing_audited(true, "config:claustrum.jsonc")
+    }))
+    .await
+    .unwrap()
+    .unwrap();
+    wait_until(|| rig.a.store.list_member_grants().unwrap().len() == 3).await;
+    assert!(
+        rig.vaults
+            .callosum
+            .methods("callosum")
+            .iter()
+            .filter(|m| *m == READ)
+            .count()
+            > reads,
+        "on triggers a fresh Callosum read without an inventory event"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    rig.installed(LOGIN).await;
+    rig.protected_rows();
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn login_sharing_member_off_closes_watches_and_on_reopens_without_pairing_event() {
+    let mut rig = Rig::new("login-sharing-member", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    let store = Arc::clone(&rig.b.store);
+    wait_for_signal(tokio::task::spawn_blocking(move || {
+        store.set_login_sharing_audited(false, "config:claustrum.jsonc")
+    }))
+    .await
+    .unwrap()
+    .unwrap();
+    wait_until(|| rig.b.store.remote_record(LOGIN).unwrap().is_none()).await;
+    rig.protected_rows();
+    wait_until(|| rig.home.remote_watches.registered_for_test() == 0).await;
+    let target = crate::support::fed_provider_name(rig.vaults.home_member());
+    let opens = rig
+        .b_callosum
+        .methods(&target)
+        .iter()
+        .filter(|m| *m == OP_REMOTE_WATCH)
+        .count();
+    rig.login("oauth:while-off", &oauth("anthropic"));
+    rig.b_inventory(Some("pair-1")).await;
+    assert!(rig
+        .b
+        .store
+        .remote_record("oauth:while-off")
+        .unwrap()
+        .is_none());
+    let store = Arc::clone(&rig.b.store);
+    wait_for_signal(tokio::task::spawn_blocking(move || {
+        store.set_login_sharing_audited(true, "config:claustrum.jsonc")
+    }))
+    .await
+    .unwrap()
+    .unwrap();
+    rig.installed(LOGIN).await;
+    rig.installed("oauth:while-off").await;
+    assert_eq!(
+        rig.b_callosum
+            .methods(&target)
+            .iter()
+            .filter(|m| *m == OP_REMOTE_WATCH)
+            .count(),
+        opens + 1
+    );
+    rig.protected_rows();
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn login_sharing_invalid_startup_edits_warn_once_and_poll_on_tokio_clock() {
+    use claustrum_module_probe::federation::login_sharing::ConfigPoll;
+    use std::sync::Mutex;
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?};", field.name()));
+        }
+    }
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event
+                .metadata()
+                .module_path()
+                .is_some_and(|p| p.ends_with("login_sharing"))
+            {
+                assert_eq!(*event.metadata().level(), tracing::Level::WARN);
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    let mut rig = Rig::new("login-sharing-poll", true).await;
+    rig.start_b();
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(Capture(Arc::clone(&logs)));
+    let path = rig._root.join("claustrum.jsonc");
+    std::fs::write(&path, "private-marker-one").unwrap();
+    let mut poll = ConfigPoll::new(path.clone(), Arc::clone(&rig.b.store));
+    poll.poll().await.unwrap();
+    assert!(
+        !rig.b.store.login_sharing().unwrap(),
+        "invalid startup applies off"
+    );
+    poll.poll().await.unwrap();
+    std::fs::write(&path, r#"{"login_sharing":true}"#).unwrap();
+    poll.poll().await.unwrap();
+    assert!(rig.b.store.login_sharing().unwrap());
+    for text in [
+        "private-marker-one",
+        "private-marker-two",
+        "private-marker-two",
+        "private-marker-one",
+    ] {
+        std::fs::write(&path, text).unwrap();
+        poll.poll().await.unwrap();
+        assert!(
+            rig.b.store.login_sharing().unwrap(),
+            "invalid edit keeps last valid value"
+        );
+    }
+    {
+        let logs = logs.lock().unwrap();
+        assert_eq!(
+            logs.len(),
+            2,
+            "one WARN per distinct invalid content, even after a valid edit"
+        );
+        for log in logs.iter() {
+            assert!(log.contains(&path.display().to_string()));
+            assert!(log.contains("reason="));
+            assert!(!log.contains("private-marker"));
+        }
+    }
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        ready.send(()).unwrap();
+        poll.run().await;
+    });
+    wait_for_signal(started).await.unwrap();
+    let mut writes = rig.b.store.subscribe_writes();
+    std::fs::write(&path, r#"{"login_sharing":false}"#).unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    wait_for_signal(writes.changed()).await.unwrap();
+    assert!(
+        !rig.b.store.login_sharing().unwrap(),
+        "next poll applies the edit"
+    );
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
+    rig.stop().await;
+}

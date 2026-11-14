@@ -44,7 +44,8 @@ cortexkit-store-types = "0.2.2"
 # normalized id (macOS /var->/private/var, symlinks, Windows verbatim/drive-case)
 # so two independent binaries agree on a path byte-for-byte. Used to scope the
 # keychain master-key item per-vault by canonical data_dir.
-cortexkit-paths = "0.1.1"
+cortexkit-paths = "0.1.2"
+subc-jsonc = "0.1.3"
 # Fleet logging (r2): one line format, one dated segment per module per day. Pulled in
 # WITHOUT `store-paths`: the daemon is told its data directory by the supervisor at
 # HELLO and must not resolve it a second time through another copy of the resolver.

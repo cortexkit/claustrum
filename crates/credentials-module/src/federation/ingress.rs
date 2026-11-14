@@ -1168,6 +1168,14 @@ impl HomeVault {
                         .ok_or(Refusal::NotFound)?,
                 )
             } else {
+                if !self
+                    .engine
+                    .store()
+                    .login_sharing()
+                    .map_err(|_| STORE_ERROR)?
+                {
+                    return Err(Refusal::NotFound);
+                }
                 self.active_transfer_key(&home)?;
                 super::home_watch::Projection::Logins(
                     self.remote_watch_projection(member, &pairing)

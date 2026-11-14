@@ -1655,6 +1655,14 @@ and run `scripts/accept-deploy.sh` against the rev you rolled back to.
 
 ### Federation setup and recovery
 
+Federation needs Callosum on every computer, for the member ids, the pairing and the
+transport between vaults. Callosum is not in the public release index yet, so a public
+install cannot federate. Until it is, run one vault per computer and sign in on each one
+with `ck auth login`, so each computer holds its own refresh token. Never copy
+`store.db`, the key file or a login's tokens to a second computer: providers that rotate
+refresh tokens revoke the whole login when two holders refresh it. A static API key does
+not rotate, so storing the same key on both computers with `ck auth put` is safe.
+
 Keep each rotating login on one home vault A. On each computer, obtain its own canonical
 member id from callosum (`fed-computer:<32 lowercase hex>`), pair the computers and run
 `ck auth transfer init --self <own-member>`. Callosum announces that vault's transfer
@@ -1670,8 +1678,8 @@ bearer-secret boundary described under capability handles, not a safe way to sha
 An older binary cannot open the migrated store; roll forward or restore the snapshot
 with the older binary, losing subsequent writes.
 
-On A, turn on B's Callosum vault-sharing switch. The switch means **B may use A's
-vault**, not the reverse. A's daemon creates two pairing-bound grants for
+On A, B's Callosum vault-sharing switch turns on when the two computers pair. The switch
+means **B may use A's vault**, not the reverse. A's daemon creates two pairing-bound grants for
 `fed-computer:<B>`: `remote_read` on category `llm-provider` and selector-free
 `secret_use`. Turning the switch off removes those grants; disappearance, re-pairing
 or changing to a non-computer class removes obsolete switch grants too. A live switch
@@ -1688,7 +1696,8 @@ otherwise recreate them. To authorize a narrower or additional selector manually
 `--category <category>`). On B, run `ck auth remote add --id <login-id> --home <A>`.
 B's modules need their own local read grants. `ck auth remote list` shows home/version/
 fetch outcome; `remote remove --id <id>` removes it. Re-homing is remove then add.
-After a re-pair, Callosum clears that peer's switches: turn sharing back on if wanted.
+Pairing a computer turns its vault-sharing switch on, and so does re-pairing it; the
+switch covers operations the vault declares later too. Turn it off per peer to stop sharing.
 After a re-pair or trust-backup restore, re-grant manual rows: old pairings do not apply.
 Repair a home login on A, then poll B's `get_scoped`; remote status alone cannot observe
 the repair. A cached access token can remain usable for at most 300 s after grant revocation.

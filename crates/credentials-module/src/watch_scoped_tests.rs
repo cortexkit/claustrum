@@ -452,6 +452,8 @@ mod scoped_watch {
                     Some("openai") if id.starts_with("apikey:") => Some("openai"),
                     Some("nanogpt") => Some("nano-gpt"),
                     Some("typesafe") => Some("typesafe"),
+                    Some("searxng") => Some("searxng"),
+                    Some("kagi") => Some("kagi"),
                     _ => None,
                 };
                 assert_eq!(

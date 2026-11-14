@@ -298,8 +298,8 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[1]["hosts"], json!(["api.exa.ai"]));
     assert!(rows.iter().all(|row| row.get("hosts").is_some()));
     assert_eq!(rows[2]["fusiform_provider_id"], "kimi-code-plan-global");
-    for index in [0, 1, 3] {
-        assert!(rows[index].get("fusiform_provider_id").is_none());
+    for (index, expected) in [(0, "brave"), (1, "exa"), (3, "tavily")] {
+        assert_eq!(rows[index]["fusiform_provider_id"], expected);
     }
     let mut cases = vec![list_vector_case(
         "catalog_and_lifecycle",

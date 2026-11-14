@@ -1667,11 +1667,14 @@ login sharing:
 The config home is `XDG_CONFIG_HOME` (normally `~/.config` on Unix); Windows also
 accepts that override and otherwise uses roaming `APPDATA`. Missing file or field
 defaults to `true`. Comments and trailing commas are accepted; unknown fields and
-non-boolean values are invalid. When the supervisor offers its config gate, the
-setting reaches the vault through that gate before federation starts. After the
-operator approves a configuration stamp for the supervisor, only operator-approved
-edits apply. Older supervisors use a direct file read and a 2-second poll. No vault
-restart is needed. `ck auth federation sharing status` prints
+non-boolean values are invalid. When the subc daemon offers its config gate, the
+setting reaches the vault through that gate before federation starts, and an edit
+reaches it as the daemon's change notice. Until someone stamps the daemon's
+configuration (`ck config stamp`, approved on the desktop), the gate serves the file
+as it is on disk. Once stamped, the daemon serves only approved configuration, so an
+edit applies only after the operator approves a plan for it, and the vault never reads
+the file itself. Daemons without the gate get a direct file read and a 2-second poll.
+No vault restart is needed. `ck auth federation sharing status` prints
 the path and local file's resolved value without a daemon or vault key, not the
 gate's approved value. Change the file, not a CLI on/off command.
 

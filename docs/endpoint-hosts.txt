@@ -644,6 +644,9 @@ crates/credentials-core/src/catalog.rs INLINE_616 vancine.com
 crates/credentials-core/src/catalog.rs INLINE_617 vancine.com
 crates/credentials-core/src/catalog.rs INLINE_618 ark.volcengine.com
 crates/credentials-core/src/catalog.rs INLINE_619 www.volcengine.com
+crates/credentials-core/src/catalog.rs INLINE_620 docs.byteplus.com
+crates/credentials-core/src/catalog.rs INLINE_621 ai.byteplus.com
+crates/credentials-core/src/catalog.rs INLINE_622 ark.ap-southeast.bytepluses.com
 crates/credentials-core/src/device_flow.rs INLINE_001 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_002 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_003 auth.openai.com

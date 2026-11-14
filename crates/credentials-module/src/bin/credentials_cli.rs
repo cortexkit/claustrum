@@ -9766,6 +9766,7 @@ mod login_regressions {
             ("stackit", "STACKIT"),
             ("vancine", "Vancine"),
             ("volcengine-coding-plan", "Volcengine Ark Coding Plan"),
+            ("byteplus", "BytePlus ModelArk"),
         ] {
             assert!(rows.contains(&(key.into(), name.into(), format!("apikey:{key}"),)));
         }

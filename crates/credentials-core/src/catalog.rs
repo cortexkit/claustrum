@@ -270,17 +270,7 @@ pub struct ApiKeyProvider {
 
 /// Rows without a published Fusiform identity pending an upstream or search-service ruling.
 /// Remove a row from this list when assigning its published id; mapped rows cannot stay here.
-pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[
-    ("tavily", "search_service_pending_ruling"),
-    ("kagi", "search_service_pending_ruling"),
-    ("exa", "search_service_pending_ruling"),
-    ("parallel", "search_service_pending_ruling"),
-    ("brave", "search_service_pending_ruling"),
-    ("firecrawl", "search_service_pending_ruling"),
-    ("jina", "search_service_pending_ruling"),
-    ("tinyfish", "search_service_pending_ruling"),
-    ("searxng", "search_service_pending_ruling"),
-];
+pub const PENDING_FUSIFORM_PROVIDER_IDS: &[(&str, &str)] = &[];
 
 /// Reviewed Fusiform ids deliberately not carried by an API-key row, paired with
 /// one of the reasons below. Unreviewed providers remain gaps, not automatic skips.
@@ -1705,7 +1695,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     },
     ApiKeyProvider {
         key: "tavily",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("tavily"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.tavily.com"],
         hosts_doc: "https://docs.tavily.com/documentation/api-reference/endpoint/search",
@@ -1725,7 +1715,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "kagi",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("kagi"),
         auth: None,
         hosts: &["kagi.com"],
         hosts_doc: "https://help.kagi.com/kagi/api/api-portal.html",
@@ -1745,7 +1735,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "exa",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("exa"),
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.exa.ai"],
         hosts_doc: "https://docs.exa.ai/reference/search",
@@ -1765,7 +1755,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
     ApiKeyProvider {
         key: "parallel",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("parallel"),
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["api.parallel.ai"],
         hosts_doc: "https://docs.parallel.ai/api-reference/search",
@@ -1788,7 +1778,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://api-dashboard.search.brave.com/api-reference/web/search/get
     ApiKeyProvider {
         key: "brave",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("brave"),
         auth: Some(AuthDescriptor { header: "x-subscription-token", scheme: AuthScheme::Raw }),
         hosts: &["api.search.brave.com"],
         hosts_doc: "https://api-dashboard.search.brave.com/documentation/guides/authentication",
@@ -1811,7 +1801,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.firecrawl.dev/api-reference/errors
     ApiKeyProvider {
         key: "firecrawl",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("firecrawl"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.firecrawl.dev"],
         hosts_doc: "https://docs.firecrawl.dev/api-reference/introduction",
@@ -1833,7 +1823,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.jina.ai/embedding-api
     ApiKeyProvider {
         key: "jina",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("jina"),
         auth: Some(BEARER_AUTH),
         hosts: &["api.jina.ai", "eu.r.jina.ai", "eu.s.jina.ai", "r.jina.ai", "s.jina.ai"],
         hosts_doc: "https://docs.jina.ai/embedding-api",
@@ -1856,7 +1846,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // https://docs.tinyfish.ai/error-codes
     ApiKeyProvider {
         key: "tinyfish",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("tinyfish"),
         auth: Some(AuthDescriptor { header: "x-api-key", scheme: AuthScheme::Raw }),
         hosts: &["agent.tinyfish.ai", "api.browser.tinyfish.ai", "api.fetch.tinyfish.ai", "api.search.tinyfish.ai", "api.tinyfish.ai"],
         hosts_doc: "https://docs.tinyfish.ai/authentication",
@@ -1876,7 +1866,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
     ApiKeyProvider {
         key: "searxng",
-        fusiform_provider_id: None,
+        fusiform_provider_id: Some("searxng"),
         auth: None,
         hosts: &[],
         hosts_doc: "https://docs.searxng.org/dev/search_api.html",
@@ -4972,6 +4962,29 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    // BytePlus documents this fixed ModelArk data-plane host, Bearer API keys and chat:
+    // https://docs.byteplus.com/en/docs/ModelArk/1298459. Access Keys for the control
+    // plane use a different authentication method and are not supported by this row.
+    ApiKeyProvider {
+        key: "byteplus",
+        fusiform_provider_id: Some("byteplus"),
+        auth: Some(BEARER_AUTH),
+        hosts: &["ark.ap-southeast.bytepluses.com"],
+        hosts_doc: "https://docs.byteplus.com/en/docs/ModelArk/1298459",
+        invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("AuthenticationError"), error_code_field: Some("/error/code") }),
+        default_provider_ids: &["byteplus"],
+        display_name: "BytePlus ModelArk",
+        default_id: "apikey:byteplus",
+        dashboard_url: "https://ai.byteplus.com/ark/region:ap-southeast-1/apiKey",
+        placeholder: "Ark API key",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/v3",
+            model: "seed-2-0-lite-260228",
+        },
+        categories: LLM,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5721,6 +5734,33 @@ mod tests {
     }
 
     #[test]
+    fn search_rows_match_their_published_fusiform_offerings() {
+        let providers = crate::fusiform_providers::fusiform_providers();
+        for (key, name, doc_host) in [
+            ("brave", "Brave Search", "api-dashboard.search.brave.com"),
+            ("exa", "Exa", "exa.ai"),
+            ("firecrawl", "Firecrawl", "docs.firecrawl.dev"),
+            ("jina", "Jina AI", "docs.jina.ai"),
+            ("kagi", "Kagi", "kagi.com"),
+            ("parallel", "Parallel", "docs.parallel.ai"),
+            ("searxng", "SearXNG", "docs.searxng.org"),
+            ("tavily", "Tavily", "docs.tavily.com"),
+            ("tinyfish", "TinyFish", "docs.tinyfish.ai"),
+        ] {
+            let row = api_key_provider(key).unwrap();
+            assert_eq!(row.fusiform_provider_id, Some(key), "{key}");
+            let published = providers
+                .iter()
+                .find(|provider| Some(provider.id.as_str()) == row.fusiform_provider_id)
+                .unwrap();
+            assert_eq!(published.name, name, "{key}");
+            let doc = url::Url::parse(&published.doc).unwrap();
+            assert_eq!(doc.domain(), Some(doc_host), "{key}");
+            assert_eq!(category_defaults(row.default_id), ["web-search"], "{key}");
+        }
+    }
+
+    #[test]
     fn api_key_fusiform_ids_match_offering_host_domains() {
         fn provider_domain(host: &str) -> &str {
             let Some(subdomains) = host.rsplitn(3, '.').nth(2) else {
@@ -5730,6 +5770,8 @@ mod tests {
         }
 
         const EXEMPTIONS: &[(&str, &str)] = &[
+            ("byteplus", "BytePlus documents ModelArk on byteplus.com; its data plane uses bytepluses.com"),
+            ("searxng", "SearXNG is self-hosted, with no fixed receiving host; its published name is checked separately"),
             ("kiro", "Kiro keys are sent to Amazon Q endpoints"),
             ("google", "AI Studio uses Google's separate API domain"),
             (
@@ -6637,6 +6679,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn byteplus_api_key_row_uses_documented_bearer_chat_and_records_the_auth_refusal() {
+        let row = api_key_provider("byteplus").expect("BytePlus api-key row");
+        assert_eq!(row.fusiform_provider_id, Some("byteplus"));
+        assert_eq!(row.default_id, "apikey:byteplus");
+        assert_eq!(row.default_provider_ids, ["byteplus"]);
+        assert_eq!(row.display_name, "BytePlus ModelArk");
+        assert_eq!(row.auth, Some(BEARER_AUTH));
+        assert_eq!(row.hosts, ["ark.ap-southeast.bytepluses.com"]);
+        assert_eq!(
+            row.hosts_doc,
+            "https://docs.byteplus.com/en/docs/ModelArk/1298459"
+        );
+        assert_eq!(
+            row.dashboard_url,
+            "https://ai.byteplus.com/ark/region:ap-southeast-1/apiKey"
+        );
+        assert_eq!(row.categories, LLM);
+        assert_eq!(category_defaults("apikey:byteplus"), ["llm-provider"]);
+        assert_eq!(category_defaults("apikey:byteplus:work"), ["llm-provider"]);
+        assert!(row.serves.is_empty());
+        assert!(row.account_id_prompt.is_none());
+        assert_eq!(
+            row.invalid_key,
+            Some(InvalidKeyEvidence {
+                status: 401,
+                error_code: Some("AuthenticationError"),
+                error_code_field: Some("/error/code"),
+            })
+        );
+        assert_eq!(
+            row.validation,
+            KeyValidation::OpenAiChat {
+                base_url: "https://ark.ap-southeast.bytepluses.com/api/v3",
+                model: "seed-2-0-lite-260228",
+            }
+        );
+    }
+
     /// `--provider cloudflare-workers-ai` must find this row, stamp new tokens
     /// `llm-provider` only, probe the account-scoped model search, and ask for an account
     /// id in Cloudflare's shape. It is the only row that asks for one.
@@ -6912,6 +6993,7 @@ mod tests {
             ("stackit", &["stackit"]),
             ("vancine", &["vancine"]),
             ("volcengine-coding-plan", &["volcengine-coding-plan"]),
+            ("byteplus", &["byteplus"]),
         ];
         assert_eq!(
             API_KEY_PROVIDERS
@@ -6951,9 +7033,9 @@ mod tests {
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, Anthropic, Inception, Cloudflare Workers AI, Kimi coding,
-        // 9 search APIs, ElevenLabs for media, and 149 rows proposed from Fusiform's
+        // 9 search APIs, ElevenLabs for media, and 150 rows proposed from Fusiform's
         // provider list.
-        assert_eq!(API_KEY_PROVIDERS.len(), 216);
+        assert_eq!(API_KEY_PROVIDERS.len(), 217);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // The category tests below pin the model, search and media rows and require
         // every row to be listed.
@@ -7251,6 +7333,7 @@ mod tests {
         "stackit",
         "vancine",
         "volcengine-coding-plan",
+        "byteplus",
     ];
 
     /// The rows in `FUSIFORM_LLM_KEYS` whose Fusiform entry also lists audio, image or
@@ -8166,6 +8249,7 @@ mod source_ownership_tests {
                 ("stackit", vec![]),
                 ("vancine", vec![]),
                 ("volcengine-coding-plan", vec![]),
+                ("byteplus", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

@@ -46,6 +46,7 @@ are unchanged.
 | blueclaw | https://openai.blueclaw.network/v1/models | 2026-11-11 | 401 | - | - |
 | bothub | https://openai.bothub.chat/v1/models | 2026-11-11 | 401 | UNAUTHORIZED | /error/code |
 | boundless | https://api.inference.boundless.network/v1/credits | 2026-11-11 | 401 | authentication_error | /error/type |
+| byteplus | https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions | 2026-11-14 | 401 | AuthenticationError | /error/code |
 | charm-hyper | https://hyper.charm.land/v1/credits | 2026-11-10 | 401 | authentication_error | /error/type |
 | chutes | https://api.chutes.ai/users/me | 2026-11-11 | 401 | - | - |
 | claudinio | https://api.claudin.io/v1/models | 2026-11-11 | 401 | token_not_found_in_db | /error/type |
@@ -1313,6 +1314,31 @@ It says to use the returned `access_token` with the prefix `Bearer` in the HTTP
 inference reference at <https://cloud.ibm.com/docs/apis/watsonx-ai> requires
 either `space_id` or `project_id` for text generation. The pasted IBM API key
 is therefore not itself a fixed-host inference Bearer key in this catalog.
+
+## BytePlus ModelArk and published search identities
+
+The provider list at Fusiform commit
+`638a4064e120332f9fe9d038eeb24eb92b3daeee` adds `byteplus` and publishes
+the previously pending search-service ids. The existing `brave`, `exa`,
+`firecrawl`, `jina`, `kagi`, `parallel`, `searxng`, `tavily` and `tinyfish` rows
+now carry the same-named Fusiform ids. Their receiving hosts, authentication,
+checks, routing defaults and `web-search` category are unchanged.
+
+BytePlus's [Base URL and authentication](https://docs.byteplus.com/en/docs/ModelArk/1298459)
+page documents `https://ark.ap-southeast.bytepluses.com/api/v3` and
+`Authorization: Bearer $ARK_API_KEY`, with a chat example using
+`seed-2-0-lite-260228`. The separate Access Key signature method for control-plane
+operations is not the API-key authentication used by this row. Its
+[API-key guide](https://docs.byteplus.com/en/docs/modelark/api-key) links the
+dashboard and describes project-scoped API keys that do not require a token exchange.
+
+On 2026-11-14 a network-enabled Linux build server sent one POST to the documented
+`/chat/completions` endpoint, without following redirects, using the obviously fake
+key `sk-claustrum-deliberately-invalid-byteplus-key`. The request used the documented
+model, one user message (`Hi`) and `max_tokens: 1`. It returned HTTP 401 with
+`error.code` equal to `AuthenticationError`, `error.type` equal to `Unauthorized`,
+and the message "The API key format is incorrect." The catalog therefore uses that
+chat as a real key check and records the authentication refusal in the table above.
 
 ## Fusiform provider skips
 

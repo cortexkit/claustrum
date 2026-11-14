@@ -12,7 +12,7 @@ reviewed Fusiform commit and update this table. The embedded-byte hash test in
 
 | file | source URL | commit | sha256 | fetched (UTC) |
 |---|---|---|---|---|
-| `providers-v1.json` | <https://raw.githubusercontent.com/cortexkit/fusiform/400202691736aaac260a2395fed9788f43fc4a2c/test-vectors/providers-v1.json> | `400202691736aaac260a2395fed9788f43fc4a2c` | `5e9c3a61615125664ca97f2d2a90c3e4bfb22a83e9df17b13e3565e7376234c9` | 2026-11-10 |
+| `providers-v1.json` | <https://raw.githubusercontent.com/cortexkit/fusiform/638a4064e120332f9fe9d038eeb24eb92b3daeee/test-vectors/providers-v1.json> | `638a4064e120332f9fe9d038eeb24eb92b3daeee` | `6a8b8e086e7c14eafdfec8eb4a6294b511859ab59fedd70126236091432a20bb` | 2026-11-14 |
 
 The initial pin, `6ee693a6b093b0d488cfb06ec2ca3bf57bbe4925`, had no provider
 entry for these existing API-key rows: `kiro`, `qianfan`, `qwen-portal`,

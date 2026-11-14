@@ -1,6 +1,6 @@
 {
   "format": "providers-v1",
-  "snapshot_fetched_at": "2026-11-09T20:08:23Z",
+  "snapshot_fetched_at": "2026-11-14T16:28:52Z",
   "providers": [
     {
       "id": "302ai",
@@ -466,6 +466,27 @@
       ]
     },
     {
+      "id": "brave",
+      "name": "Brave Search",
+      "doc": "https://api-dashboard.search.brave.com/documentation",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
+      "id": "byteplus",
+      "name": "BytePlus ModelArk",
+      "doc": "https://docs.byteplus.com/en/docs/ModelArk/1529329",
+      "source": "models.dev",
+      "env": [
+        "BYTEPLUS_API_KEY"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
       "id": "cerebras",
       "name": "Cerebras",
       "doc": "https://inference-docs.cerebras.ai/models/overview",
@@ -810,6 +831,15 @@
       ]
     },
     {
+      "id": "exa",
+      "name": "Exa",
+      "doc": "https://exa.ai/docs/search/quickstart",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "fastrouter",
       "name": "FastRouter",
       "doc": "https://fastrouter.ai/models",
@@ -822,6 +852,15 @@
         "text",
         "video"
       ]
+    },
+    {
+      "id": "firecrawl",
+      "name": "Firecrawl",
+      "doc": "https://docs.firecrawl.dev/api-reference/v2-introduction",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "fireworks-ai",
@@ -929,8 +968,7 @@
         "audio",
         "embedding",
         "image",
-        "text",
-        "video"
+        "text"
       ]
     },
     {
@@ -1209,6 +1247,24 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "jina",
+      "name": "Jina AI",
+      "doc": "https://docs.jina.ai/",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
+      "id": "kagi",
+      "name": "Kagi",
+      "doc": "https://kagi.com/api/docs",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "kenari",
@@ -1964,6 +2020,15 @@
       ]
     },
     {
+      "id": "parallel",
+      "name": "Parallel",
+      "doc": "https://docs.parallel.ai/search/search-quickstart",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "pareto",
       "name": "Pareto Inference",
       "doc": "https://docs.paretoinference.com/",
@@ -2291,6 +2356,15 @@
       ]
     },
     {
+      "id": "searxng",
+      "name": "SearXNG",
+      "doc": "https://docs.searxng.org/",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "sensenova",
       "name": "SenseNova (China)",
       "doc": "https://platform.sensenova.cn/docs",
@@ -2467,6 +2541,15 @@
       ]
     },
     {
+      "id": "tavily",
+      "name": "Tavily",
+      "doc": "https://docs.tavily.com/documentation/api-reference/endpoint/search",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "tempr",
       "name": "Tempr Gateway",
       "doc": "https://temprhq.io/docs/gateway-reference.html",
@@ -2562,6 +2645,15 @@
       "output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "tinyfish",
+      "name": "TinyFish",
+      "doc": "https://docs.tinyfish.ai/",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
     },
     {
       "id": "togetherai",

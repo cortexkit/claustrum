@@ -376,17 +376,12 @@ where
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
     // dangling refresh intents BEFORE accepting any request.
-    let (surface, admin) = build_surface(&ack, &config.module_id).await?;
-    let surface = Arc::new(surface);
-    let admin = Arc::new(admin);
     let config_path = credentials_core::login_sharing::config_path()
         .map_err(|_| ModuleError::Message("cannot resolve login sharing config path".into()))?;
-    let mut login_sharing =
-        federation::login_sharing::ConfigPoll::new(config_path, Arc::clone(surface.store()));
-    login_sharing
-        .poll()
-        .await
-        .map_err(|_| ModuleError::Message("cannot apply login sharing config".into()))?;
+    let (surface, admin, login_sharing) =
+        build_surface(&ack, &config.module_id, config_path).await?;
+    let surface = Arc::new(surface);
+    let admin = Arc::new(admin);
     let _login_sharing_guard = AbortOnDrop(tokio::spawn(login_sharing.run()));
     // The outbound client: this vault's own connection to subc for calls it makes as a
     // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
@@ -673,7 +668,15 @@ impl Drop for AbortOnDrop {
 async fn build_surface(
     ack: &ModuleHelloAckBody,
     module_id: &str,
-) -> Result<(ReadSurface, admin_surface::AdminSurface), ModuleError> {
+    config_path: PathBuf,
+) -> Result<
+    (
+        ReadSurface,
+        admin_surface::AdminSurface,
+        federation::login_sharing::ConfigPoll,
+    ),
+    ModuleError,
+> {
     let descriptor_value = ack
         .storage
         .as_ref()
@@ -745,6 +748,13 @@ async fn build_surface(
         .ensure_secret_deposit_key()
         .map_err(|e| ModuleError::Message(format!("bootstrap deposit key: {e}")))?;
     let store = Arc::new(store);
+    // Apply the local opt-out before constructing any surface or federation worker.
+    let mut login_sharing =
+        federation::login_sharing::ConfigPoll::new(config_path, Arc::clone(&store));
+    login_sharing
+        .poll()
+        .await
+        .map_err(|_| ModuleError::Message("cannot apply login sharing config".into()))?;
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
@@ -790,6 +800,7 @@ async fn build_surface(
         ReadSurface::new(engine, FetchLimiter::new(Caps::default()))
             .with_refresh_adapter_names(adapter_names),
         admin,
+        login_sharing,
     ))
 }
 
@@ -7710,6 +7721,60 @@ mod tests {
     // -----------------------------------------------------------------------------
 
     #[tokio::test]
+    async fn login_sharing_startup_applies_invalid_off_before_returning_any_surface() {
+        let root = TestTempDir::new(format!("login-sharing-start-{}", std::process::id()));
+        let data_dir = root.join("vault");
+        let key_path = root.join("master.key");
+        credentials_core::resolver::bootstrap(&credentials_core::resolver::ResolverConfig {
+            data_dir: data_dir.clone(),
+            source: credentials_core::resolver::KeySource::OperatorPath { path: key_path },
+        })
+        .unwrap();
+        let descriptor = StorageDescriptor {
+            module_id: credentials_core::MODULE_ID.into(),
+            storage_namespace: credentials_core::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: data_dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let ack: ModuleHelloAckBody = serde_json::from_value(json!({
+            "negotiated_ver": PROTOCOL_VERSION, "subc_ops": [], "subc_capabilities": [],
+            "storage": serde_json::to_value(descriptor).unwrap(),
+        }))
+        .unwrap();
+        let path = root.join("claustrum.jsonc");
+        for (bytes, enabled) in [
+            ("invalid-config", false),
+            (r#"{"login_sharing":true}"#, true),
+            ("invalid-config", false),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let (surface, admin, poll) =
+                build_surface(&ack, credentials_core::MODULE_ID, path.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(surface.store().login_sharing().unwrap(), enabled);
+            let wanted = [credentials_core::federation::VaultSharingMember {
+                member_id: "fed-computer:00000000000000000000000000000001".into(),
+                pairing_id: "pair".into(),
+            }];
+            assert_eq!(
+                surface
+                    .store()
+                    .reconcile_vault_sharing_audited(&wanted)
+                    .unwrap(),
+                if enabled { (2, 0) } else { (0, 0) }
+            );
+            assert_eq!(
+                surface.store().list_member_grants().unwrap().len(),
+                if enabled { 2 } else { 0 }
+            );
+            drop((surface, admin, poll));
+        }
+    }
+
+    #[tokio::test]
     async fn daemon_start_creates_the_deposit_key_once_across_restarts() {
         let root = TestTempDir::new(format!("secret-start-{}", std::process::id()));
         let data_dir = root.join("vault");
@@ -7736,9 +7801,13 @@ mod tests {
         .unwrap();
         let mut first_envelope = None;
         for _ in 0..2 {
-            let (surface, admin) = build_surface(&ack, credentials_core::MODULE_ID)
-                .await
-                .expect("daemon start");
+            let (surface, admin, poll) = build_surface(
+                &ack,
+                credentials_core::MODULE_ID,
+                root.join("claustrum.jsonc"),
+            )
+            .await
+            .expect("daemon start");
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             let (state, blob): (String, Vec<u8>) = conn.query_row(
                 "SELECT state, envelope FROM credentials WHERE credential_id = 'kem:secret-deposit:1'", [],
@@ -7751,7 +7820,7 @@ mod tests {
                 first_envelope = Some(blob);
             }
             assert_eq!(conn.query_row("SELECT count(*) FROM audit_log WHERE op = 'secret_deposit_key_create' AND actor = 'vault' AND credential_id = 'kem:secret-deposit:1'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-            drop((conn, surface, admin));
+            drop((conn, surface, admin, poll));
         }
     }
 

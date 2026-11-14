@@ -3,6 +3,21 @@ use super::*;
 const FP: &str = "aa11bb22cc33dd44ee55ff6600112233";
 const HOME: &str = "fed-computer:aa11bb22cc33dd44ee55ff6600112233";
 
+#[test]
+fn authority_changed_keeps_home_for_reopen() {
+    let ending = SessionEnd::Terminal(SubscriptionEvent::Error {
+        code: "fed_subscription_ended".into(),
+        message: "subscription ended".into(),
+        detail: Some(
+            serde_json::json!({"reason":subc_protocol::RouteCloseReason::AuthorityChanged}),
+        ),
+    });
+    assert!(
+        !ending.removes_home(),
+        "an authority change is not a sharing revocation"
+    );
+}
+
 struct Rig {
     reconciler: Reconciler,
     endings: mpsc::UnboundedReceiver<HomeEvent>,

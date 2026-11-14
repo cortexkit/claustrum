@@ -1745,8 +1745,8 @@ Peers treat it as no longer shared and remove only that home's automatic copies,
 not operator records. Local receiving watches close while off. Turning on rereads
 Callosum's current switches and reopens watches, restoring grants and copies from
 live state. Invalid input never enables sharing: startup is off; later invalid edits
-retain the applied value. The daemon reads the file directly until the supervisor
-delivers `config.gate`; no gate control operation is advertised in this version.
+retain the applied value. The vault declares `config.review` and opts into
+`config.gate` when offered; consumer wire operations and replies are unchanged.
 
 ### Channel identity and harness mapping
 

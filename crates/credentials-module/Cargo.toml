@@ -55,6 +55,7 @@ subc-protocol = { workspace = true }
 subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
+subc-config = { workspace = true }
 cortexkit-store = { workspace = true }
 # `durable_replace`: the engram catalog and the OpenCode file writers replace a file
 # through it so the replace survives a power loss on Windows as well as Unix.

@@ -264,6 +264,25 @@ async fn route_closed_is_transport_loss() {
 
 #[cfg(feature = "transport")]
 #[tokio::test]
+async fn authority_changed_is_transport_loss_for_reopen() {
+    let (mut watch, server) = stand_in(
+        vec![(
+            FrameType::Error,
+            json!({"code":"route_closed", "message":"closed",
+            "detail":{"reason":subc_protocol::RouteCloseReason::AuthorityChanged}}),
+        )],
+        Value::Null,
+    )
+    .await;
+    let ScopedWatchOutcome::TransportLost(error) = closed(&mut watch).await else {
+        panic!("authority changes must use the reconnect path");
+    };
+    assert_eq!(error.code(), "route_closed");
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[cfg(feature = "transport")]
+#[tokio::test]
 async fn unknown_method_is_polling_fallback() {
     let (mut watch, server) = stand_in(
         vec![(

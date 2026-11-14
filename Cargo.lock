@@ -536,6 +536,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "subc-config",
  "subc-jsonc",
  "subc-os",
  "subtle",
@@ -568,6 +569,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subc-config",
  "subc-control",
  "subc-os",
  "subc-protocol",
@@ -2202,13 +2204,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
-name = "subc-control"
-version = "0.37.0"
+name = "subc-config"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fb7a697c95ab59be38f720da06a5f03f431986f03906eb405fdb80f05d8e86a"
+checksum = "701a3c1b6e06ed0fcec46bb155b09ed194c9d4871aefade0447eb67eebd6c324"
+dependencies = [
+ "regex",
+ "ryu",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "subc-control"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2cf8d47a1e3534b914791bb07c63c3478af7928033a70962c8aa89b00244f3"
 dependencies = [
  "serde",
  "serde_json",
+ "subc-config",
  "subc-protocol",
 ]
 
@@ -2223,30 +2239,33 @@ dependencies = [
 
 [[package]]
 name = "subc-os"
-version = "0.1.30"
+version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ec5828d41eb22334c1b0a2c002d3af1efd432e6a0cef703b4d25747851f3a66"
+checksum = "077dbc9aa89d2b9b54cb6ef811ab7c20ee6d85705d86d33a2090df3ab2bb09fc"
 dependencies = [
  "libc",
  "rustix",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
 name = "subc-protocol"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d3a637e5216963e31c58a51a26c3412412781b10f0b7df851135406949bf2e"
+checksum = "07235d50c6e0de39c8a91a53b578521222b97eafcaa774fc8168bb65985f9ef6"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
+ "subc-config",
 ]
 
 [[package]]
 name = "subc-transport"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6325aac419b20781eb63e3f5e5fa77404ad3596d5f088c7e50c35c198a768486"
+checksum = "cb73c4a8aebcba6e7dd4f6fa889fc02479b7510eaafb889199c33d9ecbe2351f"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",

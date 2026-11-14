@@ -33,6 +33,12 @@ impl ConfigPoll {
         let input = tokio::task::spawn_blocking(move || read_input(&path))
             .await
             .map_err(|_| StoreOpError::Encode("config reader stopped".into()))?;
+        self.apply_input(input).await.map(|_| ())
+    }
+
+    /// Apply delivered bytes with the same invalid-edit rules as the legacy reader.
+    /// A gate refusal never calls this method, so it leaves the persisted value alone.
+    pub async fn apply_input(&mut self, input: Input) -> Result<bool, StoreOpError> {
         if self.previous.as_ref() != Some(&input) {
             self.resolution = resolve(&input);
             if let Resolution::Invalid(reason) = &self.resolution {
@@ -58,7 +64,7 @@ impl ConfigPoll {
                 .map_err(|_| StoreOpError::Encode("config apply stopped".into()))??;
             self.applied = Some(wanted);
         }
-        Ok(())
+        Ok(self.resolution.value().is_some())
     }
 
     pub async fn run(mut self) {

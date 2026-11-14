@@ -1516,6 +1516,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
     ];
     let may_not_send = [
         "main.rs",
+        "config_gate.rs",
+        "config_gate_tests.rs",
         "lib.rs",
         "read_surface.rs",
         "limiter.rs",

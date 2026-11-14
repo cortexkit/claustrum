@@ -307,7 +307,7 @@ impl RouteEpochs {
 
 async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
     let stream = connect_to_subc(&config.connection_file_path).await?;
-    let (mut read_half, write_half) = tokio::io::split(stream);
+    let (read_half, write_half) = tokio::io::split(stream);
     let (control_tx, control_rx) = mpsc::channel::<Frame>(CONTROL_EGRESS_BUFFER);
     let (route_tx, route_rx) = mpsc::channel::<Frame>(EGRESS_BUFFER);
     let writer = tokio::spawn(drain_writer(write_half, control_rx, route_rx));
@@ -320,7 +320,7 @@ async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
     // AFTER the handshake (it needs the descriptor) and the boot gate runs before
     // any request is served. In-flight requests can retain route senders after the
     // loop exits, so shutdown gives the writer a bounded grace period, then aborts it.
-    let loop_result = module_loop(&mut read_half, egress, &config).await;
+    let loop_result = module_loop(read_half, egress, &config).await;
 
     let writer_result = finish_writer(writer).await;
     match (loop_result, writer_result) {
@@ -362,27 +362,96 @@ async fn connect_to_subc(connection_file_path: &PathBuf) -> Result<TcpStream, Mo
     Ok(stream)
 }
 
+mod config_gate;
+
 async fn module_loop<R>(
-    read_half: &mut R,
+    read_half: R,
     egress: Egress,
     config: &ModuleConfig,
 ) -> Result<(), ModuleError>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let config_path = credentials_core::login_sharing::config_path()
+        .map_err(|_| ModuleError::Message("cannot resolve login sharing config path".into()))?;
+    module_loop_with_config_path(read_half, egress, config, config_path).await
+}
+
+async fn module_loop_with_config_path<R>(
+    mut read_half: R,
+    egress: Egress,
+    config: &ModuleConfig,
+    config_path: PathBuf,
+) -> Result<(), ModuleError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
 {
     // HELLO is a channel-0 control frame — send it on the control lane.
     send_hello(&egress.control, config).await?;
-    let ack = expect_hello_ack(read_half).await?;
+    let ack = expect_hello_ack(&mut read_half).await?;
+    // The frame decoder must not be cancelled mid-frame when startup completes.
+    // A bounded inbox makes the startup readiness select cancellation-safe.
+    let (incoming, mut ingress) = mpsc::channel(EGRESS_BUFFER);
+    let _reader_guard = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut read_half)
+                .await
+                .map_err(|e| ModuleError::Message(e.to_string()));
+            match frame {
+                Ok(Some(frame)) => {
+                    if incoming.send(Ok(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = incoming.send(Err(error)).await;
+                    break;
+                }
+            }
+        }
+    }));
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
     // dangling refresh intents BEFORE accepting any request.
-    let config_path = credentials_core::login_sharing::config_path()
-        .map_err(|_| ModuleError::Message("cannot resolve login sharing config path".into()))?;
     let (surface, admin, login_sharing) =
-        build_surface(&ack, &config.module_id, config_path).await?;
+        build_surface(&ack, &config.module_id, config_path.clone()).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
-    let _login_sharing_guard = AbortOnDrop(tokio::spawn(login_sharing.run()));
+    let routes = Arc::new(RouteEpochs::default());
+    let mut deferred = std::collections::VecDeque::new();
+    let (gate, login_sharing_task) = if ack
+        .subc_capabilities
+        .iter()
+        .any(|cap| cap == subc_protocol::config::CONFIG_GATE_CAPABILITY)
+    {
+        let (gate, mut ready, task) =
+            config_gate::Gate::start(login_sharing, config_path, egress.control.clone());
+        let guard = AbortOnDrop(task);
+        // Keep reading config replies, reviews and probes during startup, but do not
+        // expose routes or start federation until the first delivery has settled.
+        loop {
+            tokio::select! {
+                _ = &mut ready => break,
+                frame = ingress.recv() => {
+                    let Some(frame) = frame.transpose()? else { return Ok(()); };
+                    if gate.dispatch(&frame).await? { continue; }
+                    if frame.header.channel == 0 && frame.header.ty == FrameType::Goodbye { return Ok(()); }
+                    if frame.header.channel == 0 && (matches!(frame.header.ty, FrameType::Ping | FrameType::Push)
+                        || (frame.header.ty == FrameType::Request && serde_json::from_slice::<serde_json::Value>(&frame.body)
+                            .is_ok_and(|body| body["op"] == MODULE_CONTROL_OP_HEALTH_CHECK))) {
+                        handle_frame(frame, &egress, &surface, &admin, &routes).await?;
+                    } else { deferred.push_back(frame); }
+                }
+            }
+        }
+        (Some(gate), guard)
+    } else {
+        // Older daemons do not deliver configuration: only this branch reads and
+        // polls the file. Gate refusals must never fall back to unapproved bytes.
+        (None, AbortOnDrop(tokio::spawn(login_sharing.run())))
+    };
+    let _login_sharing_guard = login_sharing_task;
     // The outbound client: this vault's own connection to subc for calls it makes as a
     // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
     // from the module id and the launch nonce `ModuleConfig::from_env` already read;
@@ -415,7 +484,6 @@ where
     // against exactly the adapter set and reply type a consumer read uses.
     admin.attach_remote_reader(Arc::clone(surface.remote()));
     // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
-    let routes = Arc::new(RouteEpochs::default());
 
     // Keep the cached health snapshot current OFF the probe path. The health.check
     // reply must be cheap/in-memory (spec §2), so the live store scan runs here on a
@@ -481,24 +549,23 @@ where
     // it. So "the supervisor restarts us" remains true only three times in ten minutes,
     // which is the case a genuine crash loop produces.
     //
-    // Do NOT add a redundant liveness probe here on the strength of the paragraph
-    // above; the supervisor's already fires and a second one would only add a way to
-    // disagree. What WOULD justify revisiting: this daemon acquiring an outbound
-    // request that awaits a reply ON THIS CONNECTION. It now makes outbound calls for
-    // federation, but over its own connection (`federation::OutboundClient`), which
-    // carries its own deadlines and drops a dead link so the next call redials. THIS
-    // connection is still purely reactive after HELLO, which is why the
-    // reused-dead-connection class cannot occur on it -- there is no requester object
-    // here for the defect to live on. That immunity is a property of the current role
-    // shape and ends silently the day an outbound wait is moved onto this connection,
-    // in a change that need not look like a connection-lifecycle edit at all.
+    // Config-gate calls now use this connection too, with a bounded deadline in
+    // their worker. They never occupy this reader while awaiting a reply, so probes
+    // remain responsive and the supervisor still detects a silent half-open link.
     loop {
-        let Some(frame) = read_frame(read_half)
-            .await
-            .map_err(|e| ModuleError::Message(e.to_string()))?
-        else {
+        let frame = if let Some(frame) = deferred.pop_front() {
+            Some(frame)
+        } else {
+            ingress.recv().await.transpose()?
+        };
+        let Some(frame) = frame else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
+        if let Some(gate) = &gate {
+            if gate.dispatch(&frame).await? {
+                continue;
+            }
+        }
         if !handle_frame(frame, &egress, &surface, &admin, &routes).await? {
             return Ok(());
         }
@@ -748,13 +815,20 @@ async fn build_surface(
         .ensure_secret_deposit_key()
         .map_err(|e| ModuleError::Message(format!("bootstrap deposit key: {e}")))?;
     let store = Arc::new(store);
-    // Apply the local opt-out before constructing any surface or federation worker.
+    // Legacy startup reads before surface construction. Gate delivery applies in
+    // the module loop before exposing routes or starting federation workers.
     let mut login_sharing =
         federation::login_sharing::ConfigPoll::new(config_path, Arc::clone(&store));
-    login_sharing
-        .poll()
-        .await
-        .map_err(|_| ModuleError::Message("cannot apply login sharing config".into()))?;
+    if !ack
+        .subc_capabilities
+        .iter()
+        .any(|cap| cap == subc_protocol::config::CONFIG_GATE_CAPABILITY)
+    {
+        login_sharing
+            .poll()
+            .await
+            .map_err(|_| ModuleError::Message("cannot apply login sharing config".into()))?;
+    }
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
@@ -948,7 +1022,10 @@ async fn send_hello(
         // gated: unadvertised = health "unknown", never probed). We answer L2
         // through the same channel-0 dispatch and report L3 domain health from a
         // cheap no-decrypt metadata scan.
-        control_ops: Some(vec![MODULE_CONTROL_OP_HEALTH_CHECK.to_string()]),
+        control_ops: Some(vec![
+            MODULE_CONTROL_OP_HEALTH_CHECK.to_string(),
+            subc_protocol::config::CONFIG_REVIEW_OP.into(),
+        ]),
         // Echo the supervisor's launch nonce. This is the module half of the
         // reserved-id ceremony: it proves this process was spawned by the
         // supervisor rather than merely able to complete the handshake.

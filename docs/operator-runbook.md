@@ -1667,10 +1667,13 @@ login sharing:
 The config home is `XDG_CONFIG_HOME` (normally `~/.config` on Unix); Windows also
 accepts that override and otherwise uses roaming `APPDATA`. Missing file or field
 defaults to `true`. Comments and trailing commas are accepted; unknown fields and
-non-boolean values are invalid. The daemon applies the file before federation starts
-and polls every 2 seconds, so no restart is needed. `ck auth federation sharing status`
-prints the path and resolved value without a daemon or vault key. Change the file,
-not a CLI on/off command.
+non-boolean values are invalid. When the supervisor offers its config gate, the
+setting reaches the vault through that gate before federation starts. After the
+operator approves a configuration stamp for the supervisor, only operator-approved
+edits apply. Older supervisors use a direct file read and a 2-second poll. No vault
+restart is needed. `ck auth federation sharing status` prints
+the path and local file's resolved value without a daemon or vault key, not the
+gate's approved value. Change the file, not a CLI on/off command.
 
 Off removes all `sharing_switch` member grants and `home_watch` automatic copies in
 one audited transaction with the applied setting. Open and new remote login watches

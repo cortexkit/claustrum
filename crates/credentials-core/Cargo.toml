@@ -91,6 +91,7 @@ required-features = ["login-test-seam"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 subc-jsonc = { workspace = true }
+subc-config = { workspace = true }
 aft-secret-rules = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }

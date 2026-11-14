@@ -658,6 +658,7 @@ crates/credentials-core/src/google_login.rs LOAD_CODE_ASSIST_URL cloudcode-pa.go
 crates/credentials-core/src/google_login.rs ONBOARD_USER_URL cloudcode-pa.googleapis.com
 crates/credentials-core/src/google_login.rs TOKEN_URL oauth2.googleapis.com
 crates/credentials-core/src/google_login.rs USERINFO_URL www.googleapis.com
+crates/credentials-core/src/login_sharing.rs INLINE_001 json-schema.org
 crates/credentials-core/src/oauth_login.rs INLINE_001 api.openai.com
 crates/credentials-core/src/plan_detection.rs INLINE_001 api.openai.com
 crates/credentials-core/src/plan_detection.rs PROFILE_URL api.anthropic.com

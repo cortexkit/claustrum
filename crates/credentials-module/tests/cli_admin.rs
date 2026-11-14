@@ -9958,7 +9958,9 @@ fn member_list_shows_sources_and_revoke_refuses_switch_grants() {
 fn login_sharing_status_reads_isolated_jsonc_without_daemon_or_vault_key() {
     let root = tmp_root("login-sharing-status");
     let config = root.join("config");
-    let path = config.join("cortexkit/claustrum.jsonc");
+    // Join each component separately: a joined "a/b" keeps its forward slash on
+    // Windows, so its display would not match the path the CLI prints.
+    let path = config.join("cortexkit").join("claustrum.jsonc");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let status = || {
         let out = cli()

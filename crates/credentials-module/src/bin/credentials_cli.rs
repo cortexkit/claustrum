@@ -413,7 +413,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global, &args),
         "provider-report" => cmd_provider_report(&global, options),
-        "grants" => cmd_grants(&global),
+        "grants" => cmd_grants(&global, &args),
         "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
         "audit" => cmd_audit(&global, &args),
@@ -589,6 +589,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "transfer" => &["--replace"],
         "list" => &["--json"],
+        "grants" => &["--declared"],
         "provider-report" => &["--missing"],
         "enroll" => &[
             "--keep-grants",
@@ -704,7 +705,7 @@ fn usage_short() -> String {
         list                credential inventory + gateway settings (no secrets)\n\
        provider-report     compare routing ids or list uncovered providers\n\
        provider            list, set or remove operator provider defaults\n\
-       grants              principal-scoped grants (no secrets)\n\
+       grants [--declared]  hand-made or declared grants (no secrets)\n\
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
@@ -1011,14 +1012,21 @@ fn help_verb(verb: &str) -> String {
              gateway's base URL and header names only, never header values."
         }
         "grants" => {
-            "ck auth grants\n\
+            "ck auth grants [--declared]\n\
+             \n\
+             \x20 --declared  print only last-seen first-party declared grants\n\
              \n\
              NOTES\n\
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
              id, selector kind (exact, category or audience), selector, operation, reach,\n\
              and creation time. Read-only; it uses the authenticated admin.status\n\
              path when the daemon is available, otherwise a lease-free, read-only\n\
-             local metadata read. An empty grant table prints `no grants`."
+             local metadata read. An empty grant table prints `no grants`.\n\
+             Plain output stays hand-made only; stderr points to --declared when needed.\n\
+             --declared shows the last declaration each module presented, not live\n\
+             route authority. Empty declared inventory prints nothing. Change a module's\n\
+             approved declaration in the daemon configuration, then restart the module\n\
+             so it re-binds; a route bound earlier may still hold an older set."
         }
         "categories" => {
             "ck auth categories\n\
@@ -4921,6 +4929,10 @@ fn request_admin_status_with_schema(
         }
     }
     attach_inventory_creators(&mut result, &metas);
+    credentials_core::admin_ops::attach_declared_grants(
+        &mut result,
+        credentials_core::store::declared_grant_sets_read_only(&db),
+    );
     Ok((result, meta_schema.or(grant_schema)))
 }
 
@@ -6054,6 +6066,13 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         operation.as_str(),
         selector_kind.as_str()
     );
+    if result
+        .get("declared_covers")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        println!("  the last-seen declaration also lists this tuple");
+    }
     if principal_kind == "enrolled" {
         // Enrollment liveness is advisory, just like credential reach: the grant already
         // exists, and granting a name before approval is allowed.
@@ -6116,7 +6135,7 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         )
         .map_err(CliError::Usage)?;
     }
-    commit_admin(
+    let result = commit_admin(
         global,
         AdminOpBody::GrantRevokeV2 {
             v: ADMIN_OP_SCHEMA_V2,
@@ -6132,6 +6151,13 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         operation.as_str(),
         selector_kind.as_str()
     );
+    if result
+        .get("declared_still_listed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        println!("  the last-seen declaration still lists this tuple");
+    }
     Ok(())
 }
 
@@ -7227,14 +7253,125 @@ fn render_categories(result: &serde_json::Value) -> Result<Vec<String>, CliError
     Ok(lines)
 }
 
-fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
+fn cmd_grants(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // Grant inventory is part of the same authenticated admin.status response as the
     // credential inventory. A discovered daemon is queried online; otherwise the same
     // sorted rows come from the lease-free plaintext reader.
     let (result, store_schema) = request_admin_status_with_schema(global)?;
-    print_grants(&result)?;
+    let declared = render_declared_grants(&result);
+    if args.iter().any(|arg| arg == "--declared") {
+        for line in declared.lines {
+            println!("{line}");
+        }
+    } else {
+        print_grants(&result)?;
+        if declared.count > 0 {
+            eprintln!(
+                "{} declared grant(s) from first-party modules; see ck auth grants --declared",
+                declared.count
+            );
+        }
+    }
+    if declared.incomplete {
+        eprintln!("declared grants could not be read completely");
+    }
     print_store_behind_note(store_schema);
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DeclaredGrantRow {
+    module_id: String,
+    selector_kind: SelectorKind,
+    selector: String,
+    operation: GrantOperation,
+    first_seen_ms: i64,
+}
+
+struct DeclaredGrantReport {
+    lines: Vec<String>,
+    count: usize,
+    incomplete: bool,
+}
+
+fn render_declared_grants(result: &serde_json::Value) -> DeclaredGrantReport {
+    let mut report = DeclaredGrantReport {
+        lines: Vec::new(),
+        count: 0,
+        incomplete: result
+            .get("declared_grants_incomplete")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+    };
+    let Some(raw) = result.get("declared_grants") else {
+        return report;
+    };
+    let Some(raw) = raw.as_array() else {
+        report.incomplete = true;
+        return report;
+    };
+    let mut rows = Vec::new();
+    for value in raw {
+        let row = serde_json::from_value::<DeclaredGrantRow>(value.clone())
+            .ok()
+            .filter(|row| {
+                let tuple = serde_json::json!([{
+                    "selector_kind": row.selector_kind.as_str(),
+                    "selector": row.selector,
+                    "operation": row.operation.as_str(),
+                }]);
+                credentials_core::store::DeclaredGrantSet::from_grants_json(
+                    &row.module_id,
+                    &tuple.to_string(),
+                )
+                .is_ok()
+            });
+        if let Some(row) = row {
+            rows.push(row);
+        } else {
+            report.incomplete = true;
+        }
+    }
+    report.count = rows.len();
+    if rows.is_empty() {
+        return report;
+    }
+    let width = |head: &str, field: &dyn Fn(&DeclaredGrantRow) -> &str| {
+        rows.iter()
+            .map(|row| field(row).chars().count())
+            .chain(std::iter::once(head.chars().count()))
+            .max()
+            .unwrap_or(head.len())
+    };
+    let wm = width("MODULE", &|row| &row.module_id);
+    let wk = width("SELECTOR KIND", &|row| row.selector_kind.as_str());
+    let ws = width("SELECTOR", &|row| &row.selector);
+    let wo = width("OP", &|row| row.operation.as_str());
+    report
+        .lines
+        .push("declared grants (last declaration each module presented):".into());
+    report.lines.push(format!(
+        "{:<wm$}  {:<wk$}  {:<ws$}  {:<wo$}  {:>7}  FIRST SEEN",
+        "MODULE", "SELECTOR KIND", "SELECTOR", "OP", "REACHES"
+    ));
+    let inventory = parse_credential_categories(result);
+    for row in rows {
+        let reach = if row.selector_kind == SelectorKind::Audience {
+            "token".into()
+        } else {
+            grant_reach(&inventory, row.selector_kind.as_str(), &row.selector).to_string()
+        };
+        report.lines.push(format!(
+            "{:<wm$}  {:<wk$}  {:<ws$}  {:<wo$}  {:>7}  {}",
+            row.module_id,
+            row.selector_kind.as_str(),
+            row.selector,
+            row.operation.as_str(),
+            reach,
+            format_ts_ms(row.first_seen_ms)
+        ));
+    }
+    report
 }
 
 /// Report whether each credential still holds material the engine can work with.
@@ -8143,6 +8280,41 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_inventory_renderer_drops_malformed_elements_without_hiding_hand_grants() {
+        let mut reply = serde_json::json!({
+            "read_grants": [],
+            "credentials": [],
+            "declared_grants": [
+                {"module_id":"agent","selector_kind":"category","selector":"llm-provider","operation":"read","first_seen_ms":0},
+                {"module_id":"agent","selector_kind":"category","selector":"llm-provider","operation":"sign","first_seen_ms":0},
+                {"module_id":"agent","selector_kind":"category","selector":"llm-provider","operation":"read","first_seen_ms":"wrong"},
+                null
+            ]
+        });
+        let report = render_declared_grants(&reply);
+        assert_eq!(report.count, 1);
+        assert!(report.incomplete);
+        assert_eq!(report.lines.len(), 3);
+        assert!(report.lines[2].ends_with("1970-01-01 00:00:00"));
+        assert_eq!(render_grants(&reply).unwrap(), ["no grants"]);
+        reply["declared_grants"] = serde_json::json!([false]);
+        reply["declared_grants_incomplete"] = serde_json::json!(true);
+        let report = render_declared_grants(&reply);
+        assert!(report.lines.is_empty());
+        assert_eq!(report.count, 0);
+        assert!(report.incomplete);
+        for absent in [
+            serde_json::json!({}),
+            serde_json::json!({"declared_grants":[]}),
+        ] {
+            let report = render_declared_grants(&absent);
+            assert!(report.lines.is_empty());
+            assert!(!report.incomplete);
+        }
+        reply["declared_grants"] = serde_json::json!({});
+        assert!(render_declared_grants(&reply).incomplete);
+    }
     #[test]
     fn enrollment_regression_raced_not_found_is_a_usage_error() {
         use super::{enrollment_admin_error, CliError, StoreOpError};

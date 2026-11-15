@@ -706,7 +706,15 @@ impl AdminSurface {
             None => credentials_core::admin_ops::apply(self.engine.store(), op, ROUTE_ADMIN_ACTOR),
         };
         match result {
-            Ok(v) => AdminOutcome::Ok(v),
+            Ok(v) => {
+                if v.get("declared_grants_incomplete")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    tracing::warn!("declared grants could not be read completely");
+                }
+                AdminOutcome::Ok(v)
+            }
             Err(e) => store_err(e),
         }
     }
@@ -1199,6 +1207,7 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             | StoreOpError::InvalidGatewaySettings { .. }
             | StoreOpError::GatewayFixed { .. }
             | StoreOpError::EnrollmentNameHasGrants { .. }
+            | StoreOpError::DeclaredGrant { .. }
     ) {
         return AdminOutcome::Refused(e.to_string());
     }
@@ -1249,6 +1258,79 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn declared_inventory_incomplete_warns_once_without_stored_or_request_values() {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={value:?};", field.name()));
+            }
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let r = rig(176);
+        r.admin.record_bind(1, Principal::Direct);
+        let conn = rusqlite::Connection::open(r._root.join("store.db")).unwrap();
+        conn.execute("INSERT INTO declared_grant_sets (module_id, declaration_digest, grants_json, skipped_count, first_seen_ms) VALUES ('module-canary', 'digest-canary', 'raw-json-canary', 0, 1)", []).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _capture = tracing::subscriber::set_default(Capture(events.clone()));
+        for missing_table in [false, true] {
+            if missing_table {
+                conn.execute("DROP TABLE declared_grant_sets", []).unwrap();
+            }
+            let body = r#"{"op":"admin.status","v":1}"#;
+            let (tag, _) = challenge_and_sign(&r, 1, body);
+            let AdminOutcome::Ok(result) = r.admin.execute(1, body.as_bytes(), &tag).await else {
+                panic!("status refused");
+            };
+            assert_eq!(result["declared_grants_incomplete"], true);
+            assert!(result.get("declared_grants").is_none());
+            assert_eq!(
+                events.lock().unwrap().drain(..).collect::<Vec<_>>(),
+                vec!["message=declared grants could not be read completely;"]
+            );
+        }
+    }
+
+    #[test]
+    fn declared_grant_refusal_keeps_the_permanent_code_and_rebind_remedy() {
+        let AdminOutcome::Refused(message) = store_err(StoreOpError::DeclaredGrant {
+            module_id: "agent".into(),
+        }) else {
+            panic!("expected refusal");
+        };
+        assert!(message.starts_with("declared_grant/permanent:"));
+        for text in [
+            "agent",
+            "approved declaration",
+            "daemon's configuration",
+            "re-binds",
+            "restart the module",
+            "stored row is replaced",
+        ] {
+            assert!(message.contains(text), "{message}");
+        }
+    }
 
     #[test]
     fn switch_grant_refusal_keeps_its_typed_code_and_operator_remedy() {

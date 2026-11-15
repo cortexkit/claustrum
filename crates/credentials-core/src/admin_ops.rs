@@ -1905,7 +1905,7 @@ pub fn apply(
             // credential already exists" to every caller. The store writes no audit row
             // and doesn't bump the grants generation when the row is already there, so
             // reporting success changes nothing durable.
-            match store.create_read_grant_audited(
+            let mut result = match store.create_read_grant_audited(
                 &principal_kind,
                 &principal_id,
                 selector_kind,
@@ -1919,7 +1919,18 @@ pub fn apply(
                     "already_granted": true
                 })),
                 Err(e) => Err(e),
+            }?;
+            if declared_covers(
+                store,
+                &principal_kind,
+                &principal_id,
+                selector_kind,
+                &stored_selector,
+                operation,
+            ) {
+                result["declared_covers"] = serde_json::json!(true);
             }
+            Ok(result)
         }
         AdminOpBody::GrantRevokeV2 {
             principal_kind,
@@ -1946,15 +1957,34 @@ pub fn apply(
                 )
                 .map_err(|_| StoreOpError::TransferKeyReserved)?;
             }
-            store.revoke_read_grant_audited(
+            let declared = declared_covers(
+                store,
+                &principal_kind,
+                &principal_id,
+                selector_kind,
+                &stored_selector,
+                operation,
+            );
+            match store.revoke_read_grant_audited(
                 &principal_kind,
                 &principal_id,
                 selector_kind,
                 &stored_selector,
                 operation,
                 AuditCtx::route_admin(AuditOp::GrantRevoke, actor),
-            )?;
-            Ok(serde_json::json!({ "grant_revoked": true }))
+            ) {
+                Err(StoreOpError::NotFound) if declared => {
+                    return Err(StoreOpError::DeclaredGrant {
+                        module_id: principal_id,
+                    })
+                }
+                result => result?,
+            }
+            let mut result = serde_json::json!({ "grant_revoked": true });
+            if declared {
+                result["declared_still_listed"] = serde_json::json!(true);
+            }
+            Ok(result)
         }
         AdminOpBody::SetCategory {
             credential_id,
@@ -2172,6 +2202,12 @@ pub fn apply(
             if let Ok(plans) = store.detected_plans() {
                 attach_detected_plans(&mut result, &plans);
             }
+            attach_declared_grants(
+                &mut result,
+                store
+                    .list_declared_grant_sets()
+                    .map_err(|error| error.to_string()),
+            );
             Ok(result)
         }
     }
@@ -2253,6 +2289,60 @@ fn recover_transfer_key(
         "rejected_incoming": rejected,
         "abandoned_outgoing": abandoned,
     }))
+}
+
+fn declared_covers(
+    store: &EncryptedStore,
+    principal_kind: &str,
+    principal_id: &str,
+    selector_kind: SelectorKind,
+    selector: &str,
+    operation: GrantOperation,
+) -> bool {
+    principal_kind == "reserved"
+        && store.list_declared_grant_sets().is_ok_and(|listing| {
+            listing.rows.iter().any(|row| {
+                row.module_id == principal_id
+                    && row.grants.grants().iter().any(|grant| {
+                        grant.selector_kind == selector_kind
+                            && grant.selector == selector
+                            && grant.operation == operation
+                    })
+            })
+        })
+}
+
+/// Add last-seen declaration inventory without changing any existing status field.
+/// Unreadable inventory is advisory: it must not hide health or hand-made grants.
+pub fn attach_declared_grants(
+    result: &mut serde_json::Value,
+    listing: Result<crate::store::DeclaredGrantListing, String>,
+) {
+    let listing = listing.unwrap_or_else(|_| crate::store::DeclaredGrantListing {
+        incomplete: true,
+        ..Default::default()
+    });
+    let rows: Vec<_> = listing
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.grants.grants().iter().map(|grant| {
+                serde_json::json!({
+                    "module_id": row.module_id,
+                    "selector_kind": grant.selector_kind.as_str(),
+                    "selector": grant.selector,
+                    "operation": grant.operation.as_str(),
+                    "first_seen_ms": row.first_seen_ms,
+                })
+            })
+        })
+        .collect();
+    if !rows.is_empty() {
+        result["declared_grants"] = serde_json::json!(rows);
+    }
+    if listing.incomplete {
+        result["declared_grants_incomplete"] = serde_json::json!(true);
+    }
 }
 
 /// Build the status report shared by the authenticated route and lease-free CLI fallback.

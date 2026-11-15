@@ -19165,6 +19165,9 @@ mod tests {
     ///             provider plan, plus the fixed provider family; never token fields
     ///   warn!     login-sharing config: path and resolver-redacted location/reason,
     ///             or fixed apply-failure text; never config bytes or parser messages
+    ///   warn!     skipped declaration: module id and digest from the daemon's bind attestation, fixed reasons and indices; never entry values, grants_json or request fields
+    ///   warn!     declaration persistence failure: module id and digest from the daemon's bind attestation and fixed text; never entry values, grants_json or request fields
+    ///   warn!     incomplete declared inventory: fixed text only; no module id, digest, entry values, grants_json or request fields
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
@@ -19217,7 +19220,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 19, 0),
+            (1, 2, 22, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

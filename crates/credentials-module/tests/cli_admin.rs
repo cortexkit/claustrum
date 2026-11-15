@@ -56,6 +56,9 @@ mod gateway_put_cli;
 #[path = "support/gateway_list_cli.rs"]
 mod gateway_list_cli;
 
+#[path = "support/declared_grants_cli.rs"]
+mod declared_grants_cli;
+
 #[path = "support/manifest_cli.rs"]
 mod manifest_cli;
 

@@ -1618,6 +1618,8 @@ pub enum StoreOpError {
     },
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
+    /// This tuple appears in the module's approved declaration; no manually managed grant was revoked.
+    DeclaredGrant { module_id: String },
     /// Approval would hand existing name-bound grants to a new consumer without consent.
     EnrollmentNameHasGrants { name: String },
     /// Deposit grants are restricted to reserved principals and browser-session categories.
@@ -1843,6 +1845,10 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidMemberId => f.write_str(
                 "invalid_member_id: expected fed-computer: followed by 32 lowercase hex characters",
             ),
+            StoreOpError::DeclaredGrant { module_id } => write!(
+                f,
+                "declared_grant/permanent: change module {module_id}'s approved declaration in the daemon's configuration; the approval change reaches live routes only when the module re-binds (restart the module), and the stored row is replaced at that bind"
+            ),
             StoreOpError::MemberGrantSharingSwitch { member_id } => write!(
                 f,
                 "Turn the vault-sharing switch off with `ck callosum share {} claustrum/vault off`; otherwise the vault would recreate this grant.",
@@ -1893,6 +1899,7 @@ impl StoreOpError {
             StoreOpError::InvalidGatewaySettings { .. } => Some("invalid_gateway_settings"),
             StoreOpError::GatewayFixed { .. } => Some("gateway_fixed"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
+            StoreOpError::DeclaredGrant { .. } => Some("declared_grant"),
             StoreOpError::EnrollmentNameHasGrants { .. } => Some("enrollment_name_has_grants"),
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
@@ -17573,6 +17580,200 @@ mod migration_10_tests {
             "the conversion and the backfill are this migration's own writes, so a \
              consumer cannot tell a migrated store from a fresh one by this value"
         );
+    }
+
+    #[test]
+    fn declared_operator_inventory_is_additive_sorted_and_incomplete_on_corruption() {
+        use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V1};
+        let (_root, store) = rig("declared-operator-status", 109);
+        let status = || {
+            apply(
+                &store,
+                AdminOpBody::Status {
+                    v: ADMIN_OP_SCHEMA_V1,
+                },
+                "test",
+            )
+            .unwrap()
+        };
+        let baseline = status();
+        assert!(baseline.get("declared_grants").is_none());
+        assert!(baseline.get("declared_grants_incomplete").is_none());
+        for module in ["z-module", "a-module"] {
+            let grants = DeclaredGrantSet::from_grants_json(module, r#"[{"selector_kind":"category","selector":"llm-provider","operation":"read"},{"selector_kind":"category","selector":"llm-provider","operation":"list"},{"selector_kind":"audience","selector":"cortexkit-account","operation":"account_token"}]"#).unwrap();
+            store
+                .record_declared_grants_seen(module, Some("digest"), None, None, &grants, 0)
+                .unwrap();
+        }
+        let listed = status();
+        let rows = listed["declared_grants"].as_array().unwrap();
+        let keys: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["module_id"].as_str().unwrap(),
+                    row["selector_kind"].as_str().unwrap(),
+                    row["operation"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("a-module", "audience", "account_token"),
+                ("a-module", "category", "list"),
+                ("a-module", "category", "read"),
+                ("z-module", "audience", "account_token"),
+                ("z-module", "category", "list"),
+                ("z-module", "category", "read")
+            ]
+        );
+        for row in rows {
+            assert_eq!(row.as_object().unwrap().len(), 5);
+            assert!(row["first_seen_ms"].as_i64().unwrap() > 0);
+        }
+        let mut unchanged = listed;
+        unchanged.as_object_mut().unwrap().remove("declared_grants");
+        assert_eq!(unchanged, baseline);
+        store.store.with_conn(|conn| conn.execute("UPDATE declared_grant_sets SET grants_json = 'not-json' WHERE module_id = 'a-module'", [])).unwrap();
+        let mut partial = status();
+        assert_eq!(partial["declared_grants"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            partial
+                .as_object_mut()
+                .unwrap()
+                .remove("declared_grants_incomplete"),
+            Some(serde_json::json!(true))
+        );
+        partial.as_object_mut().unwrap().remove("declared_grants");
+        assert_eq!(partial, baseline);
+        store
+            .store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE declared_grant_sets SET grants_json = 'not-json'",
+                    [],
+                )
+            })
+            .unwrap();
+        let mut corrupt_only = status();
+        assert!(corrupt_only.get("declared_grants").is_none());
+        assert_eq!(
+            corrupt_only
+                .as_object_mut()
+                .unwrap()
+                .remove("declared_grants_incomplete"),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(corrupt_only, baseline);
+        store
+            .store
+            .with_conn(|conn| conn.execute("DROP TABLE declared_grant_sets", []))
+            .unwrap();
+        let mut unavailable = status();
+        assert_eq!(
+            unavailable
+                .as_object_mut()
+                .unwrap()
+                .remove("declared_grants_incomplete"),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(unavailable, baseline);
+    }
+
+    #[test]
+    fn declared_operator_revoke_refuses_inventory_only_and_revokes_hand_duplicates() {
+        use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V2};
+        let (_root, store) = rig("declared-operator-revoke", 110);
+        let grants = DeclaredGrantSet::from_grants_json(
+            "agent",
+            r#"[{"selector_kind":"category","selector":"llm-provider","operation":"read"}]"#,
+        )
+        .unwrap();
+        store
+            .record_declared_grants_seen("agent", Some("digest"), None, None, &grants, 0)
+            .unwrap();
+        let revoke = |kind: &str| AdminOpBody::GrantRevokeV2 {
+            v: ADMIN_OP_SCHEMA_V2,
+            principal_kind: kind.into(),
+            principal_id: "agent".into(),
+            selector_kind: SelectorKind::Category,
+            selector: "llm-provider".into(),
+            operation: GrantOperation::Read,
+        };
+        let create = || AdminOpBody::GrantCreateV2 {
+            v: ADMIN_OP_SCHEMA_V2,
+            principal_kind: "reserved".into(),
+            principal_id: "agent".into(),
+            selector_kind: SelectorKind::Category,
+            selector: "llm-provider".into(),
+            operation: GrantOperation::Read,
+        };
+        let tip = store.audit_tip().unwrap();
+        let error = apply(&store, revoke("reserved"), "test").unwrap_err();
+        assert_eq!(error.wire_code(), Some("declared_grant"));
+        assert_eq!(error.wire_class(), Some("permanent"));
+        let message = error.to_string();
+        for remedy in [
+            "agent",
+            "approved declaration",
+            "daemon's configuration",
+            "re-binds",
+            "restart the module",
+            "stored row is replaced",
+        ] {
+            assert!(message.contains(remedy), "{message}");
+        }
+        assert_eq!(store.audit_tip().unwrap(), tip);
+        assert!(matches!(
+            apply(&store, revoke("enrolled"), "test"),
+            Err(StoreOpError::NotFound)
+        ));
+        for _ in 0..2 {
+            assert_eq!(
+                apply(&store, create(), "test").unwrap()["declared_covers"],
+                true
+            );
+        }
+        let revoked = apply(&store, revoke("reserved"), "test").unwrap();
+        assert_eq!(
+            revoked,
+            serde_json::json!({"grant_revoked":true,"declared_still_listed":true})
+        );
+        assert!(store.list_read_grants().unwrap().is_empty());
+        store
+            .store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE declared_grant_sets SET grants_json = 'not-json'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            apply(&store, revoke("reserved"), "test"),
+            Err(StoreOpError::NotFound)
+        ));
+        assert!(apply(&store, create(), "test")
+            .unwrap()
+            .get("declared_covers")
+            .is_none());
+        assert_eq!(
+            apply(&store, revoke("reserved"), "test").unwrap(),
+            serde_json::json!({"grant_revoked":true})
+        );
+        store
+            .store
+            .with_conn(|conn| conn.execute("DROP TABLE declared_grant_sets", []))
+            .unwrap();
+        assert!(matches!(
+            apply(&store, revoke("reserved"), "test"),
+            Err(StoreOpError::NotFound)
+        ));
+        assert!(apply(&store, create(), "test")
+            .unwrap()
+            .get("declared_covers")
+            .is_none());
     }
 
     /// A repeated identical grant reports `already_granted` and writes nothing: no audit

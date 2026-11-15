@@ -733,7 +733,8 @@ same handle twice can accept that code; otherwise check the target before procee
 ```sh
 ck auth grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
 ck auth grant --principal enrolled:<name>   --selector-kind category --selector <category> --operation read
-ck auth grants          # the complete authority set, read-only
+ck auth grants          # hand-made grants, read-only
+ck auth grants --declared # last-seen declared grants, read-only
 ck auth revoke-grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
 ```
 
@@ -761,6 +762,59 @@ on the same selector in place.
 
 To verify a grant took effect, the module's next scoped call succeeds, and `ck auth events`
 shows one `scoped_first_use` row for the (credential, principal, operation) tuple.
+
+### Declared grants
+
+A first-party module can receive the grants in its daemon-approved
+`provider_declarations.claustrum` entry when it binds to the vault. These grants supplement
+hand-made grants; they are not rows created by `ck auth grant`. Only an attested
+first-party module calling for itself on its own reserved route qualifies. Enrolled
+programs, relay calls and federation callers do not inherit declared authority.
+
+```sh
+ck auth grants            # unchanged hand-grant stdout
+ck auth grants --declared # only the last-seen declared inventory
+```
+
+Plain `ck auth grants` keeps stdout byte-identical, even when declared grants exist,
+so strict parsers keep working. When declared rows exist, it adds a one-line stderr
+pointer to `ck auth grants --declared`, not another stdout section. The opt-in command
+prints `declared grants (last declaration each module presented):` and columns
+`MODULE  SELECTOR KIND  SELECTOR  OP  REACHES  FIRST SEEN`. `REACHES` counts matching
+credentials for a category and is `token` for an audience. `FIRST SEEN` is the time the
+module's stored declaration digest or grant set last changed, not its last connection.
+
+The inventory is **not live authority**. It shows the last declaration each module
+presented, and a route bound earlier may hold an older set than the one listed. A stored
+row for an uninstalled module authorizes nothing. Each route uses its captured set until
+that bind ends; re-bind replaces it and Goodbye drops it. A declaration can change within
+one module process: each change bumps the attestation's `authority_epoch`, and the daemon
+closes the module's routes with reason `authority_changed`. Declared authority never
+outlives its bind.
+
+To remove declared authority, change the module's **approved declaration in the daemon's
+configuration**. Approval changes take effect at the module's **next re-bind**; restart
+the module to obtain a new bind. The last-seen stored row is replaced at that bind.
+`ck auth revoke-grant` cannot override a declaration: a tuple listed only there refuses
+with `declared_grant` / `permanent` and names this remedy. If a matching hand-made row
+also exists, revoke removes it normally and reports that the last-seen declaration still
+lists the tuple. Creating a hand grant already covered by the declaration also succeeds
+normally and reports the overlap. Do not mistake either message for a live-route check.
+
+Both online and offline inventory reads omit malformed declared rows and print one stderr
+line if declared grants could not be read completely. With zero well-formed declared rows,
+`--declared` prints no table; an incomplete read still prints its stderr warning, while
+plain grants stdout remains unchanged. An offline store at schema step 44 has no declared
+section or warning. New CLIs against old daemons show no declared table. `ck auth list`
+(including `--json`) and `ck auth status` output are unchanged.
+
+The `declaration_seen` audit row records a change of declaration digest or canonical
+grant set, including clearing a previous declaration. Its actor is `reserved:<module>`;
+its target is `declaration|<digest>` or `declaration|none`. To check its `payload_hash`,
+compute plain SHA-256 of the exact stored `grants_json` bytes and compare lowercase hex.
+An unchanged bind does not add another row, even if only the approved-declarations digest
+or origin changed. A store failure gives the new route no declared grants; inspect the
+WARN and retry the bind after repairing the store.
 
 ### Enrollments
 
@@ -898,7 +952,8 @@ refreshed to a newer version, the report is a silent no-op.
 ```sh
 ck auth status       # health ladder + inventory
 ck auth list         # one row per credential: <state> v<version> <credential_id> …
-ck auth grants       # one row per principal-scoped grant
+ck auth grants       # one row per hand-made principal-scoped grant
+ck auth grants --declared # last declaration each module presented
 ck auth categories   # categories, counts, and the grants naming them
 ck auth usable       # which credentials can still serve or refresh
 ```

@@ -467,6 +467,182 @@ An older daemon REFUSES a token-bearing call at decode rather than ignoring the 
 params struct is `deny_unknown_fields`. You will see an explicit decode refusal, not a
 plausible list computed for grants you do not hold.
 
+### 2.2 Declared grants for first-party modules
+
+The daemon may attest a module's approved `provider_declarations.claustrum` entry in
+the `caller` record of `route.bind`. The daemon has already selected the vault's entry;
+the vault reads that declaration as given, not as a request for operator consent.
+Declared grants supplement hand-made grants without creating `read_grants` rows.
+
+**Admission is conjunctive.** A declaration is admitted only when all of these hold:
+
+- The bind principal is `Principal::Reserved` (`reserved:<module>`).
+- `caller` is present, its `claim` is `Own` (`own` on the wire), and `first_party` is true.
+- Both `declaration` and a non-empty `declaration_digest` are present.
+- At bind, the channel's `route_caller` is `RouteCaller::Principal(Some(p))`, with `p`
+  equal to the bind principal.
+
+`Member`, `Phone`, `Refused` and `Principal(None)` never qualify, including a callosum
+`fed-` route with its principal-mapping gate off. Relay claims and third-party binds
+get no declared grants. `origin` is recorded but does not gate admission.
+
+**Declaration schema and closed operation set.** The top-level object is
+`{"v":1,"grants":[entry, ...]}`. Each entry has exactly one of these shapes:
+
+| Selector shape | Allowed `operation` strings |
+|---|---|
+| `{"category":"<category>","operation":"<operation>"}` | `read`, `list`, `deposit` |
+| `{"audience":"<audience>","operation":"account_token"}` | `account_token` |
+
+The operation string is checked against this closed set before other entry validation.
+Other strings are skipped with reason `operation`, even when they are valid hand-grant
+operations: category `sign`, `open`, `seal` and category `account_token` are not declarable.
+Every whitelisted entry must also pass the same full-tuple validation as `ck auth grant`
+for the reserved module, selector kind, selector and operation. Category names must satisfy
+the vault's category-name grammar; `deposit` is valid only for `browser-session`.
+Audiences must be in the vault's account-token audience allowlist (`AUDIENCES`).
+For example, `{"category":"llm-provider","operation":"deposit"}` grants nothing.
+
+Unknown top-level keys are ignored. A version other than `v:1`, a missing or non-array
+`grants`, or more than **32 raw entries** rejects the whole declaration; the cap is
+checked before deduplication. Unknown entry fields, non-string entry values, refused
+tuples, `exact` selectors and all other entry shapes are skipped whole, because an
+unknown field could have been intended to narrow the authority. Duplicates collapse.
+A valid empty array grants nothing and does not warn. Rejection or skipped entries never
+fail the bind; they produce one WARN per (module, declaration digest) per process,
+identifying skipped indices and reasons, or the whole-declaration reason. Apart from
+validated category or audience names, entry values are never logged.
+
+**Route lifetime and effective authority.** The admitted set belongs to the route's
+bind state: re-bind replaces it and Goodbye drops it. A declaration can change within
+one module process. Each change bumps the attestation's `authority_epoch`, and the
+daemon closes that module's routes with close reason `authority_changed`. A declared
+grant never outlives the bind it came from; it is not process-wide authority.
+
+For each accepted request, the dispatcher captures the route's declared set together
+with its caller before spawning the handler. That set joins the principal's hand-made
+grants, deduplicated, **only when the request's resolved principal is the same
+`reserved:<module>` as the captured bind principal**. A later re-bind cannot lend its
+set to an already accepted frame. Enrollment tokens resolve first: a request carrying
+`enrollment_token` never sees the declared set, whether the token is valid or invalid.
+This also applies to `auth.watch_scoped`.
+
+Under that predicate, declared `read`, `list`, `deposit` and `account_token` grants cover
+the same scoped operations as equivalent hand-made grants, including individual
+credential-id requests covered by a category and remote records. Before consulting any
+grant, the transfer-key fence checks the resolved principal and key use: category coverage
+cannot expose vault transfer keys beyond callosum's announcement access, and secret-deposit
+keys remain inaccessible. First-use diagnostics remain under the resolved principal.
+`sign`, `open` and `seal` still require hand-made grants. For `credential.list_scoped`,
+the union replaces the caller's grant list before existing filtering and projection:
+`deposit` remains absent from row `operations` and `grant_tuples`,
+`grants == grant_tuples.length`, and the view digest follows the resulting rows and
+tuples. `auth.watch_scoped` captures the subscribing route's declared set and principal
+at subscribe. No new `credential.*` reply field is added. `connectors.list`,
+`permissions.list` and `permissions.revoke` are unchanged.
+
+**Last-seen inventory and audit.** Schema step 45 adds `declared_grant_sets`, keyed by
+`module_id`, with `declaration_digest`, `approved_declarations_digest`, `origin`,
+`grants_json`, `skipped_count` and `first_seen_ms`. `grants_json` is a compact JSON array
+of `{"selector_kind":"category","selector":"<selector>","operation":"<op>"}` objects
+(`selector_kind` is `category` or `audience`), with keys in that order, sorted by the
+text-byte order of `(selector_kind, selector, operation)` and deduplicated. A rejected
+declaration stores `[]`; `skipped_count` is advisory, and for a whole-declaration rejection
+counts raw entries (zero when `grants` is not an array).
+
+On an admissible bind, a missing row or a change to `(declaration_digest, grants_json)`
+writes the whole row and one `declaration_seen` audit row in one transaction before
+the bind is acknowledged; `first_seen_ms` is the time of that change. The audit actor is
+`reserved:<module>`, target `declaration|<digest>` (or `declaration|none` when cleared),
+and `payload_hash` is plain lowercase-hex SHA-256 of the exact canonical `grants_json`
+bytes. The audit chain format is unchanged. An unchanged key writes nothing, even when
+`approved_declarations_digest` or `origin` differ; those columns describe the last key
+change. A store read or write failure leaves the route with no declared grants and a
+WARN; the next bind retries.
+
+A first-party bind meeting all other admission conditions with both `declaration` and
+`declaration_digest` absent clears an existing non-NULL digest to NULL and stores `[]`,
+with the same audit transaction. With no row or an already-cleared row it writes nothing.
+Only one of the pair present, or an empty digest, grants nothing, warns and leaves the
+stored row untouched. Other inadmissible binds also leave it untouched. The table is
+the **last declaration each module presented**, not live authority: an uninstalled
+module's row authorizes nothing, and a route bound earlier may have captured an older
+set than the inventory shows.
+
+#### Optional `admin.op` declaration fields
+
+The existing authenticated admin transcript is unchanged. These are additive reply
+fields; no existing Status field changes:
+
+| Admin body (`AdminOpBody` variant) | Addition |
+|---|---|
+| `admin.status` (`Status`) | Optional `declared_grants`: an array of `{module_id, selector_kind, selector, operation, first_seen_ms}`, sorted by module then canonical tuple order; omitted when empty. |
+| `admin.status` (`Status`) | Optional `declared_grants_incomplete: true` if the table cannot be read or any stored `grants_json` fails to parse. Unreadable rows are omitted with a WARN; a table failure omits `declared_grants`, without hiding existing status or hand grants. |
+| `admin.grant_create_v2` (`GrantCreateV2`) | Optional `declared_covers: true` when the module's last-seen stored set already contains the tuple; the hand grant is still created normally. |
+| `admin.grant_revoke_v2` (`GrantRevokeV2`) | Optional success field `declared_still_listed: true` when a matching hand-made row was revoked but the stored declaration still lists the tuple. |
+
+`GrantRevokeV2` of a tuple present only in the stored declared set refuses with
+`declared_grant` / `permanent`. The remedy names the module's approved declaration in
+the daemon's configuration: change that approval, then let the module re-bind (restart
+the module). The stored row is replaced at that bind; a vault-side revoke cannot
+override declared authority. An unreadable or unparseable stored row never counts as
+covering a create or revoke.
+
+A new CLI with an old daemon sees no declared inventory; an old CLI ignores the new
+fields. `ck auth list` (including `--json`) and `ck auth status` output are unchanged.
+Plain `ck auth grants` keeps stdout byte-identical, including `no grants`; when declared
+rows exist it prints a one-line stderr pointer to `ck auth grants --declared`.
+The opt-in command lists only well-formed declared rows, under
+`declared grants (last declaration each module presented):`, with columns
+`MODULE  SELECTOR KIND  SELECTOR  OP  REACHES  FIRST SEEN`. Category reach comes from
+the same credential inventory as hand grants; audience reach is `token`. Zero
+well-formed rows produce no declared table. Malformed reply elements are dropped;
+incomplete inventory produces one stderr line without interrupting hand-grant output.
+Offline mode reads the table read-only; a step-44 store has no declared output or warning.
+
+#### Approval wording
+
+The following is **the vault's approval text** for desktop daemon-approval screens.
+Substitute the category's plain name from the table below and the literal audience;
+fall back to raw JSON for an unrecognized declaration shape.
+
+| Declarable shape | Vault text |
+|---|---|
+| Category `read` | Read your &lt;category name&gt; logins and keys |
+| Category `list` | See which &lt;category name&gt; logins and keys exist (no secrets) |
+| Category `deposit` | Save browser sign-ins into the vault (&lt;category name&gt;) |
+| Audience `account_token` | Get short-lived CortexKit account tokens for &lt;audience&gt; |
+
+The table covers the current catalog's purpose categories and native families, plus
+its built-in browser-session and GitHub App families (`CredentialCategory`,
+`category_defaults` and `native_family_category`). Native families are derived from
+adapter names, so they are not a closed vocabulary.
+For a category not in the table, show the raw category name unchanged.
+
+| Category | Plain name |
+|---|---|
+| `llm-provider` | model provider |
+| `llm-gateway` | company AI gateway |
+| `data-warehouse` | data warehouse |
+| `cloud-infrastructure` | cloud infrastructure |
+| `web-search` | web search |
+| `media-provider` | speech and media |
+| `browser-session` | browser sign-in |
+| `antigravity-native` | Antigravity |
+| `anthropic-native` | Anthropic |
+| `cursor-native` | Cursor |
+| `devin-native` | Devin |
+| `digitalocean-native` | DigitalOcean |
+| `github-app-native` | GitHub bot |
+| `github-copilot-native` | GitHub Copilot |
+| `gmail-native` | Gmail |
+| `google-native` | Google |
+| `kimi-native` | Kimi |
+| `meta-native` | Meta AI |
+| `openai-native` | OpenAI |
+| `snowflake-native` | Snowflake |
+| `xai-native` | xAI |
+
 ## 3. Reading a credential
 
 `credential.get` returns the opaque payload as a JSON array of byte integers, plus

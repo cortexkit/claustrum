@@ -602,6 +602,8 @@ Offline mode reads the table read-only; a step-44 store has no declared output o
 
 #### Approval wording
 
+The code in `crates/credentials-core/src/store_declared_grants.rs` is the source of the wording, pinned in `crates/credentials-core/tests/vectors/declared-grants-v1.json`.
+
 The following is **the vault's approval text** for desktop daemon-approval screens.
 Substitute the category's plain name from the table below and the literal audience;
 fall back to raw JSON for an unrecognized declaration shape.

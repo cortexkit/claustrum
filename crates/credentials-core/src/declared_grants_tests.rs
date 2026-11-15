@@ -7,6 +7,249 @@ fn parse(entries: serde_json::Value) -> (DeclaredGrantSet, DeclarationDiagnostic
 }
 
 #[test]
+fn declared_grant_approval_wording_formats_admitted_grants_and_unknown_categories() {
+    let (set, diagnostics) = parse(json!([
+        {"category":"llm-provider","operation":"read"},
+        {"category":"llm-provider","operation":"list"},
+        {"category":"browser-session","operation":"deposit"},
+        {"audience":"cortexkit-runners","operation":"account_token"},
+        {"category":"custom-native","operation":"read"}
+    ]));
+    assert_eq!(diagnostics, DeclarationDiagnostics::default());
+    assert_eq!(
+        set.grants()
+            .iter()
+            .map(|grant| declared_grant_approval_sentence(grant).unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "Get short-lived CortexKit account tokens for cortexkit-runners",
+            "Save browser sign-ins into the vault (browser sign-in)",
+            "Read your custom-native logins and keys",
+            "See which model provider logins and keys exist (no secrets)",
+            "Read your model provider logins and keys",
+        ]
+    );
+    for (selector_kind, operation) in [
+        (SelectorKind::Exact, GrantOperation::Read),
+        (SelectorKind::Category, GrantOperation::Sign),
+        (SelectorKind::Category, GrantOperation::Open),
+        (SelectorKind::Category, GrantOperation::Seal),
+        (SelectorKind::Category, GrantOperation::AccountToken),
+        (SelectorKind::Audience, GrantOperation::Read),
+    ] {
+        assert_eq!(
+            declared_grant_approval_sentence(&DeclaredGrant {
+                selector_kind,
+                selector: "llm-provider".into(),
+                operation,
+            }),
+            None,
+        );
+    }
+}
+
+#[test]
+fn declared_grant_approval_wording_matches_wire_contract_tables() {
+    fn table(section: &str, header: &str) -> Vec<(String, String)> {
+        let mut lines = section.lines().skip_while(|line| *line != header);
+        assert_eq!(lines.next(), Some(header), "missing approval table");
+        assert_eq!(lines.next(), Some("|---|---|"));
+        lines
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| {
+                let cells: Vec<_> = line
+                    .strip_prefix('|')
+                    .unwrap()
+                    .strip_suffix('|')
+                    .unwrap()
+                    .split('|')
+                    .map(|cell| cell.trim().replace("&lt;", "<").replace("&gt;", ">"))
+                    .collect();
+                assert_eq!(cells.len(), 2, "approval tables have exactly two columns");
+                (cells[0].clone(), cells[1].clone())
+            })
+            .collect()
+    }
+
+    let contract = include_str!("../../../docs/wire-contract-v1.md");
+    let section: String = contract
+        .split_once("#### Approval wording\n")
+        .expect("approval wording heading")
+        .1
+        .lines()
+        .take_while(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let templates = table(&section, "| Declarable shape | Vault text |");
+    assert_eq!(
+        templates,
+        DECLARED_GRANT_APPROVAL_TEMPLATES
+            .iter()
+            .map(|(shape, template)| (shape.to_string(), template.to_string()))
+            .collect::<Vec<_>>(),
+        "approval templates differ between code and the wire contract",
+    );
+    let names: Vec<_> = table(&section, "| Category | Plain name |")
+        .into_iter()
+        .map(|(category, name)| {
+            let category = category
+                .strip_prefix('`')
+                .and_then(|category| category.strip_suffix('`'))
+                .expect("category name in backticks")
+                .to_string();
+            (category, name)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        DECLARED_GRANT_CATEGORY_NAMES
+            .iter()
+            .map(|(category, name)| (category.to_string(), name.to_string()))
+            .collect::<Vec<_>>(),
+        "category names differ between code and the wire contract",
+    );
+}
+
+#[test]
+fn declared_grants_v1_vectors_are_emitted_by_parser_and_wording_code_and_pinned() {
+    let declarations = [
+        (
+            "valid-mixed",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"read"},
+                {"category":"llm-provider","operation":"list"},
+                {"category":"browser-session","operation":"deposit"},
+                {"audience":"cortexkit-runners","operation":"account_token"}
+            ]}),
+        ),
+        (
+            "unknown-entry-field",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"read","only":"x"}
+            ]}),
+        ),
+        (
+            "unknown-operation",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"unknown"}
+            ]}),
+        ),
+        (
+            "category-sign",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"sign"}
+            ]}),
+        ),
+        (
+            "exact-selector",
+            json!({"v":1,"grants":[
+                {"exact":"apikey:anthropic","operation":"read"}
+            ]}),
+        ),
+        (
+            "non-browser-deposit",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"deposit"}
+            ]}),
+        ),
+        (
+            "unknown-audience",
+            json!({"v":1,"grants":[
+                {"audience":"unrecognized","operation":"account_token"}
+            ]}),
+        ),
+        (
+            "duplicates",
+            json!({"v":1,"grants":[
+                {"category":"llm-provider","operation":"read"},
+                {"category":"llm-provider","operation":"list"},
+                {"category":"llm-provider","operation":"read"}
+            ]}),
+        ),
+        (
+            "unsupported-version",
+            json!({"v":2,"grants":[
+                {"category":"llm-provider","operation":"read"}
+            ]}),
+        ),
+        (
+            "too-many-entries",
+            json!({"v":1,"grants":vec![
+                json!({"category":"llm-provider","operation":"read"}); 33
+            ]}),
+        ),
+        ("missing-grants", json!({"v":1})),
+        (
+            "ignored-top-level-field",
+            json!({"v":1,"future_top_level":true,"grants":[
+                {"category":"llm-provider","operation":"read"}
+            ]}),
+        ),
+        ("empty-grants", json!({"v":1,"grants":[]})),
+        (
+            "raw-category-name",
+            json!({"v":1,"grants":[
+                {"category":"custom-native","operation":"read"}
+            ]}),
+        ),
+    ];
+    let module_id = "striatum";
+    let cases: Vec<_> = declarations
+        .into_iter()
+        .map(|(case, declaration)| {
+            let (set, diagnostics) = parse_declared_grants(module_id, &declaration);
+            let skipped: Vec<_> = diagnostics
+                .skipped
+                .iter()
+                .map(|skip| json!({"index":skip.index,"reason":skip.reason}))
+                .collect();
+            // Sentences zip with the admitted grants, not the original declaration entries.
+            let approval_sentences: Vec<_> = set
+                .grants()
+                .iter()
+                .map(|grant| {
+                    declared_grant_approval_sentence(grant).expect("admitted grant wording")
+                })
+                .collect();
+            json!({
+                "case":case,
+                "declaration":declaration,
+                "module_id":module_id,
+                "grants_json":set.grants_json(),
+                "skipped":skipped,
+                "whole_reason":diagnostics.whole_reason,
+                "skipped_count":diagnostics.skipped_count,
+                "approval_sentences":approval_sentences,
+            })
+        })
+        .collect();
+    let templates: Vec<_> = DECLARED_GRANT_APPROVAL_TEMPLATES
+        .iter()
+        .map(|(shape, template)| json!({"shape":shape,"template":template}))
+        .collect();
+    let category_names: Vec<_> = DECLARED_GRANT_CATEGORY_NAMES
+        .iter()
+        .map(|(category, plain_name)| json!({"category":category,"plain_name":plain_name}))
+        .collect();
+    let emitted =
+        json!({"version":1,"templates":templates,"category_names":category_names,"cases":cases});
+    let bytes = serde_json::to_vec_pretty(&emitted).unwrap();
+    let pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/vectors/declared-grants-v1.json");
+    if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+        std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+        std::fs::write(&pinned, bytes).unwrap();
+        println!("emitted 14 declared-grant parser and approval wording cases");
+    } else {
+        let expected = std::fs::read(&pinned).expect("pinned declared-grant vectors");
+        assert_eq!(
+            bytes, expected,
+            "vault-emitted declared-grant vectors changed"
+        );
+    }
+}
+
+#[test]
 fn declaration_skips_whole_entries_before_hand_grant_validation() {
     let (set, diagnostics) = parse(json!([
         {"category":"llm-provider","operation":"read","only":"x"},

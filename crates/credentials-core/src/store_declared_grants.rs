@@ -20,6 +20,71 @@ pub struct DeclaredGrant {
     pub operation: GrantOperation,
 }
 
+const CATEGORY_READ_APPROVAL_TEMPLATE: &str = "Read your <category name> logins and keys";
+const CATEGORY_LIST_APPROVAL_TEMPLATE: &str =
+    "See which <category name> logins and keys exist (no secrets)";
+const CATEGORY_DEPOSIT_APPROVAL_TEMPLATE: &str =
+    "Save browser sign-ins into the vault (<category name>)";
+const AUDIENCE_ACCOUNT_TOKEN_APPROVAL_TEMPLATE: &str =
+    "Get short-lived CortexKit account tokens for <audience>";
+
+/// Desktop approval templates in the order used by the wire contract.
+pub const DECLARED_GRANT_APPROVAL_TEMPLATES: &[(&str, &str)] = &[
+    ("Category `read`", CATEGORY_READ_APPROVAL_TEMPLATE),
+    ("Category `list`", CATEGORY_LIST_APPROVAL_TEMPLATE),
+    ("Category `deposit`", CATEGORY_DEPOSIT_APPROVAL_TEMPLATE),
+    (
+        "Audience `account_token`",
+        AUDIENCE_ACCOUNT_TOKEN_APPROVAL_TEMPLATE,
+    ),
+];
+
+/// Category plain names in wire-contract order; unlisted categories keep their raw name.
+pub const DECLARED_GRANT_CATEGORY_NAMES: &[(&str, &str)] = &[
+    ("llm-provider", "model provider"),
+    ("llm-gateway", "company AI gateway"),
+    ("data-warehouse", "data warehouse"),
+    ("cloud-infrastructure", "cloud infrastructure"),
+    ("web-search", "web search"),
+    ("media-provider", "speech and media"),
+    ("browser-session", "browser sign-in"),
+    ("antigravity-native", "Antigravity"),
+    ("anthropic-native", "Anthropic"),
+    ("cursor-native", "Cursor"),
+    ("devin-native", "Devin"),
+    ("digitalocean-native", "DigitalOcean"),
+    ("github-app-native", "GitHub bot"),
+    ("github-copilot-native", "GitHub Copilot"),
+    ("gmail-native", "Gmail"),
+    ("google-native", "Google"),
+    ("kimi-native", "Kimi"),
+    ("meta-native", "Meta AI"),
+    ("openai-native", "OpenAI"),
+    ("snowflake-native", "Snowflake"),
+    ("xai-native", "xAI"),
+];
+
+/// Format a parser-admitted grant for a desktop approval screen, not an admission check.
+/// Unsupported selector/operation pairs return `None` so callers can show raw JSON.
+pub fn declared_grant_approval_sentence(grant: &DeclaredGrant) -> Option<String> {
+    let template = match (grant.selector_kind, grant.operation) {
+        (SelectorKind::Category, GrantOperation::Read) => CATEGORY_READ_APPROVAL_TEMPLATE,
+        (SelectorKind::Category, GrantOperation::List) => CATEGORY_LIST_APPROVAL_TEMPLATE,
+        (SelectorKind::Category, GrantOperation::Deposit) => CATEGORY_DEPOSIT_APPROVAL_TEMPLATE,
+        (SelectorKind::Audience, GrantOperation::AccountToken) => {
+            return Some(
+                AUDIENCE_ACCOUNT_TOKEN_APPROVAL_TEMPLATE.replace("<audience>", &grant.selector),
+            );
+        }
+        _ => return None,
+    };
+    let name = DECLARED_GRANT_CATEGORY_NAMES
+        .iter()
+        .find_map(|(category, name)| (*category == grant.selector).then_some(*name))
+        .unwrap_or(&grant.selector);
+    Some(template.replace("<category name>", name))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeclaredGrantSet {
     module_id: Option<String>,

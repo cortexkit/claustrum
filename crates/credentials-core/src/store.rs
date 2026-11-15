@@ -19109,9 +19109,10 @@ mod gh_proposals;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
 pub use declared_grants::{
-    declared_grant_sets_read_only, parse_declared_grants, DeclarationDiagnostics, DeclaredGrant,
-    DeclaredGrantListing, DeclaredGrantRecord, DeclaredGrantSet, SkippedDeclaredGrant,
-    ACCOUNT_TOKEN_AUDIENCES, MAX_DECLARED_GRANTS,
+    declared_grant_approval_sentence, declared_grant_sets_read_only, parse_declared_grants,
+    DeclarationDiagnostics, DeclaredGrant, DeclaredGrantListing, DeclaredGrantRecord,
+    DeclaredGrantSet, SkippedDeclaredGrant, ACCOUNT_TOKEN_AUDIENCES,
+    DECLARED_GRANT_APPROVAL_TEMPLATES, DECLARED_GRANT_CATEGORY_NAMES, MAX_DECLARED_GRANTS,
 };
 pub use gh_activations::{
     GhManifestActivationOutcome, GhManifestActivationReport, GhManifestActiveStatus,

@@ -1453,7 +1453,7 @@ Only these reasons are permitted:
 - the service is discontinued or unreachable
 - its public documentation does not name both the API host and the key header
 - the key is exchanged for a short-lived token before use
-- web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global
+- a web-search offering served by an existing model key row, which keeps its model identity
 
 | Fusiform id | reason |
 | --- | --- |
@@ -1466,7 +1466,7 @@ Only these reasons are permitted:
 | github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
-| kimi-for-coding | web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global |
+| kimi-for-coding | a web-search offering served by an existing model key row, which keeps its model identity |
 | lmstudio | a user-hosted local server rather than a fixed provider API |
 | lynkr | no API key in its documentation |
 | modal | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |

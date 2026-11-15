@@ -326,7 +326,7 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
     // its model-provider identity rather than adopting the separate search offering id.
     (
         "kimi-for-coding",
-        "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
+        "a web-search offering served by an existing model key row, which keeps its model identity",
     ),
     // LM Studio tokens belong to a local server at the user's own address and port,
     // not a fixed hosted API; authentication is optional on that server.
@@ -445,7 +445,7 @@ pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
     "the service is discontinued or unreachable",
     "its public documentation does not name both the API host and the key header",
     "the key is exchanged for a short-lived token before use",
-    "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
+    "a web-search offering served by an existing model key row, which keeps its model identity",
 ];
 
 use ModelVendor::{
@@ -5599,7 +5599,7 @@ mod tests {
         assert_eq!(row.categories, LLM_AND_WEB_SEARCH);
         assert!(FUSIFORM_PROVIDER_SKIPS.contains(&(
             "kimi-for-coding",
-            "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
+            "a web-search offering served by an existing model key row, which keeps its model identity",
         )));
 
         let published: serde_json::Value =

@@ -500,7 +500,7 @@ operations: category `sign`, `open`, `seal` and category `account_token` are not
 Every whitelisted entry must also pass the same full-tuple validation as `ck auth grant`
 for the reserved module, selector kind, selector and operation. Category names must satisfy
 the vault's category-name grammar; `deposit` is valid only for `browser-session`.
-Audiences must be in the vault's account-token audience allowlist (`AUDIENCES`).
+Audiences must be in the vault's account-token audience allowlist (`ACCOUNT_TOKEN_AUDIENCES` in credentials-core).
 For example, `{"category":"llm-provider","operation":"deposit"}` grants nothing.
 
 Unknown top-level keys are ignored. A version other than `v:1`, a missing or non-array

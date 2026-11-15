@@ -176,8 +176,18 @@ there is no principal check. Treat it as a secret: it belongs in a `0600` file, 
 a log line, an error message, or a shell history. The vault never logs one.
 
 **A supervised module principal** is the supervisor's attestation, stamped at route-bind.
-It is NOT ambient on a connection: a supervised module's calls to
-another module's route surface carry `Principal::Reserved { module_id }` only when its
+For a channel-registered module, the inherited registration stream proves the
+spawn's identity. Its HELLO omits `launch_nonce` and declares
+`registration_channel: true`; `supervisor.provenance` reports `registration: channel`.
+The vault's separate outbound connections authenticate with the connection-file key,
+then present a fresh single-use `self` claim minted over the live registration
+connection (`claim.mint`, then `claim.present`). Claim-bound route opens omit
+`consumer_identity`: an explicit identity conflicts with the connection binding.
+Failed minting or presentation refuses the outbound call without sending it anonymously.
+The config gate uses the registration control lane itself and sends no consumer identity.
+
+On the legacy nonce path, a supervised module's calls to
+another module's route surface carry `Principal::Reserved { module_id }` when its
 `route.open` presents the `consumer_identity` (`SUBC_MODULE_ID`, `SUBC_LAUNCH_NONCE`) that
 the daemon injected at spawn; the daemon verifies the nonce against the live supervisor and
 stamps the principal into the `route.bind` it relays here. A `route.open` WITHOUT it is
@@ -185,13 +195,14 @@ stamps the principal into the `route.bind` it relays here. A `route.open` WITHOU
 `bad_consumer_identity` rather than downgraded. The auth handshake proves connection-file
 access and carries no identity at all.
 
-`subc-client-rs` attaches the pair for you (`ConnectOptions.consumer_identity` reads both
-variables when non-empty). A HAND-ROLLED CLIENT MUST SEND IT, and that is the entire
+Nonce-based clients attach the pair (`ConnectOptions.consumer_identity` in older
+SDKs reads both variables when non-empty). A HAND-ROLLED NONCE CLIENT MUST SEND IT,
+and that is the entire
 difference between a scoped call that works and one that answers `not_found`: a consumer
 dialling over a raw socket plus `authenticate_client` arrives `Direct` and every scoped op
 refuses it correctly.
 
-**Nonce possession, not process ancestry, is the authority boundary.** The supported
+**On the nonce path, nonce possession, not process ancestry, is the authority boundary.** The supported
 handoffs are an inherited descriptor and, when no descriptor is named, the
 `SUBC_LAUNCH_NONCE` environment fallback. The vault reads and closes its nonce
 descriptor before spawning children; before that read the descriptor is inheritable.

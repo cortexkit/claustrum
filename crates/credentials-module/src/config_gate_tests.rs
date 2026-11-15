@@ -72,6 +72,7 @@ impl Rig {
         let config = ModuleConfig {
             connection_file_path: root.join("no-outbound-daemon"),
             module_id: credentials_core::MODULE_ID.into(),
+            registration: crate::Registration::Channel(None),
             launch_nonce: None,
             launch_nonce_source: None,
         };
@@ -96,6 +97,8 @@ impl Rig {
         let hello = rig.recv().await;
         assert_eq!(hello.header.ty, FrameType::Hello);
         let hello: ModuleHelloBody = serde_json::from_slice(&hello.body).unwrap();
+        assert_eq!(hello.manifest.registration_channel, Some(true));
+        assert!(hello.launch_nonce.is_none());
         assert_eq!(
             hello.control_ops.unwrap(),
             vec!["health.check", "config.review"]

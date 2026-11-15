@@ -29,7 +29,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use subc_control::ConsumerIdentity;
+use subc_control::{
+    Claim, ClaimMintReply, ClaimMintRequest, ClaimPresentReply, ClaimPresentRequest, ClaimPurpose,
+    ConsumerIdentity,
+};
 use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget};
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::io::AsyncWriteExt;
@@ -59,6 +62,114 @@ pub const HOME_OP_DEADLINE: Duration = Duration::from_millis(1_500);
 pub const ADMIN_OP_BUDGET: Duration = Duration::from_secs(10);
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Mints consumer claims over the owner's registration egress while the daemon's
+/// frame loop continues answering probes and configuration traffic. Claims are
+/// held only by the call that presents them, never cached or logged.
+#[derive(Clone)]
+pub struct RegistrationClaims(Arc<RegistrationClaimsInner>);
+
+struct RegistrationClaimsInner {
+    writer: mpsc::Sender<Frame>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Frame>>>,
+    // Config delivery uses the low correlation range on this same control lane.
+    next_corr: std::sync::atomic::AtomicU64,
+}
+
+impl RegistrationClaims {
+    pub fn new(writer: mpsc::Sender<Frame>) -> Self {
+        Self(Arc::new(RegistrationClaimsInner {
+            writer,
+            pending: Mutex::new(HashMap::new()),
+            next_corr: std::sync::atomic::AtomicU64::new(1 << 63),
+        }))
+    }
+
+    /// Consume only a reply to an outstanding mint, not another control operation.
+    pub fn dispatch(&self, frame: &Frame) -> bool {
+        if frame.header.channel != 0
+            || frame.header.epoch != 0
+            || !matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return false;
+        }
+        let pending = self.0.pending.lock().unwrap().remove(&frame.header.corr);
+        if let Some(pending) = pending {
+            let _ = pending.send(frame.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn mint(&self) -> Result<Claim, OutboundError> {
+        let corr = self.0.next_corr.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.0.pending.lock().unwrap().insert(corr, tx);
+        let _waiter = ClaimWaiter { claims: self, corr };
+        let body = serde_json::to_value(ClaimMintRequest::new(ClaimPurpose::SelfConnection))
+            .map_err(|_| claim_failure())?;
+        self.0
+            .writer
+            .send(control_frame(corr, &body))
+            .await
+            .map_err(|_| claim_failure())?;
+        let reply = rx.await.map_err(|_| claim_failure())?;
+        if reply.header.ty != FrameType::Response {
+            return Err(claim_failure());
+        }
+        serde_json::from_slice::<ClaimMintReply>(&reply.body)
+            .map(|reply| reply.claim)
+            .map_err(|_| claim_failure())
+    }
+
+    async fn bind_consumer(
+        &self,
+        stream: &mut TcpStream,
+        budget: tokio::time::Instant,
+    ) -> Result<(), OutboundError> {
+        tokio::time::timeout_at(budget, async {
+            let claim = self.mint().await?;
+            let body = serde_json::to_value(ClaimPresentRequest::new(claim))
+                .map_err(|_| claim_failure())?;
+            write_frame(stream, &control_frame(1, &body))
+                .await
+                .map_err(|_| claim_failure())?;
+            let reply = read_frame(stream)
+                .await
+                .map_err(|_| claim_failure())?
+                .ok_or_else(claim_failure)?;
+            if reply.header.channel != 0
+                || reply.header.epoch != 0
+                || reply.header.corr != 1
+                || reply.header.ty != FrameType::Response
+            {
+                return Err(claim_failure());
+            }
+            serde_json::from_slice::<ClaimPresentReply>(&reply.body)
+                .map_err(|_| claim_failure())?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| claim_failure())?
+    }
+}
+
+fn claim_failure() -> OutboundError {
+    // Do not include daemon-supplied bodies: they may contain the bearer claim.
+    OutboundError::Unavailable("consumer claim binding unavailable".into())
+}
+
+struct ClaimWaiter<'a> {
+    claims: &'a RegistrationClaims,
+    corr: u64,
+}
+
+impl Drop for ClaimWaiter<'_> {
+    fn drop(&mut self) {
+        self.claims.0.pending.lock().unwrap().remove(&self.corr);
+    }
+}
 
 /// What an outbound call can fail with, in the terms the federation surfaces speak.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +489,7 @@ impl Drop for Subscription {
 struct Inner {
     connection_file: std::path::PathBuf,
     consumer_identity: Option<ConsumerIdentity>,
+    registration_claims: Option<RegistrationClaims>,
     /// The current link. The lock is held only while a link is read, installed or
     /// retired, never across a call: callers clone the `Arc` out and wait on their own
     /// oneshot.
@@ -400,6 +512,15 @@ impl std::fmt::Debug for OutboundClient {
 }
 
 impl OutboundClient {
+    /// A channel-registered owner binds each new consumer connection with a fresh
+    /// single-use claim. Route opens on that connection must not send a nonce identity.
+    pub fn for_registration_channel(
+        connection_file: impl Into<std::path::PathBuf>,
+        claims: RegistrationClaims,
+    ) -> Self {
+        Self::build(connection_file.into(), None, Some(claims))
+    }
+
     /// Build the client a supervised daemon uses. `consumer_identity` is built from the
     /// module id and the launch nonce the daemon already read at startup, so a peer
     /// daemon can attest this vault rather than trusting a claim in the request body.
@@ -421,10 +542,19 @@ impl OutboundClient {
         connection_file: impl Into<std::path::PathBuf>,
         consumer_identity: Option<ConsumerIdentity>,
     ) -> Self {
+        Self::build(connection_file.into(), consumer_identity, None)
+    }
+
+    fn build(
+        connection_file: std::path::PathBuf,
+        consumer_identity: Option<ConsumerIdentity>,
+        registration_claims: Option<RegistrationClaims>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                connection_file: connection_file.into(),
+                connection_file,
                 consumer_identity,
+                registration_claims,
                 connection: AsyncMutex::new(None),
                 connector: AsyncMutex::new(()),
                 bindings: Mutex::new(HashMap::new()),
@@ -548,7 +678,12 @@ impl OutboundClient {
         let connect_budget = remaining(budget, || {
             OutboundError::Unavailable("no time to connect".into())
         })?;
-        let stream = connect(&self.inner.connection_file, connect_budget).await?;
+        let mut stream = connect(&self.inner.connection_file, connect_budget).await?;
+        if let Some(claims) = &self.inner.registration_claims {
+            // Bind before installing the reader or sending route.open. A failed
+            // mint/presentation drops the socket, never downgrades it to anonymous.
+            claims.bind_consumer(&mut stream, budget).await?;
+        }
         let link = self.install(stream).await;
         Ok(link)
     }
@@ -1208,5 +1343,212 @@ mod tests {
     fn a_client_without_a_nonce_presents_no_identity() {
         let client = OutboundClient::for_daemon("/nonexistent", "claustrum", None);
         assert!(client.consumer_identity().is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_consumers_bind_fresh_claims_and_omit_nonce_identity() {
+        claim_connection_case(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_mint_sends_nothing_on_the_consumer_connection() {
+        claim_connection_case(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_presentation_never_opens_an_anonymous_route() {
+        claim_connection_case(false, true).await;
+    }
+
+    async fn claim_connection_case(mint_refused: bool, present_refused: bool) {
+        let root = credentials_core::test_support::TestTempDir::new(format!(
+            "consumer-claim-{mint_refused}-{present_refused}"
+        ));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let path = root.join("connection.json");
+        let conn = subc_transport::ConnectionInfo {
+            schema: connection_file::SCHEMA_VERSION,
+            wire_version: None,
+            endpoints: vec![subc_transport::Endpoint {
+                host: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                port: listener.local_addr().unwrap().port(),
+            }],
+            key: vec![7; 32],
+            daemon_id: [11; 16],
+            pid: std::process::id(),
+            daemon_ver: "test".into(),
+        };
+        connection_file::write_atomic(&path, &conn).unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        let claims = RegistrationClaims::new(tx);
+        let dispatcher = claims.clone();
+        let attempts = if mint_refused || present_refused {
+            1
+        } else {
+            2
+        };
+        let minting = tokio::spawn(async move {
+            for index in 0..attempts {
+                let mint = rx.recv().await.unwrap();
+                assert_eq!(mint.header.channel, 0);
+                assert_eq!(mint.header.epoch, 0);
+                assert_eq!(mint.header.ty, FrameType::Request);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&mint.body).unwrap(),
+                    json!({"op":"claim.mint","purpose":"self"})
+                );
+                let (ty, body) = if mint_refused {
+                    (
+                        FrameType::Error,
+                        json!({"code":"claim_mint_not_allowed","message":"test"}),
+                    )
+                } else {
+                    (
+                        FrameType::Response,
+                        serde_json::to_value(ClaimMintReply::new(
+                            Claim::new(format!("test-claim-{index}")),
+                            123,
+                        ))
+                        .unwrap(),
+                    )
+                };
+                let reply = Frame::build(
+                    ty,
+                    mint.header.flags,
+                    0,
+                    0,
+                    mint.header.corr,
+                    serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap();
+                assert!(dispatcher.dispatch(&reply));
+                assert!(
+                    !dispatcher.dispatch(&reply),
+                    "a mint reply is consumed only once"
+                );
+            }
+        });
+        let serving = tokio::spawn(async move {
+            for index in 0..attempts {
+                let mut stream = listener.accept().await.unwrap().0;
+                subc_transport::authenticate_server(
+                    &mut stream,
+                    &conn.key,
+                    &conn.daemon_id,
+                    "test",
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+                if mint_refused {
+                    assert!(
+                        read_frame(&mut stream).await.unwrap().is_none(),
+                        "mint refusal must leave the consumer connection unused"
+                    );
+                    continue;
+                }
+                let present = read_frame(&mut stream).await.unwrap().unwrap();
+                assert_eq!(present.header.channel, 0);
+                assert_eq!(present.header.epoch, 0);
+                assert_eq!(present.header.corr, 1);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&present.body).unwrap(),
+                    json!({"op":"claim.present","claim":format!("test-claim-{index}")})
+                );
+                let body = if present_refused {
+                    json!({"code":"claim_invalid","message":"test"})
+                } else {
+                    serde_json::to_value(ClaimPresentReply::new()).unwrap()
+                };
+                let ty = if present_refused {
+                    FrameType::Error
+                } else {
+                    FrameType::Response
+                };
+                write_frame(
+                    &mut stream,
+                    &Frame::build(
+                        ty,
+                        present.header.flags,
+                        0,
+                        0,
+                        1,
+                        serde_json::to_vec(&body).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                if present_refused {
+                    assert!(
+                        read_frame(&mut stream).await.unwrap().is_none(),
+                        "presentation refusal must not downgrade to anonymous"
+                    );
+                    continue;
+                }
+                let open = read_frame(&mut stream).await.unwrap().unwrap();
+                let body: Value = serde_json::from_slice(&open.body).unwrap();
+                assert_eq!(body["op"], "route.open");
+                assert!(body.get("consumer_identity").is_none());
+                write_frame(
+                    &mut stream,
+                    &Frame::build(
+                        FrameType::Response,
+                        open.header.flags,
+                        0,
+                        0,
+                        open.header.corr,
+                        serde_json::to_vec(&json!({"route_channel":12,"route_epoch":1})).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                let call = read_frame(&mut stream).await.unwrap().unwrap();
+                write_frame(
+                    &mut stream,
+                    &Frame::build(
+                        FrameType::Response,
+                        call.header.flags,
+                        12,
+                        1,
+                        call.header.corr,
+                        serde_json::to_vec(&json!({"ok":true})).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        // Reuse one client across a forced disconnect: each replacement connection
+        // must mint its own single-use claim, not reuse the previous presentation.
+        let client = OutboundClient::for_registration_channel(path, claims.clone());
+        for _ in 0..attempts {
+            let result = client
+                .call(
+                    "claim-test",
+                    RouteCall {
+                        target: management_surface("callosum"),
+                        request: json!({"op":"test"}),
+                        prelude: None,
+                    },
+                    Duration::from_secs(5),
+                )
+                .await;
+            if mint_refused || present_refused {
+                assert!(matches!(result, Err(OutboundError::Unavailable(_))));
+            } else {
+                assert_eq!(result.unwrap(), json!({"ok":true}));
+                if let Some(link) = client.current_link().await {
+                    close_link(&link, "test reconnect").await;
+                }
+            }
+            assert!(claims.0.pending.lock().unwrap().is_empty());
+        }
+        minting.await.unwrap();
+        serving.await.unwrap();
     }
 }

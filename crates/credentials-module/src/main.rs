@@ -2,9 +2,9 @@
 
 //! The claustrum subc module daemon (the credential vault).
 //!
-//! Connects out to the subc daemon, authenticates over loopback TCP, and registers
-//! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
-//! injected so only the spawned process can claim the `claustrum` id
+//! Authenticates to the subc daemon over its inherited registration channel (or
+//! loopback TCP for older supervisors), and registers a reserved `ManagementSurface`.
+//! The channel, or the legacy launch nonce, proves the spawned process owns the id
 //! (closing the vault-impersonation hole). It serves the capability-handle read
 //! surface plus principal-scoped `credential.get_scoped`, `credential.status`,
 //! `credential.sign`, and `credential.public_key` route operations.
@@ -12,7 +12,7 @@
 //! the admin surface, gated by master-key possession + the single-writer lease.
 //!
 //! The subc registration handshake is a `HELLO` frame the module sends (carrying
-//! its manifest and the launch nonce) and a `HELLO_ACK` the daemon returns
+//! its manifest and, only on the legacy connection, the launch nonce) and a `HELLO_ACK` the daemon returns
 //! (carrying the resolved storage descriptor); the rest is a frame loop of route
 //! requests. This mirrors the proven ai-provider-quota module.
 //!
@@ -161,9 +161,11 @@ async fn main() -> Result<(), ModuleError> {
 struct ModuleConfig {
     connection_file_path: PathBuf,
     module_id: String,
+    /// The adopted supervisor connection, consumed once before HELLO. Its absence
+    /// selects the legacy endpoint and nonce, not a retry after channel failure.
+    registration: Registration,
     /// The one-time launch nonce for a reserved module (echoed in HELLO). `None`
-    /// for a non-reserved launch (the daemon would then reject a reserved id, but a
-    /// dev run without a supervisor simply omits it).
+    /// on the registration channel or for an unsupervised development launch.
     launch_nonce: Option<String>,
     /// Where that nonce came from, declared in the manifest's provenance so the
     /// supervisor can tell which modules no longer need the environment copy.
@@ -177,6 +179,19 @@ impl ModuleConfig {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
+        // Adopt before spawning children so the inherited channel cannot leak to them.
+        // A validated channel's adoption error is fatal, never a nonce fallback.
+        let channel = subc_os::take_registration_channel()
+            .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
+        let registration_channel = channel.map(registration_stream).transpose()?;
+        Self::with_registration_channel(connection_file_path, module_id, registration_channel)
+    }
+
+    fn with_registration_channel(
+        connection_file_path: PathBuf,
+        module_id: String,
+        registration_channel: Option<Box<dyn ModuleStream>>,
+    ) -> Result<Self, ModuleError> {
         // THE ONLY READ OF THE LAUNCH NONCE IN THIS DAEMON, and it must stay the only
         // one. `subc_os::launch_nonce` takes the nonce from the inherited descriptor the
         // supervisor passes (falling back to `SUBC_LAUNCH_NONCE` only when no descriptor
@@ -187,9 +202,13 @@ impl ModuleConfig {
         //
         // Called first thing in `main`, before anything is spawned, because until it
         // runs the descriptor is inheritable and a child would receive the pipe.
-        let nonce = subc_os::launch_nonce().map_err(|e| {
-            ModuleError::Message(format!("cannot read the supervisor's launch nonce: {e}"))
-        })?;
+        let nonce = if registration_channel.is_some() {
+            None
+        } else {
+            subc_os::launch_nonce().map_err(|e| {
+                ModuleError::Message(format!("cannot read the supervisor's launch nonce: {e}"))
+            })?
+        };
         let launch_nonce_source = nonce.as_ref().map(|n| match n.source() {
             subc_os::LaunchNonceSource::Fd => LaunchNonceSource::Fd,
             subc_os::LaunchNonceSource::Env => LaunchNonceSource::Env,
@@ -201,10 +220,54 @@ impl ModuleConfig {
         Ok(Self {
             connection_file_path,
             module_id,
+            registration: match registration_channel {
+                Some(stream) => Registration::Channel(Some(stream)),
+                None => Registration::Legacy,
+            },
             launch_nonce,
             launch_nonce_source,
         })
     }
+}
+
+trait ModuleStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> ModuleStream for T {}
+
+enum Registration {
+    Legacy,
+    Channel(Option<Box<dyn ModuleStream>>),
+}
+
+impl Registration {
+    fn is_channel(&self) -> bool {
+        matches!(self, Self::Channel(_))
+    }
+
+    fn take_stream(&mut self) -> Option<Box<dyn ModuleStream>> {
+        match self {
+            Self::Legacy => None,
+            Self::Channel(stream) => Some(stream.take().expect("registration stream taken once")),
+        }
+    }
+}
+
+fn registration_stream(
+    channel: subc_os::RegistrationChannel,
+) -> Result<Box<dyn ModuleStream>, ModuleError> {
+    #[cfg(unix)]
+    let stream = {
+        let stream = channel.into_unix_stream();
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
+        tokio::net::UnixStream::from_std(stream)
+            .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?
+    };
+    #[cfg(windows)]
+    let stream = channel
+        .into_tokio_pipe_client()
+        .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
+    Ok(Box::new(stream))
 }
 
 /// The two egress lanes to the supervisor. Control-plane frames (HELLO, pong, route-bind
@@ -305,8 +368,12 @@ impl RouteEpochs {
     }
 }
 
-async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
-    let stream = connect_to_subc(&config.connection_file_path).await?;
+async fn run(mut config: ModuleConfig) -> Result<(), ModuleError> {
+    let stream = connect_to_subc(
+        &config.connection_file_path,
+        config.registration.take_stream(),
+    )
+    .await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let (control_tx, control_rx) = mpsc::channel::<Frame>(CONTROL_EGRESS_BUFFER);
     let (route_tx, route_rx) = mpsc::channel::<Frame>(EGRESS_BUFFER);
@@ -345,17 +412,27 @@ async fn finish_writer(
     }
 }
 
-async fn connect_to_subc(connection_file_path: &PathBuf) -> Result<TcpStream, ModuleError> {
+async fn connect_to_subc(
+    connection_file_path: &PathBuf,
+    registration_channel: Option<Box<dyn ModuleStream>>,
+) -> Result<Box<dyn ModuleStream>, ModuleError> {
     let conn = connection_file::read(connection_file_path)
         .map_err(|e| ModuleError::Message(format!("reading connection file: {e}")))?;
-    let endpoint = conn
-        .endpoints
-        .first()
-        .ok_or_else(|| ModuleError::Message("connection file has no endpoints".into()))?;
-    let addr = format!("{}:{}", endpoint.host, endpoint.port);
-    let mut stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| ModuleError::Message(format!("connect {addr}: {e}")))?;
+    let mut stream = match registration_channel {
+        Some(stream) => stream,
+        None => {
+            let endpoint = conn
+                .endpoints
+                .first()
+                .ok_or_else(|| ModuleError::Message("connection file has no endpoints".into()))?;
+            let addr = format!("{}:{}", endpoint.host, endpoint.port);
+            Box::new(
+                TcpStream::connect(&addr)
+                    .await
+                    .map_err(|e| ModuleError::Message(format!("connect {addr}: {e}")))?,
+            ) as Box<dyn ModuleStream>
+        }
+    };
     authenticate_client(&mut stream, &conn, std::time::Duration::from_secs(2))
         .await
         .map_err(|e| ModuleError::Message(format!("authenticate: {e}")))?;
@@ -389,6 +466,10 @@ where
     // HELLO is a channel-0 control frame — send it on the control lane.
     send_hello(&egress.control, config).await?;
     let ack = expect_hello_ack(&mut read_half).await?;
+    let claims = config
+        .registration
+        .is_channel()
+        .then(|| federation::outbound::RegistrationClaims::new(egress.control.clone()));
     // The frame decoder must not be cancelled mid-frame when startup completes.
     // A bounded inbox makes the startup readiness select cancellation-safe.
     let (incoming, mut ingress) = mpsc::channel(EGRESS_BUFFER);
@@ -454,14 +535,20 @@ where
     let _login_sharing_guard = login_sharing_task;
     // The outbound client: this vault's own connection to subc for calls it makes as a
     // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
-    // from the module id and the launch nonce `ModuleConfig::from_env` already read;
-    // the nonce is never read again. It connects lazily on its first call, so building
-    // it here costs nothing and a vault that makes no outbound calls never dials.
-    let outbound = federation::OutboundClient::for_daemon(
-        &config.connection_file_path,
-        &config.module_id,
-        config.launch_nonce.as_deref(),
-    );
+    // with either a fresh self-connection claim from this registration, or the legacy
+    // nonce already read at startup. It connects lazily, never anonymously after a
+    // failed claim, and never reads the launch nonce again.
+    let outbound = match &claims {
+        Some(claims) => federation::OutboundClient::for_registration_channel(
+            &config.connection_file_path,
+            claims.clone(),
+        ),
+        None => federation::OutboundClient::for_daemon(
+            &config.connection_file_path,
+            &config.module_id,
+            config.launch_nonce.as_deref(),
+        ),
+    };
     // The home side asks callosum about pairings and keys, the remote reader fetches
     // tokens from other members' vaults, and the usage relay sends insula batches.
     // Clones share one connection and one binding cache.
@@ -561,6 +648,12 @@ where
         let Some(frame) = frame else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
+        if claims
+            .as_ref()
+            .is_some_and(|claims| claims.dispatch(&frame))
+        {
+            continue;
+        }
         if let Some(gate) = &gate {
             if gate.dispatch(&frame).await? {
                 continue;
@@ -1026,14 +1119,14 @@ async fn send_hello(
             MODULE_CONTROL_OP_HEALTH_CHECK.to_string(),
             subc_protocol::config::CONFIG_REVIEW_OP.into(),
         ]),
-        // Echo the supervisor's launch nonce. This is the module half of the
-        // reserved-id ceremony: it proves this process was spawned by the
+        // Only legacy endpoint registration echoes the supervisor's launch nonce.
+        // On that path it proves this process was spawned by the
         // supervisor rather than merely able to complete the handshake.
         //
         // Whether the supervisor ENFORCES that is a property of its config, not of
         // this code -- an id it does not treat as reserved authorizes any HELLO,
         // and the echo is then a key for a lock nobody installed. This module
-        // cannot observe which case it is in and must send the nonce either way,
+        // cannot observe which case it is in and must send the nonce on that path,
         // so nothing here should be read as evidence that the check happens.
         launch_nonce: config.launch_nonce.clone(),
     })
@@ -2452,6 +2545,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         module_id.to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     )
+    // Support declaration, not authority: only the inherited stream selects the path.
+    .registration_channel(true)
     // TRUST TIER AND BINDINGS MOVED OUT OF `builder()` IN PROTOCOL 0.19 and are set here
     // explicitly for the same reason every other optional setter below is: the builder
     // defaults both to None, and an absence expressed by omission is indistinguishable
@@ -9674,6 +9769,202 @@ mod tests {
             found.join("\n")
         );
     }
+    /// Registration handoff validation belongs to subc-os, not to shipped vault code.
+    #[test]
+    fn no_shipped_source_reads_registration_metadata_directly() {
+        fn offending(text: &str) -> bool {
+            text.lines().any(|line| {
+                let code = line.split("//").next().unwrap_or("");
+                !code.contains("remove_var")
+                    && [
+                        "SUBC_REGISTRATION_FD",
+                        "SUBC_REGISTRATION_PIPE",
+                        "SUBC_DAEMON_PID",
+                        "REGISTRATION_FD_ENV",
+                        "REGISTRATION_PIPE_ENV",
+                        "DAEMON_PID_ENV",
+                    ]
+                    .iter()
+                    .any(|key| code.contains(key))
+            })
+        }
+        for key in [
+            "SUBC_REGISTRATION_FD",
+            "SUBC_REGISTRATION_PIPE",
+            "SUBC_DAEMON_PID",
+        ] {
+            assert!(offending(&format!("std::env::var(\"{key}\")")));
+            assert!(!offending(&format!("std::env::remove_var(\"{key}\")")));
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut stack: Vec<_> = [
+            "crates/credentials-core/src",
+            "crates/credentials-module/src",
+            "crates/claustrum-client/src",
+        ]
+        .iter()
+        .map(|p| root.join(p))
+        .collect();
+        let mut scanned = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    scanned += 1;
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let code = text
+                        .split("fn no_shipped_source_reads_registration_metadata_directly")
+                        .next()
+                        .unwrap();
+                    assert!(
+                        !offending(code),
+                        "use subc_os registration accessors: {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(scanned > 20);
+    }
+
+    #[tokio::test]
+    async fn channel_registration_omits_nonce_and_never_retries_a_refusal() {
+        registration_path_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_registration_uses_endpoint_and_nonce() {
+        registration_path_case(false).await;
+    }
+
+    async fn registration_path_case(channel: bool) {
+        // The nonce accessor caches process-wide. A child isolates each path from
+        // other tests and proves that an offered channel ignores a present nonce.
+        if std::env::var("CLAUSTRUM_REGISTRATION_TEST_CHILD").is_err() {
+            let test = if channel {
+                "tests::channel_registration_omits_nonce_and_never_retries_a_refusal"
+            } else {
+                "tests::legacy_registration_uses_endpoint_and_nonce"
+            };
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env("CLAUSTRUM_REGISTRATION_TEST_CHILD", "1")
+                .env("SUBC_LAUNCH_NONCE", "registration-test-nonce")
+                .env_remove("SUBC_LAUNCH_NONCE_FD")
+                .env_remove("SUBC_LAUNCH_NONCE_PIPE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let root =
+            credentials_core::test_support::TestTempDir::new(format!("registration-{channel}"));
+        let endpoint = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        endpoint.set_nonblocking(true).unwrap();
+        let conn = subc_transport::ConnectionInfo {
+            schema: connection_file::SCHEMA_VERSION,
+            wire_version: None,
+            endpoints: vec![subc_transport::Endpoint {
+                host: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                port: endpoint.local_addr().unwrap().port(),
+            }],
+            key: vec![7; 32],
+            daemon_id: [11; 16],
+            pid: std::process::id(),
+            daemon_ver: "test".into(),
+        };
+        let path = root.join("connection.json");
+        connection_file::write_atomic(&path, &conn).unwrap();
+        let (client, peer) = tokio::io::duplex(65536);
+        let config = ModuleConfig::with_registration_channel(
+            path,
+            "claustrum".into(),
+            channel.then(|| Box::new(client) as Box<dyn ModuleStream>),
+        )
+        .unwrap();
+        assert_eq!(
+            config.launch_nonce.as_deref(),
+            if channel {
+                None
+            } else {
+                Some("registration-test-nonce")
+            }
+        );
+        assert_eq!(
+            config.launch_nonce_source,
+            if channel {
+                None
+            } else {
+                Some(LaunchNonceSource::Env)
+            }
+        );
+        let listener = tokio::net::TcpListener::from_std(endpoint.try_clone().unwrap()).unwrap();
+        let daemon = tokio::spawn(async move {
+            let mut peer: Box<dyn ModuleStream> = if channel {
+                Box::new(peer)
+            } else {
+                Box::new(listener.accept().await.unwrap().0)
+            };
+            subc_transport::authenticate_server(
+                &mut peer,
+                &conn.key,
+                &conn.daemon_id,
+                "test",
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            let hello = read_frame(&mut peer).await.unwrap().unwrap();
+            assert_eq!(hello.header.ty, FrameType::Hello);
+            let body: serde_json::Value = serde_json::from_slice(&hello.body).unwrap();
+            assert_eq!(body["manifest"]["registration_channel"], true);
+            if channel {
+                assert!(body.get("launch_nonce").is_none());
+                assert!(body["manifest"]["provenance"]
+                    .get("launch_nonce_source")
+                    .is_none());
+            } else {
+                assert_eq!(body["launch_nonce"], "registration-test-nonce");
+                assert_eq!(body["manifest"]["provenance"]["launch_nonce_source"], "env");
+            }
+            let refusal = ErrorBody::new("registration_channel_module_mismatch", "test refusal");
+            write_frame(
+                &mut peer,
+                &Frame::build(
+                    FrameType::Error,
+                    control_flags(),
+                    0,
+                    0,
+                    HELLO_CORR,
+                    serde_json::to_vec(&refusal).unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                read_frame(&mut peer).await.unwrap().is_none(),
+                "HELLO refusal must close without retrying"
+            );
+        });
+        let error = run(config).await.expect_err("refused");
+        assert!(error
+            .to_string()
+            .contains("registration_channel_module_mismatch"));
+        daemon.await.unwrap();
+        assert_eq!(
+            endpoint.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "channel registration must not dial the nonce endpoint after refusal"
+        );
+    }
+
     /// The request pins below cover the parameter structs that exist for known route operations.
     /// They catch a parameter added to a known op, but a wholly new op with a new struct still
     /// depends on the person adding it to create a pin. This deliberately does not enumerate

@@ -37,7 +37,7 @@ use std::{
 use tokio::process::{Child, Command};
 
 use common::{
-    connect_consumer, count_alarm_rows, credential_get, credential_get_many,
+    connect_consumer, control_rpc, count_alarm_rows, credential_get, credential_get_many,
     credential_report_auth_failure, raw_route_request, route_open, unique_temp_dir,
     wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
 };
@@ -46,6 +46,9 @@ use cortexkit_test_support::{ckdev_binary, dev_command};
 use credentials_core::resolver::{KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 use credentials_core::test_support::TestTempDir;
+use serde_json::{json, Value};
+use subc_protocol::FrameType;
+use subc_transport::connection_file;
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
@@ -540,6 +543,46 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
 
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+
+    let provenance = control_rpc(
+        &mut consumer,
+        9001,
+        json!({
+            "op": "supervisor.provenance", "module_id": MODULE_ID,
+        }),
+    )
+    .await;
+    let daemon_version = connection_file::read(&seeded.daemon.connection_file)
+        .expect("connection file")
+        .daemon_ver;
+    assert_eq!(provenance.header.ty, FrameType::Response);
+    let body: Value = serde_json::from_slice(&provenance.body).unwrap();
+    let entry = body["modules"]
+        .as_array()
+        .expect("provenance modules")
+        .iter()
+        .find(|entry| entry["module_id"] == MODULE_ID)
+        .expect("vault provenance");
+    let observed = subc_control::SupervisorModuleProvenanceExt::read_from(entry).unwrap();
+    if observed.registration.is_some() || observed.registration_declaration.is_some() {
+        assert_eq!(
+            observed.registration,
+            Some(subc_control::RegistrationMethod::Channel),
+            "a channel-capable daemon must observe channel registration, not a nonce fallback"
+        );
+        assert_eq!(
+            observed.registration_declaration.as_deref(),
+            Some("declared")
+        );
+        assert!(
+            entry["module_declared"]["build"]
+                .get("launch_nonce_source")
+                .is_none(),
+            "channel registration must not claim to have read a nonce"
+        );
+    } else {
+        eprintln!("daemon {daemon_version} predates registration channel observations");
+    }
 
     let route_channel = route_open(&mut consumer, 1).await;
 

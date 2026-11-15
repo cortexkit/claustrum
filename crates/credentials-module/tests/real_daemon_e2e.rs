@@ -389,7 +389,9 @@ where
 
     // The subc.jsonc: a storage section + the vault module marked reserved, with the
     // operator key path passed via env so the daemon resolves the same key the CLI
-    // provisioned.
+    // provisioned. `registration_channel: true` is the gated production setting: the
+    // daemon then accepts the vault only over the channel it hands over, never by nonce,
+    // and reports the declaration as `declared`.
     let subc_jsonc = serde_json::json!({
         "version": 1,
         "storage": { "backend": "sqlite", "data_home": data_home },
@@ -398,6 +400,7 @@ where
                 "program": credentials_module,
                 "args": [],
                 "reserved": true,
+                "registration_channel": true,
                 "env": { "CK_MASTER_KEY_PATH": key_path }
             }
         }

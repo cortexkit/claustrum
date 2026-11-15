@@ -1320,6 +1320,15 @@
       ]
     },
     {
+      "id": "kimi-for-coding",
+      "name": "Kimi Code",
+      "doc": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+      "source": "hand_kept",
+      "kind": "web_search",
+      "env": [],
+      "output_modalities": []
+    },
+    {
       "id": "kiro",
       "name": "Kiro",
       "doc": "https://kiro.dev/docs/",

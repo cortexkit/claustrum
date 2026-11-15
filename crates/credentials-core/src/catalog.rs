@@ -322,6 +322,12 @@ pub const FUSIFORM_PROVIDER_SKIPS: &[(&str, &str)] = &[
         "google-vertex-anthropic",
         "a second secret or a per-account host in the style of Azure, Bedrock or Vertex",
     ),
+    // Search does not select credentials by provider id. The same Kimi Code key keeps
+    // its model-provider identity rather than adopting the separate search offering id.
+    (
+        "kimi-for-coding",
+        "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
+    ),
     // LM Studio tokens belong to a local server at the user's own address and port,
     // not a fixed hosted API; authentication is optional on that server.
     (
@@ -439,6 +445,7 @@ pub const FUSIFORM_SKIP_REASONS: &[&str] = &[
     "the service is discontinued or unreachable",
     "its public documentation does not name both the API host and the key header",
     "the key is exchanged for a short-lived token before use",
+    "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
 ];
 
 use ModelVendor::{
@@ -5581,6 +5588,40 @@ mod tests {
             .map(|provider| provider.id.as_str())
             .collect();
         assert_eq!(missing, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn fusiform_kimi_search_offering_preserves_the_model_key_identity() {
+        let row = api_key_provider("kimi-for-coding").unwrap();
+        assert_eq!(row.fusiform_provider_id, Some("kimi-code-plan-global"));
+        assert_eq!(row.default_provider_ids, ["kimi-code-plan-global"]);
+        assert_eq!(row.hosts, ["api.kimi.ai", "api.kimi.com"]);
+        assert_eq!(row.categories, LLM_AND_WEB_SEARCH);
+        assert!(FUSIFORM_PROVIDER_SKIPS.contains(&(
+            "kimi-for-coding",
+            "web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global",
+        )));
+
+        let published: serde_json::Value =
+            serde_json::from_slice(crate::fusiform_providers::FUSIFORM_PROVIDERS_JSON).unwrap();
+        let search = published["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "kimi-for-coding")
+            .unwrap();
+        assert_eq!(
+            search,
+            &serde_json::json!({
+                "id": "kimi-for-coding",
+                "name": "Kimi Code",
+                "doc": "https://www.kimi.com/code/docs/kimi-code/membership.html",
+                "source": "hand_kept",
+                "kind": "web_search",
+                "env": [],
+                "output_modalities": [],
+            })
+        );
     }
 
     #[test]

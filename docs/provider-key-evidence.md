@@ -1190,7 +1190,7 @@ On 2026-11-11 the owner reviewed the remaining 27 uncovered ids and approved
 nine rows and eighteen skips. These decisions supersede the earlier sections'
 uncovered dispositions, without changing any existing row's identity, routing or
 categories. `ck-auth provider-report --missing` now has no uncovered ids before
-its `Skipped:` section; the section still lists all 37 reviewed skips. The
+its `Skipped:` section; the section now lists all 38 reviewed skips. The
 proposer (`cargo run --locked -p credentials-core --example ckdev_provider_rows`)
 has no remaining row to propose. Regolo AI has text and image output in the
 vendored list, so its new row defaults to both LLM and media; the other eight
@@ -1383,6 +1383,14 @@ not a reason to skip it.
   with Google Cloud credentials. See
   <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview>
   and <https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude>.
+- `kimi-for-coding`: Fusiform publishes "Kimi Code" as a manually maintained web-search
+  offering, with documentation at
+  <https://www.kimi.com/code/docs/kimi-code/membership.html>. Its `kimi.com` domain
+  matches the existing `apikey:kimi-for-coding` row's `api.kimi.com` receiving
+  host under the catalog's offering-domain check. The key also serves models, so
+  its `fusiform_provider_id` and default provider ids remain `kimi-code-plan-global`.
+  Search routing does not select credentials by provider id, so the key does not
+  need `kimi-for-coding` on its provider ids. No stored credential is remapped.
 - `lmstudio`: LM Studio serves models at the user's own local server address and
   configurable port (default `http://localhost:1234`), not a fixed provider API host.
   Its optional Bearer token is created in that local server's token manager. See
@@ -1445,6 +1453,7 @@ Only these reasons are permitted:
 - the service is discontinued or unreachable
 - its public documentation does not name both the API host and the key header
 - the key is exchanged for a short-lived token before use
+- web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global
 
 | Fusiform id | reason |
 | --- | --- |
@@ -1457,6 +1466,7 @@ Only these reasons are permitted:
 | github-copilot | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | gitlab | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
 | google-vertex-anthropic | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |
+| kimi-for-coding | web-search offering of Kimi Code; search does not select keys by provider id, so the key keeps kimi-code-plan-global |
 | lmstudio | a user-hosted local server rather than a fixed provider API |
 | lynkr | no API key in its documentation |
 | modal | a second secret or a per-account host in the style of Azure, Bedrock or Vertex |

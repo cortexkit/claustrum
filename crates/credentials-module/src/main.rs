@@ -203,6 +203,10 @@ impl ModuleConfig {
         // Called first thing in `main`, before anything is spawned, because until it
         // runs the descriptor is inheritable and a child would receive the pipe.
         let nonce = if registration_channel.is_some() {
+            // The channel is the authority, so a nonce is never sent on it. A supervisor
+            // may still hand one over; read it anyway, so its descriptor is closed and
+            // never inherited by a child (the keychain tool, a browser), and drop it.
+            let _ = subc_os::launch_nonce();
             None
         } else {
             subc_os::launch_nonce().map_err(|e| {
@@ -243,10 +247,15 @@ impl Registration {
         matches!(self, Self::Channel(_))
     }
 
-    fn take_stream(&mut self) -> Option<Box<dyn ModuleStream>> {
+    /// A second take is an error, never `None`: `None` would send `run` to the legacy
+    /// endpoint without a nonce.
+    fn take_stream(&mut self) -> Result<Option<Box<dyn ModuleStream>>, ModuleError> {
         match self {
-            Self::Legacy => None,
-            Self::Channel(stream) => Some(stream.take().expect("registration stream taken once")),
+            Self::Legacy => Ok(None),
+            Self::Channel(stream) => stream
+                .take()
+                .map(Some)
+                .ok_or_else(|| ModuleError::Message("registration channel already used".into())),
         }
     }
 }
@@ -371,7 +380,7 @@ impl RouteEpochs {
 async fn run(mut config: ModuleConfig) -> Result<(), ModuleError> {
     let stream = connect_to_subc(
         &config.connection_file_path,
-        config.registration.take_stream(),
+        config.registration.take_stream()?,
     )
     .await?;
     let (read_half, write_half) = tokio::io::split(stream);

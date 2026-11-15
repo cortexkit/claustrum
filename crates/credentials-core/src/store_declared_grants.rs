@@ -365,7 +365,8 @@ fn declared_sets_from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Decl
     Ok(listing)
 }
 
-/// Lease-free inventory read. An older store has no declared inventory to display.
+/// Read the declared-grant inventory through a read-only connection, without the store's
+/// writer lease. An older store has no declared inventory to display.
 pub fn declared_grant_sets_read_only(
     path: &std::path::Path,
 ) -> Result<DeclaredGrantListing, String> {

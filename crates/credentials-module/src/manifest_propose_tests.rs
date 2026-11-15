@@ -979,17 +979,19 @@ async fn manifest_propose_dispatch_pins_uniform_principals_and_transport_shape_e
     let before = snapshot(&rig);
     let unknown = wire(
         &rig,
-        RouteCaller::Principal(None),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(None)),
         "credential.get",
         json!({"handle":"unknown"}),
     )
     .await;
     assert_eq!(unknown.0, FrameType::Response);
     for caller in [
-        RouteCaller::Principal(None),
-        RouteCaller::Principal(Some(Principal::Reserved {
-            module_id: "aft".into(),
-        })),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(None)),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            Principal::Reserved {
+                module_id: "aft".into(),
+            },
+        ))),
         RouteCaller::Refused,
         RouteCaller::Phone("a".repeat(64)),
     ] {
@@ -1000,7 +1002,9 @@ async fn manifest_propose_dispatch_pins_uniform_principals_and_transport_shape_e
     }
     let (kind, body) = wire(
         &rig,
-        RouteCaller::Principal(Some(plexus())),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            plexus(),
+        ))),
         OP_PROPOSE_BINDING,
         json!({"agent_id":"bad/id"}),
     )
@@ -1011,7 +1015,9 @@ async fn manifest_propose_dispatch_pins_uniform_principals_and_transport_shape_e
     assert!(body.get("class").is_none());
     let (kind, body) = wire(
         &rig,
-        RouteCaller::Principal(Some(plexus())),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            plexus(),
+        ))),
         OP_PROPOSE_BINDING,
         params(),
     )

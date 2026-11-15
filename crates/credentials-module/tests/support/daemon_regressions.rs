@@ -18,9 +18,15 @@ async fn regression_reply(
     principal: Option<subc_protocol::Principal>,
 ) -> Frame {
     let (tx, mut rx) = mpsc::channel(1);
-    handle_read_request(frame, &tx, surface, admin, principal)
-        .await
-        .unwrap();
+    handle_read_request(
+        frame,
+        &tx,
+        surface,
+        admin,
+        crate::federation::ingress::ScopedCaller::hand_only(principal),
+    )
+    .await
+    .unwrap();
     rx.recv().await.unwrap()
 }
 
@@ -42,7 +48,7 @@ async fn status_store_failures_are_transient_on_handle_resolution_and_metadata()
     let failed = surface
         .status(
             1,
-            None,
+            &crate::federation::ingress::ScopedCaller::hand_only(None),
             &read_surface::StatusParams {
                 handle: Some(handle.raw.clone()),
                 credential_id: None,
@@ -75,7 +81,7 @@ async fn status_store_failures_are_transient_on_handle_resolution_and_metadata()
     let failed = surface
         .status(
             1,
-            None,
+            &crate::federation::ingress::ScopedCaller::hand_only(None),
             &read_surface::StatusParams {
                 handle: Some(handle.raw),
                 credential_id: None,
@@ -183,7 +189,10 @@ async fn malformed_control_requests_do_not_stop_dispatch_or_goodbye() {
     let egress = Egress { control, route };
     // Each is refused on the Error lane with its own corr, so a daemon waiting on it
     // fails that request at once, and dispatch carries on afterwards.
-    for (corr, body) in [(1, b"{".to_vec()), (3, br#"{"op":"future.control"}"#.to_vec())] {
+    for (corr, body) in [
+        (1, b"{".to_vec()),
+        (3, br#"{"op":"future.control"}"#.to_vec()),
+    ] {
         let frame = Frame::build_with_version(
             subc_protocol::PROTOCOL_VERSION,
             FrameType::Request,
@@ -197,7 +206,9 @@ async fn malformed_control_requests_do_not_stop_dispatch_or_goodbye() {
         assert!(handle_frame(frame, &egress, &surface, &admin, &routes)
             .await
             .unwrap());
-        let refusal = replies.try_recv().expect("a malformed control request is refused");
+        let refusal = replies
+            .try_recv()
+            .expect("a malformed control request is refused");
         assert_eq!(refusal.header.ty, FrameType::Error);
         assert_eq!(refusal.header.corr, corr);
         let error: ErrorBody = serde_json::from_slice(&refusal.body).unwrap();
@@ -291,7 +302,7 @@ async fn concurrent_open_probes_cannot_overshoot_the_refusal_threshold() {
             surface
                 .open(
                     88,
-                    None,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
                     &read_surface::OpenParams {
                         credential_id: "kem:unknown".into(),
                         enrollment_token: None,

@@ -21,7 +21,7 @@
 //! lock a refresh holds across its provider call and commit — so an admin write
 //! can never interleave with a refresh for the same credential.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -37,7 +37,9 @@ use credentials_core::federation::{
     VAULT_TRANSFER_ID,
 };
 use credentials_core::key::KeyId;
-use credentials_core::store::{EncryptedStore, StoreOpError};
+use credentials_core::store::{
+    parse_declared_grants, DeclaredGrantSet, EncryptedStore, StoreOpError,
+};
 use subc_protocol::Principal;
 
 /// Challenge TTL. Long enough for a CLI to resolve the keychain key and MAC the op;
@@ -95,6 +97,7 @@ struct Nonce {
 struct BindState {
     epoch: u32,
     principal: Principal,
+    declared: Arc<DeclaredGrantSet>,
     /// The opener's `BindIdentity.harness` for this bind. Read only on callosum's routes
     /// and only by the federation ingress mapping (`federation::map_route_caller`).
     /// Lives in the same record as the principal, so a rebind or route Goodbye replaces
@@ -132,6 +135,19 @@ pub struct AdminSurface {
 
 /// The actor recorded in the audit trail for a route-driven admin write.
 const ROUTE_ADMIN_ACTOR: &str = "route-admin";
+
+fn declaration_warn_once(module: &str, digest: Option<&str>, reasons: &impl std::fmt::Debug) {
+    type WarningKeys = Mutex<HashSet<(String, Option<String>)>>;
+    static WARNED: OnceLock<WarningKeys> = OnceLock::new();
+    if WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert((module.to_owned(), digest.map(str::to_owned)))
+    {
+        tracing::warn!(module, digest, ?reasons, "declaration entries skipped");
+    }
+}
 
 impl AdminSurface {
     pub fn serve_permissions(
@@ -236,9 +252,10 @@ impl AdminSurface {
     /// in-flight request prove it still belongs to this binding before claiming a nonce.
     #[allow(dead_code)] // The test-only library's route harness binds without peer metadata.
     pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal, harness: &str) {
-        self.record_connector_bind(channel, epoch, principal, harness, None, None);
+        self.record_connector_bind(channel, epoch, principal, harness, None, None, None);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_connector_bind(
         &self,
         channel: u16,
@@ -247,7 +264,9 @@ impl AdminSurface {
         harness: &str,
         operator_app: Option<String>,
         scope: Option<&subc_protocol::scope::ScopeStamp>,
+        caller: Option<&subc_protocol::peer::CallerAttestation>,
     ) {
+        let declared = Arc::new(self.admit_declaration(&principal, harness, caller));
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
             // Draining the replaced bind's nonce keeps the global counter honest.
@@ -260,6 +279,7 @@ impl AdminSurface {
             BindState {
                 epoch,
                 principal,
+                declared,
                 harness: harness.to_string(),
                 operator_app,
                 scope_present: scope.is_some(),
@@ -268,6 +288,68 @@ impl AdminSurface {
                 nonce: None,
             },
         );
+    }
+
+    fn admit_declaration(
+        &self,
+        principal: &Principal,
+        harness: &str,
+        caller: Option<&subc_protocol::peer::CallerAttestation>,
+    ) -> DeclaredGrantSet {
+        use crate::federation::RouteCaller;
+        use subc_protocol::peer::CallerClaim;
+        let Principal::Reserved { module_id } = principal else {
+            return DeclaredGrantSet::empty();
+        };
+        let Some(caller) =
+            caller.filter(|caller| caller.claim == CallerClaim::Own && caller.first_party)
+        else {
+            return DeclaredGrantSet::empty();
+        };
+        if !matches!(self.map_caller(principal, harness), RouteCaller::Principal(ref mapped) if mapped.as_ref() == Some(principal))
+        {
+            return DeclaredGrantSet::empty();
+        }
+        let (grants, skipped_count) =
+            match (&caller.declaration, caller.declaration_digest.as_deref()) {
+                (None, None) => (DeclaredGrantSet::empty(), 0),
+                (Some(declaration), Some(digest)) if !digest.is_empty() => {
+                    let (grants, diagnostics) = parse_declared_grants(
+                        module_id,
+                        &serde_json::Value::Object(declaration.clone()),
+                    );
+                    if diagnostics.whole_reason.is_some() || !diagnostics.skipped.is_empty() {
+                        declaration_warn_once(module_id, Some(digest), &diagnostics);
+                    }
+                    (grants, diagnostics.skipped_count)
+                }
+                _ => {
+                    declaration_warn_once(
+                        module_id,
+                        caller.declaration_digest.as_deref(),
+                        &"partial_attestation",
+                    );
+                    return DeclaredGrantSet::empty();
+                }
+            };
+        let origin = serde_json::to_value(caller.origin).ok();
+        if self
+            .engine
+            .store()
+            .record_declared_grants_seen(
+                module_id,
+                caller.declaration_digest.as_deref(),
+                Some(&caller.approved_declarations_digest),
+                origin.as_ref().and_then(serde_json::Value::as_str),
+                &grants,
+                skipped_count,
+            )
+            .is_err()
+        {
+            tracing::warn!(module = %module_id, digest = ?caller.declaration_digest, "declared grant row unavailable; bind has no declared authority");
+            return DeclaredGrantSet::empty();
+        }
+        grants
     }
 
     pub fn connector_admission(&self, channel: u16, epoch: u32) -> ConnectorAdmission {
@@ -339,15 +421,31 @@ impl AdminSurface {
     pub fn route_caller(&self, channel: u16) -> crate::federation::RouteCaller {
         let bound = {
             let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
-            binds
-                .get(&channel)
-                .map(|state| (state.principal.clone(), state.harness.clone()))
+            binds.get(&channel).map(|state| {
+                (
+                    state.principal.clone(),
+                    state.harness.clone(),
+                    Arc::clone(&state.declared),
+                )
+            })
         };
-        let Some((principal, harness)) = bound else {
-            return crate::federation::RouteCaller::Principal(None);
+        let Some((principal, harness, declared)) = bound else {
+            return crate::federation::RouteCaller::Principal(
+                crate::federation::ingress::ScopedCaller::hand_only(None),
+            );
         };
+        let mut mapped = self.map_caller(&principal, &harness);
+        if let crate::federation::RouteCaller::Principal(caller) = &mut mapped {
+            if caller.as_ref() == Some(&principal) {
+                caller.declared = declared;
+            }
+        }
+        mapped
+    }
+
+    fn map_caller(&self, principal: &Principal, harness: &str) -> crate::federation::RouteCaller {
         use crate::federation::MappingGate;
-        let (gate, phone_gate) = if crate::federation::ingress::is_callosum(&principal) {
+        let (gate, phone_gate) = if crate::federation::ingress::is_callosum(principal) {
             match self.engine.store().secret_phone_mapping_gates() {
                 Ok((member, phone)) => (
                     if member {
@@ -368,7 +466,7 @@ impl AdminSurface {
             (MappingGate::Off, MappingGate::Off)
         };
         crate::federation::ingress::map_route_caller_with_phone(
-            &principal, &harness, gate, phone_gate,
+            principal, harness, gate, phone_gate,
         )
     }
 

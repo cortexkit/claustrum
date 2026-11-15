@@ -3,6 +3,1124 @@ mod connectors_contract {
     use credentials_core::{federation::NewRemoteRecord, record::RecordIdentity};
     use sha2::{Digest, Sha256};
 
+    fn declaration(entries: serde_json::Value) -> serde_json::Value {
+        use subc_protocol::peer::{CallerAttestation, CallerClaim, CallerOrigin};
+        serde_json::to_value(
+            CallerAttestation::new(
+                "declared-test",
+                1,
+                1,
+                CallerClaim::Own,
+                true,
+                CallerOrigin::Release,
+                "approved",
+            )
+            .unwrap()
+            .with_declaration(
+                json!({"v":1,"grants":entries}).as_object().unwrap().clone(),
+                "digest",
+            ),
+        )
+        .unwrap()
+    }
+
+    async fn declared_bind(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        principal: Option<subc_protocol::Principal>,
+        harness: &str,
+        caller: Option<serde_json::Value>,
+    ) {
+        let request = ModuleControlRequest::RouteBind {
+            route_channel: channel,
+            epoch: 1,
+            target: subc_protocol::RouteTarget::ToolProvider {
+                module_id: "claustrum".into(),
+            },
+            identity: subc_protocol::BindIdentity::new(harness, "s"),
+            principal,
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: None,
+            call_mode: None,
+        };
+        let mut body = serde_json::to_value(request).unwrap();
+        if let Some(caller) = caller {
+            let peer = subc_protocol::peer::RouteBindPeer::new()
+                .with_caller(Some(serde_json::from_value(caller).unwrap()));
+            body.as_object_mut().unwrap().extend(
+                serde_json::to_value(peer)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            0,
+            1,
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        handle_control_request(
+            frame,
+            &tx,
+            surface,
+            admin,
+            &Arc::new(RouteEpochs::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap().header.ty, FrameType::Response);
+    }
+
+    fn declared_set(
+        admin: &admin_surface::AdminSurface,
+        channel: u16,
+    ) -> Arc<credentials_core::store::DeclaredGrantSet> {
+        match admin.route_caller(channel) {
+            federation::RouteCaller::Principal(caller) => caller.declared,
+            _ => Arc::new(credentials_core::store::DeclaredGrantSet::empty()),
+        }
+    }
+
+    fn declaration_audits(store: &EncryptedStore) -> usize {
+        store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|row| row.op == "declaration_seen")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn declared_admission_requires_every_attestation_and_route_condition() {
+        let valid = declaration(json!([{"category":"llm-provider","operation":"read"}]));
+        for condition in [
+            "valid",
+            "principal_absent",
+            "direct",
+            "unverified",
+            "caller_absent",
+            "first_party",
+            "brokered",
+            "relay",
+            "legacy",
+            "unknown_claim",
+            "declaration_absent",
+            "digest_absent",
+            "digest_empty",
+            "fed_gate_off",
+            "member",
+            "phone",
+            "refused",
+        ] {
+            let (surface, admin, store, _db, _root) = rig(224);
+            let mut principal = Some(reserved("striatum"));
+            let mut caller = Some(valid.clone());
+            let mut harness = "self";
+            match condition {
+                "principal_absent" => principal = None,
+                "direct" => principal = Some(subc_protocol::Principal::Direct),
+                "unverified" => principal = Some(subc_protocol::Principal::Unverified),
+                "caller_absent" => caller = None,
+                "first_party" => caller.as_mut().unwrap()["first_party"] = json!(false),
+                "brokered" | "relay" | "legacy" => {
+                    caller.as_mut().unwrap()["claim"] = json!(condition)
+                }
+                "unknown_claim" => caller.as_mut().unwrap()["claim"] = json!("new_claim"),
+                "declaration_absent" => {
+                    caller
+                        .as_mut()
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("declaration");
+                }
+                "digest_absent" => {
+                    caller
+                        .as_mut()
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("declaration_digest");
+                }
+                "digest_empty" => caller.as_mut().unwrap()["declaration_digest"] = json!(""),
+                "fed_gate_off" | "member" | "phone" | "refused" => {
+                    principal = Some(reserved("callosum"));
+                    harness = match condition {
+                        "phone" => "fed-phone:22222222222222222222222222222222",
+                        "refused" => "not-self",
+                        _ => "fed-computer:22222222222222222222222222222222",
+                    };
+                    if condition != "fed_gate_off" {
+                        store
+                            .set_federation_member_mapping_audited(
+                                true,
+                                AuditCtx::admin(AuditOp::FederationGateSet),
+                            )
+                            .unwrap();
+                        if condition == "phone" {
+                            store
+                                .set_secret_phone_mapping_audited(
+                                    true,
+                                    AuditCtx::admin(AuditOp::SecretPhoneGateSet),
+                                )
+                                .unwrap();
+                        }
+                    }
+                }
+                "valid" => {}
+                _ => unreachable!(),
+            }
+            declared_bind(&surface, &admin, 77, principal, harness, caller).await;
+            let accepted = condition == "valid";
+            assert_eq!(
+                declared_set(&admin, 77).grants().len(),
+                usize::from(accepted),
+                "{condition}"
+            );
+            assert_eq!(
+                store.list_declared_grant_sets().unwrap().rows.len(),
+                usize::from(accepted),
+                "{condition}"
+            );
+            assert_eq!(
+                declaration_audits(&store),
+                usize::from(accepted),
+                "{condition}"
+            );
+            assert!(store.list_read_grants().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_rebind_row_is_inventory_not_live_authority_and_origin_does_not_gate() {
+        let (surface, admin, store, _db, _root) = rig(225);
+        let valid = declaration(json!([{"category":"llm-provider","operation":"read"}]));
+        for origin in ["release", "development", "other"] {
+            let mut caller = valid.clone();
+            caller["origin"] = json!(origin);
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("striatum")),
+                "self",
+                Some(caller),
+            )
+            .await;
+            assert_eq!(declared_set(&admin, 77).grants().len(), 1);
+        }
+        let first = store.list_declared_grant_sets().unwrap().rows.remove(0);
+        assert_eq!(first.origin.as_deref(), Some("release"));
+        assert_eq!(declaration_audits(&store), 1);
+        for key in ["declaration", "declaration_digest", "first_party"] {
+            let mut caller = valid.clone();
+            if key == "first_party" {
+                caller[key] = json!(false);
+            } else {
+                caller.as_object_mut().unwrap().remove(key);
+            }
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("striatum")),
+                "self",
+                Some(caller),
+            )
+            .await;
+            assert!(declared_set(&admin, 77).grants().is_empty());
+            assert_eq!(store.list_declared_grant_sets().unwrap().rows[0], first);
+            assert_eq!(declaration_audits(&store), 1);
+        }
+        let mut absent = valid.clone();
+        absent.as_object_mut().unwrap().remove("declaration");
+        absent.as_object_mut().unwrap().remove("declaration_digest");
+        for expected in [2, 2] {
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("striatum")),
+                "self",
+                Some(absent.clone()),
+            )
+            .await;
+            assert!(declared_set(&admin, 77).grants().is_empty());
+            assert_eq!(declaration_audits(&store), expected);
+            assert!(store.list_declared_grant_sets().unwrap().rows[0]
+                .grants
+                .grants()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_row_read_and_write_failures_bind_without_declared_authority() {
+        for fault in ["read", "write"] {
+            let (surface, admin, store, db, _root) = rig(226);
+            let conn = rusqlite::Connection::open(db).unwrap();
+            if fault == "read" {
+                conn.execute_batch("DROP TABLE declared_grant_sets")
+                    .unwrap();
+            } else {
+                conn.execute_batch("CREATE TRIGGER refuse_declaration BEFORE INSERT ON declared_grant_sets BEGIN SELECT RAISE(ABORT, 'test write failure'); END").unwrap();
+            }
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("striatum")),
+                "self",
+                Some(declaration(json!([
+                    {"category":"llm-provider","operation":"read"}
+                ]))),
+            )
+            .await;
+            assert!(declared_set(&admin, 77).grants().is_empty(), "{fault}");
+            assert_eq!(declaration_audits(&store), 0, "{fault}");
+        }
+    }
+
+    fn declared_category(store: &EncryptedStore, id: &str) {
+        store
+            .set_categories_audited(
+                id,
+                credentials_core::store::SetCategoryMode::Set,
+                &["llm-provider".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+    }
+
+    fn declared_hand_grant(
+        store: &EncryptedStore,
+        module: &str,
+        kind: SelectorKind,
+        selector: &str,
+        operation: GrantOperation,
+    ) {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                module,
+                kind,
+                selector,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn declared_scoped_union_matches_hand_grants_in_local_remote_and_audience_paths() {
+        let (surface, admin, store, _db, _root) = rig(227);
+        store
+            .create(
+                "apikey:declared",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"declared-value".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        declared_category(&store, "apikey:declared");
+        store
+            .remote_add_audited(&NewRemoteRecord {
+                credential_id: "oauth:declared-copy".into(),
+                home_member: "fed-computer:22222222222222222222222222222222".into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: RecordIdentity::default(),
+                home_version: 1,
+                categories: vec!["llm-provider".into()],
+            })
+            .unwrap();
+        let audience = credentials_core::store::ACCOUNT_TOKEN_AUDIENCES[0];
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(declaration(json!([
+                {"category":"llm-provider","operation":"read"},
+                {"category":"llm-provider","operation":"list"},
+                {"audience":audience,"operation":"account_token"},
+                {"audience":"not-an-account-audience","operation":"account_token"}
+            ]))),
+        )
+        .await;
+        assert_eq!(declared_set(&admin, 77).grants().len(), 3);
+        declared_bind(
+            &surface,
+            &admin,
+            78,
+            Some(reserved("hand-reader")),
+            "self",
+            None,
+        )
+        .await;
+        let empty = routed_json(&surface, &admin, 78, OP_LIST_SCOPED, json!({})).await;
+        for op in [GrantOperation::Read, GrantOperation::List] {
+            declared_hand_grant(
+                &store,
+                "hand-reader",
+                SelectorKind::Category,
+                "llm-provider",
+                op,
+            );
+        }
+        declared_hand_grant(
+            &store,
+            "hand-reader",
+            SelectorKind::Audience,
+            audience,
+            GrantOperation::AccountToken,
+        );
+        for (op, params) in [
+            (OP_GET_SCOPED, json!({"credential_id":"apikey:declared"})),
+            (OP_STATUS, json!({"credential_id":"apikey:declared"})),
+            (OP_STATUS, json!({"credential_id":"oauth:declared-copy"})),
+            (OP_LIST_SCOPED, json!({})),
+            (OP_ACCOUNT_TOKEN, json!({"audience":audience})),
+            (
+                OP_USAGE_REPORT_SCOPED,
+                json!({"credential_id":"apikey:declared", "reading":{"observedAtMs":12,"provider":"claude","headers":{}}}),
+            ),
+            (
+                OP_REPORT_AUTH_FAILURE,
+                json!({"credential_id":"apikey:declared", "record_version":1, "provider_status":401}),
+            ),
+        ] {
+            let declared = routed_json(&surface, &admin, 77, op, params.clone()).await;
+            let hand = routed_json(&surface, &admin, 78, op, params).await;
+            assert_eq!(declared, hand, "{op}");
+            assert_ne!(
+                declared["result"]["error"]["code"],
+                json!("not_found"),
+                "{op}"
+            );
+        }
+        let list = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+        assert_ne!(list["result"]["view"], empty["result"]["view"]);
+        assert_eq!(
+            list["result"]["grants"],
+            list["result"]["grant_tuples"].as_array().unwrap().len()
+        );
+        let rows = list["result"]["credentials"].as_array().unwrap();
+        assert!(
+            rows.iter().any(|r| r["id"] == "oauth:declared-copy"),
+            "remote projection must use the union"
+        );
+        assert!(rows.iter().any(|r| r["id"] == "apikey:declared"));
+        assert!(!store
+            .list_read_grants()
+            .unwrap()
+            .iter()
+            .any(|g| g.principal_id == "striatum"));
+    }
+
+    #[tokio::test]
+    async fn declared_deposit_matches_hand_and_duplicate_projection_and_transfer_fence_wins() {
+        let (surface, admin, store, _db, _root) = rig(228);
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            None,
+        )
+        .await;
+        deposit_cookie_grant(&store, "striatum", GrantOperation::Deposit);
+        let hand = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "striatum",
+                SelectorKind::Category,
+                "browser-session",
+                GrantOperation::Deposit,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .unwrap();
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(declaration(json!([
+                {"category":"browser-session","operation":"deposit"},
+                {"category":"llm-provider","operation":"deposit"},
+                {"exact":"apikey:declared","operation":"read"}
+            ]))),
+        )
+        .await;
+        assert_eq!(declared_set(&admin, 77).grants().len(), 1);
+        assert_eq!(
+            routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await,
+            hand
+        );
+        let deposited = routed_json(
+            &surface,
+            &admin,
+            77,
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert!(deposited["result"]["error"].is_null(), "{deposited}");
+        deposit_cookie_grant(&store, "striatum", GrantOperation::Deposit);
+        assert_eq!(
+            routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await,
+            hand
+        );
+        let transfer = credentials_core::federation::VAULT_TRANSFER_ID;
+        store
+            .create(
+                transfer,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    credentials_core::kem::generate_key().unwrap().into_bytes(),
+                    None,
+                ),
+            )
+            .unwrap();
+        declared_category(&store, transfer);
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(declaration(json!([
+                {"category":"llm-provider","operation":"read"}
+            ]))),
+        )
+        .await;
+        let refused = routed_json(
+            &surface,
+            &admin,
+            77,
+            OP_PUBLIC_KEY,
+            json!({"credential_id":transfer}),
+        )
+        .await;
+        assert_eq!(refused["result"]["error"]["code"], "not_found");
+        let list = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+        assert!(!list["result"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == transfer));
+    }
+
+    #[tokio::test]
+    async fn declared_read_does_not_authorize_sign_open_or_seal_but_hand_grants_do() {
+        use base64::Engine as _;
+        let (surface, admin, store, _db, _root) = rig(229);
+        store
+            .create(
+                "signing:declared",
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .unwrap();
+        let pem = credentials_core::kem::generate_key().unwrap();
+        let public = credentials_core::kem::public_half(&pem).unwrap().0;
+        store
+            .create(
+                "kem:declared",
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        for id in ["signing:declared", "kem:declared"] {
+            declared_category(&store, id);
+        }
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(declaration(json!([
+                {"category":"llm-provider","operation":"read"},
+                {"category":"llm-provider","operation":"list"},
+                {"category":"llm-provider","operation":"sign"},
+                {"category":"llm-provider","operation":"open"},
+                {"category":"llm-provider","operation":"seal"}
+            ]))),
+        )
+        .await;
+        assert_eq!(declared_set(&admin, 77).grants().len(), 2);
+        let (enc, ciphertext) =
+            credentials_core::kem::seal_base(&public, b"plaintext", b"info", b"aad").unwrap();
+        let encode = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let cases = [
+            (
+                OP_SIGN,
+                json!({"credential_id":"signing:declared", "payload_b64":encode(b"payload")}),
+                SelectorKind::Category,
+                "llm-provider",
+                GrantOperation::Sign,
+            ),
+            (
+                OP_OPEN,
+                json!({"credential_id":"kem:declared", "enc_b64":encode(&enc), "ciphertext_b64":encode(&ciphertext), "info_b64":encode(b"info"), "aad_b64":encode(b"aad")}),
+                SelectorKind::Category,
+                "llm-provider",
+                GrantOperation::Open,
+            ),
+            (
+                OP_SEAL,
+                seal_params("kem:declared", &public, b"plaintext"),
+                SelectorKind::Exact,
+                "kem:declared",
+                GrantOperation::Seal,
+            ),
+        ];
+        let published = routed_json(
+            &surface,
+            &admin,
+            77,
+            OP_PUBLIC_KEY,
+            json!({"credential_id":"signing:declared"}),
+        )
+        .await;
+        assert!(published["result"]["public_key_hex"].is_string());
+        for (op, params, kind, selector, grant_op) in cases {
+            let refused = routed_json(&surface, &admin, 77, op, params.clone()).await;
+            assert_eq!(refused["result"]["error"]["code"], "not_found", "{op}");
+            declared_hand_grant(&store, "striatum", kind, selector, grant_op);
+            let allowed = routed_json(&surface, &admin, 77, op, params).await;
+            assert!(allowed["result"]["error"].is_null(), "{op}: {allowed}");
+        }
+    }
+
+    fn declared_request(channel: u16, method: &str, params: serde_json::Value) -> Frame {
+        Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            channel,
+            1,
+            1,
+            serde_json::to_vec(&json!({"method":method,"params":params})).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn declared_dispatch_snapshots_the_set_before_same_principal_rebind_and_goodbye_drops_it()
+    {
+        let (surface, admin, store, _db, _root) = rig(230);
+        store
+            .create(
+                "apikey:declared",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"declared-value".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        declared_category(&store, "apikey:declared");
+        let original = declaration(json!([{"category":"llm-provider","operation":"read"}]));
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(original.clone()),
+        )
+        .await;
+        let routes = Arc::new(RouteEpochs::default());
+        routes.install(77, 1);
+        let (control, _controls) = mpsc::channel(1);
+        let (route, mut replies) = mpsc::channel(1);
+        let egress = Egress { control, route };
+        handle_frame(
+            declared_request(
+                77,
+                OP_GET_SCOPED,
+                json!({"credential_id":"apikey:declared"}),
+            ),
+            &egress,
+            &surface,
+            &admin,
+            &routes,
+        )
+        .await
+        .unwrap();
+        let mut replacement = declaration(json!([]));
+        replacement["declaration_digest"] = json!("replacement");
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(replacement),
+        )
+        .await;
+        assert!(declared_set(&admin, 77).grants().is_empty());
+        let reply: serde_json::Value =
+            serde_json::from_slice(&replies.recv().await.unwrap().body).unwrap();
+        assert_eq!(
+            reply["result"]["payload"],
+            json!(b"declared-value"),
+            "accepted frame lost its captured set: {reply}"
+        );
+        let refused = routed_json(
+            &surface,
+            &admin,
+            77,
+            OP_GET_SCOPED,
+            json!({"credential_id":"apikey:declared"}),
+        )
+        .await;
+        assert_eq!(refused["result"]["error"]["code"], "not_found");
+        declared_bind(
+            &surface,
+            &admin,
+            78,
+            Some(reserved("striatum")),
+            "self",
+            Some(original),
+        )
+        .await;
+        assert_eq!(declared_set(&admin, 78).grants().len(), 1);
+        assert!(
+            declared_set(&admin, 77).grants().is_empty(),
+            "two live routes must not share authority"
+        );
+        let without = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+        let with = routed_json(&surface, &admin, 78, OP_LIST_SCOPED, json!({})).await;
+        assert_ne!(without["result"]["view"], with["result"]["view"]);
+        routes.install(78, 1);
+        let goodbye = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Goodbye,
+            Flags::new(false, Priority::Interactive, false),
+            78,
+            1,
+            0,
+            Vec::new(),
+        )
+        .unwrap();
+        handle_frame(goodbye, &egress, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        assert!(declared_set(&admin, 78).grants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn declared_watch_captures_union_and_enrollment_tokens_never_see_it() {
+        let (surface, admin, store, db, _root) = rig(231);
+        for id in ["apikey:declared", "apikey:enrolled-only"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(
+                        CredentialKind::ApiKey,
+                        "test",
+                        b"test-value".to_vec(),
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("striatum")),
+            "self",
+            Some(declaration(json!([
+                {"category":"llm-provider","operation":"read"}
+            ]))),
+        )
+        .await;
+        let secret = "ad".repeat(32);
+        let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+        let proposed = store
+            .propose_enrollment("declared-consumer", &hash)
+            .unwrap();
+        store
+            .approve_enrollment(&proposed.request_id, "declared-consumer", "operator")
+            .unwrap();
+        let token = match store
+            .poll_enrollment(&proposed.request_id, &secret)
+            .unwrap()
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("expected token: {other:?}"),
+        };
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "declared-consumer",
+                SelectorKind::Exact,
+                "apikey:enrolled-only",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        dispatch_route_request(
+            declared_request(77, OP_WATCH_SCOPED, json!({})),
+            &tx,
+            &surface,
+            &admin,
+            admin.route_caller(77),
+            None,
+        )
+        .await
+        .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_slice(&rx.recv().await.unwrap().body).unwrap();
+        let initial = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(first["view"], initial["result"]["view"]);
+        declared_category(&store, "apikey:declared");
+        let changed: serde_json::Value =
+            serde_json::from_slice(&rx.recv().await.unwrap().body).unwrap();
+        assert_eq!(changed["seq"], 2);
+        assert_ne!(changed["view"], first["view"]);
+        surface.watches.close(77);
+        let list = routed_json(
+            &surface,
+            &admin,
+            77,
+            OP_LIST_SCOPED,
+            json!({"enrollment_token":token}),
+        )
+        .await;
+        let rows = list["result"]["credentials"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "apikey:enrolled-only");
+        assert_eq!(list["result"]["grant_tuples"].as_array().unwrap().len(), 1);
+        assert_eq!(list["result"]["grant_tuples"][0]["selector_kind"], "exact");
+        for (id, allowed) in [("apikey:declared", false), ("apikey:enrolled-only", true)] {
+            let result = routed_json(
+                &surface,
+                &admin,
+                77,
+                OP_GET_SCOPED,
+                json!({"credential_id":id, "enrollment_token":token}),
+            )
+            .await;
+            assert_eq!(
+                result["result"]["payload"].is_array(),
+                allowed,
+                "{id}: {result}"
+            );
+        }
+        let observed: String = rusqlite::Connection::open(&db).unwrap().query_row(
+            "SELECT principal_kind || ':' || principal_id FROM auth_events WHERE credential_id='apikey:enrolled-only' AND kind='scoped_first_use' LIMIT 1", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(observed, "enrolled:declared-consumer");
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut completed = surface.watches.completed.subscribe();
+        let caller = match admin.route_caller(77) {
+            federation::RouteCaller::Principal(caller) => caller,
+            _ => unreachable!(),
+        };
+        let token_params = read_surface::ListScopedParams {
+            enrollment_token: Some(token.clone()),
+        };
+        assert_eq!(
+            surface.watch_scoped(&caller, &token_params).unwrap().0,
+            list["result"]["view"]
+        );
+        dispatch_route_request(
+            declared_request(77, OP_WATCH_SCOPED, json!({"enrollment_token":token})),
+            &tx,
+            &surface,
+            &admin,
+            admin.route_caller(77),
+            None,
+        )
+        .await
+        .unwrap();
+        let subscribed: serde_json::Value =
+            serde_json::from_slice(&rx.recv().await.unwrap().body).unwrap();
+        assert_eq!(subscribed["view"], list["result"]["view"]);
+        completed.changed().await.unwrap();
+        store
+            .set_categories_audited(
+                "apikey:declared",
+                credentials_core::store::SetCategoryMode::Set,
+                &[],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        completed.changed().await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "token watch borrowed the bind declaration"
+        );
+        declared_category(&store, "apikey:enrolled-only");
+        let changed: serde_json::Value =
+            serde_json::from_slice(&rx.recv().await.unwrap().body).unwrap();
+        assert_eq!(changed["seq"], 2);
+        surface.watches.close(77);
+        for op in [OP_GET_SCOPED, OP_LIST_SCOPED, OP_WATCH_SCOPED] {
+            let params = if op == OP_GET_SCOPED {
+                json!({"credential_id":"apikey:declared", "enrollment_token":"invalid"})
+            } else {
+                json!({"enrollment_token":"invalid"})
+            };
+            if op == OP_WATCH_SCOPED {
+                let (tx, mut rx) = mpsc::channel(2);
+                dispatch_route_request(
+                    declared_request(77, op, params),
+                    &tx,
+                    &surface,
+                    &admin,
+                    admin.route_caller(77),
+                    None,
+                )
+                .await
+                .unwrap();
+                let refused: serde_json::Value =
+                    serde_json::from_slice(&rx.recv().await.unwrap().body).unwrap();
+                assert_eq!(refused["result"]["error"]["code"], "not_found");
+            } else {
+                assert_eq!(
+                    routed_json(&surface, &admin, 77, op, params).await["result"]["error"]["code"],
+                    "not_found"
+                );
+            }
+        }
+        surface.watches.finish_all().await.unwrap();
+    }
+
+    #[test]
+    fn declared_manifest_classifies_every_operation_and_addressing_form() {
+        let manifest = manifest("claustrum", None);
+        let ProviderRole::ManagementSurface { operations, .. } = &manifest.provides[0] else {
+            panic!("management surface")
+        };
+        let mut scoped = Vec::new();
+        for op in operations {
+            let classification = match op.name.as_str() {
+                OP_GET_SCOPED | OP_USAGE_REPORT_SCOPED => {
+                    Some((GrantOperation::Read, "credential_id", true))
+                }
+                OP_PUBLIC_KEY | OP_STATUS | OP_REPORT_AUTH_FAILURE => {
+                    Some((GrantOperation::Read, "credential_id (not handle)", true))
+                }
+                OP_LIST_SCOPED | OP_WATCH_SCOPED => Some((GrantOperation::List, "inventory", true)),
+                OP_DEPOSIT_COOKIE => {
+                    Some((GrantOperation::Deposit, "category browser-session", true))
+                }
+                OP_ACCOUNT_TOKEN => Some((GrantOperation::AccountToken, "audience", true)),
+                OP_SIGN => Some((GrantOperation::Sign, "credential_id (not handle)", false)),
+                OP_OPEN => Some((GrantOperation::Open, "credential_id", false)),
+                OP_SEAL => Some((GrantOperation::Seal, "exact credential_id", false)),
+                "secret.phone_keys_register"
+                | "secret.deposit_keys"
+                | "secret.deposit"
+                | "secret.approve"
+                | "manifest.approve"
+                | "secret.list"
+                | "secret.delete"
+                | "secret.revoke_grant"
+                | "secret.home"
+                | "secret.use"
+                | "manifest.propose_binding"
+                | "manifest.latest"
+                | "manifest.watch"
+                | "manifest.report_active"
+                | "manifest.active_status"
+                | "federation.manifest_latest"
+                | "federation.manifest_watch"
+                | "federation.manifest_report_active"
+                | "secret.request_flow_approval"
+                | "secret.revoke_flow_grants"
+                | "permissions.list"
+                | "permissions.revoke"
+                | "connectors.list"
+                | "connectors.watch"
+                | OP_ADMIN_CHALLENGE
+                | OP_ADMIN_OP
+                | OP_ENROLL_PROPOSE
+                | OP_ENROLL_POLL
+                | OP_ENROLL_ROTATE
+                | OP_GET
+                | OP_GET_MANY
+                | federation::ingress::OP_REMOTE_TOKEN
+                | federation::ingress::OP_REMOTE_WATCH
+                | federation::ingress::OP_REPORT_AUTH_FAILURE
+                | federation::ingress::OP_TRANSFER_DELIVER
+                | federation::ingress::OP_SECRET_USE
+                | federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL
+                | federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS => None,
+                name => panic!("unclassified operation: {name}"),
+            };
+            if let Some(classification) = classification {
+                scoped.push((op.name.as_str(), classification));
+            }
+        }
+        assert_eq!(scoped.len(), 12);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_bind_warns_once_per_digest_with_safe_indices_and_operation_reasons() {
+        const CHILD: &str = "CK_DECLARATION_LOG_CAPTURE_CHILD";
+        const TEST: &str = "tests::connectors_contract::declared_bind_warns_once_per_digest_with_safe_indices_and_operation_reasons";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            // A child process gives the process-wide warning cache and tracing callsite a clean start.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+            return;
+        }
+        let (surface, admin, _store, _db, _root) = rig(232);
+        let logs = Logs(Arc::default());
+        let _subscriber = tracing::subscriber::set_default(logs.clone());
+        let caller = declaration(json!([
+            {"category":"llm-provider","operation":"read"},
+            {"category":"llm-provider","operation":"sign"},
+            {"category":"llm-provider","operation":"open"},
+            {"category":"llm-provider","operation":"seal"},
+            {"category":"llm-provider","operation":"read","only":"narrowing-canary"}
+        ]));
+        for _ in 0..2 {
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("declared-diagnostics")),
+                "self",
+                Some(caller.clone()),
+            )
+            .await;
+        }
+        assert_eq!(declared_set(&admin, 77).grants().len(), 1);
+        let logs = logs.0.lock().unwrap();
+        let warnings: Vec<_> = logs
+            .iter()
+            .filter(|line| line.contains("declaration entries skipped"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "{logs:?}");
+        let warning = warnings[0];
+        assert!(warning.contains("declared-diagnostics") && warning.contains("digest"));
+        for index in 1..=3 {
+            assert!(
+                warning.contains(&format!("index: {index}, reason: \"operation\"")),
+                "{warning}"
+            );
+        }
+        assert!(!warning.contains("narrowing-canary"));
+    }
+
+    #[tokio::test]
+    async fn declared_read_and_list_are_independent_and_a_different_resolved_principal_gets_neither(
+    ) {
+        for operation in [GrantOperation::Read, GrantOperation::List] {
+            let (surface, admin, store, _db, _root) = rig(233);
+            store
+                .create(
+                    "apikey:declared",
+                    &VaultRecord::new_static(
+                        CredentialKind::ApiKey,
+                        "test",
+                        b"test-value".to_vec(),
+                        None,
+                    ),
+                )
+                .unwrap();
+            declared_category(&store, "apikey:declared");
+            declared_bind(
+                &surface,
+                &admin,
+                77,
+                Some(reserved("striatum")),
+                "self",
+                Some(declaration(json!([
+                    {"category":"llm-provider","operation":operation.as_str()}
+                ]))),
+            )
+            .await;
+            declared_bind(
+                &surface,
+                &admin,
+                78,
+                Some(reserved("hand-reader")),
+                "self",
+                None,
+            )
+            .await;
+            declared_hand_grant(
+                &store,
+                "hand-reader",
+                SelectorKind::Category,
+                "llm-provider",
+                operation,
+            );
+            let list = routed_json(&surface, &admin, 77, OP_LIST_SCOPED, json!({})).await;
+            assert_eq!(
+                list,
+                routed_json(&surface, &admin, 78, OP_LIST_SCOPED, json!({})).await
+            );
+            assert_eq!(
+                list["result"]["credentials"][0]["operations"],
+                json!([operation.as_str()])
+            );
+            let get = routed_json(
+                &surface,
+                &admin,
+                77,
+                OP_GET_SCOPED,
+                json!({"credential_id":"apikey:declared"}),
+            )
+            .await;
+            assert_eq!(
+                get["result"]["payload"].is_array(),
+                operation == GrantOperation::Read
+            );
+            let wrong = federation::ingress::ScopedCaller {
+                principal: Some(reserved("another-module")),
+                declared: declared_set(&admin, 77),
+            };
+            let params = read_surface::ListScopedParams {
+                enrollment_token: None,
+            };
+            let wrong = surface.list_scoped(&wrong, &params).unwrap();
+            assert!(wrong.credentials.is_empty() && wrong.grant_tuples.is_empty());
+        }
+    }
+
     fn rig(
         seed: u8,
     ) -> (
@@ -588,6 +1706,7 @@ mod connectors_contract {
                             harness,
                             app.map(str::to_owned),
                             stamp.as_ref(),
+                            None,
                         );
                     }
                     for op in ["connectors.list", "connectors.watch"] {

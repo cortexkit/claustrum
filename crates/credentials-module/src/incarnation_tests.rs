@@ -105,12 +105,26 @@ async fn incarnation_open_refuses_recreated_key_outside_authorized_category() {
         ),
     );
     assert_eq!(
-        surface.open(77, Some(&principal), &params).await.err(),
+        surface
+            .open(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params
+            )
+            .await
+            .err(),
         Some(read_surface::ReadError::NotFound)
     );
     assert!(store.meta(ID).unwrap().categories.is_empty());
     assert_eq!(
-        surface.open(77, Some(&principal), &params).await.err(),
+        surface
+            .open(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params
+            )
+            .await
+            .err(),
         Some(read_surface::ReadError::NotFound)
     );
 }
@@ -135,7 +149,14 @@ async fn incarnation_public_key_handle_refuses_recreated_key_after_resolution() 
         credential_id: None,
         enrollment_token: None,
     };
-    let original = surface.public_key(77, None, &params).await.unwrap();
+    let original = surface
+        .public_key(
+            77,
+            &crate::federation::ingress::ScopedCaller::hand_only(None),
+            &params,
+        )
+        .await
+        .unwrap();
     let pem = test_ed25519_pem();
     let replacement = credentials_core::signing::public_key_ed25519(&pem).unwrap();
     assert_ne!(original.key_id, replacement.key_id);
@@ -147,11 +168,25 @@ async fn incarnation_public_key_handle_refuses_recreated_key_after_resolution() 
         VaultRecord::new_static(CredentialKind::SigningKey, "test", pem.into_bytes(), None),
     );
     assert_eq!(
-        surface.public_key(77, None, &params).await.err(),
+        surface
+            .public_key(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params
+            )
+            .await
+            .err(),
         Some(read_surface::ReadError::NotFound)
     );
     assert_eq!(
-        surface.public_key(77, None, &params).await.err(),
+        surface
+            .public_key(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params
+            )
+            .await
+            .err(),
         Some(read_surface::ReadError::NotFound)
     );
     assert_eq!(
@@ -201,7 +236,13 @@ async fn report_does_not_mutate_recreated_version_one(id: &'static str) {
     }))
     .unwrap();
     assert_eq!(
-        surface.report_auth_failure(77, None, &params).await,
+        surface
+            .report_auth_failure(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params
+            )
+            .await,
         Err(read_surface::ReadError::NotFound)
     );
     assert_eq!(
@@ -320,10 +361,22 @@ async fn incarnation_scoped_get_refuses_recreated_id_after_authorization() {
     let principal = reserved("entorhinal");
     recreate_on(&surface, &store, "admitted", ID, dummy_record());
     let params = serde_json::from_value(json!({"credential_id": ID})).unwrap();
-    assert_not_found(surface.get_scoped(Some(&principal), &params).await);
+    assert_not_found(
+        surface
+            .get_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params,
+            )
+            .await,
+    );
     // An exact-id grant deliberately survives removal; only the pending read is stale.
     assert!(matches!(
-        surface.get_scoped(Some(&principal), &params).await,
+        surface
+            .get_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params
+            )
+            .await,
         read_surface::GetOutcome::Ok(_)
     ));
 }
@@ -351,7 +404,11 @@ async fn incarnation_scoped_report_refuses_recreation_after_authorization() {
     .unwrap();
     assert_eq!(
         surface
-            .report_auth_failure(77, Some(&principal), &params)
+            .report_auth_failure(
+                77,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params
+            )
             .await,
         Err(read_surface::ReadError::NotFound)
     );

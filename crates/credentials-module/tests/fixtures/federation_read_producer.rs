@@ -293,7 +293,13 @@ mod federation_read_fixture {
         let principal = subc_protocol::Principal::Reserved {
             module_id: "broca".into(),
         };
-        let result = surface.open(1, Some(&principal), &params).await;
+        let result = surface
+            .open(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params,
+            )
+            .await;
         assert!(
             matches!(result, Err(read_surface::ReadError::NotFound)),
             "the transfer-key fence must refuse before attempting an open: {result:?}"

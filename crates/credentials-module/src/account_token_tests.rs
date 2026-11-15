@@ -169,7 +169,10 @@ impl Rig {
     }
     async fn call(&self) -> Mint {
         self.surface
-            .account_token(Some(&principal()), &params())
+            .account_token(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal())).cloned()),
+                &params(),
+            )
             .await
     }
 }
@@ -298,7 +301,17 @@ async fn account_token_audience_grant_is_not_signing_or_other_audience_authority
         let mut p = params();
         p.audience = audience.into();
         assert_eq!(
-            error(rig.surface.account_token(Some(&principal()), &p).await).code,
+            error(
+                rig.surface
+                    .account_token(
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal())).cloned()
+                        ),
+                        &p
+                    )
+                    .await
+            )
+            .code,
             "not_found"
         );
     }
@@ -310,7 +323,15 @@ async fn account_token_audience_grant_is_not_signing_or_other_audience_authority
         }),
     ] {
         assert_eq!(
-            error(rig.surface.account_token(p.as_ref(), &params()).await).code,
+            error(
+                rig.surface
+                    .account_token(
+                        &crate::federation::ingress::ScopedCaller::hand_only((p.as_ref()).cloned()),
+                        &params()
+                    )
+                    .await
+            )
+            .code,
             "not_found"
         );
     }
@@ -348,9 +369,12 @@ async fn account_token_cache_window_and_minimum_ttl() {
     rig.call().await.unwrap();
     rig.surface
         .account_token(
-            Some(&Principal::Reserved {
-                module_id: "other-consumer".into(),
-            }),
+            &crate::federation::ingress::ScopedCaller::hand_only(
+                (Some(&Principal::Reserved {
+                    module_id: "other-consumer".into(),
+                }))
+                .cloned(),
+            ),
             &params(),
         )
         .await
@@ -359,7 +383,10 @@ async fn account_token_cache_window_and_minimum_ttl() {
     let mut p = params();
     p.min_ttl_ms = Some(901_000);
     rig.surface
-        .account_token(Some(&principal()), &p)
+        .account_token(
+            &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal())).cloned()),
+            &p,
+        )
         .await
         .unwrap();
     assert_eq!(rig.http.requests().len(), 4);
@@ -607,12 +634,27 @@ async fn account_token_enrolled_token_uses_same_scoped_path() {
     let mut p = params();
     p.enrollment_token = Some(token);
     rig.surface
-        .account_token(Some(&Principal::Direct), &p)
+        .account_token(
+            &crate::federation::ingress::ScopedCaller::hand_only(
+                (Some(&Principal::Direct)).cloned(),
+            ),
+            &p,
+        )
         .await
         .unwrap();
     p.enrollment_token = Some("bad-token".into());
     assert_eq!(
-        error(rig.surface.account_token(Some(&principal()), &p).await).code,
+        error(
+            rig.surface
+                .account_token(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal())).cloned()
+                    ),
+                    &p
+                )
+                .await
+        )
+        .code,
         "not_found"
     );
 }

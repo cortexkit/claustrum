@@ -426,14 +426,28 @@ async fn secret_flow_ops_dispatch_only_for_basal_and_revoke_params_are_closed() 
     ));
     let expected = serde_json::to_vec(&uniform_not_found()).unwrap();
     for caller in [
-        RouteCaller::Principal(None),
-        RouteCaller::Principal(Some(subc_protocol::Principal::Direct)),
-        RouteCaller::Principal(Some(subc_protocol::Principal::Unverified)),
-        RouteCaller::Principal(Some(reserved("aft"))),
-        RouteCaller::Principal(Some(reserved("cerebellum"))),
-        RouteCaller::Principal(Some(reserved("cingulate"))),
-        RouteCaller::Principal(Some(reserved("callosum"))),
-        RouteCaller::Principal(Some(reserved("prefrontal-core"))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(None)),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            subc_protocol::Principal::Direct,
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            subc_protocol::Principal::Unverified,
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            reserved("aft"),
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            reserved("cerebellum"),
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            reserved("cingulate"),
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            reserved("callosum"),
+        ))),
+        RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+            reserved("prefrontal-core"),
+        ))),
         RouteCaller::Phone(SC_FP.into()),
         RouteCaller::Member(SC_MEMBER.into()),
         RouteCaller::Refused,
@@ -448,7 +462,9 @@ async fn secret_flow_ops_dispatch_only_for_basal_and_revoke_params_are_closed() 
         }
     }
     assert!(store.recent_auth_events(100).unwrap().is_empty());
-    let basal = RouteCaller::Principal(Some(reserved("basal")));
+    let basal = RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(Some(
+        reserved("basal"),
+    )));
     for method in [
         "secret.use",
         "secret.request_flow_approval",
@@ -626,8 +642,7 @@ async fn secret_flow_grants_list_on_the_phone_and_revoke_one_at_a_time() {
     ));
     let db = flow._root.join("store.db");
     let vault_id = credentials_core::vault_id_for(db.parent().unwrap()).unwrap();
-    let admin =
-        admin_surface::AdminSurface::new(engine, mac, vault_id, key.key_id());
+    let admin = admin_surface::AdminSurface::new(engine, mac, vault_id, key.key_id());
 
     // The provider surface lists one row per flow grant, under its installed flow version,
     // with no expiry and no agent, in the shape Cingulate's permissions-v1.1 vectors pin as grt_06 (an API key

@@ -264,7 +264,10 @@ mod scoped_watch {
     #[tokio::test]
     async fn watch_scoped_wire_fixture_is_producer_generated() {
         let mut rig = Rig::new();
-        rig.store.force_credential_incarnation_for_test("apikey:active", "0123456789abcdef0123456789abcdef");
+        rig.store.force_credential_incarnation_for_test(
+            "apikey:active",
+            "0123456789abcdef0123456789abcdef",
+        );
         rig.grant("watcher", "apikey:active");
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;
@@ -318,9 +321,17 @@ mod scoped_watch {
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;
         let mut previous = rig.notice(1, 11, 1).await;
-        for (index, mutation) in ["grant", "category", "provider", "plan", "plan-since", "plan-since-clear", "state"]
-            .iter()
-            .enumerate()
+        for (index, mutation) in [
+            "grant",
+            "category",
+            "provider",
+            "plan",
+            "plan-since",
+            "plan-since-clear",
+            "state",
+        ]
+        .iter()
+        .enumerate()
         {
             match *mutation {
                 "grant" => rig.grant("watcher", "apikey:active"),
@@ -354,11 +365,14 @@ mod scoped_watch {
                         .unwrap();
                 }
                 "plan-since" | "plan-since-clear" => {
-                    rig.store.set_plan_since_audited(
-                        "apikey:active", Some("pro"),
-                        (*mutation == "plan-since").then_some(1),
-                        AuditCtx::admin(AuditOp::SetPlan),
-                    ).unwrap();
+                    rig.store
+                        .set_plan_since_audited(
+                            "apikey:active",
+                            Some("pro"),
+                            (*mutation == "plan-since").then_some(1),
+                            AuditCtx::admin(AuditOp::SetPlan),
+                        )
+                        .unwrap();
                 }
                 "state" => rig.store.invalidate("apikey:active").unwrap(),
                 _ => unreachable!(),
@@ -439,10 +453,15 @@ mod scoped_watch {
                         .unwrap();
                 }
                 rig.grant("watcher", &id);
-                let listing = rig.surface
+                let listing = rig
+                    .surface
                     .list_scoped(
-                        Some(&reserved("watcher")),
-                        &read_surface::ListScopedParams { enrollment_token: None },
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&reserved("watcher"))).cloned(),
+                        ),
+                        &read_surface::ListScopedParams {
+                            enrollment_token: None,
+                        },
                     )
                     .unwrap();
                 let row = listing.credentials.iter().find(|row| row.id == id).unwrap();
@@ -457,7 +476,8 @@ mod scoped_watch {
                     _ => None,
                 };
                 assert_eq!(
-                    wire.get("fusiform_provider_id").and_then(serde_json::Value::as_str),
+                    wire.get("fusiform_provider_id")
+                        .and_then(serde_json::Value::as_str),
                     fusiform_id,
                     "{id}"
                 );
@@ -474,7 +494,8 @@ mod scoped_watch {
             auth_scheme: Some("raw".into()),
             fusiform_provider_id: None,
         };
-        assert!(rig.store
+        assert!(rig
+            .store
             .set_registered_provider_settings_audited(
                 "active",
                 &[],
@@ -488,7 +509,8 @@ mod scoped_watch {
         rig.open(1, 11, json!({})).await;
         let initial = rig.notice(1, 11, 1).await;
         let version = rig.store.meta("apikey:active").unwrap().record_version;
-        assert!(rig.store
+        assert!(rig
+            .store
             .set_registered_provider_settings_audited(
                 "active",
                 &[],
@@ -512,7 +534,14 @@ mod scoped_watch {
         let mut rig = Rig::new();
         let record = roster_oauth_record();
         rig.store.create("oauth:watch-refresh", &record).unwrap();
-        rig.store.set_plan_since_audited("oauth:watch-refresh", Some("pro"), Some(1), AuditCtx::admin(AuditOp::SetPlan)).unwrap();
+        rig.store
+            .set_plan_since_audited(
+                "oauth:watch-refresh",
+                Some("pro"),
+                Some(1),
+                AuditCtx::admin(AuditOp::SetPlan),
+            )
+            .unwrap();
         rig.grant("watcher", "oauth:watch-refresh");
         rig.bind(1, reserved("watcher"));
         rig.open(1, 11, json!({})).await;
@@ -543,7 +572,12 @@ mod scoped_watch {
         rig.store
             .create_audited(
                 VAULT_TRANSFER_ID,
-                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
                 AuditCtx::admin(AuditOp::Put),
             )
             .expect("transfer init");
@@ -554,7 +588,12 @@ mod scoped_watch {
         rig.open(2, 21, json!({})).await;
         let broca_before = rig.notice(2, 21, 1).await;
 
-        grant_for(&rig.store, "callosum", VAULT_TRANSFER_ID, GrantOperation::Read);
+        grant_for(
+            &rig.store,
+            "callosum",
+            VAULT_TRANSFER_ID,
+            GrantOperation::Read,
+        );
         // The view moves too, because callosum's grant list gained a row. The held-key
         // digest is what callosum acts on, so that digest must move.
         let callosum_after = rig.notice(1, 11, 2).await;

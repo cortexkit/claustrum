@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::json;
-use subc_protocol::{Flags, Frame, FrameType, Principal, Priority};
+use subc_protocol::{Flags, Frame, FrameType, Priority};
 use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 use crate::read_surface::{ErrorBody, ListScopedParams, ReadError, ReadSurface};
@@ -67,7 +67,7 @@ impl Drop for CloseOnDrop {
 #[derive(Clone)]
 enum Inventory {
     Scoped {
-        principal: Option<Principal>,
+        caller: crate::federation::ingress::ScopedCaller,
         params: Arc<ListScopedParams>,
     },
     Connectors(Arc<crate::admin_surface::AdminSurface>),
@@ -155,7 +155,7 @@ impl WatchHub {
         surface: Arc<ReadSurface>,
         writer: mpsc::Sender<Frame>,
         header: subc_protocol::EnvelopeHeader,
-        principal: Option<Principal>,
+        caller: crate::federation::ingress::ScopedCaller,
         params: ListScopedParams,
     ) -> bool {
         self.open_inventory(
@@ -163,7 +163,7 @@ impl WatchHub {
             writer,
             header,
             Inventory::Scoped {
-                principal,
+                caller,
                 params: Arc::new(params),
             },
         )
@@ -356,7 +356,7 @@ impl Subscription {
                         }
                     }
                     let snapshot = snapshot(snapshots, move || match inventory {
-                        Inventory::Scoped { principal, params } => surface.watch_scoped(principal.as_ref(), &params)
+                        Inventory::Scoped { caller, params } => surface.watch_scoped(&caller, &params)
                             .map(|(view, keys)| json!({"view":view, "keys":keys})),
                         Inventory::Connectors(_) => crate::connectors::list(surface.store()).and_then(|reply| {
                             reply["version"].as_str().map(|version| json!({"version":version})).ok_or(ReadError::StoreError)

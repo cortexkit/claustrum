@@ -151,13 +151,33 @@ impl MappingGate {
     }
 }
 
-/// Who one route bind speaks for.
+/// A route's principal and declared grants, captured together at request acceptance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedCaller {
+    pub principal: Option<Principal>,
+    pub declared: std::sync::Arc<credentials_core::store::DeclaredGrantSet>,
+}
+
+impl ScopedCaller {
+    pub fn hand_only(principal: Option<Principal>) -> Self {
+        Self {
+            principal,
+            declared: std::sync::Arc::new(credentials_core::store::DeclaredGrantSet::empty()),
+        }
+    }
+
+    pub fn as_ref(&self) -> Option<&Principal> {
+        self.principal.as_ref()
+    }
+}
+
+/// Who one route bind speaks for, with its captured scoped authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteCaller {
     /// The bind's own principal, or `None` for a caller with none. Served by the read
     /// surface as it always was: scoped ops authorize on the principal, handle reads
     /// on the handle. The federation ops answer the uniform `not_found` here.
-    Principal(Option<Principal>),
+    Principal(ScopedCaller),
     /// A federation channel: callosum relaying a call from `member`. Only the
     /// federation ops answer, and only with the member's own grants.
     Member(String),
@@ -174,7 +194,7 @@ impl RouteCaller {
     /// refused as an unknown caller.
     pub fn principal(&self) -> Option<Principal> {
         match self {
-            Self::Principal(principal) => principal.clone(),
+            Self::Principal(caller) => caller.principal.clone(),
             Self::Member(_) | Self::Phone(_) | Self::Refused => None,
         }
     }
@@ -204,9 +224,9 @@ pub fn map_route_caller_with_phone(
     phone_gate: MappingGate,
 ) -> RouteCaller {
     if !is_callosum(principal) {
-        return RouteCaller::Principal(Some(principal.clone()));
+        return RouteCaller::Principal(ScopedCaller::hand_only(Some(principal.clone())));
     }
-    let keeps_grants = RouteCaller::Principal(Some(principal.clone()));
+    let keeps_grants = RouteCaller::Principal(ScopedCaller::hand_only(Some(principal.clone())));
     if gate == MappingGate::On && phone_gate == MappingGate::On {
         if let Some(fp) = harness.strip_prefix("fed-phone:") {
             if fp.len() == 32
@@ -223,7 +243,7 @@ pub fn map_route_caller_with_phone(
         // still run, which is the documented gate-off residual), and every other
         // harness keeps callosum's grants.
         MappingGate::Off if harness.starts_with(FORWARDED_HARNESS_PREFIX) => {
-            RouteCaller::Principal(None)
+            RouteCaller::Principal(ScopedCaller::hand_only(None))
         }
         MappingGate::Off => keeps_grants,
         MappingGate::On | MappingGate::Unreadable if harness == CALLOSUM_SELF_HARNESS => {
@@ -2179,14 +2199,14 @@ mod tests {
         ] {
             assert_eq!(
                 map_route_caller(&callosum, harness, MappingGate::Off),
-                RouteCaller::Principal(None),
+                RouteCaller::Principal(ScopedCaller::hand_only(None)),
                 "{harness}"
             );
         }
         for harness in ["callosum-self", "", "opencode", "FED-computer:x"] {
             assert_eq!(
                 map_route_caller(&callosum, harness, MappingGate::Off),
-                RouteCaller::Principal(Some(callosum.clone())),
+                RouteCaller::Principal(ScopedCaller::hand_only(Some(callosum.clone()))),
                 "{harness}"
             );
         }

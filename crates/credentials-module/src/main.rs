@@ -1179,8 +1179,8 @@ async fn handle_frame(
             let surface = Arc::clone(surface);
             let admin = Arc::clone(admin);
             // The epoch check above accepted this frame under the current bind. Snapshot
-            // who that bind speaks for before spawning so a later route reuse cannot lend
-            // its new principal to an already-accepted request.
+            // who that bind speaks for and its declared grants before spawning so a later
+            // route reuse cannot lend new authority to an already-accepted request.
             let caller = admin.route_caller(frame.header.channel);
             let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
                 && serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
@@ -1200,7 +1200,14 @@ async fn handle_frame(
             if serde_json::from_slice::<ReadRequest>(&frame.body)
                 .is_ok_and(|request| request.method == "connectors.watch")
             {
-                handle_read_request(frame, &route, &surface, &admin, caller.principal()).await?;
+                handle_read_request(
+                    frame,
+                    &route,
+                    &surface,
+                    &admin,
+                    federation::ingress::ScopedCaller::hand_only(caller.principal()),
+                )
+                .await?;
                 return Ok(true);
             }
             if let federation::RouteCaller::Principal(principal) = &caller {
@@ -1328,6 +1335,7 @@ async fn handle_control_request(
                 &identity.harness,
                 peer.operator_app.map(|app| app.app),
                 scope.as_ref(),
+                peer.caller.as_ref(),
             );
             ModuleControlResponse::RouteBindAck {}
         }
@@ -1515,7 +1523,7 @@ async fn dispatch_route_request(
     if method
         .as_ref()
         .is_some_and(|request| request.method == manifest_propose::OP_PROPOSE_BINDING)
-        && !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id == "plexus")
+        && !matches!(&caller, federation::RouteCaller::Principal(context) if matches!(context.as_ref(), Some(subc_protocol::Principal::Reserved { module_id }) if module_id == "plexus"))
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
@@ -1523,13 +1531,20 @@ async fn dispatch_route_request(
         .as_ref()
         .is_some_and(|request| connectors::is_op(&request.method))
     {
-        return handle_read_request(frame, writer, surface, admin, caller.principal()).await;
+        return handle_read_request(
+            frame,
+            writer,
+            surface,
+            admin,
+            federation::ingress::ScopedCaller::hand_only(caller.principal()),
+        )
+        .await;
     }
     if let Some(request) = method
         .as_ref()
         .filter(|r| matches!(r.method.as_str(), "permissions.list" | "permissions.revoke"))
     {
-        if !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id=="cingulate")
+        if !matches!(&caller, federation::RouteCaller::Principal(context) if matches!(context.as_ref(), Some(subc_protocol::Principal::Reserved { module_id }) if module_id=="cingulate"))
         {
             return send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await;
         }
@@ -1749,8 +1764,9 @@ async fn handle_read_request(
     writer: &mpsc::Sender<Frame>,
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
-    principal: Option<subc_protocol::Principal>,
+    caller: federation::ingress::ScopedCaller,
 ) -> Result<(), ModuleError> {
+    let principal = caller.principal.clone();
     let channel = frame.header.channel;
     // Echo the validated ingress epoch on every frame of this route (wire v2:
     // a response must carry the epoch of the binding it answers for).
@@ -1838,7 +1854,7 @@ async fn handle_read_request(
         }
         OP_ACCOUNT_TOKEN => {
             match serde_json::from_value::<read_surface::AccountTokenParams>(request.params) {
-                Ok(params) => match surface.account_token(principal.as_ref(), &params).await {
+                Ok(params) => match surface.account_token(&caller, &params).await {
                     Ok(result) => wrap_result(result),
                     Err(error) => wrap_result(json!({"error": error})),
                 },
@@ -1872,7 +1888,7 @@ async fn handle_read_request(
                 Arc::clone(surface),
                 writer.clone(),
                 frame.header,
-                principal,
+                caller.clone(),
                 params,
             ) {
                 let writer = writer.clone();
@@ -1889,7 +1905,7 @@ async fn handle_read_request(
             return Ok(());
         }
         OP_DEPOSIT_COOKIE => match serde_json::from_value::<DepositCookieParams>(request.params) {
-            Ok(params) => match surface.deposit_cookie(principal.as_ref(), &params) {
+            Ok(params) => match surface.deposit_cookie(&caller, &params) {
                 Ok(result) => wrap_result(result),
                 Err(code) => {
                     wrap_result(json!({ "error": { "code": code, "class": code.class() } }))
@@ -1971,7 +1987,7 @@ async fn handle_read_request(
             }
         },
         OP_GET_SCOPED => match serde_json::from_value::<GetScopedParams>(request.params) {
-            Ok(p) => wrap_result(surface.get_scoped(principal.as_ref(), &p).await),
+            Ok(p) => wrap_result(surface.get_scoped(&caller, &p).await),
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -1979,7 +1995,7 @@ async fn handle_read_request(
         OP_USAGE_REPORT_SCOPED => {
             match serde_json::from_value::<read_surface::UsageReportScopedParams>(request.params) {
                 Ok(params) if usage_forwarder::valid_reading(&params.reading) => {
-                    match surface.report_usage_scoped(principal.as_ref(), &params) {
+                    match surface.report_usage_scoped(&caller, &params) {
                         Ok(()) => wrap_result(json!({"accepted": true})),
                         Err(code) => wrap_result(json!({
                             "error": read_surface::ErrorBody { code, class: code.class() }
@@ -1995,7 +2011,7 @@ async fn handle_read_request(
             }
         }
         OP_LIST_SCOPED => match serde_json::from_value::<ListScopedParams>(request.params) {
-            Ok(params) => match surface.list_scoped(principal.as_ref(), &params) {
+            Ok(params) => match surface.list_scoped(&caller, &params) {
                 Ok(result) => wrap_result(result),
                 Err(code) => wrap_result(json!({
                     "error": read_surface::ErrorBody { code, class: code.class() }
@@ -2013,7 +2029,7 @@ async fn handle_read_request(
         },
         OP_SIGN => match serde_json::from_value::<read_surface::SignParams>(request.params) {
             Ok(p) if p.has_exactly_one_authorization() => {
-                match surface.sign(connection_id, principal.as_ref(), &p).await {
+                match surface.sign(connection_id, &caller, &p).await {
                     Ok(r) => wrap_result(r),
                     // Keep the same { code, class } shape every other op uses: the class
                     // gives retry policy and the code names the request-specific remedy.
@@ -2038,7 +2054,7 @@ async fn handle_read_request(
             }
         },
         OP_OPEN => match serde_json::from_value::<read_surface::OpenParams>(request.params) {
-            Ok(p) => match surface.open(connection_id, principal.as_ref(), &p).await {
+            Ok(p) => match surface.open(connection_id, &caller, &p).await {
                 Ok(result) => wrap_result(result),
                 Err(code) => wrap_result(json!({
                     "error": read_surface::ErrorBody { code, class: code.class() }
@@ -2049,7 +2065,7 @@ async fn handle_read_request(
             }
         },
         OP_SEAL => match serde_json::from_value::<read_surface::SealParams>(request.params) {
-            Ok(p) => match surface.seal(connection_id, principal.as_ref(), &p).await {
+            Ok(p) => match surface.seal(connection_id, &caller, &p).await {
                 Ok(result) => wrap_result(result),
                 Err(code) => wrap_result(json!({
                     "error": read_surface::ErrorBody { code, class: code.class() }
@@ -2061,10 +2077,7 @@ async fn handle_read_request(
         },
         OP_PUBLIC_KEY => match serde_json::from_value::<PublicKeyParams>(request.params) {
             Ok(p) if p.has_exactly_one_authorization() => {
-                match surface
-                    .public_key(connection_id, principal.as_ref(), &p)
-                    .await
-                {
+                match surface.public_key(connection_id, &caller, &p).await {
                     Ok(r) => wrap_result(r),
                     Err(code) => wrap_result(json!({
                         "error": read_surface::ErrorBody { code, class: code.class() }
@@ -2087,11 +2100,9 @@ async fn handle_read_request(
             }
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
-            Ok(p) if p.has_mutually_exclusive_addressing() => wrap_result(
-                surface
-                    .status_reply(connection_id, principal.as_ref(), &p)
-                    .await,
-            ),
+            Ok(p) if p.has_mutually_exclusive_addressing() => {
+                wrap_result(surface.status_reply(connection_id, &caller, &p).await)
+            }
             Ok(_) => {
                 return invalid_params(
                     writer,
@@ -2111,7 +2122,7 @@ async fn handle_read_request(
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
                 Ok(p) => wrap_result(
                     surface
-                        .report_auth_failure_reply(connection_id, principal.as_ref(), &p)
+                        .report_auth_failure_reply(connection_id, &caller, &p)
                         .await,
                 ),
                 Err(e) => {
@@ -3793,9 +3804,15 @@ mod tests {
         )
         .expect("build request");
         let principal = admin.principal(channel);
-        handle_read_request(frame, &writer, surface, admin, principal)
-            .await
-            .expect("serve request");
+        handle_read_request(
+            frame,
+            &writer,
+            surface,
+            admin,
+            crate::federation::ingress::ScopedCaller::hand_only(principal),
+        )
+        .await
+        .expect("serve request");
         let response = responses.recv().await.expect("route response");
         serde_json::from_slice(&response.body).expect("decode response")
     }
@@ -3896,9 +3913,15 @@ mod tests {
             serde_json::to_vec(&json!({"method": method, "params": params})).unwrap(),
         )
         .unwrap();
-        handle_read_request(frame, &writer, surface, admin, principal)
-            .await
-            .unwrap();
+        handle_read_request(
+            frame,
+            &writer,
+            surface,
+            admin,
+            crate::federation::ingress::ScopedCaller::hand_only(principal),
+        )
+        .await
+        .unwrap();
         responses.recv().await.unwrap()
     }
 
@@ -5091,9 +5114,15 @@ mod tests {
                 .expect("encode enrollment request"),
         )
         .expect("build enrollment request");
-        handle_read_request(frame, &writer, surface, admin, None)
-            .await
-            .expect("serve enrollment request");
+        handle_read_request(
+            frame,
+            &writer,
+            surface,
+            admin,
+            crate::federation::ingress::ScopedCaller::hand_only(None),
+        )
+        .await
+        .expect("serve enrollment request");
         responses.recv().await.expect("enrollment response")
     }
 
@@ -5497,9 +5526,15 @@ mod tests {
         )
         .expect("build request");
         let principal = admin.principal(channel);
-        handle_read_request(frame, &writer, surface, admin, principal)
-            .await
-            .expect("serve request");
+        handle_read_request(
+            frame,
+            &writer,
+            surface,
+            admin,
+            crate::federation::ingress::ScopedCaller::hand_only(principal),
+        )
+        .await
+        .expect("serve request");
         responses.recv().await.expect("route response").body
     }
 
@@ -6164,7 +6199,7 @@ mod tests {
         bind_reserved_route(&surface, &admin, &routes, 89, 1, "broca", MEMBER_HARNESS).await;
         assert!(matches!(
             admin.route_caller(89),
-            federation::RouteCaller::Principal(Some(_))
+            federation::RouteCaller::Principal(context) if context.as_ref().is_some()
         ));
     }
 
@@ -7783,7 +7818,7 @@ mod tests {
         assert_reads_granted_credential(&surface, &admin, 95, "gate off").await;
         assert_eq!(
             admin.route_caller(96),
-            federation::RouteCaller::Principal(None)
+            federation::RouteCaller::Principal(federation::ingress::ScopedCaller::hand_only(None))
         );
         set_member_mapping(&store, true);
         assert_eq!(admin.route_caller(95), federation::RouteCaller::Refused);
@@ -7795,7 +7830,7 @@ mod tests {
         assert_reads_granted_credential(&surface, &admin, 95, "gate off again").await;
         assert_eq!(
             admin.route_caller(96),
-            federation::RouteCaller::Principal(None)
+            federation::RouteCaller::Principal(federation::ingress::ScopedCaller::hand_only(None))
         );
     }
 
@@ -7955,12 +7990,20 @@ mod tests {
         };
         let watch_params = serde_json::from_value(json!({})).unwrap();
         let before = surface
-            .watch_scoped(Some(&principal), &watch_params)
+            .watch_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &watch_params,
+            )
             .unwrap();
         store.ensure_secret_deposit_key().unwrap();
         assert_eq!(
             surface
-                .watch_scoped(Some(&principal), &watch_params)
+                .watch_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &watch_params
+                )
                 .unwrap(),
             before,
             "neither rows nor held-key digest reveal the deposit key"
@@ -8068,7 +8111,12 @@ mod tests {
             .unwrap();
         assert_ne!(
             surface
-                .watch_scoped(Some(&principal), &watch_params)
+                .watch_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &watch_params
+                )
                 .unwrap(),
             before,
             "the watch still observes a normal key's version change"
@@ -8318,7 +8366,16 @@ mod tests {
             let surface = Arc::clone(&surface);
             async move {
                 let params: StatusParams = serde_json::from_value(json!({ "handle": h })).unwrap();
-                serde_json::to_value(surface.status(1, None, &params).await).unwrap()
+                serde_json::to_value(
+                    surface
+                        .status(
+                            1,
+                            &crate::federation::ingress::ScopedCaller::hand_only(None),
+                            &params,
+                        )
+                        .await,
+                )
+                .unwrap()
             }
         };
         assert_eq!(
@@ -8333,7 +8390,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            surface.report_auth_failure(1, None, &report).await,
+            surface
+                .report_auth_failure(
+                    1,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &report
+                )
+                .await,
             Err(read_surface::ReadError::NotFound)
         );
         assert_eq!(
@@ -8894,7 +8957,7 @@ mod tests {
             surface
                 .status(
                     52,
-                    None,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
                     &StatusParams {
                         handle: Some(handle.raw),
                         credential_id: None,
@@ -9108,7 +9171,7 @@ mod tests {
             surface
                 .status(
                     57,
-                    None,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
                     &StatusParams {
                         handle: None,
                         credential_id: None,
@@ -10286,7 +10349,7 @@ mod tests {
                     surface
                         .status(
                             1,
-                            None,
+                            &crate::federation::ingress::ScopedCaller::hand_only(None),
                             &StatusParams {
                                 handle: Some(handle),
                                 credential_id: None,
@@ -11223,7 +11286,7 @@ mod tests {
 
         let outcome = surface
             .get_scoped(
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &read_surface::GetScopedParams {
                     credential_id: "oauth:ttl-scoped".to_owned(),
                     enrollment_token: None,
@@ -11304,7 +11367,7 @@ mod tests {
 
         let served = surface
             .get_scoped(
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::GetScopedParams {
                     credential_id: "apikey:enrolled-read".to_owned(),
                     enrollment_token: Some(token.clone()),
@@ -11326,7 +11389,7 @@ mod tests {
             .expect("revoke");
         let refused = surface
             .get_scoped(
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::GetScopedParams {
                     credential_id: "apikey:enrolled-read".to_owned(),
                     enrollment_token: Some(token.clone()),
@@ -11541,7 +11604,7 @@ mod tests {
         let result = surface
             .status(
                 94,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::StatusParams {
                     handle: Some(handle.raw),
                     credential_id: None,
@@ -11563,7 +11626,7 @@ mod tests {
             surface
                 .status(
                     95,
-                    None,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
                     &read_surface::StatusParams {
                         handle: None,
                         credential_id: None,
@@ -11687,9 +11750,15 @@ mod tests {
 
             // The response comes from the real route producer and serializer rather than
             // a hand-written value that could stay stable while the wire changes.
-            handle_read_request(frame, &tx, surface, admin, None)
-                .await
-                .expect("get request must be handled");
+            handle_read_request(
+                frame,
+                &tx,
+                surface,
+                admin,
+                crate::federation::ingress::ScopedCaller::hand_only(None),
+            )
+            .await
+            .expect("get request must be handled");
             let response = rx.recv().await.expect("get response must be sent");
             assert_eq!(response.header.ty, FrameType::Response);
             serde_json::from_slice(&response.body).expect("decode get response")
@@ -11879,9 +11948,15 @@ mod tests {
 
             // The response is produced by handle_read_request, not reconstructed from a
             // hand-written object, so this observes the actual producer and wire serializer.
-            handle_read_request(frame, &tx, surface, admin, None)
-                .await
-                .expect("status request must be handled");
+            handle_read_request(
+                frame,
+                &tx,
+                surface,
+                admin,
+                crate::federation::ingress::ScopedCaller::hand_only(None),
+            )
+            .await
+            .expect("status request must be handled");
             let response = rx.recv().await.expect("status response must be sent");
             assert_eq!(response.header.ty, FrameType::Response);
             serde_json::from_slice(&response.body).expect("decode status response")
@@ -12451,7 +12526,7 @@ mod tests {
         };
         let listed = surface
             .list_scoped(
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &read_surface::ListScopedParams {
                     enrollment_token: None,
                 },
@@ -12511,7 +12586,9 @@ mod tests {
     fn catalog_field_row(surface: &ReadSurface) -> serde_json::Value {
         let listing = surface
             .list_scoped(
-                Some(&reserved("catalog-field-reader")),
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("catalog-field-reader"))).cloned(),
+                ),
                 &read_surface::ListScopedParams {
                     enrollment_token: None,
                 },
@@ -12574,7 +12651,12 @@ mod tests {
             enrollment_token: None,
         };
         let view = surface
-            .list_scoped(Some(&reserved("catalog-field-reader")), &params)
+            .list_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("catalog-field-reader"))).cloned(),
+                ),
+                &params,
+            )
             .unwrap()
             .view;
         store
@@ -12587,7 +12669,12 @@ mod tests {
         );
         assert_ne!(
             surface
-                .list_scoped(Some(&reserved("catalog-field-reader")), &params)
+                .list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&reserved("catalog-field-reader"))).cloned()
+                    ),
+                    &params
+                )
                 .unwrap()
                 .view,
             view
@@ -12617,7 +12704,9 @@ mod tests {
         let listing = || {
             surface
                 .list_scoped(
-                    Some(&reserved("catalog-field-reader")),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&reserved("catalog-field-reader"))).cloned(),
+                    ),
                     &read_surface::ListScopedParams {
                         enrollment_token: None,
                     },
@@ -12704,7 +12793,12 @@ mod tests {
         };
 
         let listed = surface
-            .list_scoped(Some(&reserved("router")), &params)
+            .list_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("router"))).cloned(),
+                ),
+                &params,
+            )
             .expect("a list-only principal enumerates");
         assert_eq!(listed.credentials.len(), 1, "the list grant covers one row");
         let row = &listed.credentials[0];
@@ -12720,7 +12814,12 @@ mod tests {
         );
 
         let signer = surface
-            .list_scoped(Some(&reserved("signer")), &params)
+            .list_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("signer"))).cloned(),
+                ),
+                &params,
+            )
             .expect("a sign-only principal enumerates");
         assert_eq!(signer.credentials.len(), 1);
         assert_eq!(signer.credentials[0].account_id, None);
@@ -12775,7 +12874,7 @@ mod tests {
 
         let served = surface
             .get_scoped(
-                Some(&broca),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&broca)).cloned()),
                 &read_surface::GetScopedParams {
                     credential_id: id.into(),
                     enrollment_token: None,
@@ -12791,7 +12890,7 @@ mod tests {
 
         let listed = surface
             .list_scoped(
-                Some(&broca),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&broca)).cloned()),
                 &read_surface::ListScopedParams {
                     enrollment_token: None,
                 },
@@ -12892,7 +12991,12 @@ mod tests {
 
         for (principal, opened) in [("reader", true), ("lister", true), ("signer", false)] {
             let listed = surface
-                .list_scoped(Some(&reserved(principal)), &params)
+                .list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&reserved(principal))).cloned(),
+                    ),
+                    &params,
+                )
                 .unwrap_or_else(|_| panic!("{principal} enumerates"));
             let wire = serde_json::to_value(&listed.credentials).expect("serialise rows");
             let rows = wire.as_array().expect("rows");
@@ -12975,7 +13079,12 @@ mod tests {
         };
 
         let signer = surface
-            .list_scoped(Some(&reserved("signer")), &params)
+            .list_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("signer"))).cloned(),
+                ),
+                &params,
+            )
             .unwrap_or_else(|_| panic!("a sign-only row never opens its envelope"));
         assert_eq!(signer.credentials.len(), 1);
         assert_eq!(signer.credentials[0].id, id);
@@ -12985,7 +13094,12 @@ mod tests {
         grant_for(&store, "reader", id, GrantOperation::Read);
         assert!(
             matches!(
-                surface.list_scoped(Some(&reserved("reader")), &params),
+                surface.list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&reserved("reader"))).cloned()
+                    ),
+                    &params
+                ),
                 Err(read_surface::ReadError::StoreError)
             ),
             "a read row that cannot be unsealed fails the whole snapshot"
@@ -13105,7 +13219,12 @@ mod tests {
             enrollment_token: None,
             min_ttl_ms: None,
         };
-        let refused = surface.get_scoped(Some(&router), &get(oauth_id)).await;
+        let refused = surface
+            .get_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&router)).cloned()),
+                &get(oauth_id),
+            )
+            .await;
         assert!(
             matches!(
                 refused,
@@ -13113,7 +13232,12 @@ mod tests {
             ),
             "get_scoped must refuse a list-only principal as not_found, got {refused:?}"
         );
-        let served = surface.get_scoped(Some(&reader), &get(oauth_id)).await;
+        let served = surface
+            .get_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&reader)).cloned()),
+                &get(oauth_id),
+            )
+            .await;
         assert!(
             matches!(served, read_surface::GetOutcome::Ok(_)),
             "the same get_scoped with a read grant serves the token, got {served:?}"
@@ -13125,13 +13249,25 @@ mod tests {
             credential_id: Some(credential_id.into()),
             enrollment_token: None,
         };
-        let refused = surface.status(1, Some(&router), &status(oauth_id)).await;
+        let refused = surface
+            .status(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(Some(router.clone())),
+                &status(oauth_id),
+            )
+            .await;
         assert_eq!(
             refused.last_error_code,
             Some(read_surface::ReadError::NotFound)
         );
         assert_eq!(refused.credential_id, None);
-        let answered = surface.status(1, Some(&reader), &status(oauth_id)).await;
+        let answered = surface
+            .status(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(Some(reader.clone())),
+                &status(oauth_id),
+            )
+            .await;
         assert_eq!(answered.last_error_code, None);
         assert_eq!(answered.credential_id.as_deref(), Some(oauth_id));
 
@@ -13143,12 +13279,25 @@ mod tests {
             enrollment_token: None,
         };
         assert_eq!(
-            surface.sign(1, Some(&router), &sign).await.err(),
+            surface
+                .sign(
+                    1,
+                    &crate::federation::ingress::ScopedCaller::hand_only((Some(&router)).cloned()),
+                    &sign
+                )
+                .await
+                .err(),
             Some(read_surface::ReadError::NotFound),
             "sign must refuse a list-only principal"
         );
         surface
-            .sign(1, Some(&reserved("signer")), &sign)
+            .sign(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&reserved("signer"))).cloned(),
+                ),
+                &sign,
+            )
             .await
             .expect("the same sign with a sign grant signs");
 
@@ -13159,12 +13308,23 @@ mod tests {
             enrollment_token: None,
         };
         assert_eq!(
-            surface.public_key(1, Some(&router), &public).await.err(),
+            surface
+                .public_key(
+                    1,
+                    &crate::federation::ingress::ScopedCaller::hand_only((Some(&router)).cloned()),
+                    &public
+                )
+                .await
+                .err(),
             Some(read_surface::ReadError::NotFound),
             "public_key must refuse a list-only principal"
         );
         surface
-            .public_key(1, Some(&reader), &public)
+            .public_key(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&reader)).cloned()),
+                &public,
+            )
             .await
             .expect("the same public_key with a read grant publishes");
 
@@ -13179,13 +13339,26 @@ mod tests {
             enrollment_token: None,
         };
         assert_eq!(
-            surface.open(1, Some(&router), &open).await.err(),
+            surface
+                .open(
+                    1,
+                    &crate::federation::ingress::ScopedCaller::hand_only((Some(&router)).cloned()),
+                    &open
+                )
+                .await
+                .err(),
             Some(read_surface::ReadError::NotFound),
             "open must refuse a list-only principal"
         );
         assert_eq!(
             surface
-                .open(2, Some(&reserved("opener")), &open)
+                .open(
+                    2,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&reserved("opener"))).cloned()
+                    ),
+                    &open
+                )
                 .await
                 .err(),
             Some(read_surface::ReadError::OpenFailed),
@@ -13205,14 +13378,22 @@ mod tests {
         };
         assert_eq!(
             surface
-                .report_auth_failure(1, Some(&router), &report)
+                .report_auth_failure(
+                    1,
+                    &crate::federation::ingress::ScopedCaller::hand_only((Some(&router)).cloned()),
+                    &report
+                )
                 .await
                 .err(),
             Some(read_surface::ReadError::NotFound),
             "report_auth_failure must refuse a list-only principal"
         );
         surface
-            .report_auth_failure(1, Some(&reader), &report)
+            .report_auth_failure(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&reader)).cloned()),
+                &report,
+            )
             .await
             .expect("the same report with a read grant is accepted");
     }
@@ -13324,7 +13505,13 @@ mod tests {
             credential_id: None,
             enrollment_token: None,
         };
-        let before = surface.status(1, None, &params).await;
+        let before = surface
+            .status(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params,
+            )
+            .await;
         assert!(before.ready, "an active credential is ready before fencing");
         assert!(before.lease_held, "the lease is held before fencing");
 
@@ -13333,7 +13520,13 @@ mod tests {
         bump_fence_epoch(&db_path);
         let _ = store.invalidate("apikey:active"); // trigger the fenced write to latch
 
-        let after = surface.status(1, None, &params).await;
+        let after = surface
+            .status(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params,
+            )
+            .await;
         assert!(
             !after.lease_held,
             "a fenced-out daemon does not hold the lease"
@@ -13347,7 +13540,7 @@ mod tests {
         let overall = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &StatusParams {
                     handle: None,
                     credential_id: None,
@@ -13401,7 +13594,7 @@ mod tests {
         let ok = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &StatusParams {
                     handle: Some(active),
                     credential_id: None,
@@ -13418,7 +13611,7 @@ mod tests {
         let reauth = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &StatusParams {
                     handle: Some(dead),
                     credential_id: None,
@@ -13436,7 +13629,7 @@ mod tests {
         let corrupt = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &StatusParams {
                     handle: Some(broken),
                     credential_id: None,
@@ -13457,7 +13650,7 @@ mod tests {
         let unknown = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &StatusParams {
                     handle: Some("ckh_not_a_real_handle".to_string()),
                     credential_id: None,
@@ -13586,7 +13779,7 @@ mod tests {
         let public = surface
             .public_key(
                 81,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::PublicKeyParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -13599,7 +13792,7 @@ mod tests {
         let signature = surface
             .sign(
                 81,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::SignParams {
                     handle: Some(handle.raw),
                     credential_id: None,
@@ -13894,7 +14087,16 @@ mod tests {
             enrollment_token: None,
         };
         for _ in 0..17 {
-            let opened = surface.open(901, Some(&principal), &params).await.unwrap();
+            let opened = surface
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
+                .await
+                .unwrap();
             assert_eq!(opened.plaintext_b64.expose(), &encode(b"plaintext"));
             assert_eq!(opened.key_id, key_id);
         }
@@ -13911,7 +14113,7 @@ mod tests {
         let public_reply = surface
             .public_key(
                 901,
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &read_surface::PublicKeyParams {
                     handle: None,
                     credential_id: Some(id.into()),
@@ -13937,7 +14139,13 @@ mod tests {
         params.enc_b64 = encode(&[0u8; 32]);
         failures.push(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
                 .await
                 .unwrap_err(),
         );
@@ -13945,7 +14153,13 @@ mod tests {
         params.ciphertext_b64 = encode(b"wrong recipient ciphertext");
         failures.push(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
                 .await
                 .unwrap_err(),
         );
@@ -13955,7 +14169,13 @@ mod tests {
         params.ciphertext_b64 = encode(&tampered);
         failures.push(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
                 .await
                 .unwrap_err(),
         );
@@ -13963,7 +14183,13 @@ mod tests {
         params.aad_b64 = encode(b"wrong aad");
         failures.push(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
                 .await
                 .unwrap_err(),
         );
@@ -13971,7 +14197,13 @@ mod tests {
         params.info_b64 = encode(b"wrong info");
         failures.push(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &params,
+                )
                 .await
                 .unwrap_err(),
         );
@@ -13987,14 +14219,24 @@ mod tests {
             .unwrap();
         params.credential_id = api_id.into();
         let api_without_grant = surface
-            .open(901, Some(&principal), &params)
+            .open(
+                901,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &params,
+            )
             .await
             .unwrap_err();
         params.credential_id = "apikey:unknown".into();
         assert_eq!(
             api_without_grant,
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
                 .await
                 .unwrap_err()
         );
@@ -14011,7 +14253,13 @@ mod tests {
         params.credential_id = api_id.into();
         assert_eq!(
             surface
-                .open(901, Some(&principal), &params)
+                .open(
+                    901,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
                 .await
                 .unwrap_err(),
             read_surface::ReadError::KindNotOpenable
@@ -14038,7 +14286,13 @@ mod tests {
             params.credential_id = format!("kem:unknown:{n}");
             assert_eq!(
                 surface
-                    .open(92, Some(&principal), &params)
+                    .open(
+                        92,
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned()
+                        ),
+                        &params
+                    )
                     .await
                     .unwrap_err(),
                 read_surface::ReadError::NotFound
@@ -14046,7 +14300,13 @@ mod tests {
         }
         assert_eq!(
             surface
-                .open(92, Some(&principal), &params)
+                .open(
+                    92,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
                 .await
                 .unwrap_err(),
             read_surface::ReadError::OpenRateLimited
@@ -14058,13 +14318,28 @@ mod tests {
             enrollment_token: None,
         };
         assert_eq!(
-            surface.sign(92, Some(&principal), &sign).await.unwrap_err(),
+            surface
+                .sign(
+                    92,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &sign
+                )
+                .await
+                .unwrap_err(),
             read_surface::ReadError::NotFound
         );
         for _ in 0..16 {
             assert_eq!(
                 surface
-                    .open(93, Some(&principal), &params)
+                    .open(
+                        93,
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned()
+                        ),
+                        &params
+                    )
                     .await
                     .unwrap_err(),
                 read_surface::ReadError::NotFound
@@ -14072,7 +14347,13 @@ mod tests {
         }
         assert_eq!(
             surface
-                .open(93, Some(&principal), &params)
+                .open(
+                    93,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
                 .await
                 .unwrap_err(),
             read_surface::ReadError::OpenRateLimited
@@ -14103,7 +14384,13 @@ mod tests {
         surface.expire_open_window_for_test(93).await;
         assert_eq!(
             surface
-                .open(93, Some(&principal), &params)
+                .open(
+                    93,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
                 .await
                 .unwrap()
                 .plaintext_b64
@@ -14131,7 +14418,14 @@ mod tests {
                 &mut params.aad_b64,
             ];
             *fields.into_iter().nth(field).unwrap() = "!".into();
-            let code = surface.open(95, None, &params).await.unwrap_err();
+            let code = surface
+                .open(
+                    95,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &params,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(
                 crate::wrap_result(serde_json::json!({
                     "error": read_surface::ErrorBody { code, class: code.class() }
@@ -14165,17 +14459,38 @@ mod tests {
             enrollment_token: None,
         };
         assert_eq!(
-            surface.open(94, None, &params).await.unwrap_err(),
+            surface
+                .open(
+                    94,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &params
+                )
+                .await
+                .unwrap_err(),
             read_surface::ReadError::NotFound
         );
         params.aad_b64 = encode(b"x");
         assert_eq!(
-            surface.open(94, None, &params).await.unwrap_err(),
+            surface
+                .open(
+                    94,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &params
+                )
+                .await
+                .unwrap_err(),
             read_surface::ReadError::SignPayloadTooLarge
         );
         params.info_b64 = "!".repeat(1_398_117);
         assert_eq!(
-            surface.open(94, None, &params).await.unwrap_err(),
+            surface
+                .open(
+                    94,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &params
+                )
+                .await
+                .unwrap_err(),
             read_surface::ReadError::SignPayloadTooLarge
         );
     }
@@ -14699,9 +15014,15 @@ mod tests {
                 serde_json::to_vec(&json!({"method": OP_SEAL, "params": params})).unwrap(),
             )
             .unwrap();
-            handle_read_request(frame, &writer, &surface, &admin, admin.principal(193))
-                .await
-                .unwrap();
+            handle_read_request(
+                frame,
+                &writer,
+                &surface,
+                &admin,
+                crate::federation::ingress::ScopedCaller::hand_only(admin.principal(193)),
+            )
+            .await
+            .unwrap();
             let response = responses.recv().await.unwrap();
             assert_eq!(response.header.ty, FrameType::Error, "{extra}");
             let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
@@ -14729,12 +15050,27 @@ mod tests {
         // shared threshold of sixteen.
         for n in 0..8 {
             assert_eq!(
-                surface.open(70, Some(&principal), &open).await.unwrap_err(),
+                surface
+                    .open(
+                        70,
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned()
+                        ),
+                        &open
+                    )
+                    .await
+                    .unwrap_err(),
                 read_surface::ReadError::NotFound
             );
             assert_eq!(
                 surface
-                    .seal(70, Some(&principal), &seal(&format!("kem:unknown:{n}")))
+                    .seal(
+                        70,
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned()
+                        ),
+                        &seal(&format!("kem:unknown:{n}"))
+                    )
                     .await
                     .unwrap_err(),
                 read_surface::ReadError::NotFound
@@ -14742,30 +15078,59 @@ mod tests {
         }
         assert_eq!(
             surface
-                .seal(70, Some(&principal), &seal("kem:push"))
+                .seal(
+                    70,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &seal("kem:push")
+                )
                 .await
                 .unwrap_err(),
             read_surface::ReadError::SealRateLimited,
             "even a granted seal waits out the window"
         );
         assert_eq!(
-            surface.open(70, Some(&principal), &open).await.unwrap_err(),
+            surface
+                .open(
+                    70,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &open
+                )
+                .await
+                .unwrap_err(),
             read_surface::ReadError::OpenRateLimited
         );
         // Another connection is unaffected, and the window recovers.
         assert!(surface
-            .seal(71, Some(&principal), &seal("kem:push"))
+            .seal(
+                71,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &seal("kem:push")
+            )
             .await
             .is_ok());
         surface.expire_open_window_for_test(70).await;
         assert!(surface
-            .seal(70, Some(&principal), &seal("kem:push"))
+            .seal(
+                70,
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
+                &seal("kem:push")
+            )
             .await
             .is_ok());
         // Successful seals do not count: many in a row never trip the gate.
         for _ in 0..20 {
             assert!(surface
-                .seal(72, Some(&principal), &seal("kem:push"))
+                .seal(
+                    72,
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &seal("kem:push")
+                )
                 .await
                 .is_ok());
         }
@@ -15865,7 +16230,7 @@ mod tests {
         let ok = surface
             .sign(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::SignParams {
                     handle: Some(h_sign.raw.clone()),
                     credential_id: None,
@@ -15882,7 +16247,7 @@ mod tests {
         let err = surface
             .sign(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::SignParams {
                     handle: Some(h_api.raw.clone()),
                     credential_id: None,
@@ -15989,7 +16354,7 @@ mod tests {
         let public = surface
             .public_key(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::PublicKeyParams {
                     handle: Some(signer_handle.raw.clone()),
                     credential_id: None,
@@ -16019,7 +16384,7 @@ mod tests {
         let signature = surface
             .sign(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::SignParams {
                     handle: Some(signer_handle.raw),
                     credential_id: None,
@@ -16044,7 +16409,7 @@ mod tests {
         let err = surface
             .public_key(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::PublicKeyParams {
                     handle: Some(non_signer_handle.raw),
                     credential_id: None,
@@ -16093,7 +16458,13 @@ mod tests {
             credential_id: None,
             enrollment_token: None,
         };
-        let before = surface.status(1, None, &params).await;
+        let before = surface
+            .status(
+                1,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params,
+            )
+            .await;
         assert!(before.ready, "seeded credential must start ready");
         let version_before = before
             .record_version
@@ -16166,7 +16537,7 @@ mod tests {
         let result = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16217,7 +16588,7 @@ mod tests {
         let before = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16242,7 +16613,7 @@ mod tests {
         let after = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16262,7 +16633,7 @@ mod tests {
         let overall = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: None,
                     credential_id: None,
@@ -16277,7 +16648,7 @@ mod tests {
         let unknown = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
                     credential_id: None,
@@ -16341,7 +16712,7 @@ mod tests {
         let clean = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16364,7 +16735,7 @@ mod tests {
         surface
             .report_auth_failure(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16380,7 +16751,7 @@ mod tests {
         let marked = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -16410,7 +16781,7 @@ mod tests {
         let overall = surface
             .status(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: None,
                     credential_id: None,
@@ -16425,7 +16796,7 @@ mod tests {
         let unknown = surface
             .status(
                 2,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
                     credential_id: None,
@@ -16522,7 +16893,7 @@ mod tests {
         surface
             .report_auth_failure(
                 11,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(raw.raw.clone()),
                     credential_id: None,
@@ -16619,7 +16990,7 @@ mod tests {
         let got = surface
             .status(
                 11,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &crate::read_surface::StatusParams {
                     handle: Some(raw.raw),
                     credential_id: None,
@@ -16657,7 +17028,13 @@ mod tests {
                 credential_id: None,
                 enrollment_token: None,
             };
-            let _ = surface.status(77, None, &params).await;
+            let _ = surface
+                .status(
+                    77,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
+                    &params,
+                )
+                .await;
         }
         let alarms = store
             .read_audit(None)
@@ -16704,7 +17081,7 @@ mod tests {
                     let _ = surface
                         .sign(
                             78,
-                            None,
+                            &crate::federation::ingress::ScopedCaller::hand_only(None),
                             &read_surface::SignParams {
                                 handle,
                                 credential_id: None,
@@ -16717,7 +17094,7 @@ mod tests {
                     let _ = surface
                         .public_key(
                             78,
-                            None,
+                            &crate::federation::ingress::ScopedCaller::hand_only(None),
                             &read_surface::PublicKeyParams {
                                 handle,
                                 credential_id: None,
@@ -17070,7 +17447,11 @@ mod tests {
         // a consumer classifying 5xx as a credential death got back success and a mark
         // that did nothing.
         let refusal = surface
-            .report_auth_failure(7, None, &params(500, 1, None))
+            .report_auth_failure(
+                7,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params(500, 1, None),
+            )
             .await
             .expect_err("a non-auth status is refused, not accepted");
         assert_eq!(
@@ -17094,7 +17475,11 @@ mod tests {
             )
             .expect("bump the record version");
         surface
-            .report_auth_failure(7, None, &params(401, 1, Some("relay_message_parse")))
+            .report_auth_failure(
+                7,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params(401, 1, Some("relay_message_parse")),
+            )
             .await
             .expect("a stale report is accepted, not errored");
         assert_eq!(
@@ -17117,7 +17502,11 @@ mod tests {
         // THE ACCEPTED ARM. Without it, an implementation that ignored every report
         // satisfies both assertions above.
         surface
-            .report_auth_failure(7, None, &params(401, 2, Some(&"a".repeat(40))))
+            .report_auth_failure(
+                7,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
+                &params(401, 2, Some(&"a".repeat(40))),
+            )
             .await
             .expect("a current-version 401 is accepted");
         assert_eq!(
@@ -17166,7 +17555,7 @@ mod tests {
         let unknown = surface
             .report_auth_failure(
                 7,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some("ckh_not_a_handle".to_string()),
                     credential_id: None,
@@ -17247,7 +17636,7 @@ mod tests {
         surface
             .report_auth_failure(
                 1,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw),
                     credential_id: None,
@@ -17262,7 +17651,7 @@ mod tests {
         surface
             .report_auth_failure(
                 2,
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("oauth:twin-scoped".to_owned()),
@@ -17321,7 +17710,7 @@ mod tests {
                 surface
                     .report_auth_failure(
                         6,
-                        None,
+                        &crate::federation::ingress::ScopedCaller::hand_only(None),
                         &read_surface::ReportAuthFailureParams {
                             handle: Some(raw),
                             credential_id: None,
@@ -17396,9 +17785,12 @@ mod tests {
             .report_auth_failure(
                 // A channel number that would be unmistakable in the row if it leaked in.
                 4242,
-                Some(&subc_protocol::Principal::Reserved {
-                    module_id: "named-reporter".into(),
-                }),
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&subc_protocol::Principal::Reserved {
+                        module_id: "named-reporter".into(),
+                    }))
+                    .cloned(),
+                ),
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("apikey:audited-scope".to_owned()),
@@ -17530,6 +17922,8 @@ mod tests {
         // two must behave identically; asserting it is what makes that a property rather
         // than an implementation detail one refactor away from changing.
         for direct in [Some(&subc_protocol::Principal::Direct), None] {
+            let caller = federation::ingress::ScopedCaller::hand_only(direct.cloned());
+            let direct = &caller;
             // Each arm renders its answer to a string so two identities can be compared
             // without every surface needing a bespoke assertion.
             let mut surfaces: Vec<(&str, String, String)> = Vec::new();
@@ -17733,7 +18127,9 @@ mod tests {
         let with_token = surface
             .status(
                 91,
-                Some(&subc_protocol::Principal::Direct),
+                &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                    subc_protocol::Principal::Direct,
+                )),
                 &read_surface::StatusParams {
                     handle: None,
                     credential_id: Some(credential_id.to_owned()),
@@ -17757,7 +18153,9 @@ mod tests {
         let without_token = surface
             .status(
                 92,
-                Some(&subc_protocol::Principal::Direct),
+                &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                    subc_protocol::Principal::Direct,
+                )),
                 &read_surface::StatusParams {
                     handle: None,
                     credential_id: Some(credential_id.to_owned()),
@@ -17830,7 +18228,9 @@ mod tests {
             surface
                 .report_auth_failure(
                     77,
-                    Some(&principal),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
                     &read_surface::ReportAuthFailureParams {
                         handle: None,
                         credential_id: Some(credential_id.to_owned()),
@@ -17908,9 +18308,12 @@ mod tests {
         surface
             .report_auth_failure(
                 3,
-                Some(&subc_protocol::Principal::Reserved {
-                    module_id: "fence-reporter".into(),
-                }),
+                &crate::federation::ingress::ScopedCaller::hand_only(
+                    (Some(&subc_protocol::Principal::Reserved {
+                        module_id: "fence-reporter".into(),
+                    }))
+                    .cloned(),
+                ),
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("oauth:fenced".to_owned()),
@@ -17973,7 +18376,9 @@ mod tests {
                 surface
                     .report_auth_failure(
                         4,
-                        Some(&principal),
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned(),
+                        ),
                         &read_surface::ReportAuthFailureParams {
                             handle: None,
                             credential_id: Some(id.to_owned()),
@@ -18008,7 +18413,7 @@ mod tests {
             surface
                 .report_auth_failure(
                     5,
-                    None,
+                    &crate::federation::ingress::ScopedCaller::hand_only(None),
                     &read_surface::ReportAuthFailureParams {
                         handle,
                         credential_id,
@@ -18062,7 +18467,7 @@ mod tests {
         surface
             .report_auth_failure(
                 8,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw),
                     credential_id: None,
@@ -18124,7 +18529,7 @@ mod tests {
         surface
             .report_auth_failure(
                 9,
-                None,
+                &crate::federation::ingress::ScopedCaller::hand_only(None),
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
@@ -18690,7 +19095,13 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     surface
-                        .open(77, Some(&reserved("entorhinal")), &params)
+                        .open(
+                            77,
+                            &crate::federation::ingress::ScopedCaller::hand_only(
+                                (Some(&reserved("entorhinal"))).cloned()
+                            ),
+                            &params
+                        )
                         .await
                         .err(),
                     Some(read_surface::ReadError::OpenFailed)

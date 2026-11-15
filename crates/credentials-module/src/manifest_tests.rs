@@ -165,9 +165,11 @@ impl Drop for Rig {
 }
 
 fn caller(module: &str) -> crate::federation::RouteCaller {
-    crate::federation::RouteCaller::Principal(Some(Principal::Reserved {
-        module_id: module.into(),
-    }))
+    crate::federation::RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(
+        Some(Principal::Reserved {
+            module_id: module.into(),
+        }),
+    ))
 }
 
 fn request(method: &str, params: Value, channel: u16, corr: u64) -> Frame {
@@ -340,7 +342,9 @@ async fn manifest_principals_are_uniformly_hidden_before_parameter_preflight() {
     ] {
         for c in [
             caller(wrong),
-            crate::federation::RouteCaller::Principal(None),
+            crate::federation::RouteCaller::Principal(
+                crate::federation::ingress::ScopedCaller::hand_only(None),
+            ),
             crate::federation::RouteCaller::Refused,
             crate::federation::RouteCaller::Phone("a".repeat(32)),
             crate::federation::RouteCaller::Member(OTHER.into()),

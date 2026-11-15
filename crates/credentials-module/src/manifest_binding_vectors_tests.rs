@@ -504,7 +504,9 @@ async fn samples() -> BTreeMap<String, Value> {
     out.insert("approve.request".into(), approve.clone());
     let (kind, invalid) = wire(
         &rig,
-        crate::federation::RouteCaller::Principal(Some(plexus())),
+        crate::federation::RouteCaller::Principal(
+            crate::federation::ingress::ScopedCaller::hand_only(Some(plexus())),
+        ),
         "manifest.propose_binding",
         json!({"unexpected":true}),
     )

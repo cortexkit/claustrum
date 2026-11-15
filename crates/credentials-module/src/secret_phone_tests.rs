@@ -54,7 +54,7 @@ fn phone_mapping_requires_both_gates_and_exact_authenticated_harness() {
             let expected = if member == MappingGate::On && phone == MappingGate::On {
                 RouteCaller::Phone(FP.into())
             } else if member == MappingGate::Off {
-                RouteCaller::Principal(None)
+                RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(None))
             } else {
                 RouteCaller::Refused
             };
@@ -80,7 +80,9 @@ fn phone_mapping_requires_both_gates_and_exact_authenticated_harness() {
             ] {
                 assert_eq!(
                     map_route_caller_with_phone(&principal, &harness, member, phone),
-                    RouteCaller::Principal(Some(principal))
+                    RouteCaller::Principal(crate::federation::ingress::ScopedCaller::hand_only(
+                        Some(principal)
+                    ))
                 );
             }
             for harness in [

@@ -912,7 +912,17 @@ mod get_scoped_tests {
                 json!({})
             };
             assert_eq!(
-                serde_json::to_value(surface.get_scoped(Some(&principal), &params).await).unwrap(),
+                serde_json::to_value(
+                    surface
+                        .get_scoped(
+                            &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                                principal.clone()
+                            )),
+                            &params
+                        )
+                        .await
+                )
+                .unwrap(),
                 golden_reply(
                     id,
                     1,
@@ -928,7 +938,14 @@ mod get_scoped_tests {
             let list_params = ListScopedParams {
                 enrollment_token: None,
             };
-            let list = surface.list_scoped(Some(&principal), &list_params).unwrap();
+            let list = surface
+                .list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
+                    &list_params,
+                )
+                .unwrap();
             let row = list.credentials.iter().find(|row| row.id == id).unwrap();
             assert_eq!(row.auth_method.as_deref(), Some("gateway"));
             assert_eq!(row.provider_ids, [id.split(':').nth(1).unwrap()]);
@@ -942,18 +959,35 @@ mod get_scoped_tests {
                 .is_none());
             assert_eq!(
                 surface
-                    .watch_scoped(Some(&principal), &list_params)
+                    .watch_scoped(
+                        &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                            principal.clone()
+                        )),
+                        &list_params
+                    )
                     .unwrap()
                     .0,
                 list.view
             );
             assert!(surface
-                .list_scoped(Some(&provider_principal), &list_params)
+                .list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                        provider_principal.clone()
+                    )),
+                    &list_params
+                )
                 .unwrap()
                 .credentials
                 .is_empty());
             assert!(matches!(
-                surface.get_scoped(Some(&provider_principal), &params).await,
+                surface
+                    .get_scoped(
+                        &crate::federation::ingress::ScopedCaller::hand_only(Some(
+                            provider_principal.clone()
+                        )),
+                        &params
+                    )
+                    .await,
                 GetOutcome::Err {
                     error: ErrorBody {
                         code: ReadError::NotFound,
@@ -980,7 +1014,7 @@ mod get_scoped_tests {
             .unwrap();
         let list = surface
             .list_scoped(
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &ListScopedParams {
                     enrollment_token: None,
                 },
@@ -991,7 +1025,9 @@ mod get_scoped_tests {
         let reply = serde_json::to_value(
             surface
                 .get_scoped(
-                    Some(&principal),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
                     &GetScopedParams {
                         credential_id: id.into(),
                         min_ttl_ms: None,
@@ -1040,7 +1076,14 @@ mod get_scoped_tests {
             };
             assert!(
                 matches!(
-                    surface.get_scoped(Some(&principal), &params).await,
+                    surface
+                        .get_scoped(
+                            &crate::federation::ingress::ScopedCaller::hand_only(
+                                (Some(&principal)).cloned()
+                            ),
+                            &params
+                        )
+                        .await,
                     GetOutcome::Err {
                         error: ErrorBody {
                             code: ReadError::NotFound,
@@ -1050,8 +1093,17 @@ mod get_scoped_tests {
                 ),
                 "{point}"
             );
-            let replacement =
-                serde_json::to_value(surface.get_scoped(Some(&principal), &params).await).unwrap();
+            let replacement = serde_json::to_value(
+                surface
+                    .get_scoped(
+                        &crate::federation::ingress::ScopedCaller::hand_only(
+                            (Some(&principal)).cloned(),
+                        ),
+                        &params,
+                    )
+                    .await,
+            )
+            .unwrap();
             assert_eq!(replacement["payload"], json!(b"new-key"));
             assert_eq!(replacement["base_url"], "http://[::1]:5000/v1");
             assert_eq!(
@@ -1088,7 +1140,14 @@ mod get_scoped_tests {
             enrollment_token: None,
         };
         assert!(matches!(
-            surface.get_scoped(Some(&principal), &params).await,
+            surface
+                .get_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned()
+                    ),
+                    &params
+                )
+                .await,
             GetOutcome::Err {
                 error: ErrorBody {
                     code: ReadError::NotFound,
@@ -1098,7 +1157,7 @@ mod get_scoped_tests {
         ));
         assert!(surface
             .list_scoped(
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &ListScopedParams {
                     enrollment_token: None
                 }
@@ -1197,7 +1256,9 @@ mod get_scoped_tests {
                 .unwrap();
             let outcome = surface
                 .get_scoped(
-                    Some(&principal),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
                     &GetScopedParams {
                         credential_id: id.into(),
                         min_ttl_ms: None,
@@ -1325,7 +1386,9 @@ mod get_scoped_tests {
             let record = store.get(id).unwrap().encode().unwrap();
             let reply = surface
                 .get_scoped(
-                    Some(&principal),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
                     &GetScopedParams {
                         credential_id: id.into(),
                         min_ttl_ms: None,
@@ -1401,7 +1464,9 @@ mod get_scoped_tests {
             run(body).unwrap();
             let reply = surface
                 .get_scoped(
-                    Some(&principal),
+                    &crate::federation::ingress::ScopedCaller::hand_only(
+                        (Some(&principal)).cloned(),
+                    ),
                     &GetScopedParams {
                         credential_id: id.into(),
                         min_ttl_ms: None,
@@ -1460,7 +1525,7 @@ mod get_scoped_tests {
         );
         let reply = surface
             .get_scoped(
-                Some(&principal),
+                &crate::federation::ingress::ScopedCaller::hand_only((Some(&principal)).cloned()),
                 &GetScopedParams {
                     credential_id: id.into(),
                     min_ttl_ms: None,
@@ -2372,14 +2437,15 @@ impl ReadSurface {
     pub async fn sign(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &SignParams,
     ) -> Result<SignResult, ReadError> {
+        let principal = caller.as_ref();
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
         let resolved = self
             .resolve_key_address(
                 connection_id,
-                principal,
+                caller,
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Sign,
@@ -2476,7 +2542,7 @@ impl ReadSurface {
     pub async fn open(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &OpenParams,
     ) -> Result<OpenResult, ReadError> {
         // The transport frame cap is larger than this bound. Check the sum before
@@ -2523,7 +2589,7 @@ impl ReadSurface {
         let resolved = match self
             .resolve_key_address(
                 connection_id,
-                principal,
+                caller,
                 params.enrollment_token.as_deref(),
                 KeyAddress::Scoped(&params.credential_id),
                 GrantOperation::Open,
@@ -2604,9 +2670,10 @@ impl ReadSurface {
     pub async fn seal(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &SealParams,
     ) -> Result<SealResult, ReadError> {
+        let principal = caller.as_ref();
         use credentials_core::kem::{
             MAX_SEAL_AAD, MAX_SEAL_INFO, MAX_SEAL_PLAINTEXT, X25519_PUBLIC_KEY_LEN,
         };
@@ -2660,7 +2727,7 @@ impl ReadSurface {
             .store()
             .credential_incarnation(&params.credential_id);
         let resolved_principal = match self.authorize_scoped_as(
-            principal,
+            caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
             GrantOperation::Seal,
@@ -2790,14 +2857,15 @@ impl ReadSurface {
     pub async fn public_key(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &PublicKeyParams,
     ) -> Result<PublicKeyResult, ReadError> {
+        let principal = caller.as_ref();
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
         let resolved = self
             .resolve_key_address(
                 connection_id,
-                principal,
+                caller,
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Read,
@@ -3045,9 +3113,10 @@ impl ReadSurface {
 
     pub fn deposit_cookie(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &DepositCookieParams,
     ) -> Result<DepositCookieResult, DepositCookieError> {
+        let principal = caller.as_ref();
         use credentials_core::deposit_cookie::{valid_deposit_cookie_id, DepositCookieOutcome};
         if !valid_deposit_cookie_id(&params.id) {
             return Err(self.deposit_cookie_refusal(
@@ -3063,7 +3132,7 @@ impl ReadSurface {
                 DepositCookieError::InvalidPayload,
             ));
         }
-        self.authorize_scoped_as(principal, None, &params.id, GrantOperation::Deposit)
+        self.authorize_scoped_as(caller, None, &params.id, GrantOperation::Deposit)
             .map_err(|_| DepositCookieError::NotFound)?;
         let (kind, id) = self
             .scoped_principal(principal, None)
@@ -3185,7 +3254,7 @@ impl ReadSurface {
     async fn resolve_key_address(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         enrollment_token: Option<&str>,
         address: KeyAddress<'_>,
         operation: GrantOperation,
@@ -3223,7 +3292,7 @@ impl ReadSurface {
                 }
                 let incarnation = self.engine.store().credential_incarnation(credential_id);
                 let resolved_principal = self.authorize_scoped_for(
-                    principal,
+                    caller,
                     enrollment_token,
                     credential_id,
                     operation,
@@ -3291,13 +3360,13 @@ impl ReadSurface {
     /// says what it does.
     fn authorize_scoped_as(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         enrollment_token: Option<&str>,
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(&'static str, String), ReadError> {
         self.authorize_scoped_for(
-            principal,
+            caller,
             enrollment_token,
             credential_id,
             operation,
@@ -3310,12 +3379,13 @@ impl ReadSurface {
     /// that may reach the vault transfer key, and only for callosum's announce.
     fn authorize_scoped_for(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         enrollment_token: Option<&str>,
         credential_id: &str,
         operation: GrantOperation,
         usage: TransferKeyUse,
     ) -> Result<(&'static str, String), ReadError> {
+        let principal = caller.as_ref();
         let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
             self.record_scoped_refusal(
                 principal,
@@ -3348,7 +3418,7 @@ impl ReadSurface {
             &id,
             credential_id,
             operation,
-            &credentials_core::store::DeclaredGrantSet::empty(),
+            &caller.declared,
         );
         #[cfg(test)]
         let coverage = if self
@@ -3428,9 +3498,10 @@ impl ReadSurface {
     /// is why it must not be disabled at either end as a local cleanup.
     pub fn list_scoped(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &ListScopedParams,
     ) -> Result<ListScopedResult, ReadError> {
+        let principal = caller.as_ref();
         let Some((principal_kind, principal_id)) =
             self.scoped_principal(principal, params.enrollment_token.as_deref())
         else {
@@ -3459,11 +3530,7 @@ impl ReadSurface {
         let mut snapshot = self
             .engine
             .store()
-            .list_scoped_snapshot(
-                principal_kind,
-                &principal_id,
-                &credentials_core::store::DeclaredGrantSet::empty(),
-            )
+            .list_scoped_snapshot(principal_kind, &principal_id, &caller.declared)
             .map_err(|_| ReadError::StoreError)?;
         self.add_remote_rows(&mut snapshot)?;
         // A grant that reaches the transfer key (through a category it was put in)
@@ -3517,9 +3584,10 @@ impl ReadSurface {
 
     pub(crate) fn watch_scoped(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &ListScopedParams,
     ) -> Result<(String, String), ReadError> {
+        let principal = caller.as_ref();
         let Some((kind, id)) = self.scoped_principal(principal, params.enrollment_token.as_deref())
         else {
             return Err(ReadError::NotFound);
@@ -3527,11 +3595,7 @@ impl ReadSurface {
         let (mut snapshot, mut keys) = self
             .engine
             .store()
-            .watch_scoped_snapshot(
-                kind,
-                &id,
-                &credentials_core::store::DeclaredGrantSet::empty(),
-            )
+            .watch_scoped_snapshot(kind, &id, &caller.declared)
             .map_err(|_| ReadError::StoreError)?;
         self.add_remote_rows(&mut snapshot)?;
         // The rows take the same fence as `list_scoped`, so no watcher's view shows the
@@ -3642,7 +3706,7 @@ impl ReadSurface {
     pub async fn status_reply(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &StatusParams,
     ) -> serde_json::Value {
         if let Some(record) =
@@ -3651,7 +3715,7 @@ impl ReadSurface {
             let fenced_out = self.engine.store().is_fenced_out();
             if self
                 .authorize_scoped_as(
-                    principal,
+                    caller,
                     params.enrollment_token.as_deref(),
                     &record.credential_id,
                     GrantOperation::Read,
@@ -3670,8 +3734,7 @@ impl ReadSurface {
             }
             return crate::federation::remote_read::status_body(&record, fenced_out);
         }
-        serde_json::to_value(self.status(connection_id, principal, params).await)
-            .unwrap_or_default()
+        serde_json::to_value(self.status(connection_id, caller, params).await).unwrap_or_default()
     }
 
     /// The `credential.report_auth_failure` reply body. A report on a remote record is
@@ -3681,9 +3744,10 @@ impl ReadSurface {
     pub async fn report_auth_failure_reply(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &ReportAuthFailureParams,
     ) -> serde_json::Value {
+        let principal = caller.as_ref();
         let local = |result: Result<(), ReadError>| match result {
             Ok(()) => serde_json::json!({ "accepted": true }),
             // The produced error class rides alongside the code, in the same
@@ -3698,12 +3762,12 @@ impl ReadSurface {
             self.remote_address(params.handle.as_ref(), params.credential_id.as_ref())
         else {
             return local(
-                self.report_auth_failure(connection_id, principal, params)
+                self.report_auth_failure(connection_id, caller, params)
                     .await,
             );
         };
         if let Err(code) = self.authorize_scoped_as(
-            principal,
+            caller,
             params.enrollment_token.as_deref(),
             &record.credential_id,
             GrantOperation::Read,
@@ -3733,11 +3797,11 @@ impl ReadSurface {
 
     pub fn report_usage_scoped(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &UsageReportScopedParams,
     ) -> Result<(), ReadError> {
         let (kind, id) = self.authorize_scoped_as(
-            principal,
+            caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
             GrantOperation::Read,
@@ -3762,16 +3826,17 @@ impl ReadSurface {
     /// turn this operation into a vault inventory oracle.
     pub async fn get_scoped(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &GetScopedParams,
     ) -> GetOutcome {
+        let principal = caller.as_ref();
         let incarnation = self
             .engine
             .store()
             .credential_incarnation(&params.credential_id);
         let remote_record = self.remote.remote_record(&params.credential_id);
         if let Err(code) = self.authorize_scoped_as(
-            principal,
+            caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
             GrantOperation::Read,
@@ -3936,9 +4001,10 @@ impl ReadSurface {
     pub async fn report_auth_failure(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &ReportAuthFailureParams,
     ) -> Result<(), ReadError> {
+        let principal = caller.as_ref();
         // TWO ADDRESSES, EXACTLY ONE OF THEM, mirroring `status` above rather than
         // inventing a second dispatch shape. `scoped` is carried forward because it
         // decides the audit actor: a handle holder is anonymous and the channel number is
@@ -3966,7 +4032,7 @@ impl ReadSurface {
                 // apart turns this into an inventory oracle. `authorize_scoped` records
                 // the discriminated reason in `auth_events` locally and returns one code.
                 self.authorize_scoped_as(
-                    principal,
+                    caller,
                     params.enrollment_token.as_deref(),
                     credential_id,
                     GrantOperation::Read,
@@ -4204,9 +4270,10 @@ impl ReadSurface {
     pub async fn status(
         &self,
         connection_id: u64,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &StatusParams,
     ) -> StatusResult {
+        let principal = caller.as_ref();
         let fenced_out = self.engine.store().is_fenced_out();
         let lease_held = !fenced_out;
         let unavailable = |credential_id| StatusResult {
@@ -4263,7 +4330,7 @@ impl ReadSurface {
                 // enumeration guard doing its job.
                 if self
                     .authorize_scoped_for(
-                        principal,
+                        caller,
                         params.enrollment_token.as_deref(),
                         credential_id,
                         GrantOperation::Read,

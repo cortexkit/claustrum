@@ -11,6 +11,7 @@ use credentials_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
+#[cfg(test)]
 use subc_protocol::Principal;
 use tokio::sync::{watch, Mutex};
 
@@ -378,12 +379,12 @@ async fn mint(
 impl ReadSurface {
     pub async fn account_token(
         &self,
-        principal: Option<&Principal>,
+        caller: &crate::federation::ingress::ScopedCaller,
         params: &AccountTokenParams,
     ) -> Mint {
         let (kind, id) = self
             .authorize_scoped_as(
-                principal,
+                caller,
                 params.enrollment_token.as_deref(),
                 &params.audience,
                 GrantOperation::AccountToken,

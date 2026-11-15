@@ -25,6 +25,7 @@ crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_013 x.test
 crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_014 x.test
 crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_015 y.test
 crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_016 x.test
+crates/credentials-core/src/agent_secret_tests.rs INLINE_001 a.test
 crates/credentials-core/src/catalog.rs INLINE_001 kiro.dev
 crates/credentials-core/src/catalog.rs INLINE_002 app.kiro.dev
 crates/credentials-core/src/catalog.rs INLINE_003 q.us-east-1.amazonaws.com

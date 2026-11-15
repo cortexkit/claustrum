@@ -29,6 +29,7 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     match verb.as_str() {
         "phone-gate" => phone_gate(global, rest),
         "multi-host" => multi_host(global, rest),
+        "local-programs" => local_programs(global, rest),
         "put" => put(global, rest),
         "list" => list(global, rest),
         "grants" => grants(global, rest),
@@ -54,6 +55,9 @@ fn put_flags() -> &'static [&'static str] {
         "--location",
         "--origin",
         "--material-file",
+        "--program",
+        "--use",
+        "--target",
     ]
 }
 
@@ -76,7 +80,7 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
     };
     let (value_flags, positional) = match verb.as_str() {
         // Each setting takes one positional operand and no flags.
-        "phone-gate" | "multi-host" => (&[][..], true),
+        "phone-gate" | "multi-host" | "local-programs" => (&[][..], true),
         // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
         "delete" => (DELETE_FLAGS, true),
         // `put` names the secret first or with `--name`, then its flags.
@@ -139,7 +143,7 @@ fn args_or(args: &[String], index: usize) -> Option<&String> {
 pub fn help_text() -> &'static str {
     "ck auth secret <verb> [flags]\n\
      \n\
-      \x20 --kind <api-key|site-login>  which kind of secret to store\n\
+      \x20 --kind <kind>                api-key, site-login or local-program\n\
       \x20 --name <name>                secret name; put also takes it first\n\
       \x20 --host <host>                api key: the approved host\n\
       \x20 --rule <host[/prefix]>       api key: repeat for each approved rule\n\
@@ -148,6 +152,9 @@ pub fn help_text() -> &'static str {
       \x20                             is authorization_bearer\n\
       \x20 --origin <https://host>      site login: repeat for each origin\n\
       \x20 --material-file <path>       read the material from a 0600 file\n\
+      \x20 --program <sudo>             local program that receives the value\n\
+      \x20 --use <use>                  optional; must match --program\n\
+      \x20 --target <user>              repeat for each approved local user\n\
       \x20 --grant-id <id>              remove one grant by id (revoke)\n\
       \n\
       VERBS\n\
@@ -157,7 +164,7 @@ pub fn help_text() -> &'static str {
       off, or prints its state. multi-host on|off|status controls creation of\n\
       multi-rule, wildcard and multi-origin secrets. home set <member-id>|self\n\
       names the vault that holds agent secrets, home unset clears it, and home\n\
-      show prints it.\n\
+      show prints it. local-programs on|off|status controls local secrets.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\
@@ -252,6 +259,42 @@ fn multi_host(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn local_programs(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let [action] = args else {
+        return Err(CliError::Usage(
+            "secret local-programs takes on, off or status".into(),
+        ));
+    };
+    if action == "status" {
+        let status =
+            credentials_core::store::secret_local_programs_status_read_only(&store_path(global))
+                .map_err(|_| CliError::Usage("cannot read local-programs setting".into()))?;
+        println!("local-programs setting {status}");
+        return Ok(());
+    }
+    let enabled = match action.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return Err(CliError::Usage(
+                "secret local-programs takes on, off or status".into(),
+            ))
+        }
+    };
+    commit_admin(
+        global,
+        AdminOpBody::SecretLocalProgramsSet {
+            v: ADMIN_OP_SCHEMA_V2,
+            enabled,
+        },
+    )?;
+    println!(
+        "local-programs setting {}",
+        if enabled { "on" } else { "off" }
+    );
+    Ok(())
+}
+
 /// What the operator supplied, already split into the kind's plaintext fields.
 enum Material {
     ApiKey(Vec<u8>),
@@ -290,11 +333,64 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let mut origin = None;
     let mut rules = None;
     let mut origins = None;
+    let program = optional_plain("--program")?;
+    let mut local_use = optional_plain("--use")?;
+    let target_values = repeated(args, "--target");
+    let mut targets = None;
     let location = optional_plain("--location")?.unwrap_or_else(|| BEARER.to_owned());
 
     // Refuse a scope the kind cannot carry before reading anything at all, so a bad
     // invocation never touches the material or the terminal.
+    if kind != "local-program"
+        && (program.is_some() || local_use.is_some() || !target_values.is_empty())
+    {
+        return Err(CliError::Usage(
+            "--program, --use and --target are only for local-program".into(),
+        ));
+    }
     match kind.as_str() {
+        "local-program" => {
+            if host.is_some()
+                || path_prefix.is_some()
+                || !rule_values.is_empty()
+                || !origin_values.is_empty()
+                || optional(args, "--location").is_some()
+            {
+                return Err(CliError::Usage(
+                    "a local program takes --program, --use and --target, not HTTPS scope flags"
+                        .into(),
+                ));
+            }
+            let program = program
+                .as_deref()
+                .ok_or_else(|| CliError::Usage("a local program requires --program".into()))?;
+            let program: agent_secret::LocalProgram =
+                serde_json::from_value(serde_json::json!(program))
+                    .map_err(|_| CliError::Usage("--program must be sudo".into()))?;
+            let expected = match program {
+                agent_secret::LocalProgram::Sudo => {
+                    agent_secret::LocalProgramUse::SudoPassword.as_str()
+                }
+            };
+            let use_name = local_use.get_or_insert_with(|| expected.to_owned());
+            let entries: Vec<_> = target_values
+                .iter()
+                .map(|value| match program {
+                    agent_secret::LocalProgram::Sudo => serde_json::json!({"user": value}),
+                })
+                .collect();
+            let fields =
+                serde_json::json!({"program": program, "use": use_name, "targets": entries});
+            agent_secret::SecretScope::from_input("local_program", &fields, None).map_err(|e| {
+                put_field_error(
+                    "--target",
+                    e,
+                    "requires a matching program/use and distinct, valid targets",
+                    "exceeds the target-count or target-byte limit",
+                )
+            })?;
+            targets = Some(serde_json::json!(entries));
+        }
         "api-key" => {
             if !origin_values.is_empty() {
                 return Err(CliError::Usage(
@@ -401,10 +497,15 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
     let material = match optional(args, "--material-file") {
         Some(path) => read_material_file(&path, &kind)?,
-        None => prompt_material(&kind)?,
+        None => prompt_material(if kind == "local-program" {
+            local_use.as_deref().expect("validated local use")
+        } else {
+            &kind
+        })?,
     };
     let (op_kind, host, origin) = match kind.as_str() {
         "api-key" => ("agent_api_key", host, None),
+        "local-program" => ("local_program", None, None),
         _ => ("site_login", None, origin),
     };
     let reply = commit_admin(
@@ -419,6 +520,9 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             origin,
             rules,
             origins,
+            program,
+            r#use: local_use,
+            targets,
             material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(frame_plaintext(&material).expose()),
         },
@@ -534,7 +638,7 @@ fn read_material_file(path: &str, kind: &str) -> Result<Material, CliError> {
 /// optional `otpauth://` line), or the whole trimmed body as the api key.
 fn parse_material(text: &str, kind: &str) -> Result<Material, &'static str> {
     match kind {
-        "api-key" => {
+        "api-key" | "local-program" => {
             if text.is_empty() {
                 return Err("the key is empty");
             }
@@ -585,8 +689,12 @@ fn prompt_material(kind: &str) -> Result<Material, CliError> {
         Ok(line.trim_end_matches('\n').to_owned())
     };
     match kind {
-        "api-key" => {
-            let key = prompt("API key", true)?;
+        "api-key" | "sudo_password" => {
+            let label = match kind {
+                "sudo_password" => "sudo password",
+                _ => "API key",
+            };
+            let key = prompt(label, true)?;
             if key.is_empty() {
                 return Err(CliError::Usage("the key is empty".into()));
             }
@@ -708,6 +816,21 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                 .map(|origin| format!("origin={origin}"))
                 .collect::<Vec<_>>()
                 .join(" "),
+            Ok(agent_secret::SecretScope::LocalProgram {
+                program,
+                r#use,
+                targets,
+            }) => {
+                let mut tokens = vec![format!(
+                    "program={} use={}",
+                    program.as_str(),
+                    r#use.as_str()
+                )];
+                tokens.extend(targets.iter().map(|target| match target {
+                    agent_secret::LocalProgramTarget::Sudo { user } => format!("target={user}"),
+                }));
+                tokens.join(" ")
+            }
             Err(_) => "scope=unreadable".into(),
         };
         println!("{} {} {} {scope}", secret.name, secret.kind, secret.state);

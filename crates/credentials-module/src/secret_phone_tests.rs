@@ -847,3 +847,36 @@ async fn manifest_approve_phone_rejects_cross_domain_envelopes_at_strict_parse()
         assert_eq!(manifest_snapshot(&root), before);
     }
 }
+
+#[test]
+fn phone_local_program_deposit_key_set_is_closed() {
+    let params = extended_deposit_params(
+        "local_program",
+        json!({"program":"sudo","use":"sudo_password","targets":[{"user":"root"}]}),
+    );
+    assert!(parse("secret.deposit", &params).is_ok());
+    for key in params.as_object().unwrap().keys() {
+        let mut missing = params.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(
+            matches!(
+                parse("secret.deposit", &missing),
+                Err(SecretError::InvalidParams)
+            ),
+            "missing {key}"
+        );
+    }
+    for (key, value) in [
+        ("origin", json!(null)),
+        ("extra", json!(null)),
+        ("use", json!("other_use")),
+        ("targets", json!([{"user":"root","extra":null}])),
+    ] {
+        let mut changed = params.clone();
+        changed[key] = value;
+        assert!(matches!(
+            parse("secret.deposit", &changed),
+            Err(SecretError::InvalidParams)
+        ));
+    }
+}

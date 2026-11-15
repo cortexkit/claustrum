@@ -1146,3 +1146,95 @@ fn phone_extended_deposit_stores_the_rule_and_origin_caps_and_legacy_ignores_gat
         );
     }
 }
+
+#[test]
+fn local_program_deposit_off_and_identical_resend_write_nothing() {
+    let (_root, store, sender) = setup("local-program-deposit");
+    let scope = SecretScope::from_input(
+        "local_program",
+        &json!({"program":"sudo","use":"sudo_password","targets":[{"user":"root"}]}),
+        None,
+    )
+    .unwrap();
+    let material = SecretMaterial::LocalProgram(Secret::new("şifre🔑".into()));
+    let d = deposit(&store, &sender, "sudo", ID, scope.clone(), material.clone());
+    let before = snapshot(&store);
+    assert_eq!(
+        run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())),
+        Err(SecretError::SecretLocalProgramsDisabled)
+    );
+    assert_eq!(snapshot(&store), before);
+    assert!(!store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    assert_eq!(snapshot(&store), before);
+    assert!(store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    let on = snapshot(&store);
+    assert!(!store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    assert_eq!(snapshot(&store), on);
+    let result = run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap();
+    assert_eq!(result["status"], "stored");
+    let (incarnation, blob): (String, Vec<u8>) = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT incarnation,envelope FROM agent_secrets WHERE name='sudo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        agent_secret::open(&store.key, &incarnation, "sudo", &scope, &blob).unwrap(),
+        material
+    );
+    assert_eq!(
+        run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap(),
+        json!({"status":"already_stored"})
+    );
+    assert!(store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    let before = snapshot(&store);
+    assert_eq!(
+        store.secret_phone_operation(
+            FP,
+            Some("pair-A"),
+            9999,
+            &PhoneOperation::Deposit(d),
+            || true,
+            || 9999
+        ),
+        Err(SecretError::SecretLocalProgramsDisabled)
+    );
+    assert_eq!(snapshot(&store), before);
+    let observed: i64 = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT observed_at_ms FROM secret_phone_observations WHERE fingerprint=?1",
+                [FP],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(observed, 1000);
+    let listing = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
+    assert_eq!(listing["secrets"][0]["program"], "sudo");
+    assert_eq!(listing["secrets"][0]["use"], "sudo_password");
+    let audits: i64 = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM audit_log WHERE op='secret_local_programs_set'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(audits, 2);
+}

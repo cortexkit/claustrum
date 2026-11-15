@@ -346,6 +346,8 @@ pub enum AdminOpBody {
     SecretPhoneGateSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_multi_host_set")]
     SecretMultiHostSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_local_programs_set")]
+    SecretLocalProgramsSet { v: u32, enabled: bool },
     /// `ck auth secret put`: create an agent secret from operator-supplied material.
     ///
     /// THE ONLY ADMIN OP THAT CARRIES SECRET MATERIAL INBOUND, shortly after
@@ -381,6 +383,16 @@ pub enum AdminOpBody {
             deserialize_with = "present_scope_value"
         )]
         origins: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#use: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        targets: Option<serde_json::Value>,
         material_b64url: String,
     },
     /// `ck auth secret delete`: remove a secret, its grants and its pending requests.
@@ -825,6 +837,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("enabled", enabled)
                 .finish(),
+            AdminOpBody::SecretLocalProgramsSet { v, enabled } => f
+                .debug_struct("SecretLocalProgramsSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::SecretPhoneGateSet { v, enabled } => f
                 .debug_struct("SecretPhoneGateSet")
                 .field("v", v)
@@ -1022,6 +1039,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { v, .. }
             | AdminOpBody::SecretPhoneGateSet { v, .. }
             | AdminOpBody::SecretMultiHostSet { v, .. }
+            | AdminOpBody::SecretLocalProgramsSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
@@ -1088,6 +1106,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1211,6 +1230,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1283,6 +1303,7 @@ impl AdminOpBody {
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
             AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
             AdminOpBody::SecretMultiHostSet { .. } => "admin.secret_multi_host_set",
+            AdminOpBody::SecretLocalProgramsSet { .. } => "admin.secret_local_programs_set",
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
@@ -1358,6 +1379,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -2050,6 +2072,13 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({"phone_mapping": enabled, "changed": changed}))
         }
+        AdminOpBody::SecretLocalProgramsSet { enabled, .. } => {
+            let changed = store.set_secret_local_programs_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretLocalProgramsSet, actor),
+            )?;
+            Ok(serde_json::json!({"local_programs": enabled, "changed": changed}))
+        }
         AdminOpBody::SecretPut {
             kind,
             name,
@@ -2060,6 +2089,9 @@ pub fn apply(
             rules,
             origins,
             material_b64url,
+            program,
+            r#use,
+            targets,
             ..
         } => store.secret_put_audited(
             &SecretPut {
@@ -2072,6 +2104,9 @@ pub fn apply(
                 rules,
                 origins,
                 material_b64url,
+                program,
+                r#use,
+                targets,
             },
             actor,
         ),
@@ -2658,6 +2693,9 @@ mod tests {
             origin: None,
             rules: None,
             origins: None,
+            program: None,
+            r#use: None,
+            targets: None,
             material_b64url: "TUFURVJJQUwtQ0FOQVJZ".into(),
         };
         let rendered = format!("{op:?}");
@@ -3128,6 +3166,9 @@ mod admin_schema_v2_tests {
                     origin: None,
                     rules: None,
                     origins: None,
+                    program: None,
+                    r#use: None,
+                    targets: None,
                     material_b64url: "".into(),
                 },
                 v2,

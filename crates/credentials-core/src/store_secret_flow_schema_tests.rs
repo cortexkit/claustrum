@@ -435,9 +435,14 @@ fn migration_30_keeps_every_secret_row_and_marks_it_local() {
         let after = rows(&sqlite, table);
         assert_eq!(after.len(), 1, "{table}");
         assert_eq!(before.len(), 1, "{table}");
-        // Every old column keeps its value and the one appended column reads '' (local).
+        // Every old column keeps its value and the asking member reads '' (local).
         let mut expected = before[0].clone();
         expected.push(SqlValue::Text(String::new()));
+        // The later local-program migration adds nullable request metadata, never
+        // retroactive local-use authority, to the agent grants and pending requests.
+        if matches!(table, "secret_grants" | "secret_pending_requests") {
+            expected.push(SqlValue::Null);
+        }
         assert_eq!(after[0], expected, "{table}");
     }
     let listing = list_agent_secrets_read_only(&store_file(&root))

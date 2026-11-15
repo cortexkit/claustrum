@@ -35,6 +35,9 @@ fn api_key_put(name: &str, location: Option<&str>) -> SecretPut {
         origin: None,
         rules: None,
         origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
         material_b64url: URL_SAFE_NO_PAD.encode(
             crate::agent_secret::deposit_plaintext(&SecretMaterial::ApiKey(Secret::new(
                 CANARY.to_vec(),
@@ -871,4 +874,51 @@ fn operator_extended_put_home_refusal_precedes_gate_and_legacy_ignores_gate() {
             "stored"
         );
     }
+}
+
+#[test]
+fn local_program_operator_put_obeys_setting_and_scope_cap() {
+    let (root, store) = rig("local-program-put", 57);
+    let mut put = api_key_put("sudo", None);
+    put.kind = "local_program".into();
+    put.host = None;
+    put.path_prefix = None;
+    put.location = None;
+    put.program = Some("sudo".into());
+    put.r#use = Some("sudo_password".into());
+    put.targets = Some(json!([{"user":"root"}]));
+    put.material_b64url = URL_SAFE_NO_PAD.encode(
+        crate::agent_secret::deposit_plaintext(&SecretMaterial::LocalProgram(Secret::new(
+            "şifre🔑".into(),
+        )))
+        .expose(),
+    );
+    assert!(matches!(
+        store.secret_put_audited(&put, "offline-cli"),
+        Err(StoreOpError::SecretLocalProgramsDisabled)
+    ));
+    store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap();
+    assert_eq!(
+        store.secret_put_audited(&put, "offline-cli").unwrap()["status"],
+        "stored"
+    );
+    let listing = list_agent_secrets_read_only(&store_file(&root))
+        .unwrap()
+        .unwrap();
+    assert_eq!(listing.secrets.len(), 1);
+    assert_eq!(listing.secrets[0].kind, "local_program");
+    put.name = "too-long".into();
+    put.material_b64url = URL_SAFE_NO_PAD.encode(
+        crate::agent_secret::deposit_plaintext(&SecretMaterial::LocalProgram(Secret::new(
+            "a".repeat(1025),
+        )))
+        .expose(),
+    );
+    assert!(store
+        .secret_put_audited(&put, "offline-cli")
+        .unwrap_err()
+        .to_string()
+        .contains("limit_exceeded"));
 }

@@ -31,9 +31,16 @@ impl SecretSender {
             (self, scope),
             (Self::Aft, SecretScope::ApiKey { .. })
                 | (Self::Aft, SecretScope::ApiKeyRules { .. })
+                | (Self::Aft, SecretScope::LocalProgram { .. })
                 | (Self::Cerebellum, SecretScope::SiteLogin { .. })
                 | (Self::Cerebellum, SecretScope::SiteLoginOrigins { .. })
-                | (Self::Basal, _)
+                | (
+                    Self::Basal,
+                    SecretScope::ApiKey { .. }
+                        | SecretScope::ApiKeyRules { .. }
+                        | SecretScope::SiteLogin { .. }
+                        | SecretScope::SiteLoginOrigins { .. }
+                )
         )
     }
 }

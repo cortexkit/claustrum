@@ -198,3 +198,171 @@ fn asserting_deposit_namespace() {
     assert!(!is_deposit_key("kem:secret-deposit:|ops-key"));
     assert!(!is_deposit_key("kem:vault-transfer:1"));
 }
+
+fn local_scope(
+    program: &str,
+    use_name: &str,
+    targets: serde_json::Value,
+) -> Result<SecretScope, ValidationError> {
+    SecretScope::from_input(
+        "local_program",
+        &serde_json::json!({"program":program,"use":use_name,"targets":targets}),
+        None,
+    )
+}
+
+#[test]
+fn local_program_layouts_canonical_scope_and_utf8_round_trip() {
+    let scope = local_scope(
+        "sudo",
+        "sudo_password",
+        serde_json::json!([{"user":"z"},{"user":"a"}]),
+    )
+    .unwrap();
+    let value = SecretMaterial::LocalProgram(Secret::new("şifre🔑".to_owned()));
+    // Build expected framing independently: lengths are little-endian UTF-8 byte counts.
+    let frame = |fields: &[&str]| {
+        fields
+            .iter()
+            .flat_map(|s| (s.len() as u64).to_le_bytes().into_iter().chain(s.bytes()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        deposit_plaintext(&value).expose(),
+        &frame(&["ck-secret-deposit-plaintext/v1", "şifre🔑"])
+    );
+    assert_eq!(
+        sealed_body(&scope, &value).unwrap().expose(),
+        &frame(&[
+            "ck-secret-sealed-body/v2",
+            "local_program",
+            "sudo",
+            "sudo_password",
+            "2",
+            "a",
+            "z",
+            "şifre🔑"
+        ])
+    );
+    assert_eq!(
+        deposit_aad("d", "m", "pw", &scope).unwrap(),
+        frame(&[
+            "ck-secret-deposit-aad/v2",
+            "d",
+            "m",
+            "pw",
+            "local_program",
+            "sudo",
+            "sudo_password",
+            "2",
+            "z",
+            "a"
+        ])
+    );
+    let raw = r#"{"program":"sudo","targets":[{"user":"a"},{"user":"z"}],"use":"sudo_password"}"#;
+    assert_eq!(scope.scope_json().unwrap().as_deref(), Some(raw));
+    assert_eq!(
+        SecretScope::from_columns("local_program", None, None, None, None, Some(raw)).unwrap(),
+        scope.canonicalized().unwrap()
+    );
+    assert!(SecretScope::from_scope_json("local_program", None, &raw.replace(",", ", ")).is_err());
+    let key = MasterKey::from_bytes([9; 32]);
+    let incarnation = "0123456789abcdef0123456789abcdef";
+    let deposited = decode_deposit_plaintext("local_program", &deposit_plaintext(&value)).unwrap();
+    let blob = seal(&key, incarnation, "pw", &scope, &deposited).unwrap();
+    assert_eq!(open(&key, incarnation, "pw", &scope, &blob).unwrap(), value);
+    assert!(seal(&key, incarnation, "pw", &scope, &api_material()).is_err());
+    assert!(seal(&key, incarnation, "pw", &api_scope(), &value).is_err());
+    let scope = &scope;
+    assert!(SecretSender::Aft.admits(scope));
+    assert!(!SecretSender::Cerebellum.admits(scope));
+    assert!(!SecretSender::Basal.admits(scope));
+    assert!(!UseTarget::SiteLogin {
+        origin: "https://a.test".into()
+    }
+    .matches(scope));
+    assert!(!UseTarget::ApiKey {
+        scheme: "https".into(),
+        host: "a.test".into(),
+        port: 443,
+        path: "/".into()
+    }
+    .matches(scope));
+}
+
+#[test]
+fn local_program_scope_grammar_and_material_refusals() {
+    use serde_json::json;
+    for (program, use_name, targets) in [
+        ("sudo", "other_use", json!([{"user":"root"}])),
+        ("other_program", "sudo_password", json!([{"user":"root"}])),
+        ("sudo", "sudo_password", json!([])),
+        (
+            "sudo",
+            "sudo_password",
+            json!([{"user":"root"},{"user":"root"}]),
+        ),
+        ("sudo", "sudo_password", json!([{"user":"-root"}])),
+        ("sudo", "sudo_password", json!([{"user":"é"}])),
+        ("sudo", "sudo_password", json!([{"user":"root","extra":1}])),
+    ] {
+        assert_eq!(
+            local_scope(program, use_name, targets),
+            Err(ValidationError::InvalidParams)
+        );
+    }
+    let scope = local_scope("sudo", "sudo_password", json!([{"user":"root"}])).unwrap();
+    for value in ["", "a\n", "a\u{7f}", "a\u{85}"] {
+        assert_eq!(
+            validate_material_for_scope(
+                &scope,
+                &SecretMaterial::LocalProgram(Secret::new(value.into()))
+            ),
+            Err(ValidationError::InvalidParams)
+        );
+    }
+    assert!(validate_material_for_scope(
+        &scope,
+        &SecretMaterial::LocalProgram(Secret::new("é\u{200d}".into()))
+    )
+    .is_ok());
+}
+
+#[test]
+fn local_program_boundaries_pin_last_accepted_and_first_refused() {
+    use serde_json::json;
+    for n in [MAX_LOCAL_PROGRAM_TARGETS, MAX_LOCAL_PROGRAM_TARGETS + 1] {
+        let targets = (0..n)
+            .map(|i| json!({"user":format!("u{i}")}))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            local_scope("sudo", "sudo_password", json!(targets)).map(|_| ()),
+            if n == MAX_LOCAL_PROGRAM_TARGETS {
+                Ok(())
+            } else {
+                Err(ValidationError::LimitExceeded)
+            }
+        );
+    }
+    assert_eq!(
+        validate_local_user(&"a".repeat(MAX_LOCAL_USER_BYTES)),
+        Ok(())
+    );
+    assert_eq!(
+        validate_local_user(&"a".repeat(MAX_LOCAL_USER_BYTES + 1)),
+        Err(ValidationError::LimitExceeded)
+    );
+    let cap = MAX_SECRET_PASSWORD_BYTES;
+    let scope = local_scope("sudo", "sudo_password", json!([{"user":"root"}])).unwrap();
+    for n in [cap, cap + 1] {
+        let value = format!("é{}", "a".repeat(n - 2));
+        assert_eq!(
+            validate_material_for_scope(&scope, &SecretMaterial::LocalProgram(Secret::new(value))),
+            if n == cap {
+                Ok(())
+            } else {
+                Err(ValidationError::LimitExceeded)
+            }
+        );
+    }
+}

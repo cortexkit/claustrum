@@ -318,7 +318,10 @@ impl EncryptedStore {
                 return Ok(Err(refusal));
             }
             gate();
-            if scope.is_extended() && !super::phone::multi_host_enabled(tx) {
+            if matches!(scope, SecretScope::LocalProgram { .. }) && !super::phone::local_programs_enabled(tx) {
+                return Ok(Err(StoreOpError::SecretLocalProgramsDisabled));
+            }
+            if matches!(scope, SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. }) && !super::phone::multi_host_enabled(tx) {
                 return Ok(Err(StoreOpError::SecretMultiHostDisabled));
             }
             let exists: bool = tx.query_row(
@@ -357,7 +360,7 @@ impl EncryptedStore {
                     super::phone::extended_scope_json(&scope_json)?,
                     location.as_bytes(),
                 ]),
-                SecretScope::SiteLoginOrigins { .. } => {
+                SecretScope::SiteLoginOrigins { .. } | SecretScope::LocalProgram { .. } => {
                     fields.push(super::phone::extended_scope_json(&scope_json)?)
                 }
             }

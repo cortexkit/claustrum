@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
+pub const LOCAL_PROGRAMS_SETTING: &str = "secret.local_programs";
 
 /// The audit payload of an extended scope names its stored `scope_json`. Encoding an
 /// extended scope always yields it, so a missing value is a store error, never a panic
@@ -16,10 +17,18 @@ pub(super) fn extended_scope_json(scope_json: &Option<String>) -> rusqlite::Resu
 }
 
 pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
+    setting_enabled(conn, MULTI_HOST_SETTING)
+}
+
+pub(super) fn local_programs_enabled(conn: &rusqlite::Connection) -> bool {
+    setting_enabled(conn, LOCAL_PROGRAMS_SETTING)
+}
+
+fn setting_enabled(conn: &rusqlite::Connection, name: &str) -> bool {
     matches!(
         conn.query_row(
             "SELECT value FROM settings WHERE name=?1",
-            [MULTI_HOST_SETTING],
+            [name],
             |r| r.get::<_, String>(0),
         ).optional(),
         Ok(Some(value)) if value == "true"
@@ -28,6 +37,16 @@ pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
 
 /// Read the multi-host setting without taking the writer lease or loading secrets.
 pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
+    feature_status_read_only(path, MULTI_HOST_SETTING)
+}
+
+pub fn secret_local_programs_status_read_only(
+    path: &std::path::Path,
+) -> Result<String, StoreOpError> {
+    feature_status_read_only(path, LOCAL_PROGRAMS_SETTING)
+}
+
+fn feature_status_read_only(path: &std::path::Path, name: &str) -> Result<String, StoreOpError> {
     if !path
         .try_exists()
         .map_err(|e| StoreOpError::Store(e.to_string()))?
@@ -48,11 +67,9 @@ pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<Stri
         return Ok("off".to_owned());
     }
     Ok(match conn
-        .query_row(
-            "SELECT value FROM settings WHERE name=?1",
-            [MULTI_HOST_SETTING],
-            |r| r.get::<_, String>(0),
-        )
+        .query_row("SELECT value FROM settings WHERE name=?1", [name], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
     {
         Ok(None) => "off",
@@ -147,24 +164,55 @@ impl EncryptedStore {
         enabled: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
+        self.set_secret_feature_audited(
+            MULTI_HOST_SETTING,
+            AuditOp::SecretMultiHostSet,
+            enabled,
+            ctx,
+        )
+    }
+
+    pub fn set_secret_local_programs_audited(
+        &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        self.set_secret_feature_audited(
+            LOCAL_PROGRAMS_SETTING,
+            AuditOp::SecretLocalProgramsSet,
+            enabled,
+            ctx,
+        )
+    }
+
+    fn set_secret_feature_audited(
+        &self,
+        name: &str,
+        op: AuditOp,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
         self.fenced_write(|tx| {
             let wanted = if enabled { "true" } else { "false" };
             let old: Option<rusqlite::types::Value> = tx.query_row(
                 "SELECT value FROM settings WHERE name=?1",
-                [MULTI_HOST_SETTING],
+                [name],
                 |r| r.get(0),
             ).optional()?;
             if old == Some(rusqlite::types::Value::Text(wanted.to_owned())) {
                 return Ok(false);
             }
+            if name == LOCAL_PROGRAMS_SETTING && old.is_none() && !enabled {
+                return Ok(false);
+            }
             tx.execute(
                 "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at_ms=excluded.updated_at_ms",
-                rusqlite::params![MULTI_HOST_SETTING, wanted, now_ms()],
+                rusqlite::params![name, wanted, now_ms()],
             )?;
             let mut payload = Vec::new();
             agent_secret::push_field(&mut payload, wanted.as_bytes());
             append_audit_tx(tx, &self.audit_key, &AuditRecord {
-                op: AuditOp::SecretMultiHostSet,
+                op,
                 credential_id: None,
                 payload_hash: Some(hex(&payload_hash(&payload))),
                 actor: ctx.actor.to_string(),
@@ -244,6 +292,11 @@ impl EncryptedStore {
     ) -> Result<Value, SecretError> {
         let answer = self.fenced_write(|tx| {
             let admitted = before_deadline();
+            // Disabled local deposits must not update even phone observations. The
+            // deposit transaction repeats the gate before consulting replay tombstones.
+            if matches!(op, PhoneOperation::Deposit(d) if matches!(d.scope, SecretScope::LocalProgram { .. })) && !local_programs_enabled(tx) {
+                return Ok(Err(SecretError::SecretLocalProgramsDisabled));
+            }
             if !matches!(op, PhoneOperation::DepositKeys) {
                 observation(tx, fingerprint, pairing, observed_at_ms)?;
             }
@@ -349,6 +402,9 @@ impl EncryptedStore {
         d: &PhoneDeposit,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
+        if matches!(d.scope, SecretScope::LocalProgram { .. }) && !local_programs_enabled(tx) {
+            return Ok(Err(SecretError::SecretLocalProgramsDisabled));
+        }
         // The caller has already refused the deposit when this vault is not where the
         // secrets live, in this same transaction.
         // All deposit checks use this transaction, including key and member reads. Reading
@@ -387,7 +443,11 @@ impl EncryptedStore {
                 Err(SecretError::DepositConflict)
             });
         }
-        if d.scope.is_extended() && !multi_host_enabled(tx) {
+        if matches!(
+            d.scope,
+            SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. }
+        ) && !multi_host_enabled(tx)
+        {
             return Ok(Err(SecretError::SecretMultiHostDisabled));
         }
         if d.member_id != member {
@@ -407,7 +467,7 @@ impl EncryptedStore {
         };
         let material = match agent_secret::decode_deposit_plaintext(d.scope.kind(), &opened)
             .and_then(|material| {
-                agent_secret::validate_material(&material)?;
+                agent_secret::validate_material_for_scope(&d.scope, &material)?;
                 Ok(material)
             }) {
             Ok(m) => m,
@@ -454,7 +514,9 @@ impl EncryptedStore {
             SecretScope::ApiKeyRules { location, .. } => {
                 fields.extend([extended_scope_json(&scope_json)?, location.as_bytes()])
             }
-            SecretScope::SiteLoginOrigins { .. } => fields.push(extended_scope_json(&scope_json)?),
+            SecretScope::SiteLoginOrigins { .. } | SecretScope::LocalProgram { .. } => {
+                fields.push(extended_scope_json(&scope_json)?)
+            }
         }
         fields.push(d.deposit_id.as_bytes());
         audit(
@@ -533,7 +595,9 @@ pub(super) fn columns(
         } => (Some(host), path_prefix.as_deref(), Some(location), None),
         SecretScope::SiteLogin { origin } => (None, None, None, Some(origin)),
         SecretScope::ApiKeyRules { location, .. } => (None, None, Some(location), None),
-        SecretScope::SiteLoginOrigins { .. } => (None, None, None, None),
+        SecretScope::SiteLoginOrigins { .. } | SecretScope::LocalProgram { .. } => {
+            (None, None, None, None)
+        }
     }
 }
 

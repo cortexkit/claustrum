@@ -1702,6 +1702,7 @@ secret_error_golden! {
     NameExists => "name_exists", "permanent", "result error";
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
     SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
+    SecretLocalProgramsDisabled => "secret_local_programs_disabled", "permanent", "result error";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
     ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
     Superseded => "superseded", "permanent", "result error";

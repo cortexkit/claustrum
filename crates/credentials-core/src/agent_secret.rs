@@ -55,6 +55,7 @@ pub enum SecretError {
     NameExists,
     SecretSetupIncomplete,
     SecretMultiHostDisabled,
+    SecretLocalProgramsDisabled,
     ApprovalInvalid,
     ManifestSetupIncomplete,
     Superseded,
@@ -76,6 +77,7 @@ impl SecretError {
             Self::NameExists => "name_exists",
             Self::SecretSetupIncomplete => "secret_setup_incomplete",
             Self::SecretMultiHostDisabled => "secret_multi_host_disabled",
+            Self::SecretLocalProgramsDisabled => "secret_local_programs_disabled",
             Self::ApprovalInvalid => "approval_invalid",
             Self::ManifestSetupIncomplete => "manifest_setup_incomplete",
             Self::Superseded => "superseded",
@@ -164,6 +166,45 @@ pub enum SecretScope {
     SiteLoginOrigins {
         origins: Vec<String>,
     },
+    LocalProgram {
+        program: LocalProgram,
+        r#use: LocalProgramUse,
+        targets: Vec<LocalProgramTarget>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalProgram {
+    Sudo,
+}
+
+impl LocalProgram {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sudo => "sudo",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalProgramUse {
+    SudoPassword,
+}
+
+impl LocalProgramUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SudoPassword => "sudo_password",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum LocalProgramTarget {
+    Sudo { user: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -179,13 +220,14 @@ impl SecretScope {
         match self {
             Self::ApiKey { .. } | Self::ApiKeyRules { .. } => "agent_api_key",
             Self::SiteLogin { .. } | Self::SiteLoginOrigins { .. } => "site_login",
+            Self::LocalProgram { .. } => "local_program",
         }
     }
 
     pub fn is_extended(&self) -> bool {
         matches!(
             self,
-            Self::ApiKeyRules { .. } | Self::SiteLoginOrigins { .. }
+            Self::ApiKeyRules { .. } | Self::SiteLoginOrigins { .. } | Self::LocalProgram { .. }
         )
     }
 
@@ -221,6 +263,20 @@ impl SecretScope {
                     push_field(out, origin.as_bytes());
                 }
             }
+            Self::LocalProgram {
+                program,
+                r#use,
+                targets,
+            } => {
+                push_field(out, program.as_str().as_bytes());
+                push_field(out, r#use.as_str().as_bytes());
+                push_field(out, targets.len().to_string().as_bytes());
+                for target in targets {
+                    match target {
+                        LocalProgramTarget::Sudo { user } => push_field(out, user.as_bytes()),
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -229,6 +285,7 @@ impl SecretScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SecretMaterial {
     ApiKey(Secret<Vec<u8>>),
+    LocalProgram(Secret<String>),
     SiteLogin {
         username: Secret<String>,
         password: Secret<String>,
@@ -240,6 +297,7 @@ impl SecretMaterial {
     fn encode_fields(&self, out: &mut Vec<u8>) {
         match self {
             Self::ApiKey(key) => push_field(out, key.expose()),
+            Self::LocalProgram(value) => push_field(out, value.expose().as_bytes()),
             Self::SiteLogin {
                 username,
                 password,
@@ -265,6 +323,7 @@ impl SecretMaterial {
                 | (Self::ApiKey(_), SecretScope::ApiKeyRules { .. })
                 | (Self::SiteLogin { .. }, SecretScope::SiteLogin { .. })
                 | (Self::SiteLogin { .. }, SecretScope::SiteLoginOrigins { .. })
+                | (Self::LocalProgram(_), SecretScope::LocalProgram { .. })
         )
     }
 }
@@ -313,6 +372,9 @@ pub fn sealed_body(
     if !material.matches(scope) {
         return Err(ValidationError::InvalidParams);
     }
+    if matches!(scope, SecretScope::LocalProgram { .. }) {
+        validate_material_for_scope(scope, material)?;
+    }
     let mut out = Secret::new(Vec::new()).into_inner();
     push_field(
         &mut out,
@@ -338,7 +400,7 @@ pub fn record_binding(
     name: &str,
 ) -> Result<String, ValidationError> {
     validate_name(name)?;
-    if !matches!(kind, "agent_api_key" | "site_login")
+    if !matches!(kind, "agent_api_key" | "site_login" | "local_program")
         || incarnation.len() != 32
         || !incarnation
             .bytes()
@@ -446,6 +508,7 @@ impl<'a> Fields<'a> {
     fn material(&mut self, kind: &str) -> Result<SecretMaterial, ValidationError> {
         match kind {
             "agent_api_key" => Ok(SecretMaterial::ApiKey(Secret::new(self.next()?.to_vec()))),
+            "local_program" => Ok(SecretMaterial::LocalProgram(self.text()?)),
             "site_login" => {
                 let username = self.text()?;
                 let password = self.text()?;

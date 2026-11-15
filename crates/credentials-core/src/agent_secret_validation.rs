@@ -1,4 +1,7 @@
-use super::{SecretMaterial, SecretRule, SecretScope, ValidationError};
+use super::{
+    LocalProgram, LocalProgramTarget, LocalProgramUse, SecretMaterial, SecretRule, SecretScope,
+    ValidationError,
+};
 use secret_rules::scope as rules;
 use serde_json::{json, Value};
 use ValidationError::{InvalidParams, LimitExceeded};
@@ -14,6 +17,8 @@ pub const MAX_SECRET_POINTER_BYTES: usize = 256;
 pub const MAX_SECRET_USERNAME_BYTES: usize = 256;
 pub const MAX_SECRET_PASSWORD_BYTES: usize = 1024;
 pub const MAX_SECRET_API_KEY_BYTES: usize = 8192;
+pub const MAX_LOCAL_PROGRAM_TARGETS: usize = 16;
+pub const MAX_LOCAL_USER_BYTES: usize = 64;
 pub const MIN_SECRET_TOTP_PERIOD: u64 = 15;
 pub const MAX_SECRET_TOTP_PERIOD: u64 = 120;
 
@@ -55,6 +60,11 @@ impl SecretScope {
             Self::SiteLogin { origin } => json!({"origin": origin}),
             Self::ApiKeyRules { rules, .. } => json!({"rules": rules}),
             Self::SiteLoginOrigins { origins } => json!({"origins": origins}),
+            Self::LocalProgram {
+                program,
+                r#use,
+                targets,
+            } => json!({"program": program, "use": r#use, "targets": targets}),
         }
     }
 
@@ -77,6 +87,22 @@ impl SecretScope {
         fields: &Value,
         location: Option<&str>,
     ) -> Result<Self, ValidationError> {
+        if kind == "local_program" {
+            if location.is_some() {
+                return Err(InvalidParams);
+            }
+            let object = fields.as_object().ok_or(InvalidParams)?;
+            if object.len() != 3
+                || !["program", "use", "targets"]
+                    .iter()
+                    .all(|k| object.contains_key(*k))
+            {
+                return Err(InvalidParams);
+            }
+            let scope = Self::from_rule_fields(kind, fields, None)?;
+            validate_local_scope(&scope)?;
+            return Ok(scope);
+        }
         rules::SecretScope::parse_input(kind, fields)?;
         let scope = Self::from_rule_fields(kind, fields, location)?;
         scope.validate_location()?;
@@ -96,6 +122,18 @@ impl SecretScope {
                 .ok_or(InvalidParams)
         };
         match kind {
+            "local_program" if location.is_none() => Ok(Self::LocalProgram {
+                program: serde_json::from_value(
+                    fields.get("program").ok_or(InvalidParams)?.clone(),
+                )
+                .map_err(|_| InvalidParams)?,
+                r#use: serde_json::from_value(fields.get("use").ok_or(InvalidParams)?.clone())
+                    .map_err(|_| InvalidParams)?,
+                targets: serde_json::from_value(
+                    fields.get("targets").ok_or(InvalidParams)?.clone(),
+                )
+                .map_err(|_| InvalidParams)?,
+            }),
             "agent_api_key" => {
                 let location = location.ok_or(InvalidParams)?.to_owned();
                 if let Some(entries) = fields.get("rules") {
@@ -140,12 +178,23 @@ impl SecretScope {
             Self::ApiKey { location, .. } | Self::ApiKeyRules { location, .. } => {
                 validate_location(location)
             }
-            Self::SiteLogin { .. } | Self::SiteLoginOrigins { .. } => Ok(()),
+            Self::SiteLogin { .. } | Self::SiteLoginOrigins { .. } | Self::LocalProgram { .. } => {
+                Ok(())
+            }
         }
     }
 
     /// Stored scopes obey grammar and limits, but never recheck the public suffix list.
     pub fn canonicalized(&self) -> Result<Self, ValidationError> {
+        if let Self::LocalProgram { .. } = self {
+            validate_local_scope(self)?;
+            let mut scope = self.clone();
+            if let Self::LocalProgram { targets, .. } = &mut scope {
+                targets
+                    .sort_by_cached_key(|target| serde_json::to_vec(target).expect("target JSON"));
+            }
+            return Ok(scope);
+        }
         rules::SecretScope::decode_stored(self.kind(), &self.stored_rule_fields())?;
         self.validate_location()?;
         let mut scope = self.clone();
@@ -160,7 +209,7 @@ impl SecretScope {
         Ok(scope)
     }
 
-    /// Vault-emitted scope fields always include an empty prefix when it is absent.
+    /// Legacy scope fields include an empty prefix when absent; local targets omit it.
     pub fn use_fields(&self) -> Value {
         match self {
             Self::ApiKey {
@@ -185,16 +234,29 @@ impl SecretScope {
                 json!({"origins": origins})
             }
             Self::SiteLogin { origin } => json!({"origin": origin}),
+            Self::LocalProgram {
+                program,
+                r#use,
+                targets,
+            } => {
+                let mut targets = targets.clone();
+                targets
+                    .sort_by_cached_key(|target| serde_json::to_vec(target).expect("target JSON"));
+                json!({"program": program, "use": r#use, "targets": targets})
+            }
         }
     }
 
-    /// The last table column contains only the canonical array, not location.
+    /// The scope column contains a canonical array for legacy extended kinds and an
+    /// object for local programs; location remains in its own column.
     pub fn scope_json(&self) -> Result<Option<String>, ValidationError> {
         if !self.is_extended() {
             return Ok(None);
         }
         let canonical = self.canonicalized()?.use_fields();
-        let array = if self.kind() == "agent_api_key" {
+        let array = if self.kind() == "local_program" {
+            &canonical
+        } else if self.kind() == "agent_api_key" {
             &canonical["rules"]
         } else {
             &canonical["origins"]
@@ -214,11 +276,16 @@ impl SecretScope {
     ) -> Result<Self, ValidationError> {
         let array: Value = serde_json::from_str(raw).map_err(|_| InvalidParams)?;
         let fields = match kind {
+            "local_program" => array,
             "agent_api_key" => json!({"rules": array}),
             "site_login" => json!({"origins": array}),
             _ => return Err(InvalidParams),
         };
-        rules::SecretScope::decode_stored(kind, &fields)?;
+        if kind == "local_program" {
+            Self::from_input(kind, &fields, location)?;
+        } else {
+            rules::SecretScope::decode_stored(kind, &fields)?;
+        }
         let scope = Self::from_rule_fields(kind, &fields, location)?.canonicalized()?;
         if scope.scope_json()?.as_deref() != Some(raw) {
             return Err(InvalidParams);
@@ -239,7 +306,7 @@ impl SecretScope {
             ("agent_api_key", None, None, Some(location), None, Some(raw)) => {
                 Self::from_scope_json(kind, Some(location), raw)
             }
-            ("site_login", None, None, None, None, Some(raw)) => {
+            ("site_login" | "local_program", None, None, None, None, Some(raw)) => {
                 Self::from_scope_json(kind, None, raw)
             }
             ("agent_api_key", Some(host), prefix, Some(location), None, None) => {
@@ -260,6 +327,9 @@ impl SecretScope {
 }
 
 pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
+    if matches!(scope, SecretScope::LocalProgram { .. }) {
+        return validate_local_scope(scope);
+    }
     rules::SecretScope::parse_input(scope.kind(), &scope.rule_fields())?;
     scope.validate_location()
 }
@@ -368,6 +438,9 @@ pub fn validate_location(location: &str) -> Result<(), ValidationError> {
 /// Validate opened deposit material and operator input with identical, content-free errors.
 pub fn validate_material(material: &SecretMaterial) -> Result<(), ValidationError> {
     match material {
+        SecretMaterial::LocalProgram(value) => {
+            validate_local_value(value.expose(), MAX_SECRET_PASSWORD_BYTES)?
+        }
         SecretMaterial::ApiKey(key) => {
             if key.expose().is_empty() {
                 return Err(InvalidParams);
@@ -469,6 +542,9 @@ pub struct SecretPut {
     /// Keep the input JSON intact so the shared parser owns shape and refusal order.
     pub rules: Option<Value>,
     pub origins: Option<Value>,
+    pub program: Option<String>,
+    pub r#use: Option<String>,
+    pub targets: Option<Value>,
     /// Unpadded base64url of the deposit-plaintext bytes for `kind`.
     pub material_b64url: String,
 }
@@ -483,6 +559,7 @@ impl SecretPut {
         match self.kind.as_str() {
             "agent_api_key" if self.location.is_some() => {}
             "site_login" if self.location.is_none() => {}
+            "local_program" if self.location.is_none() => {}
             _ => return Err(InvalidParams),
         }
         let mut fields = serde_json::Map::new();
@@ -490,12 +567,18 @@ impl SecretPut {
             ("host", &self.host),
             ("path_prefix", &self.path_prefix),
             ("origin", &self.origin),
+            ("program", &self.program),
+            ("use", &self.r#use),
         ] {
             if let Some(value) = value {
                 fields.insert(key.into(), json!(value));
             }
         }
-        for (key, value) in [("rules", &self.rules), ("origins", &self.origins)] {
+        for (key, value) in [
+            ("rules", &self.rules),
+            ("origins", &self.origins),
+            ("targets", &self.targets),
+        ] {
             if let Some(value) = value {
                 fields.insert(key.into(), value.clone());
             }
@@ -506,7 +589,7 @@ impl SecretPut {
         let bytes = base64_url_no_pad(&self.material_b64url)?;
         let framed = super::Secret::new(bytes);
         let material = super::decode_deposit_plaintext(scope.kind(), &framed)?;
-        validate_material(&material)?;
+        validate_material_for_scope(&scope, &material)?;
         Ok((scope, material))
     }
 }
@@ -535,7 +618,88 @@ impl std::fmt::Debug for SecretPut {
             .field("origin", &self.origin)
             .field("rules", &self.rules)
             .field("origins", &self.origins)
+            .field("program", &self.program)
+            .field("use", &self.r#use)
+            .field("targets", &self.targets)
             .field("material_b64url", &"<redacted>")
             .finish()
     }
+}
+
+/// Local-program targets are identifiers, not URLs: no normalization is performed.
+pub fn validate_local_user(user: &str) -> Result<(), ValidationError> {
+    if user.len() > MAX_LOCAL_USER_BYTES {
+        return Err(LimitExceeded);
+    }
+    if user.is_empty()
+        || user.starts_with('-')
+        || !user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return Err(InvalidParams);
+    }
+    Ok(())
+}
+
+fn validate_local_scope(scope: &SecretScope) -> Result<(), ValidationError> {
+    let SecretScope::LocalProgram {
+        program,
+        r#use,
+        targets,
+    } = scope
+    else {
+        return Err(InvalidParams);
+    };
+    match (program, r#use) {
+        (LocalProgram::Sudo, LocalProgramUse::SudoPassword) => {}
+    }
+    if targets.is_empty() {
+        return Err(InvalidParams);
+    }
+    if targets.len() > MAX_LOCAL_PROGRAM_TARGETS {
+        return Err(LimitExceeded);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for target in targets {
+        match (program, target) {
+            (LocalProgram::Sudo, LocalProgramTarget::Sudo { user }) => validate_local_user(user)?,
+        }
+        if !seen.insert(serde_json::to_vec(target).map_err(|_| InvalidParams)?) {
+            return Err(InvalidParams);
+        }
+    }
+    Ok(())
+}
+
+fn validate_local_value(value: &str, cap: usize) -> Result<(), ValidationError> {
+    if value.len() > cap {
+        return Err(LimitExceeded);
+    }
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(InvalidParams);
+    }
+    Ok(())
+}
+
+/// The stored use determines the material cap independently of its shared framing.
+pub fn validate_material_for_scope(
+    scope: &SecretScope,
+    material: &SecretMaterial,
+) -> Result<(), ValidationError> {
+    if !material.matches(scope) {
+        return Err(InvalidParams);
+    }
+    if let (SecretScope::LocalProgram { r#use, .. }, SecretMaterial::LocalProgram(value)) =
+        (scope, material)
+    {
+        validate_local_scope(scope)?;
+        return validate_local_value(
+            value.expose(),
+            match r#use {
+                LocalProgramUse::SudoPassword => MAX_SECRET_PASSWORD_BYTES,
+            },
+        );
+    }
+    validate_material(material)
 }

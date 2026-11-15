@@ -491,3 +491,98 @@ fn secret_multi_host_operator_list_vectors_use_the_real_renderer() {
     }
     assert_eq!(checked, 3, "every operator-list vector must reach the CLI");
 }
+
+#[test]
+fn secret_local_program_cli_setting_put_and_prompt_labels() {
+    let vault = GrantCliVault::new("local-program-cli");
+    assert_eq!(
+        stdout_ok(vault.run(&["secret", "local-programs", "status"])),
+        "local-programs setting off\n"
+    );
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, "şifre🔑");
+    let put = |name: &str, program: &str, target: &str| {
+        vault.run(&[
+            "secret",
+            "put",
+            name,
+            "--kind",
+            "local-program",
+            "--program",
+            program,
+            "--target",
+            target,
+            "--material-file",
+            file.to_str().unwrap(),
+        ])
+    };
+    let refused = put("sudo", "sudo", "root");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("secret_local_programs_disabled"));
+    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+    assert_eq!(
+        stdout_ok(vault.run(&["secret", "local-programs", "on"])),
+        "local-programs setting on\n"
+    );
+    assert!(stdout_ok(put("sudo", "sudo", "root")).starts_with("stored secret sudo (incarnation "));
+    let listing = stdout_ok(vault.run(&["secret", "list"]));
+    assert!(
+        listing.contains("sudo local_program active program=sudo use=sudo_password target=root\n")
+    );
+    let (program, use_name, target, label) = ("sudo", "sudo_password", "root", "sudo password: ");
+    let mut child = cli()
+        .args([
+            "secret",
+            "put",
+            &format!("prompt-{program}"),
+            "--kind",
+            "local-program",
+            "--program",
+            program,
+            "--use",
+            use_name,
+            "--target",
+            target,
+            "--data-dir",
+        ])
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), "şifre🔑\n".as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stderr), label);
+    assert!(stdout_ok(output).starts_with(&format!("stored secret prompt-{program} (incarnation ")));
+    let bad = vault.run(&[
+        "secret",
+        "put",
+        "bad",
+        "--kind",
+        "local-program",
+        "--program",
+        "sudo",
+        "--use",
+        "other_use",
+        "--target",
+        "root",
+        "--material-file",
+        "/does-not-exist",
+    ]);
+    assert!(!bad.status.success());
+    assert!(!String::from_utf8_lossy(&bad.stderr).contains("cannot read material"));
+    assert_eq!(
+        stdout_ok(vault.run(&["secret", "local-programs", "off"])),
+        "local-programs setting off\n"
+    );
+    assert!(stdout_ok(vault.run(&["secret", "list"])).contains("sudo local_program active"));
+    let help = stdout_ok(cli().args(["help", "secret"]).output().unwrap());
+    assert!(help.contains("local-programs on|off|status"));
+    for flag in ["--program", "--use", "--target"] {
+        assert!(help.contains(flag));
+    }
+    assert!(help.lines().all(|line| line.chars().count() <= 80));
+}

@@ -125,6 +125,7 @@ pub const PLAN_TIER_SINCE_SCHEMA_VERSION: u32 = 44;
 
 /// Last-seen approved module declarations, retained for operator inspection only.
 pub const DECLARED_GRANTS_SCHEMA_VERSION: u32 = 45;
+pub const LOCAL_PROGRAM_SECRET_SCHEMA_VERSION: u32 = 46;
 
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
@@ -1130,6 +1131,28 @@ const MIGRATIONS: &[Migration] = &[
             first_seen_ms INTEGER NOT NULL\
         );",
     },
+    Migration {
+        version: LOCAL_PROGRAM_SECRET_SCHEMA_VERSION,
+        statements: "CREATE TABLE agent_secrets_v46 (\
+            name TEXT PRIMARY KEY, \
+            kind TEXT NOT NULL CHECK (kind IN ('agent_api_key', 'site_login', 'local_program')), \
+            incarnation TEXT NOT NULL UNIQUE CHECK (length(incarnation) = 32), \
+            state TEXT NOT NULL CHECK (state IN ('active', 'corrupt')), \
+            host TEXT, path_prefix TEXT, location TEXT, origin TEXT, \
+            record_version INTEGER NOT NULL CHECK (record_version = 1), \
+            key_id TEXT NOT NULL, envelope BLOB NOT NULL, created_at_ms INTEGER NOT NULL, scope_json TEXT, \
+            CHECK ((kind = 'agent_api_key' AND location IS NOT NULL AND location != '' AND origin IS NULL \
+                AND ((host IS NOT NULL AND scope_json IS NULL) OR (host IS NULL AND path_prefix IS NULL AND scope_json IS NOT NULL))) \
+                OR (kind = 'site_login' AND host IS NULL AND path_prefix IS NULL AND location IS NULL \
+                    AND ((origin IS NOT NULL AND scope_json IS NULL) OR (origin IS NULL AND scope_json IS NOT NULL))) \
+                OR (kind = 'local_program' AND host IS NULL AND path_prefix IS NULL AND location IS NULL AND origin IS NULL AND scope_json IS NOT NULL))\
+        ); \
+        INSERT INTO agent_secrets_v46 SELECT * FROM agent_secrets; \
+        DROP TABLE agent_secrets; \
+        ALTER TABLE agent_secrets_v46 RENAME TO agent_secrets; \
+        ALTER TABLE secret_grants ADD COLUMN local_use TEXT; \
+        ALTER TABLE secret_pending_requests ADD COLUMN local_use TEXT;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1594,9 +1617,13 @@ pub enum StoreOpError {
     /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
     InvalidCategoryName,
     /// An API-key service cannot be named by the interactive put flow.
-    InvalidServiceName { service: String },
+    InvalidServiceName {
+        service: String,
+    },
     /// The fixed API-key catalog already owns this service's defaults.
-    ServiceInProviderCatalog { service: String },
+    ServiceInProviderCatalog {
+        service: String,
+    },
     /// A tier is not a lowercase ASCII identifier of 1–32 characters.
     InvalidPlanTier,
     /// An enrollment display name failed the shared person-facing label validation.
@@ -1619,9 +1646,13 @@ pub enum StoreOpError {
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
     /// This tuple appears in the module's approved declaration; no manually managed grant was revoked.
-    DeclaredGrant { module_id: String },
+    DeclaredGrant {
+        module_id: String,
+    },
     /// Approval would hand existing name-bound grants to a new consumer without consent.
-    EnrollmentNameHasGrants { name: String },
+    EnrollmentNameHasGrants {
+        name: String,
+    },
     /// Deposit grants are restricted to reserved principals and browser-session categories.
     InvalidDepositGrant,
     /// The existing cookie belongs to another creator, or has no known creator.
@@ -1643,7 +1674,9 @@ pub enum StoreOpError {
     /// The payload is a short-term Amazon Bedrock API key, which expires within 12 hours
     /// and cannot be renewed by the vault. `expires_at_ms` is decoded from the key when
     /// its presigned URL carries one.
-    ShortTermBedrockKey { expires_at_ms: Option<i64> },
+    ShortTermBedrockKey {
+        expires_at_ms: Option<i64>,
+    },
     /// The record is quarantined (`corrupt`) and cannot be served.
     Quarantined,
     /// The record is `needs_reauth` and must not be served until re-authenticated.
@@ -1657,7 +1690,9 @@ pub enum StoreOpError {
     /// A member id is not `fed-computer:` followed by 32 lowercase hex characters.
     InvalidMemberId,
     /// Callosum owns this grant; a manual revoke would be undone by reconciliation.
-    MemberGrantSharingSwitch { member_id: String },
+    MemberGrantSharingSwitch {
+        member_id: String,
+    },
     /// The home controls this row and its categories until an operator converts it
     /// with a remote add for the same home.
     RemoteRecordHomeWatch {
@@ -1680,17 +1715,22 @@ pub enum StoreOpError {
     /// An API key with multiple host rules or a wildcard, or a login with multiple
     /// origins, requires `secret.multi_host` to be on.
     SecretMultiHostDisabled,
+    SecretLocalProgramsDisabled,
     /// An agent secret already exists under the requested name, live or `corrupt`.
     /// Names are create-only, so the operator must delete before storing again.
     SecretNameExists,
     /// This vault's `secrets.home_member` setting names another member, so agent secrets
     /// live in that member's vault and none may be created here. `home_member` is the
     /// member whose vault the operator should use instead.
-    SecretHomeElsewhere { home_member: String },
+    SecretHomeElsewhere {
+        home_member: String,
+    },
     /// The `secrets.home_member` setting names a member, but this vault's own member id
     /// is unset or equal to it, so the vault cannot tell whether it is the home. The
     /// operator of this vault (`remedy_member`, when its id is known) must fix it.
-    SecretRemoteSetupIncomplete { remedy_member: Option<String> },
+    SecretRemoteSetupIncomplete {
+        remedy_member: Option<String>,
+    },
     /// Pointing `secrets.home_member` at another member was refused because this vault
     /// still holds agent secret state that would be stranded there. The counts say what
     /// must be deleted or revoked first.
@@ -1706,7 +1746,10 @@ pub enum StoreOpError {
     Corrupt(String),
     /// A fenced write was rejected because a newer writer holds the database (the
     /// lease-handover race). The write was NOT applied.
-    Fenced { holder_epoch: u64, db_epoch: u64 },
+    Fenced {
+        holder_epoch: u64,
+        db_epoch: u64,
+    },
     /// A serialization failure building the record body.
     Encode(String),
     /// The vault's sealed audit key is missing on a non-empty vault — a genuinely
@@ -1749,6 +1792,7 @@ impl std::fmt::Display for StoreOpError {
         match self {
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => f.write_str("secret_multi_host_disabled: secret.multi_host is off or unreadable; enable it with ck auth secret multi-host on"),
+            StoreOpError::SecretLocalProgramsDisabled => f.write_str("secret_local_programs_disabled: secret.local_programs is off or unreadable; enable it with ck auth secret local-programs on"),
             StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
             // These three print the same `code/class: detail` text the daemon's admin
             // route answers with, so the online and offline `ck auth secret` paths agree.
@@ -1888,6 +1932,7 @@ impl StoreOpError {
         match self {
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
+            StoreOpError::SecretLocalProgramsDisabled => Some("secret_local_programs_disabled"),
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
@@ -14232,7 +14277,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            45,
+            46,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16399,11 +16444,51 @@ mod migration_10_tests {
             .unwrap();
         let before = every_table_row(&store.store);
         EncryptedStore::migrate(&store.store).unwrap();
-        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 45);
+        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 46);
         let mut after = every_table_row(&store.store);
         assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
         assert_eq!(after, before);
         assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
+        let (_root, sqlite) = sqlite("local-program-upgrade", 228);
+        migrate_through_for_test(&sqlite, 45).unwrap();
+        sqlite.with_conn(|conn| {
+            conn.execute_batch("INSERT INTO agent_secrets VALUES ('legacy','agent_api_key','00000000000000000000000000000001','active','x.test',NULL,'authorization_bearer',NULL,1,'key',X'0102',1,NULL);
+                INSERT INTO agent_secrets VALUES ('extended','site_login','00000000000000000000000000000002','active',NULL,NULL,NULL,NULL,1,'key',X'0304',2,'[\"https://a.test\",\"https://b.test\"]');
+                INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES ('g','legacy','00000000000000000000000000000001','owner','head','H','scope','hour',100,1,'digest');
+                INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms) VALUES ('r','approve','legacy','00000000000000000000000000000001','member',X'0506','digest',100);")
+        }).unwrap();
+        let before = every_table_row(&sqlite);
+        EncryptedStore::migrate(&sqlite).unwrap();
+        let mut after = every_table_row(&sqlite);
+        for table in ["secret_grants", "secret_pending_requests"] {
+            assert_eq!(after[table].len(), 1);
+            assert_eq!(
+                after.get_mut(table).unwrap()[0].pop(),
+                Some(rusqlite::types::Value::Null)
+            );
+        }
+        assert_eq!(
+            after, before,
+            "migration must preserve every pre-existing byte"
+        );
+        sqlite.with_conn(|conn| {
+            let insert = "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES ('local','local_program','00000000000000000000000000000003','active',?1,?2,?3,?4,1,'key',X'0708',3,?5)";
+            for (host, prefix, location, origin, scope) in [
+                (None, None, None, None, None),
+                (Some("x.test"), None, None, None, Some("{}")),
+                (None, Some("/"), None, None, Some("{}")),
+                (None, None, Some("header:X"), None, Some("{}")),
+                (None, None, None, Some("https://x.test"), Some("{}")),
+            ] {
+                assert!(conn.execute(insert, rusqlite::params![host,prefix,location,origin,scope]).is_err());
+            }
+            conn.execute(insert, rusqlite::params![None::<String>,None::<String>,None::<String>,None::<String>,"{}"])?;
+            Ok(())
+        }).unwrap();
     }
 
     /// Every row of every vault table, sorted by all of its columns, keyed by table name.
@@ -17343,6 +17428,55 @@ mod migration_10_tests {
         };
 
         for (table, expected) in [
+            (
+                "secret_grants",
+                vec![
+                    column("grant_id", "TEXT", false, None, true),
+                    column("secret_name", "TEXT", true, None, false),
+                    column("incarnation", "TEXT", true, None, false),
+                    column("scope_owner", "TEXT", true, None, false),
+                    column("scope_kind", "TEXT", true, None, false),
+                    column("scope_ref", "TEXT", true, None, false),
+                    column("coverage", "TEXT", true, None, false),
+                    column("duration", "TEXT", true, None, false),
+                    column("expires_at_ms", "INTEGER", true, None, false),
+                    column("granted_at_ms", "INTEGER", true, None, false),
+                    column("envelope_sha256", "TEXT", true, None, false),
+                    column("agent_id", "TEXT", false, None, false),
+                    column("card_ref", "TEXT", false, None, false),
+                    column("first_released", "INTEGER", true, Some("0"), false),
+                    column("last_use_ms", "INTEGER", false, None, false),
+                    column("asking_member_id", "TEXT", true, Some("''"), false),
+                    column("local_use", "TEXT", false, None, false),
+                ],
+            ),
+            (
+                "secret_pending_requests",
+                vec![
+                    column("request_id", "TEXT", false, None, true),
+                    column("request_kind", "TEXT", true, None, false),
+                    column("secret_name", "TEXT", true, None, false),
+                    column("incarnation", "TEXT", true, None, false),
+                    column("member_id", "TEXT", true, None, false),
+                    column("mapped_owner", "TEXT", false, None, false),
+                    column("mapped_kind", "TEXT", false, None, false),
+                    column("mapped_ref", "TEXT", false, None, false),
+                    column("mapped_epoch", "INTEGER", false, None, false),
+                    column("coverage", "TEXT", false, None, false),
+                    column("agent_id", "TEXT", false, None, false),
+                    column("statement_bytes", "BLOB", true, None, false),
+                    column("statement_sha256", "TEXT", true, None, false),
+                    column("request_expires_at_ms", "INTEGER", true, None, false),
+                    column("consumed", "INTEGER", true, Some("0"), false),
+                    column("flow_id", "TEXT", false, None, false),
+                    column("flow_version", "INTEGER", false, None, false),
+                    column("flow_code_hash", "TEXT", false, None, false),
+                    column("flow_install_id", "TEXT", false, None, false),
+                    column("methods", "TEXT", false, None, false),
+                    column("asking_member_id", "TEXT", true, Some("''"), false),
+                    column("local_use", "TEXT", false, None, false),
+                ],
+            ),
             (
                 "declared_grant_sets",
                 vec![
@@ -19156,8 +19290,9 @@ pub use store_agent_secrets::{
     SecretHomeStatus, SECRET_HOME_SELF, SECRET_HOME_SETTING,
 };
 pub use store_agent_secrets::{
-    secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,
-    PhoneOperation, SecretDepositPublicKey, SecretUseOutcome,
+    secret_local_programs_status_read_only, secret_multi_host_status_read_only,
+    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
+    SecretUseOutcome,
 };
 /// Sealed releases to paired computers and the receipts that answer their retries.
 pub use store_agent_secrets::{

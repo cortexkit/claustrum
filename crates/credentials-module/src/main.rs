@@ -4805,7 +4805,13 @@ mod tests {
         for id in [DEPOSIT_COOKIE_ID, signing_id, kem_id] {
             assert!(
                 store
-                    .evaluate_scoped_coverage("reserved", "cerebellum", id, GrantOperation::Deposit)
+                    .evaluate_scoped_coverage(
+                        "reserved",
+                        "cerebellum",
+                        id,
+                        GrantOperation::Deposit,
+                        &credentials_core::store::DeclaredGrantSet::empty()
+                    )
                     .unwrap()
                     .covered
             );

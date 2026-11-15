@@ -1718,7 +1718,13 @@ fn scoped_coverage_treats_a_remote_id_and_its_categories_as_existing() {
     };
     grant(SelectorKind::Category, "custom-team");
     let before = store
-        .evaluate_scoped_coverage("reserved", "broca", "oauth:anthropic", GrantOperation::Read)
+        .evaluate_scoped_coverage(
+            "reserved",
+            "broca",
+            "oauth:anthropic",
+            GrantOperation::Read,
+            &crate::store::DeclaredGrantSet::empty(),
+        )
         .unwrap();
     assert!(before.id_exists);
     assert!(!before.covered);
@@ -1733,7 +1739,13 @@ fn scoped_coverage_treats_a_remote_id_and_its_categories_as_existing() {
         )
         .unwrap();
     let by_category = store
-        .evaluate_scoped_coverage("reserved", "broca", "oauth:anthropic", GrantOperation::Read)
+        .evaluate_scoped_coverage(
+            "reserved",
+            "broca",
+            "oauth:anthropic",
+            GrantOperation::Read,
+            &crate::store::DeclaredGrantSet::empty(),
+        )
         .unwrap();
     assert!(by_category.covered && by_category.id_exists);
     assert_eq!(by_category.id_category_count, Some(2));
@@ -1749,11 +1761,23 @@ fn scoped_coverage_treats_a_remote_id_and_its_categories_as_existing() {
         )
         .unwrap();
     assert!(store
-        .read_grant_covers("reserved", "broca", "oauth:openai", GrantOperation::Read)
+        .read_grant_covers(
+            "reserved",
+            "broca",
+            "oauth:openai",
+            GrantOperation::Read,
+            &DeclaredGrantSet::empty()
+        )
         .unwrap());
 
     let unknown = store
-        .evaluate_scoped_coverage("reserved", "broca", "oauth:none", GrantOperation::Read)
+        .evaluate_scoped_coverage(
+            "reserved",
+            "broca",
+            "oauth:none",
+            GrantOperation::Read,
+            &crate::store::DeclaredGrantSet::empty(),
+        )
         .unwrap();
     assert!(!unknown.covered && !unknown.id_exists);
 }
@@ -3268,7 +3292,7 @@ fn remote_record_source_readers_default_to_operator_at_schema_38() {
         store.store.with_conn(read_schema_version).unwrap(),
         newest_migration_version()
     );
-    assert_eq!(newest_migration_version(), 44);
+    assert_eq!(newest_migration_version(), 45);
     for record in &expected {
         assert_eq!(
             store.remote_record(&record.credential_id).unwrap().as_ref(),

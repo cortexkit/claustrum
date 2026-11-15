@@ -316,7 +316,13 @@ async fn account_token_audience_grant_is_not_signing_or_other_audience_authority
     }
     assert!(!rig
         .store
-        .read_grant_covers("reserved", "ck-motor", VAULT_KEY, GrantOperation::Sign)
+        .read_grant_covers(
+            "reserved",
+            "ck-motor",
+            VAULT_KEY,
+            GrantOperation::Sign,
+            &credentials_core::store::DeclaredGrantSet::empty()
+        )
         .unwrap());
     assert!(rig.http.requests().is_empty());
 }

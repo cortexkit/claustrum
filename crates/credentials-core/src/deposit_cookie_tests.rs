@@ -234,13 +234,19 @@ fn deposit_grants_are_narrow_and_cover_defaults_not_stored_categories() {
         .unwrap();
     assert!(
         store
-            .evaluate_scoped_coverage("reserved", "cerebellum", ID, GrantOperation::Deposit)
+            .evaluate_scoped_coverage(
+                "reserved",
+                "cerebellum",
+                ID,
+                GrantOperation::Deposit,
+                &DeclaredGrantSet::empty()
+            )
             .unwrap()
             .covered
     );
     deposit(&store).unwrap();
     assert!(store
-        .list_scoped_snapshot("reserved", "cerebellum")
+        .list_scoped_snapshot("reserved", "cerebellum", &DeclaredGrantSet::empty())
         .unwrap()
         .rows
         .is_empty());
@@ -256,7 +262,7 @@ fn deposit_grants_are_narrow_and_cover_defaults_not_stored_categories() {
         .unwrap();
     assert_eq!(
         store
-            .list_scoped_snapshot("reserved", "cerebellum")
+            .list_scoped_snapshot("reserved", "cerebellum", &DeclaredGrantSet::empty())
             .unwrap()
             .rows[0]
             .operations,
@@ -282,7 +288,13 @@ fn deposit_grants_are_narrow_and_cover_defaults_not_stored_categories() {
         .unwrap();
     assert!(
         store
-            .evaluate_scoped_coverage("reserved", "cerebellum", ID, GrantOperation::Deposit)
+            .evaluate_scoped_coverage(
+                "reserved",
+                "cerebellum",
+                ID,
+                GrantOperation::Deposit,
+                &DeclaredGrantSet::empty()
+            )
             .unwrap()
             .covered
     );
@@ -294,7 +306,13 @@ fn deposit_grants_are_narrow_and_cover_defaults_not_stored_categories() {
     ] {
         assert!(
             !store
-                .evaluate_scoped_coverage("reserved", "cerebellum", ID, op)
+                .evaluate_scoped_coverage(
+                    "reserved",
+                    "cerebellum",
+                    ID,
+                    op,
+                    &DeclaredGrantSet::empty()
+                )
                 .unwrap()
                 .covered
         );
@@ -305,7 +323,8 @@ fn deposit_grants_are_narrow_and_cover_defaults_not_stored_categories() {
                 "reserved",
                 "cerebellum",
                 "apikey:x",
-                GrantOperation::Deposit
+                GrantOperation::Deposit,
+                &DeclaredGrantSet::empty(),
             )
             .unwrap()
             .covered

@@ -16,11 +16,7 @@ use tokio::sync::{watch, Mutex};
 
 const CHALLENGE_URL: &str = "https://account.cortexkit.io/v1/machine/token/challenge";
 const TOKEN_URL: &str = "https://account.cortexkit.io/v1/machine/token";
-const AUDIENCES: [&str; 3] = [
-    "cortexkit-runners",
-    "cortexkit-account",
-    "cortexkit-webhook-relay",
-];
+use credentials_core::store::ACCOUNT_TOKEN_AUDIENCES as AUDIENCES;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

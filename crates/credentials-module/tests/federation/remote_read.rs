@@ -564,7 +564,11 @@ impl Rig {
         let grants = self
             .b
             .store
-            .list_scoped_snapshot("reserved", "broca")
+            .list_scoped_snapshot(
+                "reserved",
+                "broca",
+                &credentials_core::store::DeclaredGrantSet::empty(),
+            )
             .unwrap()
             .grants;
         self.reader
@@ -734,7 +738,11 @@ async fn a_consumer_on_b_reads_an_anthropic_token_homed_on_a_and_b_matches_a() {
     let a_row = rig
         .a
         .store
-        .list_scoped_snapshot("reserved", "broca")
+        .list_scoped_snapshot(
+            "reserved",
+            "broca",
+            &credentials_core::store::DeclaredGrantSet::empty(),
+        )
         .unwrap()
         .rows
         .into_iter()
@@ -858,7 +866,11 @@ async fn antigravity_and_chatgpt_projections_match_the_homes_local_get_and_list(
     let a_rows = rig
         .a
         .store
-        .list_scoped_snapshot("reserved", "broca")
+        .list_scoped_snapshot(
+            "reserved",
+            "broca",
+            &credentials_core::store::DeclaredGrantSet::empty(),
+        )
         .unwrap()
         .rows;
     for id in ["antigravity:google", "oauth:openai:claim"] {
@@ -2277,7 +2289,13 @@ async fn b_owned_metadata_reaches_the_listing_and_a_local_category_grant_covers_
     assert_eq!(row.operations, vec![GrantOperation::Read]);
     assert!(
         store
-            .evaluate_scoped_coverage("reserved", "broca", TOKEN_ID, GrantOperation::Read)
+            .evaluate_scoped_coverage(
+                "reserved",
+                "broca",
+                TOKEN_ID,
+                GrantOperation::Read,
+                &credentials_core::store::DeclaredGrantSet::empty()
+            )
             .unwrap()
             .covered
     );

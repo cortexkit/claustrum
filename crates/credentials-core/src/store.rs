@@ -123,6 +123,9 @@ pub const GATEWAY_SETTINGS_SCHEMA_VERSION: u32 = 43;
 /// Optional operator-supplied effective starts for local and remote plan tiers.
 pub const PLAN_TIER_SINCE_SCHEMA_VERSION: u32 = 44;
 
+/// Last-seen approved module declarations, retained for operator inspection only.
+pub const DECLARED_GRANTS_SCHEMA_VERSION: u32 = 45;
+
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
 ///
@@ -1114,6 +1117,18 @@ const MIGRATIONS: &[Migration] = &[
         version: PLAN_TIER_SINCE_SCHEMA_VERSION,
         statements: "ALTER TABLE credential_plan_tiers ADD COLUMN since_ms INTEGER; \
                      ALTER TABLE remote_record_plan_tiers ADD COLUMN since_ms INTEGER;",
+    },
+    Migration {
+        version: DECLARED_GRANTS_SCHEMA_VERSION,
+        statements: "CREATE TABLE declared_grant_sets (\
+            module_id TEXT PRIMARY KEY, \
+            declaration_digest TEXT, \
+            approved_declarations_digest TEXT, \
+            origin TEXT, \
+            grants_json TEXT NOT NULL, \
+            skipped_count INTEGER NOT NULL, \
+            first_seen_ms INTEGER NOT NULL\
+        );",
     },
 ];
 
@@ -3809,9 +3824,16 @@ impl EncryptedStore {
         principal_id: &str,
         credential_id: &str,
         operation: GrantOperation,
+        declared: &DeclaredGrantSet,
     ) -> Result<bool, StoreOpError> {
         Ok(self
-            .evaluate_scoped_coverage(principal_kind, principal_id, credential_id, operation)?
+            .evaluate_scoped_coverage(
+                principal_kind,
+                principal_id,
+                credential_id,
+                operation,
+                declared,
+            )?
             .covered)
     }
 
@@ -3823,21 +3845,25 @@ impl EncryptedStore {
         principal_id: &str,
         credential_id: &str,
         operation: GrantOperation,
+        declared: &DeclaredGrantSet,
     ) -> Result<ScopedCoverage, StoreOpError> {
         if crate::agent_secret::is_deposit_key(credential_id) {
             return Err(StoreOpError::NotFound);
         }
         self.store
             .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT selector_kind, selector FROM read_grants \
-                     WHERE principal_kind = ?1 AND principal_id = ?2 AND operation = ?3",
+                let mut grants = read_grants_from_conn(
+                    conn,
+                    Some(principal_kind),
+                    Some(principal_id),
+                    read_schema_version(conn)?,
                 )?;
-                let rows = stmt.query_map(
-                    rusqlite::params![principal_kind, principal_id, operation.as_str()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )?;
-                let grants = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                declared.union_into(principal_kind, principal_id, &mut grants);
+                let grants: Vec<_> = grants
+                    .into_iter()
+                    .filter(|grant| grant.operation == operation)
+                    .map(|grant| (grant.selector_kind.as_str().to_owned(), grant.selector))
+                    .collect();
                 let caller_active_grants = grants.len() as u32;
                 if operation == GrantOperation::AccountToken {
                     return Ok(ScopedCoverage {
@@ -3941,8 +3967,9 @@ impl EncryptedStore {
         &self,
         principal_kind: &str,
         principal_id: &str,
+        declared: &DeclaredGrantSet,
     ) -> Result<ScopedListSnapshot, StoreOpError> {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, false, || Ok(()))
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, declared, false, || Ok(()))
             .map(|(snapshot, _)| snapshot)
     }
 
@@ -3953,8 +3980,9 @@ impl EncryptedStore {
         &self,
         principal_kind: &str,
         principal_id: &str,
+        declared: &DeclaredGrantSet,
     ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError> {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, true, || Ok(()))
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, declared, true, || Ok(()))
     }
 
     #[cfg(test)]
@@ -3967,14 +3995,21 @@ impl EncryptedStore {
     where
         F: FnOnce() -> rusqlite::Result<()>,
     {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, false, after_grants)
-            .map(|(snapshot, _)| snapshot)
+        self.list_scoped_snapshot_inner(
+            principal_kind,
+            principal_id,
+            &DeclaredGrantSet::empty(),
+            false,
+            after_grants,
+        )
+        .map(|(snapshot, _)| snapshot)
     }
 
     fn list_scoped_snapshot_inner<F>(
         &self,
         principal_kind: &str,
         principal_id: &str,
+        declared: &DeclaredGrantSet,
         include_keys: bool,
         after_grants: F,
     ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError>
@@ -3992,6 +4027,7 @@ impl EncryptedStore {
                     Some(principal_id),
                     schema_version,
                 )?;
+                declared.union_into(principal_kind, principal_id, &mut grants);
                 grants.retain(|grant| grant.selector_kind != SelectorKind::Exact
                     || !crate::agent_secret::is_deposit_key(&grant.selector));
                 after_grants()?;
@@ -14158,6 +14194,7 @@ mod tests {
                     "prefrontal-core",
                     "github%_app:agent",
                     GrantOperation::Read,
+                    &DeclaredGrantSet::empty(),
                 )
                 .expect("check exact literal"),
             "the byte-equal id must be covered"
@@ -14169,6 +14206,7 @@ mod tests {
                     "prefrontal-core",
                     "githubZZapp:agent",
                     GrantOperation::Read,
+                    &DeclaredGrantSet::empty(),
                 )
                 .expect("check unrelated id"),
             "percent and underscore in a grant must not widen it as SQL LIKE wildcards"
@@ -14187,7 +14225,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            44,
+            45,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -14708,7 +14746,13 @@ mod taxonomy_tests {
             .unwrap();
         let covers = |principal: &str, operation| {
             store
-                .evaluate_scoped_coverage("reserved", principal, "kem:push", operation)
+                .evaluate_scoped_coverage(
+                    "reserved",
+                    principal,
+                    "kem:push",
+                    operation,
+                    &crate::store::DeclaredGrantSet::empty(),
+                )
                 .unwrap()
                 .covered
         };
@@ -14801,20 +14845,31 @@ mod taxonomy_tests {
                 "consumer",
                 "apikey:deepseek",
                 GrantOperation::Read,
+                &crate::store::DeclaredGrantSet::empty(),
             )
             .unwrap();
         assert!(read.covered);
         assert_eq!(read.caller_active_grants, 2);
         assert!(read.holds_category_selector);
         let unrelated = store
-            .evaluate_scoped_coverage("reserved", "consumer", "missing", GrantOperation::Read)
+            .evaluate_scoped_coverage(
+                "reserved",
+                "consumer",
+                "missing",
+                GrantOperation::Read,
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .unwrap();
         assert!(!unrelated.covered);
         assert!(!unrelated.id_exists);
         assert_eq!(unrelated.id_category_count, Some(0));
 
         let snapshot = store
-            .list_scoped_snapshot("reserved", "consumer")
+            .list_scoped_snapshot(
+                "reserved",
+                "consumer",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .expect("one snapshot");
         assert_eq!(snapshot.grants.len(), 3);
         assert_eq!(snapshot.rows.len(), 1);
@@ -14843,6 +14898,7 @@ mod taxonomy_tests {
                 "consumer",
                 "apikey:deepseek",
                 GrantOperation::Sign,
+                &DeclaredGrantSet::empty(),
             )
             .unwrap());
         assert!(!store
@@ -14851,6 +14907,7 @@ mod taxonomy_tests {
                 "consumer",
                 "apikey:deepseek",
                 GrantOperation::Read,
+                &DeclaredGrantSet::empty(),
             )
             .unwrap());
         let targets: Vec<_> = store
@@ -15130,7 +15187,13 @@ mod list_scoped_snapshot_tests {
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .unwrap();
-        let readable = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+        let readable = store
+            .list_scoped_snapshot(
+                "reserved",
+                "consumer",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
+            .unwrap();
         assert_eq!(
             readable.rows[0]
                 .identity
@@ -15170,7 +15233,11 @@ mod list_scoped_snapshot_tests {
             })
             .unwrap();
         let sign_only = store
-            .list_scoped_snapshot("reserved", "consumer")
+            .list_scoped_snapshot(
+                "reserved",
+                "consumer",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .expect("sign-only rows never open envelopes");
         assert_eq!(sign_only.rows.len(), 1);
         assert_eq!(sign_only.rows[0].identity, None);
@@ -15186,7 +15253,9 @@ mod list_scoped_snapshot_tests {
             )
             .unwrap();
         assert!(
-            store.list_scoped_snapshot("reserved", "consumer").is_err(),
+            store
+                .list_scoped_snapshot("reserved", "consumer", &DeclaredGrantSet::empty())
+                .is_err(),
             "an unreadable row still stored as active fails the whole snapshot"
         );
 
@@ -15219,7 +15288,11 @@ mod list_scoped_snapshot_tests {
             })
             .unwrap();
         let listed = store
-            .list_scoped_snapshot("reserved", "consumer")
+            .list_scoped_snapshot(
+                "reserved",
+                "consumer",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .expect("a quarantined row must not fail the listing");
         assert_eq!(listed.rows.len(), 2);
         let quarantined = listed
@@ -15282,6 +15355,7 @@ mod coverage_phase_tests {
                 "consumer",
                 "operator:prefix",
                 GrantOperation::Read,
+                &crate::store::DeclaredGrantSet::empty(),
             )
             .expect("an exact match never enters phase 2");
         assert!(exact.covered);
@@ -15293,12 +15367,15 @@ mod coverage_phase_tests {
                     "consumer",
                     "other:category",
                     GrantOperation::Read,
+                    &DeclaredGrantSet::empty(),
                 )
                 .is_err(),
             "an uncovered scoped read with a category selector must enter phase 2"
         );
         assert!(
-            store.list_scoped_snapshot("reserved", "consumer").is_err(),
+            store
+                .list_scoped_snapshot("reserved", "consumer", &DeclaredGrantSet::empty())
+                .is_err(),
             "list_scoped intentionally reads categories in its one snapshot"
         );
     }
@@ -15334,7 +15411,13 @@ mod migration_10_tests {
             .unwrap();
 
         assert!(store
-            .read_grant_covers("reserved", "broca", "apikey:opencode", GrantOperation::Read,)
+            .read_grant_covers(
+                "reserved",
+                "broca",
+                "apikey:opencode",
+                GrantOperation::Read,
+                &DeclaredGrantSet::empty()
+            )
             .unwrap());
         assert!(
             !store
@@ -15343,6 +15426,7 @@ mod migration_10_tests {
                     "broca",
                     "apikey:opencode-zed",
                     GrantOperation::Read,
+                    &DeclaredGrantSet::empty(),
                 )
                 .unwrap(),
             "a longer id with the same leading bytes must not inherit exact authority"
@@ -16260,7 +16344,7 @@ mod migration_10_tests {
         assert_eq!(before["remote_record_plan_tiers"].len(), 1);
         assert_eq!(before["credential_gateway_settings"].len(), 1);
         assert_eq!(before["read_grants"].len(), 1);
-        EncryptedStore::migrate(&store.store).unwrap();
+        migrate_through_for_test(&store.store, 44).unwrap();
         assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 44);
         let mut after = every_table_row(&store.store);
         for table in ["credential_plan_tiers", "remote_record_plan_tiers"] {
@@ -16281,6 +16365,37 @@ mod migration_10_tests {
             store.remote_inventory().unwrap()[0].plan_tier_since_ms,
             None
         );
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row() {
+        let (_root, sqlite) = sqlite("declarations-upgrade", 227);
+        migrate_through_for_test(&sqlite, 44).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([227; 32])).unwrap();
+        store
+            .create_audited(
+                "apikey:anthropic",
+                &api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "striatum",
+                SelectorKind::Category,
+                "llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let before = every_table_row(&store.store);
+        EncryptedStore::migrate(&store.store).unwrap();
+        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 45);
+        let mut after = every_table_row(&store.store);
+        assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
+        assert_eq!(after, before);
         assert_eq!(store.verify_audit_chain().unwrap(), None);
     }
 
@@ -17221,6 +17336,18 @@ mod migration_10_tests {
         };
 
         for (table, expected) in [
+            (
+                "declared_grant_sets",
+                vec![
+                    column("module_id", "TEXT", false, None, true),
+                    column("declaration_digest", "TEXT", false, None, false),
+                    column("approved_declarations_digest", "TEXT", false, None, false),
+                    column("origin", "TEXT", false, None, false),
+                    column("grants_json", "TEXT", true, None, false),
+                    column("skipped_count", "INTEGER", true, None, false),
+                    column("first_seen_ms", "INTEGER", true, None, false),
+                ],
+            ),
             (
                 "credential_plan_tiers",
                 vec![
@@ -18763,6 +18890,11 @@ mod transfer_key_fence_tests;
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
 
+#[path = "store_declared_grants.rs"]
+mod declared_grants;
+#[cfg(test)]
+#[path = "declared_grants_tests.rs"]
+mod declared_grants_tests;
 #[path = "store_gh_activations.rs"]
 mod gh_activations;
 #[path = "store_gh_admin.rs"]
@@ -18775,6 +18907,11 @@ mod gh_manifests;
 mod gh_proposals;
 #[path = "store_registered_providers.rs"]
 mod registered_providers;
+pub use declared_grants::{
+    declared_grant_sets_read_only, parse_declared_grants, DeclarationDiagnostics, DeclaredGrant,
+    DeclaredGrantListing, DeclaredGrantRecord, DeclaredGrantSet, SkippedDeclaredGrant,
+    ACCOUNT_TOKEN_AUDIENCES, MAX_DECLARED_GRANTS,
+};
 pub use gh_activations::{
     GhManifestActivationOutcome, GhManifestActivationReport, GhManifestActiveStatus,
     GhManifestComputerStatus, GhManifestHandoffEnvelope, GhManifestLatest,

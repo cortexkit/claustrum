@@ -2211,6 +2211,7 @@ versions JSON numbers, and reasons refusal codes.
 | `federation_gate_set` | none | admin | `{value}` |
 | `federation_self_set` | none | admin | `{member}` |
 | `login_sharing_set` | none | config:&lt;path&gt; | applied boolean (`true` or `false`) |
+| `declaration_seen` | `declaration\|<digest>` or `declaration\|none` | `reserved:<module>` | canonical `grants_json` bytes (compact array, tuple text-byte order, deduplicated); `payload_hash` is their lowercase-hex SHA-256 |
 
 Issuance dedup and audit commit before token release, keyed by member/id/version/encrypted
 material digest, so retries/restarts add no row but a recreated id at version 1 is audited

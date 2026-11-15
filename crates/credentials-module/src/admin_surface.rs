@@ -1895,7 +1895,14 @@ mod tests {
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .unwrap();
-        let snapshot = r.store.list_scoped_snapshot("reserved", "plexus").unwrap();
+        let snapshot = r
+            .store
+            .list_scoped_snapshot(
+                "reserved",
+                "plexus",
+                &credentials_core::store::DeclaredGrantSet::empty(),
+            )
+            .unwrap();
         let result = crate::read_surface::project_list_scoped(snapshot);
         assert_eq!(result.credentials.len(), 1);
         assert_eq!(

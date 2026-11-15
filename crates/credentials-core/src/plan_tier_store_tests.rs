@@ -116,7 +116,11 @@ fn plan_since_follows_operator_identity_visibility_and_survives_token_refresh() 
     }
     let row = |principal| {
         store
-            .list_scoped_snapshot("reserved", principal)
+            .list_scoped_snapshot(
+                "reserved",
+                principal,
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .unwrap()
             .rows
             .remove(0)
@@ -166,7 +170,11 @@ fn plan_observed_time_tracks_value_changes_not_refreshes_and_clear_restores_dete
         .unwrap();
     let row = || {
         store
-            .list_scoped_snapshot("reserved", "reader")
+            .list_scoped_snapshot(
+                "reserved",
+                "reader",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .unwrap()
             .rows
             .remove(0)
@@ -297,7 +305,7 @@ fn migration_16_adds_only_an_empty_tier_table_and_behind_readers_tolerate_absenc
         .unwrap();
     assert_eq!(
         store
-            .list_scoped_snapshot("reserved", "reader")
+            .list_scoped_snapshot("reserved", "reader", &DeclaredGrantSet::empty())
             .unwrap()
             .rows[0]
             .plan_tier,
@@ -314,7 +322,7 @@ fn migration_16_adds_only_an_empty_tier_table_and_behind_readers_tolerate_absenc
     assert_eq!(store.list_meta().unwrap(), before);
     assert_eq!(store.read_audit(None).unwrap(), audit_before);
     assert_eq!(audit.len(), 1);
-    assert_eq!(newest_migration_version(), 44);
+    assert_eq!(newest_migration_version(), 45);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 
@@ -588,7 +596,13 @@ fn tiers_follow_identity_authority_while_providers_also_reach_sign_only_rows() {
             )
             .unwrap();
     }
-    let snapshot = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "consumer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     assert_eq!(snapshot.rows.len(), 4);
     for row in snapshot.rows {
         assert_eq!(
@@ -705,7 +719,11 @@ fn detected_plan_override_precedence_and_clear_reveal_the_observation() {
         set(&store, ID, override_tier);
         for principal in ["reader", "lister"] {
             let row = store
-                .list_scoped_snapshot("reserved", principal)
+                .list_scoped_snapshot(
+                    "reserved",
+                    principal,
+                    &crate::store::DeclaredGrantSet::empty(),
+                )
                 .unwrap()
                 .rows
                 .remove(0);
@@ -713,7 +731,11 @@ fn detected_plan_override_precedence_and_clear_reveal_the_observation() {
             assert_eq!(row.plan_tier_source.as_deref(), Some(source));
         }
         let hidden = store
-            .list_scoped_snapshot("reserved", "signer")
+            .list_scoped_snapshot(
+                "reserved",
+                "signer",
+                &crate::store::DeclaredGrantSet::empty(),
+            )
             .unwrap()
             .rows
             .remove(0);

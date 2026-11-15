@@ -1105,6 +1105,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `fetch_anomaly` | Record a read-surface fetch-rate or enumeration anomaly. |
 | `grant_create` | Create a principal-scoped exact or category operation grant. |
 | `grant_revoke` | Revoke a principal-scoped exact or category operation grant. |
+| `declaration_seen` | Replace a module's last-seen declaration; `payload_hash` is lowercase-hex SHA-256 of the stored `grants_json` bytes. |
 | `enroll.approve` | Approve a pending enrolled-consumer incarnation. |
 | `enroll.label` | Set or clear a live enrollment's display name. |
 | `enroll.deny` | Deny a pending enrollment request. |

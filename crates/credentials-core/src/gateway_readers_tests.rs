@@ -64,7 +64,13 @@ fn gateway_readers_use_settings_not_category_or_service_spelling_for_auth_method
     for operation in [GrantOperation::List, GrantOperation::Read] {
         grant(&store, "consumer", "llm-gateway", operation);
     }
-    let snapshot = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "consumer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     assert_eq!(snapshot.rows.len(), 2);
     let gateway = snapshot.rows.iter().find(|row| row.id == ID).unwrap();
     assert_eq!(
@@ -87,7 +93,7 @@ fn gateway_readers_use_settings_not_category_or_service_spelling_for_auth_method
         GrantOperation::List,
     );
     assert!(store
-        .list_scoped_snapshot("reserved", "provider-only")
+        .list_scoped_snapshot("reserved", "provider-only", &DeclaredGrantSet::empty())
         .unwrap()
         .rows
         .is_empty());
@@ -102,7 +108,13 @@ fn gateway_readers_preserve_sign_and_open_only_method_omission_but_identify_quar
         ("opener", GrantOperation::Open),
     ] {
         grant(&store, principal, "llm-gateway", operation);
-        let snapshot = store.list_scoped_snapshot("reserved", principal).unwrap();
+        let snapshot = store
+            .list_scoped_snapshot(
+                "reserved",
+                principal,
+                &crate::store::DeclaredGrantSet::empty(),
+            )
+            .unwrap();
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.rows[0].auth_method, None);
         assert_eq!(snapshot.rows[0].identity, None);
@@ -116,7 +128,13 @@ fn gateway_readers_preserve_sign_and_open_only_method_omission_but_identify_quar
         })
         .unwrap();
     grant(&store, "lister", "llm-gateway", GrantOperation::List);
-    let snapshot = store.list_scoped_snapshot("reserved", "lister").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "lister",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].state, RecordState::Corrupt);
     assert_eq!(snapshot.rows[0].auth_method, Some(ListAuthMethod::Gateway));
@@ -185,7 +203,13 @@ fn gateway_readers_below_migration_keep_existing_output_and_never_change_schema(
         count_refresh_intents_read_only(&root.join("store.db")).unwrap(),
         0
     );
-    let snapshot = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "consumer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].auth_method, Some(ListAuthMethod::Apikey));
     assert_eq!(schema(&store), before);

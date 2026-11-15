@@ -377,7 +377,11 @@ fn list_json_auth_method_agrees_with_list_scoped_derivation() {
     let store =
         EncryptedStore::open(open_sqlite(&descriptor).expect("open store"), key).expect("key");
     let snapshot = store
-        .list_scoped_snapshot("reserved", "json-probe")
+        .list_scoped_snapshot(
+            "reserved",
+            "json-probe",
+            &credentials_core::store::DeclaredGrantSet::empty(),
+        )
         .expect("scoped snapshot");
     for row in &snapshot.rows {
         let expected = row.auth_method.map(|method| method.as_str().to_string());

@@ -104,7 +104,7 @@ fn oauth_record() -> VaultRecord {
 #[test]
 fn migration_15_adds_only_the_provider_id_table_and_conserves_every_row() {
     assert_eq!(PROVIDER_ID_SCHEMA_VERSION, 15);
-    assert_eq!(newest_migration_version(), 44);
+    assert_eq!(newest_migration_version(), 45);
     let (root, sqlite) = sqlite("provider-migration", 160);
     migrate_through_for_test(&sqlite, PROVIDER_ID_SCHEMA_VERSION - 1).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([160; 32])).unwrap();
@@ -557,7 +557,11 @@ fn writing_provider_ids_never_touches_the_record_even_when_it_is_retired_or_corr
         )
         .unwrap();
     let sign_only = store
-        .list_scoped_snapshot("reserved", "signer")
+        .list_scoped_snapshot(
+            "reserved",
+            "signer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
         .expect("a sign-only row never opens its envelope");
     assert_eq!(sign_only.rows.len(), 1);
     assert_eq!(sign_only.rows[0].provider_ids, ["aa", "bb"]);
@@ -708,7 +712,13 @@ fn readers_return_provider_ids_and_list_scoped_derives_auth_method_only_for_read
             )
             .unwrap();
     }
-    let snapshot = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "consumer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     let row = |id: &str| snapshot.rows.iter().find(|row| row.id == id).unwrap();
     assert_eq!(row(ID).provider_ids, ["aa", "zz"]);
     assert_eq!(
@@ -750,7 +760,13 @@ fn a_store_one_migration_behind_reads_and_removes_without_the_provider_table() {
             AuditCtx::admin(AuditOp::GrantCreate),
         )
         .unwrap();
-    let snapshot = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+    let snapshot = store
+        .list_scoped_snapshot(
+            "reserved",
+            "consumer",
+            &crate::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
     assert_eq!(snapshot.rows[0].provider_ids, Vec::<String>::new());
     store
         .remove_audited(ID, AuditCtx::admin(AuditOp::Remove))

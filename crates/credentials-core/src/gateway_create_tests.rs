@@ -571,14 +571,18 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 44);
-    assert_eq!(newest_migration_version(), 44);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 45);
+    assert_eq!(newest_migration_version(), 45);
     let added: Vec<_> = table_names(&store)
         .into_iter()
         .filter(|name| !tables_before.contains(name))
         .collect();
-    assert_eq!(added, ["credential_gateway_settings"]);
+    assert_eq!(
+        added,
+        ["credential_gateway_settings", "declared_grant_sets"]
+    );
     assert!(rows(&store, "credential_gateway_settings").is_empty());
+    assert!(rows(&store, "declared_grant_sets").is_empty());
     for ((table, after), (_, before)) in snapshot(&store, &tables_before).iter().zip(&before) {
         assert_eq!(after, before, "the upgrade changed rows in {table}");
     }

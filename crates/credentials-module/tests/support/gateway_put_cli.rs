@@ -172,10 +172,22 @@ fn gateway_put_online_and_offline_create_normalized_settings_with_sorted_headers
                 credentials_core::store::GrantOperation::List,
             ] {
                 assert!(store
-                    .read_grant_covers("reserved", "gateway-reader", ID, operation)
+                    .read_grant_covers(
+                        "reserved",
+                        "gateway-reader",
+                        ID,
+                        operation,
+                        &credentials_core::store::DeclaredGrantSet::empty()
+                    )
                     .unwrap());
                 assert!(!store
-                    .read_grant_covers("reserved", "provider-reader", ID, operation)
+                    .read_grant_covers(
+                        "reserved",
+                        "provider-reader",
+                        ID,
+                        operation,
+                        &credentials_core::store::DeclaredGrantSet::empty()
+                    )
                     .unwrap());
             }
             let audit = store.read_audit(None).unwrap();

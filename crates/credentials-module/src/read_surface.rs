@@ -3343,10 +3343,13 @@ impl ReadSurface {
             self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
             return Err(ReadError::NotFound);
         }
-        let coverage =
-            self.engine
-                .store()
-                .evaluate_scoped_coverage(kind, &id, credential_id, operation);
+        let coverage = self.engine.store().evaluate_scoped_coverage(
+            kind,
+            &id,
+            credential_id,
+            operation,
+            &credentials_core::store::DeclaredGrantSet::empty(),
+        );
         #[cfg(test)]
         let coverage = if self
             .scoped_grant_lookup_error_for_test
@@ -3456,7 +3459,11 @@ impl ReadSurface {
         let mut snapshot = self
             .engine
             .store()
-            .list_scoped_snapshot(principal_kind, &principal_id)
+            .list_scoped_snapshot(
+                principal_kind,
+                &principal_id,
+                &credentials_core::store::DeclaredGrantSet::empty(),
+            )
             .map_err(|_| ReadError::StoreError)?;
         self.add_remote_rows(&mut snapshot)?;
         // A grant that reaches the transfer key (through a category it was put in)
@@ -3520,7 +3527,11 @@ impl ReadSurface {
         let (mut snapshot, mut keys) = self
             .engine
             .store()
-            .watch_scoped_snapshot(kind, &id)
+            .watch_scoped_snapshot(
+                kind,
+                &id,
+                &credentials_core::store::DeclaredGrantSet::empty(),
+            )
             .map_err(|_| ReadError::StoreError)?;
         self.add_remote_rows(&mut snapshot)?;
         // The rows take the same fence as `list_scoped`, so no watcher's view shows the

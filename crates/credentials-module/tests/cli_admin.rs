@@ -62,6 +62,9 @@ mod declared_grants_cli;
 #[path = "support/manifest_cli.rs"]
 mod manifest_cli;
 
+#[path = "support/remote_grant_reach_cli.rs"]
+mod remote_grant_reach_cli;
+
 fn cli() -> Command {
     let mut command = cli_binary();
     isolated_cli::isolate(&mut command);

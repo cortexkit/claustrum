@@ -5038,6 +5038,10 @@ fn request_admin_status_with_schema(
     };
     let mut result =
         credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false);
+    credentials_core::admin_ops::attach_remote_credentials(
+        &mut result,
+        &EncryptedStore::remote_inventory_read_only(&db).map_err(CliError::Store)?,
+    );
     if let Ok(key) = resolve_store_key(global) {
         if let Ok(plans) = credentials_core::store::detected_plans_read_only(&db, &key) {
             credentials_core::admin_ops::attach_detected_plans(&mut result, &plans);
@@ -5314,8 +5318,8 @@ struct GrantRow {
     created_at_ms: i64,
 }
 
-/// Credential id -> its assigned categories, read from the same `admin.status` reply
-/// the grant table is rendered from.
+/// Credential id -> its assigned member-local categories, including remote copies,
+/// read from the same `admin.status` reply the grant table is rendered from.
 ///
 /// Tolerant by design: a reply without the inventory yields an empty map and every grant
 /// renders `reaches 0`. That is honest rather than silent -- an operator seeing every row
@@ -5324,13 +5328,13 @@ fn parse_credential_categories(
     result: &serde_json::Value,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
     let mut map = std::collections::BTreeMap::new();
-    let Some(rows) = result
-        .get("credentials")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return map;
-    };
-    for row in rows {
+    // Scoped coverage prefers local metadata if both tables contain an id. Preserve
+    // that precedence while counting each id only once.
+    for row in ["remote_credentials", "credentials"]
+        .iter()
+        .filter_map(|member| result.get(member).and_then(serde_json::Value::as_array))
+        .flatten()
+    {
         let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
@@ -5530,9 +5534,8 @@ fn render_grants(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
     // keeps that honest -- a permanent visible statement rather than a one-time warning
     // that scrolls past.
     //
-    // Computed from the SAME `admin.status` reply, which already carries per-credential
-    // categories. No new admin op and no new wire field, which is why this is a
-    // rendering change rather than a protocol one.
+    // Both output paths use the same status inventory, including member-local
+    // categories for remote copies when the vault supplies them.
     let inventory = parse_credential_categories(result);
     let reach = |g: &GrantRow| -> usize {
         let selector = g
@@ -9246,6 +9249,33 @@ mod taxonomy_cli_tests {
             "exact is byte equality: a prefix of a real id reaches nothing, which is the \
              narrowing the selector vocabulary exists to make visible"
         );
+    }
+
+    #[test]
+    fn remote_grant_reach_merges_optional_inventory_once_and_keeps_local_metadata() {
+        let local = serde_json::json!({
+            "credentials": [{"id": "oauth:duplicate", "categories": ["local-category"]}]
+        });
+        let legacy = parse_credential_categories(&local);
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(grant_reach(&legacy, "exact", "oauth:duplicate"), 1);
+        let mut reply = local.clone();
+        reply["remote_credentials"] = serde_json::json!([
+            {"id": "oauth:duplicate", "categories": ["remote-category"]},
+            {"id": "oauth:only-remote", "categories": ["shared-category"]},
+            {"categories": ["ignored-without-id"]}
+        ]);
+        let inventory = parse_credential_categories(&reply);
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(grant_reach(&inventory, "exact", "oauth:duplicate"), 1);
+        assert_eq!(grant_reach(&inventory, "category", "local-category"), 1);
+        assert_eq!(grant_reach(&inventory, "category", "remote-category"), 0);
+        assert_eq!(grant_reach(&inventory, "category", "shared-category"), 1);
+        reply.as_object_mut().unwrap().remove("credentials");
+        assert_eq!(parse_credential_categories(&reply).len(), 2);
+        reply.as_object_mut().unwrap().remove("remote_credentials");
+        assert!(parse_credential_categories(&reply).is_empty());
+        assert_eq!(parse_credential_categories(&local), legacy);
     }
 
     #[test]

@@ -1014,50 +1014,70 @@ impl EncryptedStore {
     /// listing shows for remote ids: nothing in it came from a home call made now.
     pub fn remote_inventory(&self) -> Result<Vec<RemoteInventoryRow>, StoreOpError> {
         self.store
-            .with_conn(|conn| {
-                if read_schema_version(conn)? < REMOTE_METADATA_SCHEMA_VERSION {
-                    return Ok(Vec::new());
-                }
-                let tx = conn.unchecked_transaction()?;
-                let records = {
-                    let mut stmt =
-                        tx.prepare("SELECT * FROM remote_records ORDER BY credential_id")?;
-                    let rows = stmt
-                        .query_map([], remote_record_from_row)?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    rows
-                };
-                let mut out = Vec::with_capacity(records.len());
-                for record in records {
-                    let id = record.credential_id.as_str();
-                    let categories = {
-                        let mut stmt = tx.prepare(
-                            "SELECT category FROM remote_record_categories \
+            .with_conn(Self::remote_inventory_from_conn)
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read the same member-local inventory without a writer lease or master key.
+    /// Older schemas without remote metadata contribute no remote rows.
+    pub fn remote_inventory_read_only(
+        store_path: &std::path::Path,
+    ) -> Result<Vec<RemoteInventoryRow>, StoreOpError> {
+        let map =
+            |error: rusqlite::Error| StoreOpError::from(StoreError::Backend(error.to_string()));
+        let conn = rusqlite::Connection::open_with_flags(
+            format!("file:{}?mode=ro", store_path.display()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(map)?;
+        Self::remote_inventory_from_conn(&conn).map_err(map)
+    }
+
+    fn remote_inventory_from_conn(
+        conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<RemoteInventoryRow>> {
+        if read_schema_version(conn)? < REMOTE_METADATA_SCHEMA_VERSION {
+            return Ok(Vec::new());
+        }
+        let tx = conn.unchecked_transaction()?;
+        let records = {
+            let mut stmt = tx.prepare("SELECT * FROM remote_records ORDER BY credential_id")?;
+            let rows = stmt
+                .query_map([], remote_record_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let id = record.credential_id.as_str();
+            let categories = {
+                let mut stmt = tx.prepare(
+                    "SELECT category FROM remote_record_categories \
                              WHERE credential_id = ?1 ORDER BY category",
-                        )?;
-                        let rows = stmt
-                            .query_map([id], |row| row.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?;
-                        rows
-                    };
-                    let provider_ids = {
-                        let mut stmt = tx.prepare(
-                            "SELECT provider_id FROM remote_record_provider_ids \
+                )?;
+                let rows = stmt
+                    .query_map([id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let provider_ids = {
+                let mut stmt = tx.prepare(
+                    "SELECT provider_id FROM remote_record_provider_ids \
                              WHERE credential_id = ?1 ORDER BY provider_id",
-                        )?;
-                        let rows = stmt
-                            .query_map([id], |row| row.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?;
-                        rows
-                    };
-                    let plan_tier = tx
-                        .query_row(
-                            "SELECT plan_tier FROM remote_record_plan_tiers WHERE credential_id = ?1",
-                            [id],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .optional()?;
-                    out.push(RemoteInventoryRow {
+                )?;
+                let rows = stmt
+                    .query_map([id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let plan_tier = tx
+                .query_row(
+                    "SELECT plan_tier FROM remote_record_plan_tiers WHERE credential_id = ?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            out.push(RemoteInventoryRow {
                         plan_tier_since_ms: if read_schema_version(&tx)? >= crate::store::PLAN_TIER_SINCE_SCHEMA_VERSION {
                             tx.query_row("SELECT since_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
                         } else { None },
@@ -1069,11 +1089,9 @@ impl EncryptedStore {
                         provider_ids,
                         plan_tier,
                     });
-                }
-                tx.commit()?;
-                Ok(out)
-            })
-            .map_err(StoreOpError::from)
+        }
+        tx.commit()?;
+        Ok(out)
     }
 
     /// Record the result of the latest fetch for a remote record: `outcome` is `ok` or

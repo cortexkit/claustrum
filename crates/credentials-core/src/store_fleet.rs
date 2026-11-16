@@ -664,7 +664,10 @@ fn validate_wrap(body: &WrapPlaintext, from: &str, myself: &str) -> Result<(), F
             .keys
             .windows(2)
             .any(|pair| pair[0].epoch >= pair[1].epoch)
-        || (body.kind == "rotation" && (body.keys.len() != 1 || body.keys[0].minter != from))
+        || (body.kind == "rotation"
+            && (body.keys.len() != 1
+                || body.keys[0].minter != from
+                || !body.keys[0].members.contains(&body.keys[0].minter)))
     {
         return Err(FleetError::WrapRefused);
     }
@@ -1607,5 +1610,90 @@ mod tests {
         let mut json = serde_json::to_value(good()).unwrap();
         json["keys"][0]["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<WrapPlaintext>(json).is_err());
+    }
+
+    #[test]
+    fn fleet_removed_sender_is_refused_for_rotation_and_join_without_writing() {
+        let (_a, a) = rig("fleet-removed-sender-a", 1);
+        let (_b, b) = rig("fleet-removed-sender-b", 2);
+        let peers = [peer(&a, 1)];
+        let record = a.fleet_read(|conn| a.fleet_wrap_record(conn)).unwrap();
+        let public = peer(&b, 2);
+        let mut body = WrapPlaintext {
+            keys: vec![WrapKey {
+                epoch: 1,
+                key: encode(&[7; 32]),
+                members: vec![id(2)],
+                minter: id(1),
+            }],
+            kind: "join".into(),
+            v: WRAP_DOMAIN.into(),
+        };
+        let join = make_wrap(&record, &id(1), &id(2), public.public_key(), &body).unwrap();
+        // A join may carry history whose holders omit the sender. Prove the same
+        // authenticated wrap is usable before its sender's removal is observed.
+        assert_eq!(b.fleet_epoch_import(&join, &peers).unwrap().epochs, [1]);
+        b.fleet_record_removals(
+            &[FleetRemoval {
+                member_id: id(1),
+                removal_id: "removed-sender".into(),
+            }],
+            10,
+        )
+        .unwrap();
+        body.keys[0].epoch = 2;
+        let before = blobs(&b);
+        let status = b.fleet_epoch_status().unwrap();
+        let envelopes = envelope_snapshot(&b);
+        let audit = b.read_audit(None).unwrap();
+        for kind in ["rotation", "join"] {
+            body.kind = kind.into();
+            let wrap = make_wrap(&record, &id(1), &id(2), public.public_key(), &body).unwrap();
+            assert_eq!(
+                b.fleet_epoch_import(&wrap, &peers).unwrap_err(),
+                FleetError::WrapRefused,
+                "removed sender still in peer snapshot: {kind}"
+            );
+            assert_eq!(blobs(&b), before);
+            assert_eq!(b.fleet_epoch_status().unwrap(), status);
+            assert_eq!(envelope_snapshot(&b), envelopes);
+            assert_eq!(b.read_audit(None).unwrap(), audit);
+        }
+    }
+
+    #[test]
+    fn fleet_rotation_omitting_its_minter_is_refused_before_writing() {
+        let (_a, a) = rig("fleet-missing-minter-a", 1);
+        let (_b, b) = rig("fleet-missing-minter-b", 2);
+        let peers = [peer(&a, 1)];
+        let record = a.fleet_read(|conn| a.fleet_wrap_record(conn)).unwrap();
+        let public = peer(&b, 2);
+        let mut body = WrapPlaintext {
+            keys: vec![WrapKey {
+                epoch: 1,
+                key: encode(&[7; 32]),
+                members: vec![id(2)],
+                minter: id(1),
+            }],
+            kind: "rotation".into(),
+            v: WRAP_DOMAIN.into(),
+        };
+        let wrap = make_wrap(&record, &id(1), &id(2), public.public_key(), &body).unwrap();
+        let before = blobs(&b);
+        let status = b.fleet_epoch_status().unwrap();
+        let envelopes = envelope_snapshot(&b);
+        let audit = b.read_audit(None).unwrap();
+        assert_eq!(
+            b.fleet_epoch_import(&wrap, &peers).unwrap_err(),
+            FleetError::WrapRefused
+        );
+        assert_eq!(blobs(&b), before);
+        assert_eq!(b.fleet_epoch_status().unwrap(), status);
+        assert_eq!(envelope_snapshot(&b), envelopes);
+        assert_eq!(b.read_audit(None).unwrap(), audit);
+        body.keys[0].members.insert(0, id(1));
+        let wrap = make_wrap(&record, &id(1), &id(2), public.public_key(), &body).unwrap();
+        assert_eq!(b.fleet_epoch_import(&wrap, &peers).unwrap().epochs, [1]);
+        assert_eq!(audit_len(&b), audit.len() + 1);
     }
 }

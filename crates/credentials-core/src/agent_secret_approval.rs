@@ -303,9 +303,7 @@ pub fn local_approval_statement(
     statement["coverage"] = json!("scope");
     statement["durations"] = json!(local.durations());
     statement["request_expires_at_ms"] = json!(expiry);
-    if let Some(agent) = &call.agent_id {
-        statement["agent_id"] = json!(agent);
-    }
+    statement["agent_id"] = json!(call.agent_id);
     if !asking_member.is_empty() {
         statement["asking_member_id"] = json!(asking_member);
     }
@@ -400,9 +398,9 @@ mod local_statement_tests {
     }
 
     #[test]
-    fn local_statement_has_exact_members_and_omits_absent_attribution() {
+    fn local_statement_has_exact_members_and_nullable_agent_id() {
         let local = LocalUse::from_value(&sudo()).unwrap();
-        let call = super::super::SecretUse {
+        let mut call = super::super::SecretUse {
             name: "pw".into(),
             sender: super::super::SecretSender::Aft,
             scope: super::super::AskingScope {
@@ -417,8 +415,13 @@ mod local_statement_tests {
             target: super::super::UseTarget::LocalProgram(local.clone()),
         };
         let statement = local_approval_statement("r", "m", "i", &call, &local, None, 42, "");
-        let expected = br#"{"command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
+        let expected = br#"{"agent_id":null,"command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
         assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
+        call.agent_id = Some("agent-A".into());
+        let statement = local_approval_statement("r", "m", "i", &call, &local, None, 42, "");
+        let expected = br#"{"agent_id":"agent-A","command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
+        assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
+        call.agent_id = None;
         let ssh = LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/","purpose":"login"})).unwrap();
         let statement =
             local_approval_statement("r", "m", "i", &call, &ssh, Some("SHA256:test"), 42, "asker");
@@ -432,9 +435,9 @@ mod local_statement_tests {
             statement.get("secret").is_none()
                 && statement.get("expects").is_none()
                 && statement.get("undoable").is_none()
-                && statement.get("agent_id").is_none()
         );
-        assert_eq!(statement.as_object().unwrap().len(), 15);
+        assert_eq!(statement.get("agent_id"), Some(&serde_json::Value::Null));
+        assert_eq!(statement.as_object().unwrap().len(), 16);
     }
 
     fn userauth(session_len: usize) -> Vec<u8> {

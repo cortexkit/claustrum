@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 const NOW: i64 = 1_700_000_000_000;
 const HOME: &str = "fed-computer:22222222222222222222222222222222";
-const PHONE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PHONE: &str = "11111111111111111111111111111111";
 const DEPOSIT_ID: &str = "01HF7YAT000000000000000001";
 const REQUEST_ID: &str = "01HF7YAT000000000000000100";
 const INCARNATION: &str = "000000000000000000000000000000ab";
@@ -450,6 +450,22 @@ fn secret_basic_auth_vectors_are_producer_generated_and_pinned() {
     let pack = produce();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/vectors/secret-basic-auth-vectors-v1");
+    for (_, bytes) in pack
+        .files
+        .iter()
+        .filter(|(name, _)| name.ends_with(".envelope.json"))
+    {
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        let fingerprint = envelope["device_fingerprint"].as_str().unwrap();
+        assert_eq!(
+            fingerprint.len(),
+            32,
+            "phone fingerprint must be 32 hex digits"
+        );
+        assert!(fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
     for (name, bytes) in &pack.files {
         let path = root.join(name);
         if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {

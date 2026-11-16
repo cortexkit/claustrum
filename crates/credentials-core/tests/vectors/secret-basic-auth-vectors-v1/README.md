@@ -71,7 +71,8 @@ Fixed inputs for an independent implementation:
 
 - Clock: 1,700,000,000,000 ms; hour grant expires at 1,700,003,600,000 ms.
 - Home: `fed-computer:22222222222222222222222222222222`.
-- Phone fingerprint: 64 lowercase `a` characters; pairing: `pair-A`.
+- Phone fingerprint: `11111111111111111111111111111111` (32 lowercase hex
+  characters); pairing: `pair-A`.
 - Master key: 32 bytes of `0x1d` (only for internal test record sealing).
 - X25519 receiver scalar: 32 bytes of `0x09`; phone sender scalar: 32 bytes of
   `0x03`; HPKE ephemeral IKM: 32 bytes of `0x04`.

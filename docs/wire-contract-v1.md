@@ -3932,6 +3932,12 @@ over the exact packet. Without a grant, the reply has the same four members as
 `use.result.approval_required`, with a `ck-secret-local-use-statement/v1` statement
 carrying the vault-authored key identity and fingerprint, not a secret name.
 
+Every `ck-secret-local-use-statement/v1` statement carries `agent_id`: a string
+when the scope names an agent, or `null` otherwise. Sudo statements carry
+`secret: {name, kind: "local_program", incarnation}`; SSH statements instead carry
+`key: {credential_id, incarnation, fingerprint}`. These identities are supplied by
+the vault, not the asking program.
+
 Checks stop in this order: AFT admission; closed params and signing-id grammar;
 feature switch; stamp and scope-only coverage; target, text and userauth grammar;
 key enrollment, target coverage and public-key match; grant or approval. The first

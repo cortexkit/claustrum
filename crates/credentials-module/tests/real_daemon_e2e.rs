@@ -390,8 +390,7 @@ where
     // The subc.jsonc: a storage section + the vault module marked reserved, with the
     // operator key path passed via env so the daemon resolves the same key the CLI
     // provisioned. `registration_channel: true` is the gated production setting: the
-    // daemon then accepts the vault only over the channel it hands over, never by nonce,
-    // and reports the declaration as `declared`.
+    // daemon then accepts the vault only over the channel it hands over, never by nonce.
     let subc_jsonc = serde_json::json!({
         "version": 1,
         "storage": { "backend": "sqlite", "data_home": data_home },
@@ -567,15 +566,14 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
         .find(|entry| entry["module_id"] == MODULE_ID)
         .expect("vault provenance");
     let observed = subc_control::SupervisorModuleProvenanceExt::read_from(entry).unwrap();
-    if observed.registration.is_some() || observed.registration_declaration.is_some() {
+    // `registration_declaration` is not asserted: the daemon fills it from its stamped
+    // configuration gate, which this unstamped test daemon does not run, so it reads
+    // nothing about the vault.
+    if observed.registration.is_some() {
         assert_eq!(
             observed.registration,
             Some(subc_control::RegistrationMethod::Channel),
             "a channel-capable daemon must observe channel registration, not a nonce fallback"
-        );
-        assert_eq!(
-            observed.registration_declaration.as_deref(),
-            Some("declared")
         );
         assert!(
             entry["module_declared"]["build"]

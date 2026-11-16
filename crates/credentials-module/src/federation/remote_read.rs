@@ -1500,7 +1500,9 @@ fn sender_wire(sender: SecretSender) -> &'static str {
 
 /// Every §15 secret refusal code, so a home refusal in that vocabulary is relayed as
 /// the exact body this vault's own store would answer.
-const SECRET_ERRORS: [SecretError; 13] = [
+const SECRET_ERRORS: [SecretError; 15] = [
+    SecretError::Ambiguous,
+    SecretError::SecretBasicAuthDisabled,
     SecretError::SecretLocalProgramsDisabled,
     SecretError::InvalidParams,
     SecretError::LimitExceeded,

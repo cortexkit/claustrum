@@ -1717,6 +1717,7 @@ pub enum StoreOpError {
     /// An API key with multiple host rules or a wildcard, or a login with multiple
     /// origins, requires `secret.multi_host` to be on.
     SecretMultiHostDisabled,
+    SecretBasicAuthDisabled,
     SecretLocalProgramsDisabled,
     /// An agent secret already exists under the requested name, live or `corrupt`.
     /// Names are create-only, so the operator must delete before storing again.
@@ -1794,6 +1795,7 @@ impl std::fmt::Display for StoreOpError {
         match self {
             StoreOpError::InvalidAgentSsh => f.write_str("invalid_params: invalid SSH enrollment"),
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
+            StoreOpError::SecretBasicAuthDisabled => f.write_str("secret_basic_auth_disabled: secret.basic_auth is off or unreadable; enable it with ck auth secret basic-auth on"),
             StoreOpError::SecretMultiHostDisabled => f.write_str("secret_multi_host_disabled: secret.multi_host is off or unreadable; enable it with ck auth secret multi-host on"),
             StoreOpError::SecretLocalProgramsDisabled => f.write_str("secret_local_programs_disabled: secret.local_programs is off or unreadable; enable it with ck auth secret local-programs on"),
             StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
@@ -1936,6 +1938,7 @@ impl StoreOpError {
             StoreOpError::InvalidAgentSsh => Some("invalid_params"),
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
+            StoreOpError::SecretBasicAuthDisabled => Some("secret_basic_auth_disabled"),
             StoreOpError::SecretLocalProgramsDisabled => Some("secret_local_programs_disabled"),
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
@@ -19799,9 +19802,9 @@ pub use store_agent_secrets::{
     SecretHomeStatus, SECRET_HOME_SELF, SECRET_HOME_SETTING,
 };
 pub use store_agent_secrets::{
-    secret_local_programs_status_read_only, secret_multi_host_status_read_only,
-    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
-    SecretUseOutcome,
+    secret_basic_auth_status_read_only, secret_local_programs_status_read_only,
+    secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,
+    PhoneOperation, SecretDepositPublicKey, SecretUseOutcome,
 };
 /// Sealed releases to paired computers and the receipts that answer their retries.
 pub use store_agent_secrets::{

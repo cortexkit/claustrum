@@ -354,6 +354,8 @@ pub enum AdminOpBody {
     SecretPhoneGateSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_multi_host_set")]
     SecretMultiHostSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_basic_auth_set")]
+    SecretBasicAuthSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_local_programs_set")]
     SecretLocalProgramsSet { v: u32, enabled: bool },
     /// `ck auth secret put`: create an agent secret from operator-supplied material.
@@ -851,6 +853,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("approver", approver)
                 .finish(),
             AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+            AdminOpBody::SecretBasicAuthSet { v, enabled } => f
+                .debug_struct("SecretBasicAuthSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::SecretMultiHostSet { v, enabled } => f
                 .debug_struct("SecretMultiHostSet")
                 .field("v", v)
@@ -1059,6 +1066,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { v, .. }
             | AdminOpBody::SecretPhoneGateSet { v, .. }
             | AdminOpBody::SecretMultiHostSet { v, .. }
+            | AdminOpBody::SecretBasicAuthSet { v, .. }
             | AdminOpBody::SecretLocalProgramsSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
@@ -1129,6 +1137,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
@@ -1254,6 +1263,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
@@ -1329,6 +1339,7 @@ impl AdminOpBody {
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
             AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
             AdminOpBody::SecretMultiHostSet { .. } => "admin.secret_multi_host_set",
+            AdminOpBody::SecretBasicAuthSet { .. } => "admin.secret_basic_auth_set",
             AdminOpBody::SecretLocalProgramsSet { .. } => "admin.secret_local_programs_set",
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
@@ -1406,6 +1417,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
@@ -2096,6 +2108,13 @@ pub fn apply(
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
+        }
+        AdminOpBody::SecretBasicAuthSet { enabled, .. } => {
+            let changed = store.set_secret_basic_auth_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretBasicAuthSet, actor),
+            )?;
+            Ok(serde_json::json!({"basic_auth": enabled, "changed": changed}))
         }
         AdminOpBody::SecretMultiHostSet { enabled, .. } => {
             let changed = store.set_secret_multi_host_audited(

@@ -12,6 +12,7 @@ pub const MAX_SECRET_PATH_PREFIX_BYTES: usize = rules::MAX_PREFIX_BYTES;
 pub const MAX_SECRET_RULES: usize = 8;
 pub const MAX_SECRET_ORIGINS: usize = 4;
 pub const MAX_SECRET_HEADER_BYTES: usize = 64;
+pub const MAX_SECRET_BASIC_USER_BYTES: usize = 128;
 pub const MAX_SECRET_QUERY_BYTES: usize = 64;
 pub const MAX_SECRET_POINTER_BYTES: usize = 256;
 pub const MAX_SECRET_USERNAME_BYTES: usize = 256;
@@ -391,6 +392,17 @@ pub fn validate_location(location: &str) -> Result<(), ValidationError> {
         return Err(InvalidParams);
     }
     match kind {
+        "authorization_basic" => {
+            if !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._@+-".contains(&b))
+            {
+                return Err(InvalidParams);
+            }
+            if value.len() > MAX_SECRET_BASIC_USER_BYTES {
+                return Err(LimitExceeded);
+            }
+        }
         "header" => {
             if !value
                 .bytes()

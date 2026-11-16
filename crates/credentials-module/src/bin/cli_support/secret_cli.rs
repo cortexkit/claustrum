@@ -29,6 +29,7 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     match verb.as_str() {
         "phone-gate" => phone_gate(global, rest),
         "multi-host" => multi_host(global, rest),
+        "basic-auth" => basic_auth(global, rest),
         "local-programs" => local_programs(global, rest),
         "put" => put(global, rest),
         "list" => list(global, rest),
@@ -80,7 +81,7 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
     };
     let (value_flags, positional) = match verb.as_str() {
         // Each setting takes one positional operand and no flags.
-        "phone-gate" | "multi-host" | "local-programs" => (&[][..], true),
+        "phone-gate" | "multi-host" | "basic-auth" | "local-programs" => (&[][..], true),
         // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
         "delete" => (DELETE_FLAGS, true),
         // `put` names the secret first or with `--name`, then its flags.
@@ -165,6 +166,8 @@ pub fn help_text() -> &'static str {
       multi-rule, wildcard and multi-origin secrets. home set <member-id>|self\n\
       names the vault that holds agent secrets, home unset clears it, and home\n\
       show prints it. local-programs on|off|status controls local secrets.\n\
+      basic-auth on|off|status controls authorization_basic:<user> creation.\n\
+      Keep basic-auth off until the phone can show Basic sign-in cards.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\
@@ -256,6 +259,39 @@ fn multi_host(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         },
     )?;
     println!("multi-host setting {}", if enabled { "on" } else { "off" });
+    Ok(())
+}
+
+fn basic_auth(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let [action] = args else {
+        return Err(CliError::Usage(
+            "secret basic-auth takes on, off or status".into(),
+        ));
+    };
+    if action == "status" {
+        let status =
+            credentials_core::store::secret_basic_auth_status_read_only(&store_path(global))
+                .map_err(|_| CliError::Usage("cannot read basic-auth setting".into()))?;
+        println!("basic-auth setting {status}");
+        return Ok(());
+    }
+    let enabled = match action.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return Err(CliError::Usage(
+                "secret basic-auth takes on, off or status".into(),
+            ))
+        }
+    };
+    commit_admin(
+        global,
+        AdminOpBody::SecretBasicAuthSet {
+            v: ADMIN_OP_SCHEMA_V2,
+            enabled,
+        },
+    )?;
+    println!("basic-auth setting {}", if enabled { "on" } else { "off" });
     Ok(())
 }
 

@@ -880,3 +880,40 @@ fn phone_local_program_deposit_key_set_is_closed() {
         ));
     }
 }
+
+#[tokio::test]
+async fn basic_auth_phone_location_grammar_preserves_transport_refusals() {
+    let (_root, store) = rig("basic-location-grammar");
+    let mut params = extended_deposit_params("agent_api_key", json!({"host":"x.test"}));
+    params["location"] = json!(format!("authorization_basic:{}", "a".repeat(128)));
+    assert!(parse("secret.deposit", &params).is_ok());
+    for (user, limit) in [
+        ("user:password".into(), false),
+        (String::new(), false),
+        ("a".repeat(129), true),
+        ("usér".into(), false),
+    ] {
+        params["location"] = json!(format!("authorization_basic:{user}"));
+        let polled = AtomicBool::new(false);
+        let answer = serve_with_lookup(
+            Arc::clone(&store),
+            FP,
+            "secret.deposit",
+            &params,
+            tokio::time::Instant::now() + PHONE_OP_DEADLINE,
+            async {
+                polled.store(true, Ordering::SeqCst);
+                Some(paired())
+            },
+        )
+        .await;
+        if limit {
+            assert!(
+                matches!(answer, PhoneAnswer::Reply(ref reply) if reply == &json!({"error":{"code":"limit_exceeded","class":"context_overflow"}}))
+            );
+        } else {
+            assert!(matches!(answer, PhoneAnswer::InvalidParams(_)));
+        }
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+}

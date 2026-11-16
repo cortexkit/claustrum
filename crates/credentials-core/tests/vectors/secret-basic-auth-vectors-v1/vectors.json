@@ -1,0 +1,561 @@
+{
+  "ambiguous": {
+    "reply": {
+      "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJhbWJpZ3VvdXMifX0",
+      "file": "ambiguous.reply.json",
+      "json": {
+        "error": {
+          "class": "permanent",
+          "code": "ambiguous"
+        }
+      },
+      "sha256": "852b19dd49b2b8a67c3f9b75eefdf66ef8cec0497529c1f52fa242227bc7aacc"
+    },
+    "request": {
+      "b64url": "eyJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7ImFnZW50X2lkIjoiYWdlbnQtQSJ9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IngudGVzdCIsInBhdGgiOiIvcmVwb3MvYS9wcm9qZWN0LmdpdC9pbmZvL3JlZnMiLCJzY2hlbWUiOiJodHRwcyJ9fQ",
+      "file": "ambiguous.request.json",
+      "json": {
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent-A"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal-core"
+          },
+          "owner_authorized": true,
+          "ref": "H",
+          "scope_epoch": 7
+        },
+        "target": {
+          "host": "x.test",
+          "path": "/repos/a/project.git/info/refs",
+          "scheme": "https"
+        }
+      },
+      "sha256": "47408c05257ffd89a187474c4f3844ec1ccf67ff5ab1c97f98cc1a6afd056d3d"
+    }
+  },
+  "approval_public": {
+    "b64url": "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM",
+    "file": "approval-public.sec1.bin",
+    "sha256": "c8f193e678e762f9c4b28fc9e11a6e43d5cd792d2e1e376e56b80a76f22744ac"
+  },
+  "cases": [
+    {
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDAiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNkltRm5aVzUwTFVFaUxDSmpiM1psY21GblpTSTZJbk5qYjNCbElpd2laSFZ5WVhScGIyNXpJanBiSW05dVkyVWlMQ0pvYjNWeUlpd2ljMlZ6YzJsdmJpSXNJbkJsY20xaGJtVnVkQ0pkTENKdFpXMWlaWEpmYVdRaU9pSm1aV1F0WTI5dGNIVjBaWEk2TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSWlMQ0p5WlhGMVpYTjBYMlY0Y0dseVpYTmZZWFJmYlhNaU9qRTNNREF3TURBMk1EQXdNREFzSW5KbGNYVmxjM1JmYVdRaU9pSXdNVWhHTjFsQlZEQXdNREF3TURBd01EQXdNREF3TURFd01DSXNJbk5qYjNCbElqcDdJbVZ3YjJOb0lqbzNMQ0pyYVc1a0lqb2lhR1ZoWkNJc0ltOTNibVZ5SWpvaWNtVnpaWEoyWldRNmNISmxabkp2Ym5SaGJDMWpiM0psSWl3aWNtVm1Jam9pU0NKOUxDSnpaV055WlhRaU9uc2lhVzVqWVhKdVlYUnBiMjRpT2lJd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQmhZaUlzSW10cGJtUWlPaUpoWjJWdWRGOWhjR2xmYTJWNUlpd2libUZ0WlNJNkltZHBkQ0o5TENKMWMyVWlPbnNpYUc5emRDSTZJbmd1ZEdWemRDSXNJbXh2WTJGMGFXOXVJam9pWVhWMGFHOXlhWHBoZEdsdmJsOWlZWE5wWXpwbmFYUWlMQ0p3WVhSb1gzQnlaV1pwZUNJNklpOXlaWEJ2Y3k5aEluMHNJbllpT2lKamF5MXpaV055WlhRdGRYTmxMWE4wWVhSbGJXVnVkQzkyTVNKOSIsInN0YXR1cyI6ImFwcHJvdmFsX3JlcXVpcmVkIn0",
+        "file": "named.approval-required.json",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiIsInBlcm1hbmVudCJdLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJzZWNyZXQiOnsiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBhYiIsImtpbmQiOiJhZ2VudF9hcGlfa2V5IiwibmFtZSI6ImdpdCJ9LCJ1c2UiOnsiaG9zdCI6IngudGVzdCIsImxvY2F0aW9uIjoiYXV0aG9yaXphdGlvbl9iYXNpYzpnaXQiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtdXNlLXN0YXRlbWVudC92MSJ9",
+          "status": "approval_required"
+        },
+        "sha256": "af39ab79af5d7dc44aceb7566f66ddbb1087e5fa6d362f36a006aa390c01d7d2"
+      },
+      "approval_result": {
+        "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCJ9XX0",
+        "file": "named.approval-result.json",
+        "json": {
+          "results": [
+            {
+              "outcome": "granted",
+              "request_id": "01HF7YAT000000000000000100"
+            }
+          ]
+        },
+        "sha256": "4864f64aaa5a5e3d7211f5150198b9c91452d9219e8ca8355c6b710f89635a0a"
+      },
+      "case": "named",
+      "envelope": {
+        "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImR1cmF0aW9uIjoiaG91ciIsImdyYW50X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDM2MDAwMDAsImlzc3VlZF9hdF9tcyI6MTcwMDAwMDAwMDAwMCwiaXRlbXMiOlt7InJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInN0YXRlbWVudF9zaGEyNTYiOiJhZGE1OTYwYTcwOGU0ODRjZmU5MjI2YTc2MGYwZjE2NjRjZDVmODNjZGMyZDFkODVhZDM5ZTJhYzg0Nzc0MWM1In1dLCJ2IjoiY2stc2VjcmV0LXVzZS1lbnZlbG9wZS92MSJ9",
+        "file": "named.envelope.json",
+        "json": {
+          "decision": "allow",
+          "device_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "duration": "hour",
+          "grant_expires_at_ms": 1700003600000,
+          "issued_at_ms": 1700000000000,
+          "items": [
+            {
+              "request_id": "01HF7YAT000000000000000100",
+              "statement_sha256": "ada5960a708e484cfe9226a760f0f1664cd5f83cdc2d1d85ad39e2ac847741c5"
+            }
+          ],
+          "v": "ck-secret-use-envelope/v1"
+        },
+        "sha256": "473c2329e3aecc40c4b50465732f3ded1c853e8cb883fe3353eab7d0c5a0a21d"
+      },
+      "release": {
+        "b64url": "eyJrZXlfYjY0dXJsIjoiQVA4NkNuUnZhMlZ1Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6Z2l0Iiwic3RhdHVzIjoicmVsZWFzZWQifQ",
+        "file": "named.release.json",
+        "json": {
+          "key_b64url": "AP86CnRva2Vu",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:git",
+          "status": "released"
+        },
+        "sha256": "9197d44559632d0b2e83bdf2dc9ef558f198c0b3885d11344e651f3af3e0137b"
+      },
+      "request": {
+        "b64url": "eyJuYW1lIjoiZ2l0Iiwic3RhbXAiOnsiYXR0cmlidXRlcyI6eyJhZ2VudF9pZCI6ImFnZW50LUEifSwia2luZCI6ImhlYWQiLCJvd25lciI6eyJraW5kIjoicmVzZXJ2ZWQiLCJtb2R1bGVfaWQiOiJwcmVmcm9udGFsLWNvcmUifSwib3duZXJfYXV0aG9yaXplZCI6dHJ1ZSwicmVmIjoiSCIsInNjb3BlX2Vwb2NoIjo3fSwidGFyZ2V0Ijp7Imhvc3QiOiJ4LnRlc3QiLCJwYXRoIjoiL3JlcG9zL2EvcHJvamVjdC5naXQvaW5mby9yZWZzIiwic2NoZW1lIjoiaHR0cHMifX0",
+        "file": "named.request.json",
+        "json": {
+          "name": "git",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "x.test",
+            "path": "/repos/a/project.git/info/refs",
+            "scheme": "https"
+          }
+        },
+        "sha256": "e37789f68556780a0634426c72720b4eb219730cbaa2ea74a57346c0e80879be"
+      },
+      "signature_der": {
+        "b64url": "MEUCIQD7ZnakXbrTXgBo_ThwlKV9qrehlWm5awmX6XeSLLLeOwIgfv1KmyqMYpSjEzmgzjnPcnJqyDABRUE5_vnwO004pvQ",
+        "file": "named.signature.der",
+        "sha256": "bdef4e99ddeeeaf450ce12d75d45ed70c6e9240cddee7bfdb28efaa9561c1c60"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiIsInBlcm1hbmVudCJdLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJzZWNyZXQiOnsiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBhYiIsImtpbmQiOiJhZ2VudF9hcGlfa2V5IiwibmFtZSI6ImdpdCJ9LCJ1c2UiOnsiaG9zdCI6IngudGVzdCIsImxvY2F0aW9uIjoiYXV0aG9yaXphdGlvbl9iYXNpYzpnaXQiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtdXNlLXN0YXRlbWVudC92MSJ9",
+        "file": "named.statement.json",
+        "json": {
+          "agent_id": "agent-A",
+          "coverage": "scope",
+          "durations": [
+            "once",
+            "hour",
+            "session",
+            "permanent"
+          ],
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "secret": {
+            "incarnation": "000000000000000000000000000000ab",
+            "kind": "agent_api_key",
+            "name": "git"
+          },
+          "use": {
+            "host": "x.test",
+            "location": "authorization_basic:git",
+            "path_prefix": "/repos/a"
+          },
+          "v": "ck-secret-use-statement/v1"
+        },
+        "sha256": "ada5960a708e484cfe9226a760f0f1664cd5f83cdc2d1d85ad39e2ac847741c5"
+      }
+    },
+    {
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDAiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNkltRm5aVzUwTFVFaUxDSmpiM1psY21GblpTSTZJbk5qYjNCbElpd2laSFZ5WVhScGIyNXpJanBiSW05dVkyVWlMQ0pvYjNWeUlpd2ljMlZ6YzJsdmJpSXNJbkJsY20xaGJtVnVkQ0pkTENKdFpXMWlaWEpmYVdRaU9pSm1aV1F0WTI5dGNIVjBaWEk2TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSWlMQ0p5WlhGMVpYTjBYMlY0Y0dseVpYTmZZWFJmYlhNaU9qRTNNREF3TURBMk1EQXdNREFzSW5KbGNYVmxjM1JmYVdRaU9pSXdNVWhHTjFsQlZEQXdNREF3TURBd01EQXdNREF3TURFd01DSXNJbk5qYjNCbElqcDdJbVZ3YjJOb0lqbzNMQ0pyYVc1a0lqb2lhR1ZoWkNJc0ltOTNibVZ5SWpvaWNtVnpaWEoyWldRNmNISmxabkp2Ym5SaGJDMWpiM0psSWl3aWNtVm1Jam9pU0NKOUxDSnpaV055WlhRaU9uc2lhVzVqWVhKdVlYUnBiMjRpT2lJd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQmhZaUlzSW10cGJtUWlPaUpoWjJWdWRGOWhjR2xmYTJWNUlpd2libUZ0WlNJNkltZHBkQ0o5TENKMWMyVWlPbnNpYUc5emRDSTZJbmd1ZEdWemRDSXNJbXh2WTJGMGFXOXVJam9pWVhWMGFHOXlhWHBoZEdsdmJsOWlZWE5wWXpwbmFYUWlMQ0p3WVhSb1gzQnlaV1pwZUNJNklpOXlaWEJ2Y3k5aEluMHNJbllpT2lKamF5MXpaV055WlhRdGRYTmxMWE4wWVhSbGJXVnVkQzkyTVNKOSIsInN0YXR1cyI6ImFwcHJvdmFsX3JlcXVpcmVkIn0",
+        "file": "nameless.approval-required.json",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiIsInBlcm1hbmVudCJdLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJzZWNyZXQiOnsiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBhYiIsImtpbmQiOiJhZ2VudF9hcGlfa2V5IiwibmFtZSI6ImdpdCJ9LCJ1c2UiOnsiaG9zdCI6IngudGVzdCIsImxvY2F0aW9uIjoiYXV0aG9yaXphdGlvbl9iYXNpYzpnaXQiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtdXNlLXN0YXRlbWVudC92MSJ9",
+          "status": "approval_required"
+        },
+        "sha256": "af39ab79af5d7dc44aceb7566f66ddbb1087e5fa6d362f36a006aa390c01d7d2"
+      },
+      "approval_result": {
+        "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCJ9XX0",
+        "file": "nameless.approval-result.json",
+        "json": {
+          "results": [
+            {
+              "outcome": "granted",
+              "request_id": "01HF7YAT000000000000000100"
+            }
+          ]
+        },
+        "sha256": "4864f64aaa5a5e3d7211f5150198b9c91452d9219e8ca8355c6b710f89635a0a"
+      },
+      "case": "nameless",
+      "envelope": {
+        "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImR1cmF0aW9uIjoiaG91ciIsImdyYW50X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDM2MDAwMDAsImlzc3VlZF9hdF9tcyI6MTcwMDAwMDAwMDAwMCwiaXRlbXMiOlt7InJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInN0YXRlbWVudF9zaGEyNTYiOiJhZGE1OTYwYTcwOGU0ODRjZmU5MjI2YTc2MGYwZjE2NjRjZDVmODNjZGMyZDFkODVhZDM5ZTJhYzg0Nzc0MWM1In1dLCJ2IjoiY2stc2VjcmV0LXVzZS1lbnZlbG9wZS92MSJ9",
+        "file": "nameless.envelope.json",
+        "json": {
+          "decision": "allow",
+          "device_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "duration": "hour",
+          "grant_expires_at_ms": 1700003600000,
+          "issued_at_ms": 1700000000000,
+          "items": [
+            {
+              "request_id": "01HF7YAT000000000000000100",
+              "statement_sha256": "ada5960a708e484cfe9226a760f0f1664cd5f83cdc2d1d85ad39e2ac847741c5"
+            }
+          ],
+          "v": "ck-secret-use-envelope/v1"
+        },
+        "sha256": "473c2329e3aecc40c4b50465732f3ded1c853e8cb883fe3353eab7d0c5a0a21d"
+      },
+      "release": {
+        "b64url": "eyJrZXlfYjY0dXJsIjoiQVA4NkNuUnZhMlZ1Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6Z2l0Iiwic3RhdHVzIjoicmVsZWFzZWQifQ",
+        "file": "nameless.release.json",
+        "json": {
+          "key_b64url": "AP86CnRva2Vu",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:git",
+          "status": "released"
+        },
+        "sha256": "9197d44559632d0b2e83bdf2dc9ef558f198c0b3885d11344e651f3af3e0137b"
+      },
+      "request": {
+        "b64url": "eyJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7ImFnZW50X2lkIjoiYWdlbnQtQSJ9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IngudGVzdCIsInBhdGgiOiIvcmVwb3MvYS9wcm9qZWN0LmdpdC9pbmZvL3JlZnMiLCJzY2hlbWUiOiJodHRwcyJ9fQ",
+        "file": "nameless.request.json",
+        "json": {
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "x.test",
+            "path": "/repos/a/project.git/info/refs",
+            "scheme": "https"
+          }
+        },
+        "sha256": "47408c05257ffd89a187474c4f3844ec1ccf67ff5ab1c97f98cc1a6afd056d3d"
+      },
+      "signature_der": {
+        "b64url": "MEUCIQD7ZnakXbrTXgBo_ThwlKV9qrehlWm5awmX6XeSLLLeOwIgfv1KmyqMYpSjEzmgzjnPcnJqyDABRUE5_vnwO004pvQ",
+        "file": "nameless.signature.der",
+        "sha256": "bdef4e99ddeeeaf450ce12d75d45ed70c6e9240cddee7bfdb28efaa9561c1c60"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiIsInBlcm1hbmVudCJdLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJzZWNyZXQiOnsiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBhYiIsImtpbmQiOiJhZ2VudF9hcGlfa2V5IiwibmFtZSI6ImdpdCJ9LCJ1c2UiOnsiaG9zdCI6IngudGVzdCIsImxvY2F0aW9uIjoiYXV0aG9yaXphdGlvbl9iYXNpYzpnaXQiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtdXNlLXN0YXRlbWVudC92MSJ9",
+        "file": "nameless.statement.json",
+        "json": {
+          "agent_id": "agent-A",
+          "coverage": "scope",
+          "durations": [
+            "once",
+            "hour",
+            "session",
+            "permanent"
+          ],
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "secret": {
+            "incarnation": "000000000000000000000000000000ab",
+            "kind": "agent_api_key",
+            "name": "git"
+          },
+          "use": {
+            "host": "x.test",
+            "location": "authorization_basic:git",
+            "path_prefix": "/repos/a"
+          },
+          "v": "ck-secret-use-statement/v1"
+        },
+        "sha256": "ada5960a708e484cfe9226a760f0f1664cd5f83cdc2d1d85ad39e2ac847741c5"
+      }
+    }
+  ],
+  "clock_ms": 1700000000000,
+  "deposit": {
+    "aad": {
+      "b64url": "GAAAAAAAAABjay1zZWNyZXQtZGVwb3NpdC1hYWQvdjEaAAAAAAAAADAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxLQAAAAAAAABmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIDAAAAAAAAAGdpdA0AAAAAAAAAYWdlbnRfYXBpX2tleQYAAAAAAAAAeC50ZXN0CAAAAAAAAAAvcmVwb3MvYRcAAAAAAAAAYXV0aG9yaXphdGlvbl9iYXNpYzpnaXQ",
+      "file": "deposit.aad.bin",
+      "sha256": "f183bcddcc8f2fa93623b1208d8013445e51259d64900caf291e79c149754f06"
+    },
+    "ciphertext": {
+      "b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+      "file": "deposit.ciphertext.bin",
+      "sha256": "1aaa32b87e424604c540c64a2004f5da7b5b1f151018980e9eb36c8ab807c88b"
+    },
+    "enc": {
+      "b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+      "file": "deposit.enc.bin",
+      "sha256": "3d9235f16d8df3bce7d1511a05df71cedd38e989d9bc6b46e47f630d14816dec"
+    },
+    "phone_deposit_public": {
+      "b64url": "Xf7dO2vUf2-ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI",
+      "file": "phone-deposit-public.bin",
+      "sha256": "3d74359e38a88a425a57d8716fe3c08deaff0b683257175efc07e68d352b462f"
+    },
+    "plaintext": {
+      "b64url": "HgAAAAAAAABjay1zZWNyZXQtZGVwb3NpdC1wbGFpbnRleHQvdjEJAAAAAAAAAAD_Ogp0b2tlbg",
+      "file": "deposit.plaintext.bin",
+      "sha256": "cf27da35170e4f72e54d9e757c4446a1ef0a86400e8dd8c80a77363ef8a9f581"
+    },
+    "recipient_public": {
+      "b64url": "V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE",
+      "file": "recipient-public.bin",
+      "sha256": "0710e7de882119e331610cac720c1b15288f7006f083c101777be37b19f2a8a3"
+    },
+    "reply": {
+      "b64url": "eyJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGFiIiwic3RhdHVzIjoic3RvcmVkIn0",
+      "file": "deposit.reply.json",
+      "json": {
+        "incarnation": "000000000000000000000000000000ab",
+        "status": "stored"
+      },
+      "sha256": "009f5e0ba7dbc38fc730e07cdbeb5d3339ca7ec3cf5829594bc8c2e039522f1b"
+    },
+    "request": {
+      "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6Z2l0IiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibmFtZSI6ImdpdCIsInBhdGhfcHJlZml4IjoiL3JlcG9zL2EifQ",
+      "file": "deposit.request.json",
+      "json": {
+        "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+        "deposit_id": "01HF7YAT000000000000000001",
+        "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+        "host": "x.test",
+        "kind": "agent_api_key",
+        "location": "authorization_basic:git",
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "name": "git",
+        "path_prefix": "/repos/a"
+      },
+      "sha256": "0cd3b97163541224a742aa6d07b1acf153fad75e72e71135445a968afed2670b"
+    },
+    "sealed_body": {
+      "b64url": "GAAAAAAAAABjay1zZWNyZXQtc2VhbGVkLWJvZHkvdjENAAAAAAAAAGFnZW50X2FwaV9rZXkGAAAAAAAAAHgudGVzdAgAAAAAAAAAL3JlcG9zL2EXAAAAAAAAAGF1dGhvcml6YXRpb25fYmFzaWM6Z2l0CQAAAAAAAAAA_zoKdG9rZW4",
+      "file": "deposit.sealed-body.bin",
+      "sha256": "fe5512c7ec1b405a1f2123bdb3be171a7ec5e0aecae6e37e386fb3db6b532c66"
+    }
+  },
+  "grammar": [
+    {
+      "case": "colon",
+      "request": {
+        "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6dXNlcjpwYXNzd29yZCIsIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm5hbWUiOiJnaXQiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0",
+        "file": "grammar-colon.request.json",
+        "json": {
+          "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+          "deposit_id": "01HF7YAT000000000000000001",
+          "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+          "host": "x.test",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:user:password",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "name": "git",
+          "path_prefix": "/repos/a"
+        },
+        "sha256": "04de7ab273e09aa1ddb77d36f2916b4d11c163e0e4fd667423f829fe950a00ae"
+      },
+      "validation": {
+        "b64url": "eyJjb2RlIjoiaW52YWxpZF9wYXJhbXMiLCJ2YWxpZGF0aW9uX2Vycm9yIjoiSW52YWxpZFBhcmFtcyJ9",
+        "file": "grammar-colon.validation.json",
+        "json": {
+          "code": "invalid_params",
+          "validation_error": "InvalidParams"
+        },
+        "sha256": "ded75ea5efec654fc95ae367778a4298f991eacf22b82d1a868205813b98487c"
+      }
+    },
+    {
+      "case": "empty",
+      "request": {
+        "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6IiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibmFtZSI6ImdpdCIsInBhdGhfcHJlZml4IjoiL3JlcG9zL2EifQ",
+        "file": "grammar-empty.request.json",
+        "json": {
+          "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+          "deposit_id": "01HF7YAT000000000000000001",
+          "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+          "host": "x.test",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "name": "git",
+          "path_prefix": "/repos/a"
+        },
+        "sha256": "36fb32f0d4aa2cf7dc7a9192b91b5bc5e834f21fc9932aa6e53752bb65ba9930"
+      },
+      "validation": {
+        "b64url": "eyJjb2RlIjoiaW52YWxpZF9wYXJhbXMiLCJ2YWxpZGF0aW9uX2Vycm9yIjoiSW52YWxpZFBhcmFtcyJ9",
+        "file": "grammar-empty.validation.json",
+        "json": {
+          "code": "invalid_params",
+          "validation_error": "InvalidParams"
+        },
+        "sha256": "ded75ea5efec654fc95ae367778a4298f991eacf22b82d1a868205813b98487c"
+      }
+    },
+    {
+      "case": "129-bytes",
+      "request": {
+        "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibmFtZSI6ImdpdCIsInBhdGhfcHJlZml4IjoiL3JlcG9zL2EifQ",
+        "file": "grammar-129-bytes.request.json",
+        "json": {
+          "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+          "deposit_id": "01HF7YAT000000000000000001",
+          "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+          "host": "x.test",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "name": "git",
+          "path_prefix": "/repos/a"
+        },
+        "sha256": "a920684938f2d287f84c55f941a9587fcbb14a1cd316487aa318ed4916f08f31"
+      },
+      "validation": {
+        "b64url": "eyJjb2RlIjoibGltaXRfZXhjZWVkZWQiLCJ2YWxpZGF0aW9uX2Vycm9yIjoiTGltaXRFeGNlZWRlZCJ9",
+        "file": "grammar-129-bytes.validation.json",
+        "json": {
+          "code": "limit_exceeded",
+          "validation_error": "LimitExceeded"
+        },
+        "sha256": "ad32fb6856a0709a29245f301e1053c7a716421eca2ca96a7ebc41a8226d97aa"
+      }
+    },
+    {
+      "case": "non-ascii",
+      "request": {
+        "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6dXPDqXIiLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJuYW1lIjoiZ2l0IiwicGF0aF9wcmVmaXgiOiIvcmVwb3MvYSJ9",
+        "file": "grammar-non-ascii.request.json",
+        "json": {
+          "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+          "deposit_id": "01HF7YAT000000000000000001",
+          "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+          "host": "x.test",
+          "kind": "agent_api_key",
+          "location": "authorization_basic:usér",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "name": "git",
+          "path_prefix": "/repos/a"
+        },
+        "sha256": "332fc7ccdb72e4f13d1f9b284c1e897029824948577b7602156c9d1ab3d1dd04"
+      },
+      "validation": {
+        "b64url": "eyJjb2RlIjoiaW52YWxpZF9wYXJhbXMiLCJ2YWxpZGF0aW9uX2Vycm9yIjoiSW52YWxpZFBhcmFtcyJ9",
+        "file": "grammar-non-ascii.validation.json",
+        "json": {
+          "code": "invalid_params",
+          "validation_error": "InvalidParams"
+        },
+        "sha256": "ded75ea5efec654fc95ae367778a4298f991eacf22b82d1a868205813b98487c"
+      }
+    }
+  ],
+  "not_found": {
+    "reply": {
+      "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJub3RfZm91bmQifX0",
+      "file": "not-found.reply.json",
+      "json": {
+        "error": {
+          "class": "permanent",
+          "code": "not_found"
+        }
+      },
+      "sha256": "b1cb9a811b3cd08b18be6eee05d40a6082465c96fb914b87438a1fb595526b0c"
+    },
+    "request": {
+      "b64url": "eyJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7ImFnZW50X2lkIjoiYWdlbnQtQSJ9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IngudGVzdCIsInBhdGgiOiIvcmVwb3MvYS9wcm9qZWN0LmdpdC9pbmZvL3JlZnMiLCJzY2hlbWUiOiJodHRwcyJ9fQ",
+      "file": "not-found.request.json",
+      "json": {
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent-A"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal-core"
+          },
+          "owner_authorized": true,
+          "ref": "H",
+          "scope_epoch": 7
+        },
+        "target": {
+          "host": "x.test",
+          "path": "/repos/a/project.git/info/refs",
+          "scheme": "https"
+        }
+      },
+      "sha256": "47408c05257ffd89a187474c4f3844ec1ccf67ff5ab1c97f98cc1a6afd056d3d"
+    }
+  },
+  "setting_off": {
+    "deposit_reply": {
+      "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJzZWNyZXRfYmFzaWNfYXV0aF9kaXNhYmxlZCJ9fQ",
+      "file": "disabled-deposit.reply.json",
+      "json": {
+        "error": {
+          "class": "permanent",
+          "code": "secret_basic_auth_disabled"
+        }
+      },
+      "sha256": "639e056277779a1db631e6c4bb33b3313ef3934e0c1f0247b15911d95298c816"
+    },
+    "deposit_request": {
+      "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazR0NFJqN0dCUnNTRTZDYUtBX1Rtc1E4MzFUOFZOMTZIRUFsR1g0MzExc0dNIiwiZGVwb3NpdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwiZW5jX2I2NHVybCI6IkFJMVAxc0FHWTVWYjl6M0JVdjVEdlBFOGwwVTVKSWNrV0tJcDlHeUFnQkkiLCJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6Z2l0IiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibmFtZSI6ImdpdCIsInBhdGhfcHJlZml4IjoiL3JlcG9zL2EifQ",
+      "file": "disabled-deposit.request.json",
+      "json": {
+        "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k4t4Rj7GBRsSE6CaKA_TmsQ831T8VN16HEAlGX4311sGM",
+        "deposit_id": "01HF7YAT000000000000000001",
+        "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+        "host": "x.test",
+        "kind": "agent_api_key",
+        "location": "authorization_basic:git",
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "name": "git",
+        "path_prefix": "/repos/a"
+      },
+      "sha256": "0cd3b97163541224a742aa6d07b1acf153fad75e72e71135445a968afed2670b"
+    },
+    "put_reply": {
+      "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJzZWNyZXRfYmFzaWNfYXV0aF9kaXNhYmxlZCJ9fQ",
+      "file": "disabled-put.reply.json",
+      "json": {
+        "error": {
+          "class": "permanent",
+          "code": "secret_basic_auth_disabled"
+        }
+      },
+      "sha256": "639e056277779a1db631e6c4bb33b3313ef3934e0c1f0247b15911d95298c816"
+    },
+    "put_request": {
+      "b64url": "eyJob3N0IjoieC50ZXN0Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJsb2NhdGlvbiI6ImF1dGhvcml6YXRpb25fYmFzaWM6Z2l0IiwibWF0ZXJpYWxfYjY0dXJsIjoiSGdBQUFBQUFBQUJqYXkxelpXTnlaWFF0WkdWd2IzTnBkQzF3YkdGcGJuUmxlSFF2ZGpFSkFBQUFBQUFBQUFEX09ncDBiMnRsYmciLCJuYW1lIjoiZ2l0LW9wZXJhdG9yIiwicGF0aF9wcmVmaXgiOiIvcmVwb3MvYSJ9",
+      "file": "disabled-put.request.json",
+      "json": {
+        "host": "x.test",
+        "kind": "agent_api_key",
+        "location": "authorization_basic:git",
+        "material_b64url": "HgAAAAAAAABjay1zZWNyZXQtZGVwb3NpdC1wbGFpbnRleHQvdjEJAAAAAAAAAAD_Ogp0b2tlbg",
+        "name": "git-operator",
+        "path_prefix": "/repos/a"
+      },
+      "sha256": "ba743ed2e1111ec28ef2df29f1295675156ef2f8cd7ad05adcec50f71d61fc49"
+    }
+  },
+  "v": "secret-basic-auth-vectors-v1"
+}

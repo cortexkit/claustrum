@@ -49,6 +49,7 @@ pub enum AuditOp {
     SecretDepositKeyCreate,
     SecretPhoneGateSet,
     SecretMultiHostSet,
+    SecretBasicAuthSet,
     SecretLocalProgramsSet,
     SshKeyAgentAllow,
     SshKeyAgentDeny,
@@ -230,6 +231,7 @@ impl AuditOp {
             AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
             AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
             AuditOp::SecretMultiHostSet => "secret_multi_host_set",
+            AuditOp::SecretBasicAuthSet => "secret_basic_auth_set",
             AuditOp::SecretLocalProgramsSet => "secret_local_programs_set",
             AuditOp::SshKeyAgentAllow => "ssh_key_agent_allow",
             AuditOp::SshKeyAgentDeny => "ssh_key_agent_deny",
@@ -919,6 +921,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
                 AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
                 AuditOp::SecretMultiHostSet => AuditOp::SecretMultiHostSet.as_str(),
+                AuditOp::SecretBasicAuthSet => AuditOp::SecretBasicAuthSet.as_str(),
                 AuditOp::SecretLocalProgramsSet => AuditOp::SecretLocalProgramsSet.as_str(),
                 AuditOp::SshKeyAgentAllow => AuditOp::SshKeyAgentAllow.as_str(),
                 AuditOp::SshKeyAgentDeny => AuditOp::SshKeyAgentDeny.as_str(),
@@ -1041,6 +1044,7 @@ mod vocabulary_documentation_tests {
             assert!(WIRE_CONTRACT.contains(value(op)));
         }
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
+        assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretBasicAuthSet)));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::LoginSharingSet)));
         for op in [
             AuditOp::GhManifestPropose,

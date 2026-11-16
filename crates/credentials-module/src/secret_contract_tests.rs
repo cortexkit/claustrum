@@ -47,6 +47,10 @@ const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
 const SECRET_GOLDEN_STRING_IDS: &[&str] = &["envelope.flow.bytes", "federation.secret_use.aad"];
 
 const SECRET_GOLDEN_IDS: &[&str] = &[
+    "basic_auth.disabled",
+    "basic_auth.not_found",
+    "basic_auth.ambiguous",
+    "use.request.basic_auth_by_target",
     "usage.report_scoped.request",
     "usage.report_scoped.result",
     "phone_keys_register.request",
@@ -683,8 +687,8 @@ async fn secret_use_request_and_result_key_sets_match_the_contract() {
     assert_eq!(login_asked["status"], "approval_required", "{login_asked}");
     assert_secret_reply_matches("use.result.approval_required", &login_asked);
 
-    // The key set is closed: each required key removed, any key renamed, an unknown
-    // key, and a caller-supplied agent name are refused at grammar.
+    // The key set is closed. Name and coverage are optional; missing required
+    // keys, renamed keys and caller-supplied agent names return invalid_params.
     let invalid = json!({"transport":"invalid_params"});
     let object = api.as_object().unwrap().clone();
     for key in object.keys() {
@@ -693,6 +697,9 @@ async fn secret_use_request_and_result_key_sets_match_the_contract() {
         let answer = flow.use_secret("aft", &without);
         if key == "coverage" {
             assert_eq!(answer, asked, "coverage defaults to scope");
+        } else if key == "name" {
+            assert_eq!(answer, credentials_core::agent_secret::SecretError::NotFound.body(),
+                "the covering header secret is not a Basic sign-in candidate");
         } else {
             assert_eq!(answer, invalid, "secret.use without {key}");
         }
@@ -1701,6 +1708,7 @@ secret_error_golden! {
     InvalidParams => "invalid_params", "none", "transport Error";
     LimitExceeded => "limit_exceeded", "context_overflow", "result error";
     NotFound => "not_found", "permanent", "result error";
+    Ambiguous => "ambiguous", "permanent", "result error";
     PairingUnavailable => "pairing_unavailable", "transient", "result error";
     PhoneNotRegistered => "phone_not_registered", "permanent", "result error";
     PhoneKeyConflict => "phone_key_conflict", "permanent", "result error";
@@ -1708,6 +1716,7 @@ secret_error_golden! {
     NameExists => "name_exists", "permanent", "result error";
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
     SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
+    SecretBasicAuthDisabled => "secret_basic_auth_disabled", "permanent", "result error";
     SecretLocalProgramsDisabled => "secret_local_programs_disabled", "permanent", "result error";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
     ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
@@ -2149,6 +2158,14 @@ const SC_LOCAL_GOLDENS: &[&str] = &[
     "federation.secret_ssh_sign.request",
     "federation.secret_ssh_sign.result.sealed",
 ];
+
+// These new blocks extend the contract without changing the existing golden bytes.
+const SC_BASIC_AUTH_GOLDENS: &[&str] = &[
+    "basic_auth.disabled",
+    "basic_auth.not_found",
+    "basic_auth.ambiguous",
+    "use.request.basic_auth_by_target",
+];
 const SC_SSH_KEY: &str = "signing:agent:ssh";
 
 fn sc_programs(store: &EncryptedStore, enabled: bool) {
@@ -2254,7 +2271,7 @@ fn local_ops_preserve_every_legacy_golden_byte() {
     let mut count = 0;
     for part in SECRET_CONTRACT_DOC.split("<!-- golden:").skip(1) {
         let (id, rest) = part.split_once(" -->\n```json\n").expect("golden fence");
-        if SC_LOCAL_GOLDENS.contains(&id) {
+        if SC_LOCAL_GOLDENS.contains(&id) || SC_BASIC_AUTH_GOLDENS.contains(&id) {
             continue;
         }
         let (text, _) = rest.split_once("\n```").unwrap();
@@ -2728,4 +2745,16 @@ async fn local_ops_ssh_decoded_size_boundary_and_trailing_packet_bytes() {
         json!({"transport":"invalid_params"})
     );
     assert_eq!(sc_local_counts(&flow), before);
+}
+
+#[tokio::test]
+async fn basic_auth_goldens_pin_target_only_request_and_permanent_refusals() {
+    use credentials_core::agent_secret::SecretError;
+    let request = secret_golden("use.request.basic_auth_by_target");
+    assert!(request.get("name").is_none());
+    let flow = SecretFlow::new(234).await;
+    assert_eq!(flow.use_secret("aft", &request), SecretError::NotFound.body());
+    for (id, error) in [("basic_auth.disabled", SecretError::SecretBasicAuthDisabled), ("basic_auth.not_found", SecretError::NotFound), ("basic_auth.ambiguous", SecretError::Ambiguous)] {
+        assert_eq!(secret_golden(id), error.body());
+    }
 }

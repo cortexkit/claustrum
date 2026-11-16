@@ -1,0 +1,1 @@
+{"decision":"allow","device_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","duration":"hour","grant_expires_at_ms":1700003600000,"issued_at_ms":1700000000000,"items":[{"request_id":"01HF7YAT000000000000000100","statement_sha256":"ada5960a708e484cfe9226a760f0f1664cd5f83cdc2d1d85ad39e2ac847741c5"}],"v":"ck-secret-use-envelope/v1"}

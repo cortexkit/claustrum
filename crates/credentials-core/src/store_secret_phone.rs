@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
+pub const BASIC_AUTH_SETTING: &str = "secret.basic_auth";
 pub const LOCAL_PROGRAMS_SETTING: &str = "secret.local_programs";
 
 /// The audit payload of an extended scope names its stored `scope_json`. Encoding an
@@ -18,6 +19,10 @@ pub(super) fn extended_scope_json(scope_json: &Option<String>) -> rusqlite::Resu
 
 pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
     setting_enabled(conn, MULTI_HOST_SETTING)
+}
+
+pub(super) fn basic_auth_enabled(conn: &rusqlite::Connection) -> bool {
+    setting_enabled(conn, BASIC_AUTH_SETTING)
 }
 
 pub(in crate::store) fn local_programs_enabled(conn: &rusqlite::Connection) -> bool {
@@ -38,6 +43,10 @@ fn setting_enabled(conn: &rusqlite::Connection, name: &str) -> bool {
 /// Read the multi-host setting without taking the writer lease or loading secrets.
 pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
     feature_status_read_only(path, MULTI_HOST_SETTING)
+}
+
+pub fn secret_basic_auth_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
+    feature_status_read_only(path, BASIC_AUTH_SETTING)
 }
 
 pub fn secret_local_programs_status_read_only(
@@ -192,6 +201,19 @@ impl EncryptedStore {
         )
     }
 
+    pub fn set_secret_basic_auth_audited(
+        &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        self.set_secret_feature_audited(
+            BASIC_AUTH_SETTING,
+            AuditOp::SecretBasicAuthSet,
+            enabled,
+            ctx,
+        )
+    }
+
     fn set_secret_feature_audited(
         &self,
         name: &str,
@@ -209,7 +231,7 @@ impl EncryptedStore {
             if old == Some(rusqlite::types::Value::Text(wanted.to_owned())) {
                 return Ok(false);
             }
-            if name == LOCAL_PROGRAMS_SETTING && old.is_none() && !enabled {
+            if matches!(name, LOCAL_PROGRAMS_SETTING | BASIC_AUTH_SETTING) && old.is_none() && !enabled {
                 return Ok(false);
             }
             tx.execute(
@@ -456,6 +478,9 @@ impl EncryptedStore {
         ) && !multi_host_enabled(tx)
         {
             return Ok(Err(SecretError::SecretMultiHostDisabled));
+        }
+        if d.scope.is_basic_auth() && !basic_auth_enabled(tx) {
+            return Ok(Err(SecretError::SecretBasicAuthDisabled));
         }
         if d.member_id != member {
             return Ok(Err(SecretError::NotFound));

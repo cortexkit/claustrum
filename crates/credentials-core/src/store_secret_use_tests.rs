@@ -11,6 +11,9 @@ mod extended_tests;
 #[path = "store_secret_conformance_tests.rs"]
 mod conformance_tests;
 
+#[path = "store_secret_basic_auth_tests.rs"]
+mod basic_auth_tests;
+
 const MEMBER: &str = "fed-computer:22222222222222222222222222222222";
 const NOW: i64 = 1_700_000_000_000;
 fn scope() -> SecretScope {
@@ -45,7 +48,7 @@ fn seed(store: &EncryptedStore, name: &str, scope: &SecretScope, material: &Secr
     let incarnation = format!("{:032x}", name.bytes().map(u64::from).sum::<u64>());
     let blob = agent_secret::seal(&store.key, &incarnation, name, scope, material).unwrap();
     let (host, prefix, location, origin) = phone::columns(scope);
-    store.fenced_write(|tx|tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",rusqlite::params![name,scope.kind(),incarnation,host,prefix,location,origin,store.key_id.to_hex(),blob,NOW]).map(|_|())).unwrap();
+    store.fenced_write(|tx|tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10,?11)",rusqlite::params![name,scope.kind(),incarnation,host,prefix,location,origin,store.key_id.to_hex(),blob,NOW,scope.scope_json().unwrap()]).map(|_|())).unwrap();
 }
 fn setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
     let (root, store) = rig(tag, 65);

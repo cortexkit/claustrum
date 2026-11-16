@@ -26,6 +26,15 @@ pub enum UseAnswer {
     InvalidParams,
 }
 
+enum ParsedUse {
+    Named(SecretUse),
+    ByTarget(SecretUseByTarget),
+}
+
+fn is_target_only(params: &Value) -> bool {
+    params.get("name").is_none() && params.get("target").is_some()
+}
+
 /// The closed `secret.use` key set. There is deliberately no caller-supplied agent name:
 /// a sender has no trusted human name for an agent, and the approval statement is
 /// signed, so the statement names the agent only by the stamp's attribution: a worker's
@@ -34,7 +43,7 @@ pub enum UseAnswer {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Params {
-    name: String,
+    name: Option<String>,
     #[serde(default = "default_coverage")]
     coverage: String,
     stamp: Value,
@@ -214,21 +223,22 @@ fn parse_local_use(
     }
     let params: Params =
         serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
-    validate_name(&params.name).map_err(|_| UseAnswer::InvalidParams)?;
+    let name = params.name.ok_or(UseAnswer::InvalidParams)?;
+    validate_name(&name).map_err(|_| UseAnswer::InvalidParams)?;
     let Target::Local(target) = params.target else {
         return Err(UseAnswer::InvalidParams);
     };
     local_enabled(store)?;
     let (scope, worker_parent, agent_id) =
-        local_scope(store, &params.name, params.stamp, &params.coverage)?;
+        local_scope(store, &name, params.stamp, &params.coverage)?;
     let local =
         LocalUse::from_value(&serde_json::to_value(target).expect("local target serializes"))
-            .map_err(|e| local_error(store, &params.name, e))?;
+            .map_err(|e| local_error(store, &name, e))?;
     if local.is_ssh() {
-        return Err(local_error(store, &params.name, SecretError::InvalidParams));
+        return Err(local_error(store, &name, SecretError::InvalidParams));
     }
     Ok(SecretUse {
-        name: params.name,
+        name,
         sender,
         scope,
         worker_parent,
@@ -333,7 +343,8 @@ pub(crate) fn preflight_forward(
         }
         let p: Params =
             serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
-        validate_name(&p.name).map_err(|_| UseAnswer::InvalidParams)?;
+        let name = p.name.ok_or(UseAnswer::InvalidParams)?;
+        validate_name(&name).map_err(|_| UseAnswer::InvalidParams)?;
         if !matches!(p.target, Target::Local(_)) {
             return Err(UseAnswer::InvalidParams);
         }
@@ -402,7 +413,7 @@ pub fn serve(
     params: &Value,
     clock: impl Fn() -> i64,
 ) -> UseAnswer {
-    if is_local_use(params) && !aft(principal) {
+    if (is_local_use(params) || is_target_only(params)) && !aft(principal) {
         return UseAnswer::Reply(SecretError::NotFound.body());
     }
     let sender = match principal {
@@ -419,7 +430,11 @@ pub fn serve(
         Ok(call) => call,
         Err(answer) => return answer,
     };
-    match store.secret_use(&call, clock) {
+    let result = match call {
+        ParsedUse::Named(call) => store.secret_use(&call, clock),
+        ParsedUse::ByTarget(call) => store.secret_use_by_target(&call, clock),
+    };
+    match result {
         Ok(outcome) => {
             if let Some((id, now)) = outcome.last_use {
                 let store = Arc::clone(store);
@@ -448,7 +463,10 @@ pub fn sender_call<'a>(
     let Some(Principal::Reserved { module_id }) = principal else {
         return None;
     };
-    if method == "secret.use" && is_local_use(params) && module_id != "aft" {
+    if method == "secret.use"
+        && (is_local_use(params) || is_target_only(params))
+        && module_id != "aft"
+    {
         return None;
     }
     match (method, module_id.as_str()) {
@@ -479,9 +497,9 @@ fn parse_use(
     store: &EncryptedStore,
     sender: SecretSender,
     params: &Value,
-) -> Result<SecretUse, UseAnswer> {
+) -> Result<ParsedUse, UseAnswer> {
     if is_local_use(params) {
-        return parse_local_use(store, sender, params);
+        return parse_local_use(store, sender, params).map(ParsedUse::Named);
     }
     let invalid = |error: ValidationError| {
         store.record_secret_use_refusal(
@@ -498,12 +516,17 @@ fn parse_use(
             ValidationError::LimitExceeded => UseAnswer::Reply(SecretError::LimitExceeded.body()),
         }
     };
+    if params.get("name").is_some_and(|name| !name.is_string()) {
+        return Err(invalid(ValidationError::InvalidParams));
+    }
     let params: Params = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
         Err(_) => return Err(invalid(ValidationError::InvalidParams)),
     };
-    if let Err(e) = validate_name(&params.name) {
-        return Err(invalid(e));
+    if let Some(name) = &params.name {
+        if let Err(e) = validate_name(name) {
+            return Err(invalid(e));
+        }
     }
     if !matches!(params.coverage.as_str(), "scope" | "agent_and_workers") {
         return Err(invalid(ValidationError::InvalidParams));
@@ -540,8 +563,7 @@ fn parse_use(
         store.record_secret_use_refusal(sender, None, "coverage");
         return Err(UseAnswer::InvalidParams);
     }
-    Ok(SecretUse {
-        name: params.name,
+    let call = SecretUseByTarget {
         sender,
         scope,
         worker_parent,
@@ -554,7 +576,14 @@ fn parse_use(
             stamp.attributes.agent_id
         },
         target,
-    })
+    };
+    match params.name {
+        Some(name) => Ok(ParsedUse::Named(call.with_name(name))),
+        None if sender == SecretSender::Aft && matches!(call.target, UseTarget::ApiKey { .. }) => {
+            Ok(ParsedUse::ByTarget(call))
+        }
+        None => Err(UseAnswer::Reply(SecretError::NotFound.body())),
+    }
 }
 
 /// The home's answer to a `secret.use` that a paired computer forwarded, before the
@@ -588,6 +617,9 @@ pub fn serve_forwarded<E>(
     seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
     clock: impl Fn() -> i64,
 ) -> ForwardedUseAnswer<E> {
+    if is_target_only(call) && sender != SecretSender::Aft {
+        return ForwardedUseAnswer::Reply(SecretError::NotFound.body());
+    }
     if is_local_use(call) {
         let call = match parse_local_use(store, sender, call) {
             Ok(call) => call,
@@ -602,7 +634,10 @@ pub fn serve_forwarded<E>(
         Ok(call) => call,
         Err(answer) => return answer.into(),
     };
-    forwarded_answer(store.secret_use_sealed(&call, request, seal, clock))
+    forwarded_answer(match call {
+        ParsedUse::Named(call) => store.secret_use_sealed(&call, request, seal, clock),
+        ParsedUse::ByTarget(call) => store.secret_use_by_target_sealed(&call, request, seal, clock),
+    })
 }
 
 impl<E> From<UseAnswer> for ForwardedUseAnswer<E> {

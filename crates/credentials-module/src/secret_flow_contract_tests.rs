@@ -547,7 +547,12 @@ async fn secret_flow_install_errors_and_closed_shapes_do_not_create_pending_rows
         request.as_object_mut().unwrap().remove(key);
         assert_eq!(sf_request(&flow, &request), invalid);
     }
-    for key in ["name", "stamp", "target", "method"] {
+    // Name-less flow calls are uniformly refused rather than entering the Basic
+    // sign-in selector or revealing which flow fields are required.
+    let mut nameless = sf_run(false);
+    nameless.as_object_mut().unwrap().remove("name");
+    assert_eq!(flow.use_secret("basal", &nameless), credentials_core::agent_secret::SecretError::NotFound.body());
+    for key in ["stamp", "target", "method"] {
         let mut request = sf_run(false);
         request.as_object_mut().unwrap().remove(key);
         assert_eq!(flow.use_secret("basal", &request), invalid);

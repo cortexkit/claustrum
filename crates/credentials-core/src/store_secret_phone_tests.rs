@@ -4,6 +4,7 @@ use crate::{
     secret::Secret,
     store::taxonomy_tests::rig,
 };
+use base64::Engine as _;
 use std::sync::{Arc, Barrier};
 
 #[path = "store_secret_list_vectors_tests.rs"]
@@ -1373,4 +1374,161 @@ fn local_use_listing_projects_grants_and_omits_ssh_keys_without_grants() {
     let listed = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
     assert!(listed.get("ssh_keys").is_none(), "{listed}");
     assert_eq!(listed["secrets"][0]["grants"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn basic_auth_setting_defaults_off_and_audits_only_changes() {
+    let (root, store) = rig("basic-setting", 59);
+    let path = root.join("store.db");
+    assert_eq!(
+        secret_basic_auth_status_read_only(&root.join("absent.db")).unwrap(),
+        "off"
+    );
+    assert!(!root.join("absent.db").exists());
+    let initial = store.audit_tip().unwrap();
+    assert!(!store
+        .set_secret_basic_auth_audited(false, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap());
+    assert_eq!(store.audit_tip().unwrap(), initial);
+    store
+        .store
+        .with_conn(|conn| {
+            assert!(!conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE name='secret.basic_auth')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )?);
+            Ok(())
+        })
+        .unwrap();
+    for (enabled, changed, audit_count) in [
+        (true, true, 1),
+        (true, false, 1),
+        (false, true, 2),
+        (false, false, 2),
+    ] {
+        let op = crate::AdminOpBody::SecretBasicAuthSet {
+            v: crate::ADMIN_OP_SCHEMA_V2,
+            enabled,
+        };
+        assert!(op.has_valid_schema_version());
+        assert_eq!(op.lock_id(), None);
+        assert!(!op.requires_daemon());
+        assert_eq!(
+            crate::admin_ops::apply(&store, op, "offline-cli").unwrap(),
+            json!({"basic_auth": enabled, "changed": changed})
+        );
+        assert_eq!(
+            secret_basic_auth_status_read_only(&path).unwrap(),
+            if enabled { "on" } else { "off" }
+        );
+        store
+            .store
+            .with_conn(|conn| {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT count(*) FROM audit_log WHERE op='secret_basic_auth_set'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    audit_count
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    for value in ["TRUE", "damaged", "1"] {
+        store
+            .store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE settings SET value=?1 WHERE name='secret.basic_auth'",
+                    [value],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            secret_basic_auth_status_read_only(&path).unwrap(),
+            "unreadable"
+        );
+        assert!(!store
+            .store
+            .with_conn(|conn| Ok(basic_auth_enabled(conn)))
+            .unwrap());
+    }
+    let before_repair = store.audit_tip().unwrap();
+    assert!(store
+        .set_secret_basic_auth_audited(false, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap());
+    assert_ne!(store.audit_tip().unwrap(), before_repair);
+    assert_eq!(secret_basic_auth_status_read_only(&path).unwrap(), "off");
+    assert!(!store
+        .set_secret_basic_auth_audited(false, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap());
+    assert_eq!(SecretError::SecretBasicAuthDisabled.class(), "permanent");
+    assert_eq!(
+        StoreOpError::SecretBasicAuthDisabled.wire_code(),
+        Some("secret_basic_auth_disabled")
+    );
+    assert!(StoreOpError::SecretBasicAuthDisabled
+        .to_string()
+        .contains("ck auth secret basic-auth on"));
+}
+
+#[test]
+fn basic_auth_setting_off_refuses_deposit_and_put_without_rows_or_audit() {
+    let (_root, store, sender) = setup("basic-gate");
+    let basic = SecretScope::ApiKey {
+        host: "x.test".into(),
+        path_prefix: None,
+        location: "authorization_basic:git".into(),
+    };
+    let d = deposit(&store, &sender, "basic", ID, basic, key());
+    let put = agent_secret::SecretPut {
+        name: "operator".into(),
+        kind: "agent_api_key".into(),
+        host: Some("x.test".into()),
+        location: Some("authorization_basic:git".into()),
+        path_prefix: None,
+        origin: None,
+        rules: None,
+        origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
+        material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(agent_secret::deposit_plaintext(&key()).expose()),
+    };
+    for value in [None, Some("false"), Some("damaged")] {
+        store.store.with_conn(|conn| {
+            conn.execute("DELETE FROM settings WHERE name='secret.basic_auth'", [])?;
+            if let Some(value) = value { conn.execute("INSERT INTO settings (name,value,updated_at_ms) VALUES ('secret.basic_auth',?1,0)", [value])?; }
+            Ok(())
+        }).unwrap();
+        let before = snapshot(&store);
+        assert_eq!(
+            run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())),
+            Err(SecretError::SecretBasicAuthDisabled)
+        );
+        assert_eq!(snapshot(&store), before);
+        assert_eq!(
+            store
+                .secret_put_audited(&put, "operator")
+                .unwrap_err()
+                .wire_code(),
+            Some("secret_basic_auth_disabled")
+        );
+        assert_eq!(snapshot(&store), before);
+    }
+    store
+        .set_secret_basic_auth_audited(true, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap();
+    assert_eq!(
+        run(&store, Some("pair-A"), &PhoneOperation::Deposit(d)).unwrap()["status"],
+        "stored"
+    );
+    assert_eq!(
+        store.secret_put_audited(&put, "operator").unwrap()["status"],
+        "stored"
+    );
 }

@@ -586,3 +586,116 @@ fn secret_local_program_cli_setting_put_and_prompt_labels() {
     }
     assert!(help.lines().all(|line| line.chars().count() <= 80));
 }
+
+#[test]
+fn secret_basic_auth_setting_and_put_work_offline_online_with_lease_free_status() {
+    let vault = GrantCliVault::new("basic-auth-setting");
+    let status = || stdout_ok(vault.run(&["secret", "basic-auth", "status"]));
+    assert_eq!(status(), "basic-auth setting off\n");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = |name: &str| {
+        vault.run(&[
+            "secret",
+            "put",
+            name,
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--location",
+            "authorization_basic:git",
+            "--material-file",
+            file.to_str().unwrap(),
+        ])
+    };
+    let refused = put("basic");
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8(refused.stderr).unwrap();
+    assert!(stderr.contains("secret_basic_auth_disabled"), "{stderr}");
+    assert!(stderr.contains("ck auth secret basic-auth on"), "{stderr}");
+    assert!(!stderr.contains(MATERIAL_CANARY));
+    assert_eq!(
+        stdout_ok(vault.run(&["secret", "basic-auth", "off"])),
+        "basic-auth setting off\n"
+    );
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM audit_log WHERE op='secret_basic_auth_set'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM agent_secrets", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        stdout_ok(vault.run(&["secret", "basic-auth", "on"])),
+        "basic-auth setting on\n"
+    );
+    assert_eq!(status(), "basic-auth setting on\n");
+    stdout_ok(put("basic"));
+    if std::env::var_os(CLI_BIN_ENV).is_none() {
+        let peer = ProviderRoutePeer::start(&vault);
+        let out = cli()
+            .args(["secret", "basic-auth", "off", "--data-dir"])
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path)
+            .arg("--subc")
+            .arg(&peer.connection)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+            .output()
+            .unwrap();
+        assert_eq!(stdout_ok(out), "basic-auth setting off\n");
+        assert_eq!(
+            peer.observed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|v| v["op"] == "admin.secret_basic_auth_set")
+                .count(),
+            1
+        );
+    } else {
+        stdout_ok(vault.run(&["secret", "basic-auth", "off"]));
+    }
+    let held = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    })
+    .unwrap();
+    assert_eq!(status(), "basic-auth setting off\n");
+    conn.execute(
+        "UPDATE settings SET value='broken' WHERE name='secret.basic_auth'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(status(), "basic-auth setting unreadable\n");
+    drop(held);
+    for args in [
+        vec!["secret", "basic-auth"],
+        vec!["secret", "basic-auth", "bogus"],
+        vec!["secret", "basic-auth", "on", "off"],
+    ] {
+        assert!(!vault.run(&args).status.success());
+    }
+    let help = stdout_ok(vault.run(&["help", "secret"]));
+    assert!(help.contains("basic-auth on|off|status"));
+    assert!(help.lines().all(|line| line.chars().count() <= 80));
+    assert!(stdout_ok(vault.run(&["help"])).contains("basic-auth"));
+}

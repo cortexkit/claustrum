@@ -2752,7 +2752,9 @@ key, gives `secret_setup_incomplete` without replacing the key. No pairing looku
 
 API key: `{deposit_id, member_id, name, kind: "agent_api_key", host, path_prefix?,
 location, enc_b64url, ciphertext_b64url}`. `location` is mandatory:
-`authorization_bearer`, `header:<name>`, `query:<name>` or `json_pointer:<pointer>`.
+`authorization_bearer`, `authorization_basic:<user>`, `header:<name>`, `query:<name>`
+or `json_pointer:<pointer>`. Basic sign-in creation requires `secret.basic_auth`
+to be on; its grammar and reader-first gate are specified below.
 `path_prefix` is omitted for "every path".
 
 <!-- golden:deposit.request.api_key -->
@@ -3462,6 +3464,7 @@ the message is fixed text and never echoes the request.
 |---|---|---|---|
 | `invalid_params` | none | transport Error | request grammar or key set, stamp shape, coverage not permitted, malformed `card_ref`, bearer params on a phone channel |
 | `not_found` | `permanent` | result error | uniform refusal: not a sender or phone channel, unknown or unusable name, unmapped scope, target mismatch, wrong member id or unopenable deposit |
+| `ambiguous` | `permanent` | result error | more than one active Basic sign-in secret covers a name-less web-request target |
 | `limit_exceeded` | `context_overflow` | result error | a length or size over its limit |
 | `approval_invalid` | `permanent` | result error, or the `code` of a refused `results` item | an envelope or item failed a check; never says which |
 | `phone_not_registered` | `permanent` | result error | the phone is absent from callosum, or has no keys under its current pairing |
@@ -3470,6 +3473,7 @@ the message is fixed text and never echoes the request.
 | `name_exists` | `permanent` | result error | a new deposit for a name that already has a record, corrupt included |
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
+| `secret_basic_auth_disabled` | `permanent` | result error | creating a Basic sign-in secret while `secret.basic_auth` is off or unreadable |
 | `secret_local_programs_disabled` | `permanent` | result error | creating or depositing a local-program secret while `secret.local_programs` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
 | `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
@@ -3491,6 +3495,7 @@ material or its digest. Vault-global rows have no target.
 |---|---|---|---|
 | `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_multi_host_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `secret_basic_auth_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_local_programs_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `ssh_key_agent_allow` | offline-cli or route-admin | signing credential id | keyed fingerprint of the resulting enrollment JSON |
 | `ssh_key_agent_deny` | offline-cli or route-admin | signing credential id | keyed fingerprint of JSON `null` |
@@ -3584,6 +3589,8 @@ password 1,024 and API key 8,192 bytes. Location retains its legacy grammar:
 escapes. Header names are RFC 9110 tokens; Host, Cookie, Content-Length and
 Authorization are forbidden case-insensitively. Location is required for API keys and
 absent for logins. Material and TOTP validation and limits remain as above.
+The Basic sign-in extension below also admits `authorization_basic:<user>` for
+both single-host and multi-host API-key scopes, behind its separate creation gate.
 
 The **first failing check** decides the refusal, in this order:
 
@@ -3796,6 +3803,88 @@ Implementation of extended-scope vault readers and writers waits until an
 Existing published samples
 outside `multi-host/` stay unchanged. New numeric count boundaries require tests
 on both sides and registration in `docs/threshold-controls.txt` when implemented.
+
+### Basic sign-in and name-less web requests
+
+Only `agent_api_key` secrets admit `authorization_basic:<user>`. The user-id is
+1–128 ASCII bytes from `[A-Za-z0-9._@+-]`; an empty user-id, a colon, a non-ASCII
+byte or any other character is `invalid_params`. A valid user-id of 129 bytes or
+more is `limit_exceeded`. Single-host and multi-host scopes use the same grammar
+and the existing scope matcher. The vault stores and releases the token bytes
+unchanged. It never constructs an Authorization header: AFT constructs
+`Basic base64(user:token)` from the location and released key bytes.
+
+#### Reader-first creation gate
+
+`secret.basic_auth` is off when missing. Only the exact stored text `true` is on;
+malformed values are unreadable and fail closed. While off or unreadable,
+`secret.deposit` and `ck auth secret put` refuse a new Basic sign-in secret with
+`secret_basic_auth_disabled`, class `permanent`, as a result error. The setting
+check and insert share one write transaction: refusal leaves no secret, tombstone
+or audit row. Like `secret.multi_host`, this gates creation only. Already-stored
+Basic sign-in secrets remain usable after the setting is turned off.
+
+`ck auth secret basic-auth on|off|status` mirrors the multi-host control.
+`admin.secret_basic_auth_set {v: 2, enabled: boolean}` returns
+`{"basic_auth":boolean,"changed":boolean}`. A real setting change writes one
+`secret_basic_auth_set` audit row, no target, with payload `push_field("true")`
+or `push_field("false")`; repeated values, including missing-to-off, write none.
+Status is read-only and prints `basic-auth setting on|off|unreadable`. The operator
+refusal names `ck auth secret basic-auth on` as the remedy. Keep this setting off
+until the user's phone can show the location as “Sign in as {user} with this token”.
+
+<!-- golden:basic_auth.disabled -->
+```json
+{"error":{"code":"secret_basic_auth_disabled","class":"permanent"}}
+```
+
+#### Selection without a name
+
+`secret.use` may omit `name` for a web-request target. Only `reserved:aft` in a
+non-flow scope is admitted. Cerebellum, basal, other callers and flow scopes get
+the existing uniform `not_found` result, never an approval card. Explicit empty
+or null names remain `invalid_params`, not selection requests.
+
+<!-- golden:use.request.basic_auth_by_target -->
+```json
+{"stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"kind":"head","ref":"H","scope_epoch":7,"attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}}
+```
+
+Inside the same transaction as the grant check, the home vault counts active
+`agent_api_key` secrets with a location starting `authorization_basic:` whose
+scope covers the target. Only HTTPS on port 443 can match. Bearer, header, query,
+JSON-pointer, login and local-program secrets are never candidates. Coverage,
+not existing grants, decides ambiguity; overlapping rules on one secret count
+as one candidate.
+
+No candidate returns the named path's byte-identical `not_found`. One candidate
+continues as a named request for that secret, with byte-identical replies,
+pending-card reuse, grant checks, release and audit. More than one returns
+`ambiguous`, class `permanent`, as a result error, without creating a card,
+consuming a grant or writing a release audit.
+
+<!-- golden:basic_auth.not_found -->
+```json
+{"error":{"code":"not_found","class":"permanent"}}
+```
+
+<!-- golden:basic_auth.ambiguous -->
+```json
+{"error":{"code":"ambiguous","class":"permanent"}}
+```
+
+Paired computers forward the name-less request unchanged to the home vault.
+Selection happens only at the home, and `ambiguous` is relayed unchanged to the
+asking computer. Approval remains per secret and agent scope, not per git
+repository or operation: the card shows the selected secret's own host and path
+prefix. An hour or session grant covers every request within that stored scope.
+
+The producer-generated `secret-basic-auth-vectors-v1` pack under
+`crates/credentials-core/tests/vectors/` pins deposit HPKE bytes, statements,
+signed approvals, releases and refusals, with raw bytes, JSON and SHA-256 records.
+Generate it with `CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-core
+--features test-support --test secret_basic_auth_vectors` on Linux. Samples must
+be available to the phone reader before the creation setting is enabled.
 
 ### Local programs and SSH userauth
 

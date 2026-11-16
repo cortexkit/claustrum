@@ -48,6 +48,7 @@ pub enum SecretError {
     InvalidParams,
     LimitExceeded,
     NotFound,
+    Ambiguous,
     PairingUnavailable,
     PhoneNotRegistered,
     PhoneKeyConflict,
@@ -55,6 +56,7 @@ pub enum SecretError {
     NameExists,
     SecretSetupIncomplete,
     SecretMultiHostDisabled,
+    SecretBasicAuthDisabled,
     SecretLocalProgramsDisabled,
     ApprovalInvalid,
     ManifestSetupIncomplete,
@@ -70,6 +72,7 @@ impl SecretError {
             Self::InvalidParams => "invalid_params",
             Self::LimitExceeded => "limit_exceeded",
             Self::NotFound => "not_found",
+            Self::Ambiguous => "ambiguous",
             Self::PairingUnavailable => "pairing_unavailable",
             Self::PhoneNotRegistered => "phone_not_registered",
             Self::PhoneKeyConflict => "phone_key_conflict",
@@ -77,6 +80,7 @@ impl SecretError {
             Self::NameExists => "name_exists",
             Self::SecretSetupIncomplete => "secret_setup_incomplete",
             Self::SecretMultiHostDisabled => "secret_multi_host_disabled",
+            Self::SecretBasicAuthDisabled => "secret_basic_auth_disabled",
             Self::SecretLocalProgramsDisabled => "secret_local_programs_disabled",
             Self::ApprovalInvalid => "approval_invalid",
             Self::ManifestSetupIncomplete => "manifest_setup_incomplete",
@@ -216,6 +220,11 @@ pub struct SecretRule {
 }
 
 impl SecretScope {
+    pub fn is_basic_auth(&self) -> bool {
+        matches!(self, Self::ApiKey { location, .. } | Self::ApiKeyRules { location, .. }
+            if location.starts_with("authorization_basic:"))
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::ApiKey { .. } | Self::ApiKeyRules { .. } => "agent_api_key",

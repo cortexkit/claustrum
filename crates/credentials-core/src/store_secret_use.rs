@@ -53,6 +53,8 @@ struct Grant {
     duration: String,
 }
 
+type AgentUseAnswer = Result<Result<SecretUseOutcome, SecretError>, Refusal>;
+
 /// How long the home answers a same-nonce retry of a forwarded release with the reply
 /// it already sealed. A paired computer gives up retrying one sender call well before
 /// this, so a nonce is never answered afresh after its receipt has been deleted.
@@ -136,6 +138,98 @@ impl ReceiptGrant {
 }
 
 impl EncryptedStore {
+    fn select_basic_auth(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        call: &agent_secret::SecretUseByTarget,
+    ) -> rusqlite::Result<Result<SecretUse, SecretError>> {
+        if call.sender != SecretSender::Aft
+            || !matches!(call.scope.kind.as_str(), "head" | "worker" | "ephemeral")
+            || !matches!(&call.target, agent_secret::UseTarget::ApiKey { scheme, port: 443, .. } if scheme == "https")
+        {
+            return Ok(Err(SecretError::NotFound));
+        }
+        let mut stmt = tx.prepare("SELECT name,kind,host,path_prefix,location,origin,scope_json FROM agent_secrets WHERE state='active' AND kind='agent_api_key' AND location LIKE 'authorization_basic:%'")?;
+        let mut rows = stmt.query([])?;
+        let mut selected = None;
+        while let Some(row) = rows.next()? {
+            let scope = SecretScope::from_columns(
+                &row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?.as_deref(),
+                row.get::<_, Option<String>>(3)?.as_deref(),
+                row.get::<_, Option<String>>(4)?.as_deref(),
+                row.get::<_, Option<String>>(5)?.as_deref(),
+                row.get::<_, Option<String>>(6)?.as_deref(),
+            );
+            if scope.is_ok_and(|scope| scope.is_basic_auth() && call.target.matches(&scope)) {
+                if selected.is_some() {
+                    return Ok(Err(SecretError::Ambiguous));
+                }
+                selected = Some(row.get::<_, String>(0)?);
+            }
+        }
+        Ok(selected
+            .map(|name| call.with_name(name))
+            .ok_or(SecretError::NotFound))
+    }
+
+    /// Select by coverage and check the selected secret's grant in one write
+    /// transaction. Selection never consults grants, even when one already exists.
+    pub fn secret_use_by_target(
+        &self,
+        call: &agent_secret::SecretUseByTarget,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        let mut selected = None;
+        let answer = self
+            .fenced_write(|tx| {
+                let named = match self.select_basic_auth(tx, call)? {
+                    Ok(named) => named,
+                    Err(error) => return Ok(Ok(Err(error))),
+                };
+                let answer = self.secret_use_tx(tx, &named, LOCAL_ASKING_MEMBER, clock())?;
+                selected = Some(named);
+                Ok(answer)
+            })
+            .map_err(|_| SecretError::StoreError)?;
+        match answer {
+            Ok(answer) => answer,
+            Err(refusal) => self.use_refused(selected.as_ref().expect("selected secret"), refusal),
+        }
+    }
+
+    fn secret_use_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        call: &SecretUse,
+        asking_member: &str,
+        now: i64,
+    ) -> rusqlite::Result<AgentUseAnswer> {
+        let record = match self.check_secret_use(tx, call)? {
+            Ok(record) => record,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        phone::sweep(tx, &self.audit_key, now)?;
+        if let Some(grant) = choose_grant(tx, call, asking_member, &record.incarnation, now)? {
+            let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
+            self.commit_agent_release(tx, call, asking_member, &grant, &record, now)?;
+            return Ok(Ok(Ok(SecretUseOutcome {
+                reply,
+                last_use: None,
+            })));
+        }
+        pending(
+            tx,
+            call,
+            asking_member,
+            &record.incarnation,
+            Some(&record.scope),
+            None,
+            now,
+        )
+        .map(Ok)
+    }
+
     fn validate_local_use(
         &self,
         call: &SecretUse,
@@ -535,32 +629,7 @@ impl EncryptedStore {
         let answer = self
             .fenced_write(|tx| {
                 let now = clock();
-                let record = match self.check_secret_use(tx, call)? {
-                    Ok(r) => r,
-                    Err(r) => return Ok(Err(r)),
-                };
-                phone::sweep(tx, &self.audit_key, now)?;
-                if let Some(grant) =
-                    choose_grant(tx, call, asking_member, &record.incarnation, now)?
-                {
-                    let reply =
-                        release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
-                    self.commit_agent_release(tx, call, asking_member, &grant, &record, now)?;
-                    return Ok(Ok(Ok(SecretUseOutcome {
-                        reply,
-                        last_use: None,
-                    })));
-                }
-                pending(
-                    tx,
-                    call,
-                    asking_member,
-                    &record.incarnation,
-                    Some(&record.scope),
-                    None,
-                    now,
-                )
-                .map(Ok)
+                self.secret_use_tx(tx, call, asking_member, now)
             })
             .map_err(|_| SecretError::StoreError)?;
         match answer {
@@ -673,61 +742,9 @@ impl EncryptedStore {
                 },
             ));
         }
-        let aad_sha256 = phone::hex(&payload_hash(request.aad));
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
-            let now = clock();
-            let record = match self.check_secret_use(tx, call)? {
-                Ok(record) => record,
-                Err(refusal) => return Ok(Forwarded::Refused(refusal)),
-            };
-            let kinds = [ReceiptGrant::Agent, ReceiptGrant::Once];
-            if let Some(replay) =
-                replay(tx, request, &aad_sha256, &record.incarnation, &kinds, now)?
-            {
-                return Ok(replay);
-            }
-            phone::sweep(tx, &self.audit_key, now)?;
-            let Some(grant) = choose_grant(tx, call, request.requester, &record.incarnation, now)?
-            else {
-                return Ok(Forwarded::Answer(
-                    pending(
-                        tx,
-                        call,
-                        request.requester,
-                        &record.incarnation,
-                        Some(&record.scope),
-                        None,
-                        now,
-                    )?
-                    .map(|outcome| ForwardedUse::Reply(outcome.reply)),
-                ));
-            };
-            let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
-            let sealed = match seal(&reply) {
-                Ok(sealed) => sealed,
-                Err(error) => {
-                    seal_failure = Some(error);
-                    return Err(rusqlite_err("secret release seal failed"));
-                }
-            };
-            self.commit_agent_release(tx, call, request.requester, &grant, &record, now)?;
-            let kind = if grant.duration == "once" {
-                ReceiptGrant::Once
-            } else {
-                ReceiptGrant::Agent
-            };
-            write_receipt(
-                tx,
-                request,
-                &aad_sha256,
-                &record.incarnation,
-                kind,
-                &grant.id,
-                &sealed,
-                now,
-            )?;
-            Ok(Forwarded::Answer(Ok(ForwardedUse::Sealed(sealed))))
+            self.secret_use_sealed_tx(tx, call, request, seal, &mut seal_failure, clock())
         });
         if let Some(error) = seal_failure {
             return Ok(Err(error));
@@ -738,6 +755,101 @@ impl EncryptedStore {
                 Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
             }
         }
+    }
+
+    /// Forwarded selection uses the home vault's coverage snapshot and seals only
+    /// after the selected secret passes the normal named grant checks.
+    pub fn secret_use_by_target_sealed<E>(
+        &self,
+        call: &agent_secret::SecretUseByTarget,
+        request: &ReleaseRequest<'_>,
+        seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+        clock: impl Fn() -> i64,
+    ) -> Result<Result<ForwardedUse, E>, SecretError> {
+        request.validate()?;
+        let mut selected = None;
+        let mut seal_failure = None;
+        let answer = self.fenced_write(|tx| {
+            let named = match self.select_basic_auth(tx, call)? {
+                Ok(named) => named,
+                Err(error) => return Ok(Forwarded::Answer(Err(error))),
+            };
+            let answer =
+                self.secret_use_sealed_tx(tx, &named, request, seal, &mut seal_failure, clock());
+            selected = Some(named);
+            answer
+        });
+        if let Some(error) = seal_failure {
+            return Ok(Err(error));
+        }
+        match answer.map_err(|_| SecretError::StoreError)? {
+            Forwarded::Answer(answer) => answer.map(Ok),
+            Forwarded::Refused(refusal) => {
+                let call = selected.as_ref().expect("selected secret");
+                Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
+            }
+        }
+    }
+
+    fn secret_use_sealed_tx<E>(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        call: &SecretUse,
+        request: &ReleaseRequest<'_>,
+        seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+        seal_failure: &mut Option<E>,
+        now: i64,
+    ) -> rusqlite::Result<Forwarded> {
+        let aad_sha256 = phone::hex(&payload_hash(request.aad));
+        let record = match self.check_secret_use(tx, call)? {
+            Ok(record) => record,
+            Err(refusal) => return Ok(Forwarded::Refused(refusal)),
+        };
+        let kinds = [ReceiptGrant::Agent, ReceiptGrant::Once];
+        if let Some(replay) = replay(tx, request, &aad_sha256, &record.incarnation, &kinds, now)? {
+            return Ok(replay);
+        }
+        phone::sweep(tx, &self.audit_key, now)?;
+        let Some(grant) = choose_grant(tx, call, request.requester, &record.incarnation, now)?
+        else {
+            return Ok(Forwarded::Answer(
+                pending(
+                    tx,
+                    call,
+                    request.requester,
+                    &record.incarnation,
+                    Some(&record.scope),
+                    None,
+                    now,
+                )?
+                .map(|outcome| ForwardedUse::Reply(outcome.reply)),
+            ));
+        };
+        let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
+        let sealed = match seal(&reply) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                *seal_failure = Some(error);
+                return Err(rusqlite_err("secret release seal failed"));
+            }
+        };
+        self.commit_agent_release(tx, call, request.requester, &grant, &record, now)?;
+        let kind = if grant.duration == "once" {
+            ReceiptGrant::Once
+        } else {
+            ReceiptGrant::Agent
+        };
+        write_receipt(
+            tx,
+            request,
+            &aad_sha256,
+            &record.incarnation,
+            kind,
+            &grant.id,
+            &sealed,
+            now,
+        )?;
+        Ok(Forwarded::Answer(Ok(ForwardedUse::Sealed(sealed))))
     }
 
     fn use_refused(

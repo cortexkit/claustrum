@@ -2508,6 +2508,7 @@ mod tests {
             "federation_gate_set",
             "secret_phone_gate_set",
             "secret_multi_host_set",
+            "secret_basic_auth_set",
             "secret_put",
             "secret_delete",
             "secret_revoke_grant",

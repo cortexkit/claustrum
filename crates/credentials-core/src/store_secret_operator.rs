@@ -324,6 +324,9 @@ impl EncryptedStore {
             if matches!(scope, SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. }) && !super::phone::multi_host_enabled(tx) {
                 return Ok(Err(StoreOpError::SecretMultiHostDisabled));
             }
+            if scope.is_basic_auth() && !super::phone::basic_auth_enabled(tx) {
+                return Ok(Err(StoreOpError::SecretBasicAuthDisabled));
+            }
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM agent_secrets WHERE name=?1)",
                 [&put.name],

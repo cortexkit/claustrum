@@ -137,3 +137,4 @@ MAX_GATEWAY_SLUG_BYTES crates/credentials-core/src/gateway.rs gateway_provider_s
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.
 MAX_EXACT crates/credentials-module/src/federation/ingress.rs the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call
+MAX_SECRET_BASIC_USER_BYTES crates/credentials-core/src/agent_secret_validation.rs basic_auth_user_accepts_128_bytes_and_refuses_129_and_invalid_grammar

@@ -1167,3 +1167,57 @@ fn the_custody_check_finds_material_in_the_clear_and_sealed_mutate_replies() {
         &json!({"status":"approval_required","request_id":"r","statement_b64url":"s","expires_at_ms":1}),
     );
 }
+
+#[tokio::test]
+async fn forwarded_nameless_basic_auth_ambiguous_reaches_the_asking_computer_unchanged() {
+    let rig = Rig::new("basic-forward-ambiguous").await;
+    rig.a
+        .store
+        .set_secret_basic_auth_audited(true, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap();
+    for name in ["basic", "other"] {
+        let mut put = api_key_put();
+        put.name = name.into();
+        put.location = Some("authorization_basic:git".into());
+        put_secret(&rig.a.store, put);
+    }
+    let mut call = golden("use.request.api_key");
+    call.as_object_mut().unwrap().remove("name");
+    let before = rig.a.store.audit_tip().unwrap();
+    let expected = json!({"error":{"code":"ambiguous","class":"permanent"}});
+    assert_eq!(rig.use_on_b("aft", &call).await, expected);
+    assert_eq!(rig.secret_use_replies(), vec![expected.clone()]);
+    assert_eq!(rig.a.store.audit_tip().unwrap(), before);
+    assert_eq!(rig.use_on_home("aft", &call), expected);
+}
+
+#[tokio::test]
+async fn forwarded_nameless_basic_auth_reuses_named_card_and_releases_sealed() {
+    let rig = Rig::new("basic-forward-release").await;
+    rig.a
+        .store
+        .set_secret_basic_auth_audited(true, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap();
+    let mut put = api_key_put();
+    put.name = "basic".into();
+    put.location = Some("authorization_basic:git".into());
+    put_secret(&rig.a.store, put);
+    let mut named = golden("use.request.api_key");
+    named["name"] = json!("basic");
+    let mut nameless = named.clone();
+    nameless.as_object_mut().unwrap().remove("name");
+    let card = rig.use_on_b("aft", &named).await;
+    assert_eq!(
+        serde_json::to_vec(&rig.use_on_b("aft", &nameless).await).unwrap(),
+        serde_json::to_vec(&card).unwrap()
+    );
+    rig.grant(&card, "hour");
+    let named_reply = rig.use_on_b("aft", &named).await;
+    assert_eq!(named_reply["location"], "authorization_basic:git");
+    assert_eq!(
+        serde_json::to_vec(&rig.use_on_b("aft", &nameless).await).unwrap(),
+        serde_json::to_vec(&named_reply).unwrap()
+    );
+    assert_eq!(rig.secret_use_replies().last().unwrap()["status"], "sealed");
+    rig.assert_reply_custody(&[]);
+}

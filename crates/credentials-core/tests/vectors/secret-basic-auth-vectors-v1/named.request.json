@@ -1,0 +1,1 @@
+{"name":"git","stamp":{"attributes":{"agent_id":"agent-A"},"kind":"head","owner":{"kind":"reserved","module_id":"prefrontal-core"},"owner_authorized":true,"ref":"H","scope_epoch":7},"target":{"host":"x.test","path":"/repos/a/project.git/info/refs","scheme":"https"}}

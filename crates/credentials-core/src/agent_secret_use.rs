@@ -65,6 +65,32 @@ pub struct SecretUse {
     pub target: UseTarget,
 }
 
+/// A web request without a secret name. The store resolves coverage inside the
+/// grant transaction before constructing a named call, so grants and cards always
+/// refer to an actual secret.
+pub struct SecretUseByTarget {
+    pub sender: SecretSender,
+    pub scope: AskingScope,
+    pub worker_parent: Option<AskingScope>,
+    pub coverage: String,
+    pub agent_id: Option<String>,
+    pub target: UseTarget,
+}
+
+impl SecretUseByTarget {
+    pub fn with_name(&self, name: String) -> SecretUse {
+        SecretUse {
+            name,
+            sender: self.sender,
+            scope: self.scope.clone(),
+            worker_parent: self.worker_parent.clone(),
+            coverage: self.coverage.clone(),
+            agent_id: self.agent_id.clone(),
+            target: self.target.clone(),
+        }
+    }
+}
+
 /// The route derives scope, parent and agent attribution from the decoded
 /// `subc_protocol::scope::ScopeStamp` and parses userauth before calling the store.
 /// The key field names an enrolled signing credential; it never contains a private
@@ -124,6 +150,7 @@ pub fn validate_flow_methods(
     }
 }
 
+#[derive(Clone)]
 pub enum UseTarget {
     LocalProgram(super::LocalUse),
     ApiKey {

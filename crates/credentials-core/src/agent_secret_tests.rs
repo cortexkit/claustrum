@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn basic_auth_user_accepts_128_bytes_and_refuses_129_and_invalid_grammar() {
+    assert_eq!(
+        validate_location(&format!("authorization_basic:{}", "a".repeat(128))),
+        Ok(())
+    );
+    assert_eq!(
+        validate_location(&format!("authorization_basic:{}", "a".repeat(129))),
+        Err(ValidationError::LimitExceeded)
+    );
+    assert_eq!(validate_location("authorization_basic:Az09._@+-"), Ok(()));
+    for user in ["", "user:password", "é", "a b", "a\n"] {
+        assert_eq!(
+            validate_location(&format!("authorization_basic:{user}")),
+            Err(ValidationError::InvalidParams)
+        );
+    }
+    for byte in 0u8..=127 {
+        let user = format!("a{}", char::from(byte));
+        assert_eq!(
+            validate_location(&format!("authorization_basic:{user}")).is_ok(),
+            byte.is_ascii_alphanumeric() || b"._@+-".contains(&byte),
+            "byte {byte}"
+        );
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

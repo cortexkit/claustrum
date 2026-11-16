@@ -271,7 +271,12 @@ fn secret_use_grammar_targets_and_key_sets() {
         p["target"]["path"] = json!(path);
         assert_eq!(run(&p), invalid);
     }
-    for key in ["name", "stamp", "target"] {
+    // Only the name may be omitted: a target-only request now selects a Basic
+    // sign-in secret, and an empty vault has no matching candidate.
+    let mut nameless = params();
+    nameless.as_object_mut().unwrap().remove("name");
+    assert_eq!(run(&nameless), SecretError::NotFound.body());
+    for key in ["stamp", "target"] {
         let mut p = params();
         p.as_object_mut().unwrap().remove(key);
         assert_eq!(run(&p), invalid);
@@ -500,4 +505,103 @@ fn local_use_closed_target_and_legacy_limit_framing_stay_distinct() {
             invalid
         );
     }
+}
+
+fn put_basic(store: &EncryptedStore, name: &str) {
+    use credentials_core::audit::{AuditCtx, AuditOp};
+    store
+        .set_federation_self_member_audited(
+            "fed-computer:22222222222222222222222222222222",
+            AuditCtx::admin(AuditOp::FederationSelfSet),
+        )
+        .unwrap();
+    store
+        .set_secret_basic_auth_audited(true, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap();
+    store
+        .secret_put_audited(
+            &SecretPut {
+                name: name.into(),
+                kind: "agent_api_key".into(),
+                host: Some("x.test".into()),
+                path_prefix: Some("/repos/a".into()),
+                location: Some("authorization_basic:git".into()),
+                origin: None,
+                rules: None,
+                origins: None,
+                program: None,
+                r#use: None,
+                targets: None,
+                material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    deposit_plaintext(&SecretMaterial::ApiKey(
+                        credentials_core::secret::Secret::new(b"token".to_vec()),
+                    ))
+                    .expose(),
+                ),
+            },
+            "operator",
+        )
+        .unwrap();
+}
+
+#[test]
+fn nameless_secret_use_refuses_cerebellum_basal_and_flow_with_uniform_not_found() {
+    let (_root, store) = rig("nameless-admission");
+    put_basic(&store, "key");
+    let mut request = params();
+    request.as_object_mut().unwrap().remove("name");
+    for module in ["cerebellum", "basal", "unknown"] {
+        assert_eq!(
+            serde_json::to_vec(&body(serve(
+                &store,
+                Some(&principal(module)),
+                &request,
+                || 1000
+            )))
+            .unwrap(),
+            serde_json::to_vec(&SecretError::NotFound.body()).unwrap()
+        );
+        assert!(sender_call("secret.use", Some(&principal(module)), &request).is_none());
+    }
+    request["stamp"]["attributes"]["flow_id"] = json!("flow-A");
+    for module in ["aft", "cerebellum", "basal"] {
+        assert_eq!(
+            body(serve(&store, Some(&principal(module)), &request, || 1000)),
+            SecretError::NotFound.body()
+        );
+    }
+}
+
+#[test]
+fn nameless_secret_use_parses_only_absence_and_reuses_the_named_card() {
+    let (_root, store) = rig("nameless-parsing");
+    put_basic(&store, "key");
+    let named = body(serve(&store, Some(&principal("aft")), &params(), || 1000));
+    assert_eq!(named["status"], "approval_required");
+    let mut request = params();
+    request.as_object_mut().unwrap().remove("name");
+    assert!(sender_call("secret.use", Some(&principal("aft")), &request).is_some());
+    assert_eq!(
+        serde_json::to_vec(&named).unwrap(),
+        serde_json::to_vec(&body(serve(
+            &store,
+            Some(&principal("aft")),
+            &request,
+            || 1000
+        )))
+        .unwrap()
+    );
+    for name in [json!(""), Value::Null, json!(42)] {
+        request["name"] = name;
+        assert_eq!(
+            body(serve(&store, Some(&principal("aft")), &request, || 1000)),
+            json!({"transport":"invalid_params"})
+        );
+    }
+    request.as_object_mut().unwrap().remove("name");
+    put_basic(&store, "other");
+    assert_eq!(
+        body(serve(&store, Some(&principal("aft")), &request, || 1000)),
+        SecretError::Ambiguous.body()
+    );
 }

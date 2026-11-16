@@ -126,6 +126,7 @@ pub const PLAN_TIER_SINCE_SCHEMA_VERSION: u32 = 44;
 /// Last-seen approved module declarations, retained for operator inspection only.
 pub const DECLARED_GRANTS_SCHEMA_VERSION: u32 = 45;
 pub const LOCAL_PROGRAM_SECRET_SCHEMA_VERSION: u32 = 46;
+pub const FLEET_SCHEMA_VERSION: u32 = 47;
 
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
@@ -1153,6 +1154,22 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE secret_grants ADD COLUMN local_use TEXT; \
         ALTER TABLE secret_pending_requests ADD COLUMN local_use TEXT;",
     },
+    Migration {
+        version: FLEET_SCHEMA_VERSION,
+        statements: "CREATE TABLE fleet_epochs (\
+            epoch INTEGER PRIMARY KEY, key BLOB NOT NULL, minter TEXT NOT NULL, \
+            members_json TEXT NOT NULL, mint_id TEXT, \
+            state TEXT NOT NULL CHECK (state IN ('pending','current','retired')), \
+            created_at_ms INTEGER NOT NULL\
+        ); \
+        CREATE UNIQUE INDEX fleet_one_current ON fleet_epochs(state) WHERE state = 'current'; \
+        CREATE UNIQUE INDEX fleet_one_pending ON fleet_epochs(state) WHERE state = 'pending'; \
+        CREATE TABLE fleet_removals (\
+            member_id TEXT NOT NULL, removal_id TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, \
+            PRIMARY KEY (member_id, removal_id)\
+        ); \
+        CREATE TABLE fleet_discards (mint_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL);",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1706,6 +1723,7 @@ pub enum StoreOpError {
     /// transfer key signs the federation seals, so the only thing it may be granted is
     /// `credential.public_key`, and no handle may reach it.
     TransferKeyReserved,
+    FleetKeyReserved,
     /// The vault transfer key is `Active`, so every operation that would change its
     /// state, payload, identity or kind is refused: the federation peers sealed to it
     /// could not open anything signed by a replacement. Recovery is an operator
@@ -1908,6 +1926,7 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::TransferKeyReserved => f.write_str(
                 "transfer_key_reserved: the vault transfer key admits one grant only, read to reserved:callosum for the public-key announce; it cannot be opened, sealed, signed or listed, and no other credential may take its id",
             ),
+            StoreOpError::FleetKeyReserved => f.write_str("fleet_key_reserved: fleet keys admit only their purpose-specific grants and no handles"),
             StoreOpError::TransferKeyProtected => f.write_str(
                 "transfer_key_protected: the vault transfer key is active, so its record cannot be replaced, re-identified, invalidated, retired, reactivated or removed",
             ),
@@ -1956,6 +1975,7 @@ impl StoreOpError {
             StoreOpError::MemberGrantSharingSwitch { .. } => Some("member_grant_sharing_switch"),
             StoreOpError::RemoteRecordHomeWatch { .. } => Some("remote_record_home_watch"),
             StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
+            StoreOpError::FleetKeyReserved => Some("fleet_key_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
         }
@@ -3840,7 +3860,7 @@ impl EncryptedStore {
                 &format!("{principal_kind}:{principal_id}"),
                 operation,
             )
-            .map_err(|_| StoreOpError::TransferKeyReserved)?;
+            .map_err(|_| crate::federation::key_grant_refusal(selector))?;
         }
         // Same closed kind list as creation. If revocation accepted a NARROWER set than
         // creation, a grant could be created and never revocable through this API -- the
@@ -7036,6 +7056,9 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        if crate::federation::is_fleet_key_id(credential_id) {
+            return Err(StoreOpError::FleetKeyReserved);
+        }
         if crate::agent_secret::is_deposit_key(credential_id) {
             return Err(StoreOpError::NotFound);
         }
@@ -7428,6 +7451,7 @@ impl EncryptedStore {
                 quarantined.extend(store_agent_secrets::rotate_agent_secrets_tx(
                     tx, old_key, &new_key,
                 )?);
+                fleet_store::rotate_fleet_epochs_tx(tx, old_key, &new_key)?;
 
                 // Re-seal the audit-key secret row under the new key.
                 tx.execute(
@@ -8364,7 +8388,7 @@ fn validate_read_grant(
             &format!("{principal_kind}:{principal_id}"),
             operation,
         )
-        .map_err(|_| StoreOpError::TransferKeyReserved)?;
+        .map_err(|_| crate::federation::key_grant_refusal(selector))?;
     }
     // An enrolled name outside the approval grammar could never be held, so a grant
     // to it is unusable. Only creation checks this: revocation keeps the wider rule
@@ -14786,7 +14810,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            46,
+            47,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16953,9 +16977,12 @@ mod migration_10_tests {
             .unwrap();
         let before = every_table_row(&store.store);
         EncryptedStore::migrate(&store.store).unwrap();
-        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 46);
+        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 47);
         let mut after = every_table_row(&store.store);
         assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
+        for table in ["fleet_discards", "fleet_epochs", "fleet_removals"] {
+            assert_eq!(after.remove(table), Some(vec![]));
+        }
         assert_eq!(after, before);
         assert_eq!(store.verify_audit_chain().unwrap(), None);
     }
@@ -16973,6 +17000,9 @@ mod migration_10_tests {
         let before = every_table_row(&sqlite);
         EncryptedStore::migrate(&sqlite).unwrap();
         let mut after = every_table_row(&sqlite);
+        for table in ["fleet_discards", "fleet_epochs", "fleet_removals"] {
+            assert_eq!(after.remove(table), Some(vec![]));
+        }
         for table in ["secret_grants", "secret_pending_requests"] {
             assert_eq!(after[table].len(), 1);
             assert_eq!(
@@ -17937,6 +17967,33 @@ mod migration_10_tests {
         };
 
         for (table, expected) in [
+            (
+                "fleet_epochs",
+                vec![
+                    column("epoch", "INTEGER", false, None, true),
+                    column("key", "BLOB", true, None, false),
+                    column("minter", "TEXT", true, None, false),
+                    column("members_json", "TEXT", true, None, false),
+                    column("mint_id", "TEXT", false, None, false),
+                    column("state", "TEXT", true, None, false),
+                    column("created_at_ms", "INTEGER", true, None, false),
+                ],
+            ),
+            (
+                "fleet_removals",
+                vec![
+                    column("member_id", "TEXT", true, None, true),
+                    column("removal_id", "TEXT", true, None, true),
+                    column("observed_at_ms", "INTEGER", true, None, false),
+                ],
+            ),
+            (
+                "fleet_discards",
+                vec![
+                    column("mint_id", "TEXT", false, None, true),
+                    column("epoch", "INTEGER", true, None, false),
+                ],
+            ),
             (
                 "secret_grants",
                 vec![
@@ -19733,6 +19790,9 @@ mod transfer_key_fence_tests;
 
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
+
+#[path = "store_fleet.rs"]
+mod fleet_store;
 
 #[path = "store_declared_grants.rs"]
 mod declared_grants;

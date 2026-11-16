@@ -33,6 +33,7 @@ mod engine_tests;
 pub mod enrollment;
 pub mod envelope;
 pub mod federation;
+pub mod fleet;
 pub mod fusiform_providers;
 pub mod gateway;
 pub mod gh_manifest;

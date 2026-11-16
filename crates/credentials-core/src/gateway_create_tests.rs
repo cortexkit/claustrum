@@ -593,15 +593,21 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 46);
-    assert_eq!(newest_migration_version(), 46);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 47);
+    assert_eq!(newest_migration_version(), 47);
     let added: Vec<_> = table_names(&store)
         .into_iter()
         .filter(|name| !tables_before.contains(name))
         .collect();
     assert_eq!(
         added,
-        ["credential_gateway_settings", "declared_grant_sets"]
+        [
+            "credential_gateway_settings",
+            "declared_grant_sets",
+            "fleet_discards",
+            "fleet_epochs",
+            "fleet_removals"
+        ]
     );
     assert!(rows(&store, "credential_gateway_settings").is_empty());
     assert!(rows(&store, "declared_grant_sets").is_empty());

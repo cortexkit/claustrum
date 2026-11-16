@@ -1180,6 +1180,13 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `remote_remove` | Remove a remote record and its local metadata. |
 | `federation_gate_set` | Change the live federation member-mapping setting. |
 | `federation_self_set` | Set the vault's own canonical member id. |
+| `fleet_key_create` | Vault bootstrap creates a missing record-signing, epoch-wrap or bus-seal key; target is the credential id, with no payload. |
+| `fleet_epoch_mint` | Create one pending epoch and return its member wraps; no target or payload. |
+| `fleet_epoch_commit` | Make a matching pending mint current, retiring the previous current epoch; no target or payload. |
+| `fleet_epoch_discard` | Delete a matching pending mint and retain its discard receipt; no target or payload. |
+| `fleet_epoch_import` | Import authenticated epoch keys or grow their stored holder sets; no target or payload. |
+| `fleet_epoch_wrap_for` | Export held epochs in a join wrap, including successful retries; no target or payload. |
+| `fleet_removal` | Append one previously unseen member/removal-id pair; no target or payload. |
 | `secret_deposit_key_create` | Vault bootstrap creates the dedicated deposit key; target `kem:secret-deposit:1`, payload fields: key id. |
 | `secret_phone_gate_set` | Operator changes the phone mapping gate; no target, payload fields: enabled. |
 | `ssh_key_agent_allow` | Operator replaces a signing key's agent SSH targets; target is the credential id, payload is the keyed fingerprint of the resulting enrollment JSON. |

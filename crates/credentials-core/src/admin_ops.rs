@@ -1958,7 +1958,7 @@ pub fn apply(
                     &format!("{principal_kind}:{principal_id}"),
                     operation,
                 )
-                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+                .map_err(|_| crate::federation::key_grant_refusal(&selector))?;
             }
             let stored_selector = selector;
             // Re-granting an identical row is a no-op, not a failure: setup scripts re-run
@@ -2016,7 +2016,7 @@ pub fn apply(
                     &format!("{principal_kind}:{principal_id}"),
                     operation,
                 )
-                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+                .map_err(|_| crate::federation::key_grant_refusal(&stored_selector))?;
             }
             let declared = declared_covers(
                 store,

@@ -1630,6 +1630,19 @@ fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
 }
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
+    if verb == "ssh-key" {
+        return include_str!("../src/bin/credentials_cli.rs")
+            .split_once("fn parse_ssh_key_op(")
+            .unwrap()
+            .1
+            .split_once("fn parse_ssh_key_target(")
+            .unwrap()
+            .0
+            .split('"')
+            .filter(|token| token.starts_with("--"))
+            .map(str::to_string)
+            .collect();
+    }
     if verb == "manifest" {
         let source = include_str!("../src/bin/cli_support/manifest_cli.rs");
         let table = source
@@ -2324,6 +2337,178 @@ fn bootstrap_put_mint_audit_end_to_end() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ssh_enrollment_cli_replaces_targets_denies_while_off_and_mint_replace_unmarks() {
+    let root = tmp_root("ssh-enrollment");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    write_operator_master_key(&key_path, &"11".repeat(32));
+    let run = |args: &[&str]| {
+        cli()
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--key-path",
+                key_path.to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let success = |args: &[&str]| {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let id = "signing:cli-ssh";
+    success(&["mint-signing-key", "--id", id]);
+    let off = run(&["ssh-key", "allow", id, "--target", "root@[::1]:22"]);
+    assert!(!off.status.success());
+    assert!(String::from_utf8_lossy(&off.stderr).contains("secret_local_programs_disabled"));
+    success(&["secret", "local-programs", "on"]);
+    let first = success(&[
+        "ssh-key",
+        "allow",
+        id,
+        "--target",
+        "root@[::1]:22",
+        "--target",
+        "[2001:db8::1]",
+    ]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap(),
+        serde_json::json!({"targets":[{"host":"2001:db8::1"},{"host":"::1","port":22,"user":"root"}]})
+    );
+    let second = success(&["ssh-key", "allow", id, "--target", "192.0.2.1"]);
+    assert_eq!(second, "{\"targets\":[{\"host\":\"192.0.2.1\"}]}\n");
+    success(&["secret", "local-programs", "off"]);
+    assert_eq!(success(&["ssh-key", "deny", id]), "{\"targets\":[]}\n");
+    success(&["secret", "local-programs", "on"]);
+    success(&["ssh-key", "allow", id, "--target", "[::1]"]);
+    let db = data_dir.join("store.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let incarnation: String = conn
+        .query_row(
+            "SELECT incarnation FROM credentials WHERE credential_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES ('ssh-grant',?1,?2,'aft','session','scope','scope','hour',9999999999999,1,'hash')", rusqlite::params![id,incarnation]).unwrap();
+    drop(conn);
+    success(&["mint-signing-key", "--id", id, "--replace"]);
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = open_sqlite(&descriptor).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x11; 32])).unwrap();
+    assert!(store.get(id).unwrap().agent_ssh.is_none());
+    assert_eq!(store.credential_incarnation(id).unwrap(), incarnation);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM secret_grants WHERE secret_name=?1",
+            [id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let audit = store.read_audit(None).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|r| r.op == "ssh_key_agent_allow")
+            .count(),
+        3
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|r| r.op == "ssh_key_agent_deny")
+            .count(),
+        1
+    );
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
+fn ssh_enrollment_cli_rejects_unbracketed_ipv6_and_malformed_targets_before_access() {
+    for target in [
+        "::1",
+        "2001:db8::1:22",
+        "root@::1",
+        "root@2001:db8::1:22",
+        "[::1",
+        "[::1]tail",
+        "[::1]:0",
+        "[::1]:65536",
+        "[::1]:",
+        "[::1]:+22",
+        "-root@[::1]",
+        "root@@[::1]",
+        "EXAMPLE.COM",
+        "example.com.",
+    ] {
+        let out = cli()
+            .args(["ssh-key", "allow", "signing:ssh", "--target", target])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{target}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("SSH target"),
+            "{target}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for args in [
+        vec!["ssh-key", "deny", "signing:ssh", "--target", "[::1]"],
+        vec!["ssh-key", "allow", "signing:ssh"],
+        vec![
+            "ssh-key",
+            "allow",
+            "signing:ssh",
+            "--target",
+            "[::1]",
+            "--target",
+            "[::1]",
+        ],
+    ] {
+        let out = cli().args(&args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("ssh-key"));
+    }
+}
+
+#[test]
+fn ssh_enrollment_cli_help_explains_replacement_brackets_and_the_setting() {
+    for args in [["help", "ssh-key"], ["ssh-key", "--help"]] {
+        let out = cli().args(args).output().unwrap();
+        assert!(out.status.success());
+        let help = String::from_utf8(out.stdout).unwrap();
+        for text in [
+            "ssh-key allow",
+            "ssh-key deny",
+            "--target",
+            "replaces",
+            "Bracket IPv6",
+            "local-programs on",
+        ] {
+            assert!(help.contains(text), "{text}: {help}");
+        }
+        assert!(help.lines().all(|line| line.chars().count() <= 80));
+    }
 }
 
 /// A minted signing key is stored under the signing kind, can sign, and publishes the
@@ -5798,8 +5983,8 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // and provider-report.
     assert_eq!(
         verbs.len(),
-        41,
-        "the rendered verb-table scan narrowed; manifest is a public verb"
+        42,
+        "the rendered verb-table scan narrowed; ssh-key is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
@@ -8774,6 +8959,145 @@ fn secret_list_and_grants_work_with_the_daemon_down_and_show_phone_key_state() {
     assert!(empty.status.success());
     assert_eq!(
         String::from_utf8_lossy(&empty.stdout),
+        "no agent secrets stored\n"
+    );
+}
+
+#[test]
+fn local_use_listing_cli_orders_secret_ssh_and_phone_rows_without_a_key() {
+    let vault = GrantCliVault::new("local-use-listing-cli");
+    vault.bootstrap();
+    assert!(vault
+        .run(&["secret", "local-programs", "on"])
+        .status
+        .success());
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    for args in [
+        vec![
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "localhost",
+            "--material-file",
+            file.to_str().unwrap(),
+        ],
+        vec![
+            "secret",
+            "put",
+            "sudo",
+            "--kind",
+            "local-program",
+            "--program",
+            "sudo",
+            "--target",
+            "root",
+            "--target",
+            "admin",
+            "--material-file",
+            file.to_str().unwrap(),
+        ],
+    ] {
+        let out = vault.run(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    let local_rows = [
+        (
+            "sudo-grant",
+            "sudo",
+            "once",
+            r#"{"command":"command-canary","expects":"password","program":"sudo","purpose":"update","target":{"user":"root"},"undoable":"no","use":"sudo_password","workdir":"/private"}"#,
+        ),
+        (
+            "z-grant",
+            "signing:z",
+            "hour",
+            r#"{"key":{"credential_id":"signing:z","fingerprint":"SHA256:signing:z"},"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#,
+        ),
+        (
+            "b-grant",
+            "signing:a",
+            "once",
+            r#"{"command":"command-canary","key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","purpose":"login","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign","workdir":"/private"}"#,
+        ),
+        (
+            "a-grant",
+            "signing:a",
+            "session",
+            r#"{"key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#,
+        ),
+    ];
+    for (id, name, duration, local) in local_rows {
+        let incarnation: String = conn
+            .query_row(
+                "SELECT incarnation FROM agent_secrets WHERE name=?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "key-incarnation".into());
+        conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use,asking_member_id) VALUES (?1,?2,?3,'owner','head','H','scope',?4,2000,1000,'hash',?5,?6)", rusqlite::params![id,name,incarnation,duration,local,if name.starts_with("signing:") { "remote" } else { "" }]).unwrap();
+    }
+    conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) SELECT 'legacy-grant',name,incarnation,'owner','head','H','scope','permanent',0,1000,'hash' FROM agent_secrets WHERE name='ops-key'", []).unwrap();
+    conn.execute("INSERT INTO secret_phone_keys (fingerprint,pairing_id,deposit_pub,approval_pub,created_at_ms) VALUES ('phone-fp','pair-A',zeroblob(32),zeroblob(65),1000)", []).unwrap();
+    conn.execute("UPDATE agent_secrets SET envelope=x'00'", [])
+        .unwrap();
+    std::fs::remove_file(&vault.key_path).unwrap();
+    // The CLI must use only stored grant metadata: there is no daemon, master key or
+    // decryptable secret envelope, and no SSH credential row to consult.
+    let sudo_suffix =
+        r#" local_use={"program":"sudo","target":{"user":"root"},"use":"sudo_password"}"#;
+    let ssh_suffix = r#" asking_member=remote local_use={"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#;
+    let list = vault.run(&["secret", "list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&list.stdout), format!(
+        "ops-key agent_api_key active host=localhost prefix= location=authorization_bearer\n  grant legacy-grant owner/head:H scope permanent\nsudo local_program active program=sudo use=sudo_password target=admin target=root\n  grant sudo-grant owner/head:H scope once until 1970-01-01T00:00:02Z{sudo_suffix}\nssh-key signing:a SHA256:signing:a\n  grant a-grant owner/head:H scope session until 1970-01-01T00:00:02Z{ssh_suffix}\n  grant b-grant owner/head:H scope once until 1970-01-01T00:00:02Z{ssh_suffix}\nssh-key signing:z SHA256:signing:z\n  grant z-grant owner/head:H scope hour until 1970-01-01T00:00:02Z{ssh_suffix}\nphone phone-fp pairing pair-A unobserved\n"
+    ));
+    let grants = vault.run(&["secret", "grants"]);
+    assert!(
+        grants.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grants.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&grants.stdout), format!(
+        "legacy-grant secret|ops-key owner/head:H scope permanent expiry=none last_use=never\nsudo-grant secret|sudo owner/head:H scope once expiry=2000 last_use=never{sudo_suffix}\na-grant signing:a SHA256:signing:a owner/head:H scope session expiry=2000 last_use=never{ssh_suffix}\nb-grant signing:a SHA256:signing:a owner/head:H scope once expiry=2000 last_use=never{ssh_suffix}\nz-grant signing:z SHA256:signing:z owner/head:H scope hour expiry=2000 last_use=never{ssh_suffix}\n"
+    ));
+    conn.execute(
+        "DELETE FROM secret_grants WHERE secret_name NOT GLOB 'signing:*'",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM agent_secrets", []).unwrap();
+    conn.execute("DELETE FROM secret_phone_keys", []).unwrap();
+    for verb in ["list", "grants"] {
+        let out = vault.run(&["secret", verb]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("signing:a SHA256:signing:a"), "{text}");
+        assert!(!text.contains("no agent-secret grants"), "{text}");
+        assert!(!text.contains("no agent secrets stored"), "{text}");
+    }
+    conn.execute("DELETE FROM secret_grants", []).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "grants"]).stdout),
+        "no agent-secret grants\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "list"]).stdout),
         "no agent secrets stored\n"
     );
 }

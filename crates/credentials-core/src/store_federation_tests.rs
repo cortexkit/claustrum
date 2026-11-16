@@ -2977,6 +2977,37 @@ fn an_accept_that_fails_part_way_writes_nothing() {
     assert!(store.verify_audit_chain().is_ok());
 }
 
+#[test]
+fn incoming_transfer_refuses_agent_ssh_without_writing() {
+    let (_root, store) = rig("federation-accept-ssh", 234);
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID, 7))
+        .unwrap();
+    let mut incoming = acceptance(TRANSFER_ID, 7, vec!["openai".into()]);
+    incoming.record.agent_ssh = Some(crate::record::AgentSsh {
+        targets: vec![crate::record::AgentSshTarget {
+            user: None,
+            host: "::1".into(),
+            port: None,
+        }],
+    });
+    let before = store.audit_tip().unwrap();
+    assert!(matches!(
+        store.accept_incoming_transfer_audited(&incoming),
+        Err(StoreOpError::InvalidAgentSsh)
+    ));
+    assert_eq!(local_rows(&store, "apikey:openai"), 0);
+    assert!(store.categories("apikey:openai").unwrap().is_empty());
+    assert!(store.provider_ids("apikey:openai").unwrap().is_empty());
+    assert_eq!(store.audit_tip().unwrap(), before);
+    let pending = store.incoming_transfer(HOME, TRANSFER_ID).unwrap().unwrap();
+    assert_eq!(
+        pending.state,
+        crate::federation::IncomingTransferState::Pending
+    );
+    assert_eq!(pending.sealed, Some(sealed(7)));
+}
+
 /// The dedup recheck runs before the queue bounds: with the sender's queue full, the
 /// same bytes again answer their stored state and write nothing, while a different
 /// transfer is refused as queue-full.
@@ -3292,7 +3323,7 @@ fn remote_record_source_readers_default_to_operator_at_schema_38() {
         store.store.with_conn(read_schema_version).unwrap(),
         newest_migration_version()
     );
-    assert_eq!(newest_migration_version(), 45);
+    assert_eq!(newest_migration_version(), 46);
     for record in &expected {
         assert_eq!(
             store.remote_record(&record.credential_id).unwrap().as_ref(),

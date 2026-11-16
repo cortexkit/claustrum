@@ -89,6 +89,14 @@ pub enum AdminOpBody {
         id: String,
         payload_b64: String,
     },
+    #[serde(rename = "admin.ssh_key_agent_allow")]
+    SshKeyAgentAllow {
+        v: u32,
+        id: String,
+        targets: Vec<crate::record::AgentSshTarget>,
+    },
+    #[serde(rename = "admin.ssh_key_agent_deny")]
+    SshKeyAgentDeny { v: u32, id: String },
     #[serde(rename = "admin.manifest_import")]
     ManifestImport {
         v: u32,
@@ -346,6 +354,8 @@ pub enum AdminOpBody {
     SecretPhoneGateSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_multi_host_set")]
     SecretMultiHostSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_local_programs_set")]
+    SecretLocalProgramsSet { v: u32, enabled: bool },
     /// `ck auth secret put`: create an agent secret from operator-supplied material.
     ///
     /// THE ONLY ADMIN OP THAT CARRIES SECRET MATERIAL INBOUND, shortly after
@@ -381,6 +391,16 @@ pub enum AdminOpBody {
             deserialize_with = "present_scope_value"
         )]
         origins: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#use: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_scope_value"
+        )]
+        targets: Option<serde_json::Value>,
         material_b64url: String,
     },
     /// `ck auth secret delete`: remove a secret, its grants and its pending requests.
@@ -511,6 +531,17 @@ pub enum AdminOpBody {
 impl std::fmt::Debug for AdminOpBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AdminOpBody::SshKeyAgentAllow { v, id, targets } => f
+                .debug_struct("SshKeyAgentAllow")
+                .field("v", v)
+                .field("id", id)
+                .field("targets", targets)
+                .finish(),
+            AdminOpBody::SshKeyAgentDeny { v, id } => f
+                .debug_struct("SshKeyAgentDeny")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
             AdminOpBody::ProviderSet {
                 v,
                 service,
@@ -825,6 +856,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("enabled", enabled)
                 .finish(),
+            AdminOpBody::SecretLocalProgramsSet { v, enabled } => f
+                .debug_struct("SecretLocalProgramsSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::SecretPhoneGateSet { v, enabled } => f
                 .debug_struct("SecretPhoneGateSet")
                 .field("v", v)
@@ -983,6 +1019,7 @@ impl AdminOpBody {
     /// The schema version this op declares.
     pub fn schema_version(&self) -> u32 {
         match self {
+            AdminOpBody::SshKeyAgentAllow { v, .. } | AdminOpBody::SshKeyAgentDeny { v, .. } => *v,
             AdminOpBody::Store { v, .. }
             | AdminOpBody::GatewayCreate { v, .. }
             | AdminOpBody::ProviderSet { v, .. }
@@ -1022,6 +1059,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { v, .. }
             | AdminOpBody::SecretPhoneGateSet { v, .. }
             | AdminOpBody::SecretMultiHostSet { v, .. }
+            | AdminOpBody::SecretLocalProgramsSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
@@ -1048,6 +1086,9 @@ impl AdminOpBody {
     /// which clears the descriptor rather than preserving it as a legacy v2 set does.
     pub const fn required_schema_version(&self) -> u32 {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } | AdminOpBody::SshKeyAgentDeny { .. } => {
+                ADMIN_OP_SCHEMA_V2
+            }
             AdminOpBody::ProviderSet {
                 hosts,
                 auth_header,
@@ -1088,6 +1129,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1139,6 +1181,7 @@ impl AdminOpBody {
     /// which therefore takes no per-id lock.
     pub fn lock_id(&self) -> Option<&str> {
         match self {
+            AdminOpBody::SshKeyAgentAllow { id, .. } | AdminOpBody::SshKeyAgentDeny { id, .. } => Some(id),
             // An approval takes the signing credential's lock: it is the record whose
             // window is about to open, so an approval racing an admin mutation of that
             // same key should serialize rather than interleave.
@@ -1211,6 +1254,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1243,6 +1287,8 @@ impl AdminOpBody {
     /// refused without nesting the whole body).
     pub fn op_name(&self) -> &'static str {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } => "admin.ssh_key_agent_allow",
+            AdminOpBody::SshKeyAgentDeny { .. } => "admin.ssh_key_agent_deny",
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
             AdminOpBody::ManifestImport { .. } => "admin.manifest_import",
             AdminOpBody::ManifestSign { .. } => "admin.manifest_sign",
@@ -1283,6 +1329,7 @@ impl AdminOpBody {
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
             AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
             AdminOpBody::SecretMultiHostSet { .. } => "admin.secret_multi_host_set",
+            AdminOpBody::SecretLocalProgramsSet { .. } => "admin.secret_local_programs_set",
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
@@ -1314,6 +1361,7 @@ impl AdminOpBody {
     /// half-implementation.
     pub const fn requires_daemon(&self) -> bool {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } | AdminOpBody::SshKeyAgentDeny { .. } => false,
             AdminOpBody::Store { .. }
             | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderSet { .. }
@@ -1358,6 +1406,7 @@ impl AdminOpBody {
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::SecretMultiHostSet { .. }
+            | AdminOpBody::SecretLocalProgramsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1478,6 +1527,18 @@ pub fn apply(
         return Err(requires_daemon_refusal(&op));
     }
     match op {
+        AdminOpBody::SshKeyAgentAllow { id, targets, .. } => {
+            let enrollment = store.set_agent_ssh_audited(
+                &id,
+                Some(crate::record::AgentSsh { targets }),
+                actor,
+            )?;
+            Ok(serde_json::json!({"targets": enrollment.map(|e| e.targets).unwrap_or_default()}))
+        }
+        AdminOpBody::SshKeyAgentDeny { id, .. } => {
+            store.set_agent_ssh_audited(&id, None, actor)?;
+            Ok(serde_json::json!({"targets": []}))
+        }
         AdminOpBody::ManifestImport { envelope, .. } => {
             store.import_gh_manifest_admin(&envelope, actor)
         }
@@ -2050,6 +2111,13 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({"phone_mapping": enabled, "changed": changed}))
         }
+        AdminOpBody::SecretLocalProgramsSet { enabled, .. } => {
+            let changed = store.set_secret_local_programs_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretLocalProgramsSet, actor),
+            )?;
+            Ok(serde_json::json!({"local_programs": enabled, "changed": changed}))
+        }
         AdminOpBody::SecretPut {
             kind,
             name,
@@ -2060,6 +2128,9 @@ pub fn apply(
             rules,
             origins,
             material_b64url,
+            program,
+            r#use,
+            targets,
             ..
         } => store.secret_put_audited(
             &SecretPut {
@@ -2072,6 +2143,9 @@ pub fn apply(
                 rules,
                 origins,
                 material_b64url,
+                program,
+                r#use,
+                targets,
             },
             actor,
         ),
@@ -2658,6 +2732,9 @@ mod tests {
             origin: None,
             rules: None,
             origins: None,
+            program: None,
+            r#use: None,
+            targets: None,
             material_b64url: "TUFURVJJQUwtQ0FOQVJZ".into(),
         };
         let rendered = format!("{op:?}");
@@ -2812,6 +2889,25 @@ mod admin_schema_v2_tests {
         let v1 = ADMIN_OP_SCHEMA_V1;
         let v2 = ADMIN_OP_SCHEMA_V2;
         let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
+            (
+                "SshKeyAgentAllow",
+                AdminOpBody::SshKeyAgentAllow {
+                    v: v2,
+                    id: "signing:ssh".into(),
+                    targets: vec![],
+                },
+                v2,
+                Some("signing:ssh"),
+            ),
+            (
+                "SshKeyAgentDeny",
+                AdminOpBody::SshKeyAgentDeny {
+                    v: v2,
+                    id: "signing:ssh".into(),
+                },
+                v2,
+                Some("signing:ssh"),
+            ),
             (
                 "ManifestImport",
                 AdminOpBody::ManifestImport {
@@ -3128,6 +3224,9 @@ mod admin_schema_v2_tests {
                     origin: None,
                     rules: None,
                     origins: None,
+                    program: None,
+                    r#use: None,
+                    targets: None,
                     material_b64url: "".into(),
                 },
                 v2,

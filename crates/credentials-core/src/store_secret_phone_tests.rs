@@ -1146,3 +1146,231 @@ fn phone_extended_deposit_stores_the_rule_and_origin_caps_and_legacy_ignores_gat
         );
     }
 }
+
+#[test]
+fn local_program_deposit_off_and_identical_resend_write_nothing() {
+    let (_root, store, sender) = setup("local-program-deposit");
+    let scope = SecretScope::from_input(
+        "local_program",
+        &json!({"program":"sudo","use":"sudo_password","targets":[{"user":"root"}]}),
+        None,
+    )
+    .unwrap();
+    let material = SecretMaterial::LocalProgram(Secret::new("şifre🔑".into()));
+    let d = deposit(&store, &sender, "sudo", ID, scope.clone(), material.clone());
+    let before = snapshot(&store);
+    assert_eq!(
+        run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())),
+        Err(SecretError::SecretLocalProgramsDisabled)
+    );
+    assert_eq!(snapshot(&store), before);
+    assert!(!store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    assert_eq!(snapshot(&store), before);
+    assert!(store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    let on = snapshot(&store);
+    assert!(!store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    assert_eq!(snapshot(&store), on);
+    let result = run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap();
+    assert_eq!(result["status"], "stored");
+    let (incarnation, blob): (String, Vec<u8>) = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT incarnation,envelope FROM agent_secrets WHERE name='sudo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        agent_secret::open(&store.key, &incarnation, "sudo", &scope, &blob).unwrap(),
+        material
+    );
+    assert_eq!(
+        run(&store, Some("pair-A"), &PhoneOperation::Deposit(d.clone())).unwrap(),
+        json!({"status":"already_stored"})
+    );
+    assert!(store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap());
+    let before = snapshot(&store);
+    assert_eq!(
+        store.secret_phone_operation(
+            FP,
+            Some("pair-A"),
+            9999,
+            &PhoneOperation::Deposit(d),
+            || true,
+            || 9999
+        ),
+        Err(SecretError::SecretLocalProgramsDisabled)
+    );
+    assert_eq!(snapshot(&store), before);
+    let observed: i64 = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT observed_at_ms FROM secret_phone_observations WHERE fingerprint=?1",
+                [FP],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(observed, 1000);
+    let listing = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
+    assert_eq!(listing["secrets"][0]["program"], "sudo");
+    assert_eq!(listing["secrets"][0]["use"], "sudo_password");
+    let audits: i64 = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM audit_log WHERE op='secret_local_programs_set'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(audits, 2);
+}
+
+#[test]
+fn local_use_listing_projects_grants_and_omits_ssh_keys_without_grants() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (_root, store, sender) = setup("local-use-listing-phone");
+    store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap();
+    let scope_fields = json!({"program":"sudo","use":"sudo_password","targets":[{"user":"root"},{"user":"admin"}]});
+    let local_scope = SecretScope::from_input("local_program", &scope_fields, None).unwrap();
+    let deposited = run(
+        &store,
+        Some("pair-A"),
+        &PhoneOperation::Deposit(deposit(
+            &store,
+            &sender,
+            "sudo",
+            ID,
+            local_scope,
+            SecretMaterial::LocalProgram(Secret::new("password-canary".into())),
+        )),
+    )
+    .unwrap();
+    let incarnation = deposited["incarnation"].as_str().unwrap();
+    let der =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pem = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        STANDARD.encode(der.as_ref())
+    );
+    for id in ["signing:z", "signing:a"] {
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        store
+            .set_agent_ssh_audited(
+                id,
+                Some(crate::record::AgentSsh {
+                    targets: vec![crate::record::AgentSshTarget {
+                        user: None,
+                        host: "localhost".into(),
+                        port: None,
+                    }],
+                }),
+                "admin",
+            )
+            .unwrap();
+    }
+    let listed = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
+    assert!(listed.get("ssh_keys").is_none(), "{listed}");
+    assert_eq!(listed["secrets"][0]["program"], "sudo");
+    assert_eq!(listed["secrets"][0]["use"], "sudo_password");
+    assert_eq!(
+        listed["secrets"][0]["targets"],
+        json!([{"user":"admin"},{"user":"root"}])
+    );
+    let sudo = json!({"program":"sudo","use":"sudo_password","target":{"user":"root"}});
+    let ssh = json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"localhost","port":22}});
+    store.fenced_write(|tx| {
+        let mut once = sudo.clone();
+        once["command"] = json!("command-canary");
+        once["workdir"] = json!("/private");
+        once["purpose"] = json!("update");
+        once["expects"] = json!("password");
+        once["undoable"] = json!("no");
+        tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use) VALUES ('sudo-grant','sudo',?1,'owner','head','H','scope','once',2000,1000,'hash',?2)", rusqlite::params![incarnation,once.to_string()])?;
+        for (id, key_id, duration, expiry) in [("z-grant","signing:z","hour",2000),("b-grant","signing:a","once",2000),("a-grant","signing:a","session",2000),("expired","signing:a","hour",1000)] {
+            let mut local = ssh.clone();
+            local["key"] = json!({"credential_id":key_id,"fingerprint":format!("SHA256:{key_id}")});
+            if duration == "once" {
+                local["command"] = json!("command-canary");
+                local["workdir"] = json!("/private");
+                local["purpose"] = json!("login");
+            }
+            tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use,agent_id,last_use_ms) SELECT ?1,credential_id,incarnation,'owner','head','H','scope',?3,?4,1000,'hash',?5,'agent-A',999 FROM credentials WHERE credential_id=?2", rusqlite::params![id,key_id,duration,expiry,local.to_string()])?;
+        }
+        // Neither listing may rely on decrypting an enrolled key to recover its identity.
+        tx.execute("UPDATE credentials SET envelope=x'00' WHERE credential_id GLOB 'signing:*'", [])?;
+        Ok(())
+    }).unwrap();
+    store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap();
+    let listed = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
+    assert_eq!(listed["secrets"][0]["grants"][0]["local_use"], sudo);
+    let keys = listed["ssh_keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0]["credential_id"], "signing:a");
+    assert_eq!(keys[1]["credential_id"], "signing:z");
+    assert_eq!(keys[0]["fingerprint"], "SHA256:signing:a");
+    let key_incarnation: String = store
+        .store
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT incarnation FROM credentials WHERE credential_id='signing:a'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(keys[0]["incarnation"], key_incarnation);
+    assert_eq!(
+        keys[0]["grants"],
+        json!([
+            {"grant_id":"a-grant","scope":{"owner":"owner","kind":"head","ref":"H"},"coverage":"scope","duration":"session","expires_at_ms":2000,"last_use_ms":999,"agent_id":"agent-A","local_use":ssh},
+            {"grant_id":"b-grant","scope":{"owner":"owner","kind":"head","ref":"H"},"coverage":"scope","duration":"once","expires_at_ms":2000,"last_use_ms":999,"agent_id":"agent-A","local_use":ssh},
+        ])
+    );
+    assert!(!listed.to_string().contains("command-canary"));
+    assert!(!listed.to_string().contains("password-canary"));
+    assert_eq!(
+        store.secret_permissions_list(None, 1000).unwrap(),
+        json!({"grants":[]})
+    );
+    for id in ["a-grant", "b-grant", "z-grant"] {
+        run(
+            &store,
+            Some("pair-A"),
+            &PhoneOperation::Revoke {
+                grant_id: id.into(),
+            },
+        )
+        .unwrap();
+    }
+    let listed = run(&store, Some("pair-A"), &PhoneOperation::List).unwrap();
+    assert!(listed.get("ssh_keys").is_none(), "{listed}");
+    assert_eq!(listed["secrets"][0]["grants"].as_array().unwrap().len(), 1);
+}

@@ -1,9 +1,10 @@
 //! The trusted sender boundary for secret release. Scope authority comes only from ScopeStamp.
+use base64::Engine as _;
 use credentials_core::{
     agent_secret::*,
     store::{EncryptedStore, ForwardedUse, ReleaseRequest, SealedRelease},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use subc_protocol::{
@@ -48,6 +49,7 @@ fn default_coverage() -> String {
 enum Target {
     Api(ApiTarget),
     Login(LoginTarget),
+    Local(LocalTarget),
 }
 impl Target {
     fn into_use_target(self) -> UseTarget {
@@ -59,6 +61,7 @@ impl Target {
                 path: t.path,
             },
             Self::Login(t) => UseTarget::SiteLogin { origin: t.origin },
+            Self::Local(_) => unreachable!("local targets are parsed before legacy targets"),
         }
     }
 }
@@ -78,6 +81,268 @@ fn default_port() -> u16 {
 #[serde(deny_unknown_fields)]
 struct LoginTarget {
     origin: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LocalTarget {
+    program: String,
+    r#use: String,
+    target: Value,
+    command: String,
+    workdir: String,
+    purpose: String,
+    expects: String,
+    undoable: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshParams {
+    key: String,
+    stamp: Value,
+    #[serde(default = "default_coverage")]
+    coverage: String,
+    target: Value,
+    command: String,
+    workdir: String,
+    purpose: String,
+    data: String,
+}
+
+pub(crate) fn is_local_use(params: &Value) -> bool {
+    params
+        .get("target")
+        .and_then(Value::as_object)
+        .is_some_and(|t| {
+            t.contains_key("program")
+                || t.contains_key("use")
+                || (!t.contains_key("scheme")
+                    && !t.contains_key("origin")
+                    && [
+                        "target", "command", "workdir", "purpose", "expects", "undoable",
+                    ]
+                    .iter()
+                    .any(|key| t.contains_key(*key)))
+        })
+}
+
+fn aft(principal: Option<&Principal>) -> bool {
+    matches!(principal, Some(Principal::Reserved { module_id }) if module_id == "aft")
+}
+
+fn local_body(error: SecretError) -> Value {
+    let mut body = error.body();
+    if error == SecretError::LimitExceeded {
+        body["error"]["class"] = "permanent".into();
+    }
+    body
+}
+
+fn local_error(store: &EncryptedStore, name: &str, error: SecretError) -> UseAnswer {
+    store.record_secret_use_refusal(
+        SecretSender::Aft,
+        Some(name),
+        if error == SecretError::LimitExceeded {
+            "limit"
+        } else {
+            "grammar"
+        },
+    );
+    match error {
+        SecretError::InvalidParams => UseAnswer::InvalidParams,
+        _ => UseAnswer::Reply(local_body(error)),
+    }
+}
+
+fn local_enabled(store: &EncryptedStore) -> Result<(), UseAnswer> {
+    // This early refusal avoids parsing or forwarding while off. The store's
+    // in-transaction check remains authoritative if the switch changes meanwhile.
+    match store.secret_local_programs_enabled() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(UseAnswer::Reply(
+            SecretError::SecretLocalProgramsDisabled.body(),
+        )),
+        Err(error) => Err(UseAnswer::Reply(error.body())),
+    }
+}
+
+fn local_scope(
+    store: &EncryptedStore,
+    name: &str,
+    stamp: Value,
+    coverage: &str,
+) -> Result<(AskingScope, Option<AskingScope>, Option<String>), UseAnswer> {
+    if coverage != "scope" {
+        return Err(local_error(store, name, SecretError::InvalidParams));
+    }
+    let stamp: ScopeStamp = match serde_json::from_value(stamp) {
+        Ok(s) => s,
+        Err(e) if e.to_string().starts_with("missing field ") => {
+            store.record_secret_use_refusal(SecretSender::Aft, Some(name), "unmapped");
+            return Err(UseAnswer::Reply(SecretError::NotFound.body()));
+        }
+        Err(_) => return Err(local_error(store, name, SecretError::InvalidParams)),
+    };
+    if stamp.scope_epoch > MAX_SECRET_JSON_INTEGER
+        || stamp
+            .parent
+            .as_ref()
+            .is_some_and(|p| p.scope_epoch > MAX_SECRET_JSON_INTEGER)
+    {
+        return Err(local_error(store, name, SecretError::InvalidParams));
+    }
+    let Some((scope, parent)) = asking(&stamp) else {
+        store.record_secret_use_refusal(SecretSender::Aft, Some(name), "unmapped");
+        return Err(UseAnswer::Reply(SecretError::NotFound.body()));
+    };
+    let agent = if stamp.kind == ScopeKind::Worker {
+        stamp.attributes.on_behalf_of_agent
+    } else {
+        stamp.attributes.agent_id
+    };
+    Ok((scope, parent, agent))
+}
+
+fn parse_local_use(
+    store: &EncryptedStore,
+    sender: SecretSender,
+    params: &Value,
+) -> Result<SecretUse, UseAnswer> {
+    if sender != SecretSender::Aft {
+        return Err(UseAnswer::Reply(SecretError::NotFound.body()));
+    }
+    let params: Params =
+        serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
+    validate_name(&params.name).map_err(|_| UseAnswer::InvalidParams)?;
+    let Target::Local(target) = params.target else {
+        return Err(UseAnswer::InvalidParams);
+    };
+    local_enabled(store)?;
+    let (scope, worker_parent, agent_id) =
+        local_scope(store, &params.name, params.stamp, &params.coverage)?;
+    let local =
+        LocalUse::from_value(&serde_json::to_value(target).expect("local target serializes"))
+            .map_err(|e| local_error(store, &params.name, e))?;
+    if local.is_ssh() {
+        return Err(local_error(store, &params.name, SecretError::InvalidParams));
+    }
+    Ok(SecretUse {
+        name: params.name,
+        sender,
+        scope,
+        worker_parent,
+        coverage: params.coverage,
+        agent_id,
+        target: UseTarget::LocalProgram(local),
+    })
+}
+
+pub(crate) fn parse_ssh_sign(
+    store: &EncryptedStore,
+    params: &Value,
+) -> Result<SecretSshSign, UseAnswer> {
+    let params: SshParams =
+        serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
+    if !params.key.starts_with("signing:")
+        || credentials_core::store::validate_deposit_credential_id(&params.key).is_err()
+    {
+        return Err(UseAnswer::InvalidParams);
+    }
+    local_enabled(store)?;
+    let (scope, worker_parent, agent_id) =
+        local_scope(store, &params.key, params.stamp, &params.coverage)?;
+    let local_use = LocalUse::from_value(&serde_json::json!({"program":"ssh","use":"ssh_sign","target":params.target,"command":params.command,"workdir":params.workdir,"purpose":params.purpose}))
+        .map_err(|e| local_error(store, &params.key, e))?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&params.data)
+        .map_err(|_| local_error(store, &params.key, SecretError::InvalidParams))?;
+    let data = SshUserauth::parse(bytes).map_err(|e| local_error(store, &params.key, e))?;
+    if data.user() != local_use.user() {
+        return Err(local_error(store, &params.key, SecretError::InvalidParams));
+    }
+    Ok(SecretSshSign {
+        key: params.key,
+        sender: SecretSender::Aft,
+        scope,
+        worker_parent,
+        coverage: params.coverage,
+        agent_id,
+        local_use,
+        data,
+    })
+}
+
+pub fn serve_ssh_sign(
+    store: &Arc<EncryptedStore>,
+    principal: Option<&Principal>,
+    params: &Value,
+    clock: impl Fn() -> i64,
+) -> UseAnswer {
+    if !aft(principal) {
+        return UseAnswer::Reply(SecretError::NotFound.body());
+    }
+    let call = match parse_ssh_sign(store, params) {
+        Ok(call) => call,
+        Err(answer) => return answer,
+    };
+    match store.secret_ssh_sign(&call, clock) {
+        Ok(outcome) => UseAnswer::Reply(outcome.reply),
+        Err(error) => match error {
+            SecretError::InvalidParams => UseAnswer::InvalidParams,
+            _ => UseAnswer::Reply(local_body(error)),
+        },
+    }
+}
+
+pub fn serve_ssh_sign_forwarded<E>(
+    store: &Arc<EncryptedStore>,
+    sender: SecretSender,
+    params: &Value,
+    request: &ReleaseRequest<'_>,
+    seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+    clock: impl Fn() -> i64,
+) -> ForwardedUseAnswer<E> {
+    if sender != SecretSender::Aft {
+        return ForwardedUseAnswer::Reply(SecretError::NotFound.body());
+    }
+    let call = match parse_ssh_sign(store, params) {
+        Ok(call) => call,
+        Err(answer) => return answer.into(),
+    };
+    local_forwarded_answer(store.secret_ssh_sign_sealed(&call, request, seal, clock))
+}
+
+pub(crate) fn preflight_forward(
+    store: &EncryptedStore,
+    sender: SecretSender,
+    params: &Value,
+    ssh: bool,
+) -> Result<(), UseAnswer> {
+    if ssh {
+        let p: SshParams =
+            serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
+        if !p.key.starts_with("signing:")
+            || credentials_core::store::validate_deposit_credential_id(&p.key).is_err()
+        {
+            return Err(UseAnswer::InvalidParams);
+        }
+    } else if is_local_use(params) {
+        if sender != SecretSender::Aft {
+            return Err(UseAnswer::Reply(SecretError::NotFound.body()));
+        }
+        let p: Params =
+            serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
+        validate_name(&p.name).map_err(|_| UseAnswer::InvalidParams)?;
+        if !matches!(p.target, Target::Local(_)) {
+            return Err(UseAnswer::InvalidParams);
+        }
+    } else {
+        return Ok(());
+    }
+    // The asking computer performs only admission, closed params and its switch.
+    // Stamp, target and data checks belong to the home after its own switch check.
+    local_enabled(store)
 }
 
 fn owner(principal: &Principal) -> String {
@@ -137,6 +402,9 @@ pub fn serve(
     params: &Value,
     clock: impl Fn() -> i64,
 ) -> UseAnswer {
+    if is_local_use(params) && !aft(principal) {
+        return UseAnswer::Reply(SecretError::NotFound.body());
+    }
     let sender = match principal {
         Some(Principal::Reserved { module_id }) if module_id == "basal" => {
             return flow::serve_use(store, params, clock);
@@ -159,6 +427,10 @@ pub fn serve(
             }
             UseAnswer::Reply(outcome.reply)
         }
+        Err(error) if is_local_use(params) => match error {
+            SecretError::InvalidParams => UseAnswer::InvalidParams,
+            _ => UseAnswer::Reply(local_body(error)),
+        },
         Err(error) => UseAnswer::Reply(error.body()),
     }
 }
@@ -166,7 +438,7 @@ pub fn serve(
 /// The forwardable form of a secret call from `principal`, or `None` when the caller is
 /// not admitted to `method` (the local serve functions then refuse it with `not_found`,
 /// before anything is looked up). Admission is the local one: `secret.use` from AFT,
-/// Cerebellum or basal, and the two flow ops from basal only.
+/// Cerebellum or basal, `secret.ssh_sign` from AFT only, and the two flow ops from basal only.
 pub fn sender_call<'a>(
     method: &str,
     principal: Option<&Principal>,
@@ -176,7 +448,11 @@ pub fn sender_call<'a>(
     let Some(Principal::Reserved { module_id }) = principal else {
         return None;
     };
+    if method == "secret.use" && is_local_use(params) && module_id != "aft" {
+        return None;
+    }
     match (method, module_id.as_str()) {
+        ("secret.ssh_sign", "aft") => Some(SecretCall::SshSign(params)),
         ("secret.use", "aft") => Some(SecretCall::Use {
             sender: SecretSender::Aft,
             call: params,
@@ -197,12 +473,16 @@ pub fn sender_call<'a>(
 
 /// Parse and validate `secret.use` params from an agent sender (AFT or Cerebellum) into
 /// the call the store authorizes, or the answer that ends the request. Every refusal
-/// here writes its diagnostic under `sender`.
+/// on the legacy path writes its diagnostic under `sender`. Local targets have silent
+/// admission, closed-params and feature-switch checks before scope diagnostics.
 fn parse_use(
     store: &EncryptedStore,
     sender: SecretSender,
     params: &Value,
 ) -> Result<SecretUse, UseAnswer> {
+    if is_local_use(params) {
+        return parse_local_use(store, sender, params);
+    }
     let invalid = |error: ValidationError| {
         store.record_secret_use_refusal(
             sender,
@@ -308,6 +588,13 @@ pub fn serve_forwarded<E>(
     seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
     clock: impl Fn() -> i64,
 ) -> ForwardedUseAnswer<E> {
+    if is_local_use(call) {
+        let call = match parse_local_use(store, sender, call) {
+            Ok(call) => call,
+            Err(answer) => return answer.into(),
+        };
+        return local_forwarded_answer(store.secret_use_sealed(&call, request, seal, clock));
+    }
     if sender == SecretSender::Basal {
         return flow::serve_use_forwarded(store, call, request, seal, clock);
     }
@@ -335,6 +622,16 @@ fn forwarded_answer<E>(
         Ok(Ok(ForwardedUse::Reply(reply))) => ForwardedUseAnswer::Reply(reply),
         Ok(Err(error)) => ForwardedUseAnswer::SealFailed(error),
         Err(error) => ForwardedUseAnswer::Reply(error.body()),
+    }
+}
+
+fn local_forwarded_answer<E>(
+    result: Result<Result<ForwardedUse, E>, SecretError>,
+) -> ForwardedUseAnswer<E> {
+    match result {
+        Err(SecretError::InvalidParams) => ForwardedUseAnswer::InvalidParams,
+        Err(error) => ForwardedUseAnswer::Reply(local_body(error)),
+        result => forwarded_answer(result),
     }
 }
 

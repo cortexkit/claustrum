@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
+pub const LOCAL_PROGRAMS_SETTING: &str = "secret.local_programs";
 
 /// The audit payload of an extended scope names its stored `scope_json`. Encoding an
 /// extended scope always yields it, so a missing value is a store error, never a panic
@@ -16,10 +17,18 @@ pub(super) fn extended_scope_json(scope_json: &Option<String>) -> rusqlite::Resu
 }
 
 pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
+    setting_enabled(conn, MULTI_HOST_SETTING)
+}
+
+pub(in crate::store) fn local_programs_enabled(conn: &rusqlite::Connection) -> bool {
+    setting_enabled(conn, LOCAL_PROGRAMS_SETTING)
+}
+
+fn setting_enabled(conn: &rusqlite::Connection, name: &str) -> bool {
     matches!(
         conn.query_row(
             "SELECT value FROM settings WHERE name=?1",
-            [MULTI_HOST_SETTING],
+            [name],
             |r| r.get::<_, String>(0),
         ).optional(),
         Ok(Some(value)) if value == "true"
@@ -28,6 +37,16 @@ pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
 
 /// Read the multi-host setting without taking the writer lease or loading secrets.
 pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<String, StoreOpError> {
+    feature_status_read_only(path, MULTI_HOST_SETTING)
+}
+
+pub fn secret_local_programs_status_read_only(
+    path: &std::path::Path,
+) -> Result<String, StoreOpError> {
+    feature_status_read_only(path, LOCAL_PROGRAMS_SETTING)
+}
+
+fn feature_status_read_only(path: &std::path::Path, name: &str) -> Result<String, StoreOpError> {
     if !path
         .try_exists()
         .map_err(|e| StoreOpError::Store(e.to_string()))?
@@ -48,11 +67,9 @@ pub fn secret_multi_host_status_read_only(path: &std::path::Path) -> Result<Stri
         return Ok("off".to_owned());
     }
     Ok(match conn
-        .query_row(
-            "SELECT value FROM settings WHERE name=?1",
-            [MULTI_HOST_SETTING],
-            |r| r.get::<_, String>(0),
-        )
+        .query_row("SELECT value FROM settings WHERE name=?1", [name], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
     {
         Ok(None) => "off",
@@ -142,8 +159,43 @@ pub enum PhoneOperation {
 }
 
 impl EncryptedStore {
+    /// Read the local-program feature switch without opening any secret record.
+    pub fn secret_local_programs_enabled(&self) -> Result<bool, SecretError> {
+        self.store
+            .with_conn(|conn| Ok(local_programs_enabled(conn)))
+            .map_err(|_| SecretError::StoreError)
+    }
+
     pub fn set_secret_multi_host_audited(
         &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        self.set_secret_feature_audited(
+            MULTI_HOST_SETTING,
+            AuditOp::SecretMultiHostSet,
+            enabled,
+            ctx,
+        )
+    }
+
+    pub fn set_secret_local_programs_audited(
+        &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        self.set_secret_feature_audited(
+            LOCAL_PROGRAMS_SETTING,
+            AuditOp::SecretLocalProgramsSet,
+            enabled,
+            ctx,
+        )
+    }
+
+    fn set_secret_feature_audited(
+        &self,
+        name: &str,
+        op: AuditOp,
         enabled: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
@@ -151,20 +203,23 @@ impl EncryptedStore {
             let wanted = if enabled { "true" } else { "false" };
             let old: Option<rusqlite::types::Value> = tx.query_row(
                 "SELECT value FROM settings WHERE name=?1",
-                [MULTI_HOST_SETTING],
+                [name],
                 |r| r.get(0),
             ).optional()?;
             if old == Some(rusqlite::types::Value::Text(wanted.to_owned())) {
                 return Ok(false);
             }
+            if name == LOCAL_PROGRAMS_SETTING && old.is_none() && !enabled {
+                return Ok(false);
+            }
             tx.execute(
                 "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at_ms=excluded.updated_at_ms",
-                rusqlite::params![MULTI_HOST_SETTING, wanted, now_ms()],
+                rusqlite::params![name, wanted, now_ms()],
             )?;
             let mut payload = Vec::new();
             agent_secret::push_field(&mut payload, wanted.as_bytes());
             append_audit_tx(tx, &self.audit_key, &AuditRecord {
-                op: AuditOp::SecretMultiHostSet,
+                op,
                 credential_id: None,
                 payload_hash: Some(hex(&payload_hash(&payload))),
                 actor: ctx.actor.to_string(),
@@ -244,6 +299,11 @@ impl EncryptedStore {
     ) -> Result<Value, SecretError> {
         let answer = self.fenced_write(|tx| {
             let admitted = before_deadline();
+            // Disabled local deposits must not update even phone observations. The
+            // deposit transaction repeats the gate before consulting replay tombstones.
+            if matches!(op, PhoneOperation::Deposit(d) if matches!(d.scope, SecretScope::LocalProgram { .. })) && !local_programs_enabled(tx) {
+                return Ok(Err(SecretError::SecretLocalProgramsDisabled));
+            }
             if !matches!(op, PhoneOperation::DepositKeys) {
                 observation(tx, fingerprint, pairing, observed_at_ms)?;
             }
@@ -349,6 +409,9 @@ impl EncryptedStore {
         d: &PhoneDeposit,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
+        if matches!(d.scope, SecretScope::LocalProgram { .. }) && !local_programs_enabled(tx) {
+            return Ok(Err(SecretError::SecretLocalProgramsDisabled));
+        }
         // The caller has already refused the deposit when this vault is not where the
         // secrets live, in this same transaction.
         // All deposit checks use this transaction, including key and member reads. Reading
@@ -387,7 +450,11 @@ impl EncryptedStore {
                 Err(SecretError::DepositConflict)
             });
         }
-        if d.scope.is_extended() && !multi_host_enabled(tx) {
+        if matches!(
+            d.scope,
+            SecretScope::ApiKeyRules { .. } | SecretScope::SiteLoginOrigins { .. }
+        ) && !multi_host_enabled(tx)
+        {
             return Ok(Err(SecretError::SecretMultiHostDisabled));
         }
         if d.member_id != member {
@@ -407,7 +474,7 @@ impl EncryptedStore {
         };
         let material = match agent_secret::decode_deposit_plaintext(d.scope.kind(), &opened)
             .and_then(|material| {
-                agent_secret::validate_material(&material)?;
+                agent_secret::validate_material_for_scope(&d.scope, &material)?;
                 Ok(material)
             }) {
             Ok(m) => m,
@@ -454,7 +521,9 @@ impl EncryptedStore {
             SecretScope::ApiKeyRules { location, .. } => {
                 fields.extend([extended_scope_json(&scope_json)?, location.as_bytes()])
             }
-            SecretScope::SiteLoginOrigins { .. } => fields.push(extended_scope_json(&scope_json)?),
+            SecretScope::SiteLoginOrigins { .. } | SecretScope::LocalProgram { .. } => {
+                fields.push(extended_scope_json(&scope_json)?)
+            }
         }
         fields.push(d.deposit_id.as_bytes());
         audit(
@@ -533,7 +602,9 @@ pub(super) fn columns(
         } => (Some(host), path_prefix.as_deref(), Some(location), None),
         SecretScope::SiteLogin { origin } => (None, None, None, Some(origin)),
         SecretScope::ApiKeyRules { location, .. } => (None, None, Some(location), None),
-        SecretScope::SiteLoginOrigins { .. } => (None, None, None, None),
+        SecretScope::SiteLoginOrigins { .. } | SecretScope::LocalProgram { .. } => {
+            (None, None, None, None)
+        }
     }
 }
 
@@ -575,7 +646,7 @@ pub(super) fn sweep(
             tx,
             key,
             AuditOp::SecretGrantExpire,
-            Some(format!("secret|{name}")),
+            Some(use_secret::secret_subject(&name)),
             "vault",
             &[id.as_bytes(), incarnation.as_bytes(), &expiry.to_le_bytes()],
         )?;
@@ -595,6 +666,36 @@ pub(super) fn sweep_release_receipts(
         [now],
     )?;
     Ok(())
+}
+
+/// Listings expose only the approved program/use/target, not a once grant's command
+/// or the SSH key identity stored alongside it.
+pub(super) fn listing_local_use(raw: &str) -> rusqlite::Result<Value> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|_| rusqlite_err("invalid stored local use"))?;
+    let field = |name| {
+        value
+            .get(name)
+            .cloned()
+            .ok_or_else(|| rusqlite_err("invalid stored local use"))
+    };
+    Ok(json!({"program":field("program")?,"use":field("use")?,"target":field("target")?}))
+}
+
+fn listed_agent_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let duration: String = r.get(5)?;
+    // Keep `agent_id` present even when the grant has no agent.
+    let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration,"agent_id":r.get::<_,Option<String>>(8)?});
+    if duration != "permanent" {
+        grant["expires_at_ms"] = json!(r.get::<_, i64>(6)?);
+    }
+    if let Some(last) = r.get::<_, Option<i64>>(7)? {
+        grant["last_use_ms"] = json!(last);
+    }
+    if let Some(raw) = r.get::<_, Option<String>>(9)? {
+        grant["local_use"] = listing_local_use(&raw)?;
+    }
+    Ok(grant)
 }
 
 fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
@@ -618,16 +719,15 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         Ok(value)
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     for secret in &mut secrets {
-        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
-        secret["grants"] = Value::Array(grants.query_map([secret["incarnation"].as_str().expect("incarnation")], |r| {
-            let duration: String=r.get(5)?;
-            // `agent_id` is always present so the phone never has to tell a missing key
-            // from an agent-less grant: it is null when the grant named no agent.
-            let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration,"agent_id":r.get::<_,Option<String>>(8)?});
-            if duration != "permanent" { grant["expires_at_ms"]=json!(r.get::<_,i64>(6)?); }
-            if let Some(last)=r.get::<_,Option<i64>>(7)? { grant["last_use_ms"]=json!(last); }
-            Ok(grant)
-        })?.collect::<rusqlite::Result<Vec<_>>>()?);
+        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
+        secret["grants"] = Value::Array(
+            grants
+                .query_map(
+                    [secret["incarnation"].as_str().expect("incarnation")],
+                    listed_agent_grant,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
         // A flow grant answers a different question: "which installed flow version may
         // use this?" It therefore names its flow instead of an asking scope, has no
         // coverage and never expires, and carries `methods` only for an API key.
@@ -645,7 +745,38 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         secret["flow_grants"] = Value::Array(flow_grants);
     }
-    Ok(json!({"secrets":secrets}))
+    let mut ssh_keys: Vec<Value> = Vec::new();
+    let mut stmt = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use,secret_name,incarnation FROM secret_grants WHERE secret_name GLOB 'signing:*' AND local_use IS NOT NULL ORDER BY secret_name,grant_id")?;
+    let rows = stmt.query_map([], |r| {
+        let raw: String = r.get(9)?;
+        let local: Value =
+            serde_json::from_str(&raw).map_err(|_| rusqlite_err("invalid stored local use"))?;
+        let fingerprint = local["key"]["fingerprint"]
+            .as_str()
+            .ok_or_else(|| rusqlite_err("missing SSH grant fingerprint"))?
+            .to_owned();
+        Ok((
+            r.get::<_, String>(10)?,
+            r.get::<_, String>(11)?,
+            fingerprint,
+            listed_agent_grant(r)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, incarnation, fingerprint, grant) = row?;
+        if ssh_keys.last().is_none_or(|key| key["credential_id"] != id) {
+            ssh_keys.push(json!({"credential_id":id,"incarnation":incarnation,"fingerprint":fingerprint,"grants":[]}));
+        }
+        ssh_keys.last_mut().expect("SSH key group")["grants"]
+            .as_array_mut()
+            .expect("grants array")
+            .push(grant);
+    }
+    let mut reply = json!({"secrets":secrets});
+    if !ssh_keys.is_empty() {
+        reply["ssh_keys"] = json!(ssh_keys);
+    }
+    Ok(reply)
 }
 
 #[cfg(test)]

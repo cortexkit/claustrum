@@ -167,6 +167,9 @@ fn api_key_put() -> SecretPut {
         origin: None,
         rules: None,
         origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
         material_b64url: b64url(
             deposit_plaintext(&SecretMaterial::ApiKey(Secret::new(API_KEY.to_vec()))).expose(),
         ),
@@ -183,6 +186,9 @@ fn site_login_put() -> SecretPut {
         origin: Some("https://x.test".into()),
         rules: None,
         origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
         material_b64url: b64url(
             deposit_plaintext(&SecretMaterial::SiteLogin {
                 username: Secret::new(USERNAME.to_owned()),

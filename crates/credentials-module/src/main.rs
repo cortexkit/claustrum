@@ -1666,8 +1666,10 @@ async fn dispatch_route_request(
             }
         };
     }
-    // Sender admission for secret.use precedes even phone/member parameter preflight.
-    if method.as_ref().is_some_and(|r| r.method == "secret.use")
+    // Sender admission precedes even phone/member parameter preflight.
+    if method
+        .as_ref()
+        .is_some_and(|r| matches!(r.method.as_str(), "secret.use" | "secret.ssh_sign"))
         && !matches!(caller, federation::RouteCaller::Principal(_))
     {
         return send_route_result(writer, header, uniform_not_found()).await;
@@ -1829,11 +1831,11 @@ fn route_connection_id(channel: u16, epoch: u32) -> u64 {
     (u64::from(epoch) << 16) | u64::from(channel)
 }
 
-/// Serve one sender secret call (`secret.use`, `secret.request_flow_approval`,
+/// Serve one sender secret call (`secret.use`, `secret.ssh_sign`, `secret.request_flow_approval`,
 /// `secret.revoke_flow_grants`). An admitted call on a vault whose secret home is
 /// another member is forwarded there and nothing is looked up locally; on a vault that
 /// serves its own secrets, and for a caller who is not admitted, the local serve
-/// functions answer exactly as before.
+/// functions enforce sender admission and parse locally.
 async fn serve_secret_call(
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
@@ -1855,6 +1857,7 @@ async fn serve_secret_call(
         }
         SecretRoute::Local => match method {
             "secret.use" => admin.serve_secret_use(principal, params),
+            "secret.ssh_sign" => admin.serve_secret_ssh_sign(principal, params),
             "secret.request_flow_approval" => admin.serve_flow_approval(principal, params),
             _ => admin.serve_revoke_flow_grants(principal, params),
         },
@@ -1939,13 +1942,18 @@ async fn handle_read_request(
             )
             .await;
         }
-        method @ ("secret.use" | "secret.request_flow_approval" | "secret.revoke_flow_grants") => {
+        method @ ("secret.use"
+        | "secret.ssh_sign"
+        | "secret.request_flow_approval"
+        | "secret.revoke_flow_grants") => {
             match serve_secret_call(surface, admin, principal.as_ref(), method, &request.params)
                 .await
             {
                 secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
                 secret_use::UseAnswer::InvalidParams => {
-                    let detail = if method == "secret.use" {
+                    let detail = if method == "secret.ssh_sign" {
+                        "invalid secret ssh sign parameters"
+                    } else if method == "secret.use" {
                         "invalid secret use parameters"
                     } else {
                         "invalid flow secret parameters"
@@ -2613,6 +2621,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 federation::ingress::OP_REPORT_AUTH_FAILURE,
                 federation::ingress::OP_TRANSFER_DELIVER,
                 federation::ingress::OP_SECRET_USE,
+                federation::ingress::OP_SECRET_SSH_SIGN,
                 federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
                 federation::ingress::OP_REMOTE_WATCH,
@@ -2798,6 +2807,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.home".into(), description: None, kind: ManagementOperationKind::Query },
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.ssh_sign".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "manifest.propose_binding".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "manifest.latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "manifest.watch".into(), description: None, kind: ManagementOperationKind::Query },
@@ -2949,6 +2959,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation {
                 name: federation::ingress::OP_SECRET_USE.to_string(),
                 description: Some("Release an agent secret this vault holds to a member vault's sender, sealed to that vault's announced key. Never returns plaintext.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_SECRET_SSH_SIGN.to_string(),
+                description: Some("Sign SSH userauth for a member vault's AFT, sealed to that vault's announced key.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -3145,6 +3160,7 @@ mod tests {
         for name in secret_phone::PHONE_OPS.into_iter().chain([
             "secret.home",
             "secret.use",
+            "secret.ssh_sign",
             manifest_propose::OP_PROPOSE_BINDING,
             "manifest.latest",
             "manifest.watch",
@@ -3268,6 +3284,10 @@ mod tests {
             ),
             (
                 federation::ingress::OP_SECRET_USE,
+                ManagementOperationKind::Query,
+            ),
+            (
+                federation::ingress::OP_SECRET_SSH_SIGN,
                 ManagementOperationKind::Query,
             ),
             (

@@ -212,6 +212,27 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
         "secret.deposit" => {
             let kind = text(params, "kind")?;
             let (fields, location) = match kind {
+                "local_program" => {
+                    keys(
+                        params,
+                        &[
+                            "deposit_id",
+                            "member_id",
+                            "name",
+                            "kind",
+                            "program",
+                            "use",
+                            "targets",
+                            "enc_b64url",
+                            "ciphertext_b64url",
+                        ],
+                        &[],
+                    )?;
+                    (
+                        json!({"program": text(params, "program")?, "use": text(params, "use")?, "targets": params["targets"]}),
+                        None,
+                    )
+                }
                 "agent_api_key" => {
                     let extended = params.get("rules").is_some();
                     keys(

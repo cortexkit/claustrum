@@ -3,9 +3,10 @@ use crate::agent_secret::{self, DEPOSIT_KEY_ID};
 
 #[path = "store_secret_phone.rs"]
 mod phone;
+pub(super) use phone::local_programs_enabled;
 pub use phone::{
-    secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,
-    PhoneOperation,
+    secret_local_programs_status_read_only, secret_multi_host_status_read_only,
+    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation,
 };
 #[path = "store_secret_approval.rs"]
 mod approval;

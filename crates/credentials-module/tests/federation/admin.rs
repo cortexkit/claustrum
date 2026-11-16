@@ -512,6 +512,9 @@ fn secret_put_op(name: &str) -> AdminOpBody {
         origin: put.origin,
         rules: None,
         origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
         material_b64url: put.material_b64url,
     }
 }
@@ -527,6 +530,9 @@ fn api_key_put(name: &str) -> SecretPut {
         origin: None,
         rules: None,
         origins: None,
+        program: None,
+        r#use: None,
+        targets: None,
         material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
             deposit_plaintext(&SecretMaterial::ApiKey(
                 credentials_core::secret::Secret::new(b"sk-agent".to_vec()),

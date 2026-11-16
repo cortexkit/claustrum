@@ -3470,6 +3470,7 @@ the message is fixed text and never echoes the request.
 | `name_exists` | `permanent` | result error | a new deposit for a name that already has a record, corrupt included |
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
+| `secret_local_programs_disabled` | `permanent` | result error | creating or depositing a local-program secret while `secret.local_programs` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
 | `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
 | `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
@@ -3490,6 +3491,9 @@ material or its digest. Vault-global rows have no target.
 |---|---|---|---|
 | `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_multi_host_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `secret_local_programs_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `ssh_key_agent_allow` | offline-cli or route-admin | signing credential id | keyed fingerprint of the resulting enrollment JSON |
+| `ssh_key_agent_deny` | offline-cli or route-admin | signing credential id | keyed fingerprint of JSON `null` |
 | `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
 | `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
 | `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |
@@ -3792,6 +3796,74 @@ Implementation of extended-scope vault readers and writers waits until an
 Existing published samples
 outside `multi-host/` stay unchanged. New numeric count boundaries require tests
 on both sides and registration in `docs/threshold-controls.txt` when implemented.
+
+### Local programs and SSH userauth
+
+The local-program feature switch is off by default. Only AFT may use the local
+`secret.use` target or call the mutating `secret.ssh_sign` operation. Local targets
+are closed objects; sudo requires both `expects` and `undoable` and offers only
+`once`. The password is UTF-8, not base64:
+
+<!-- golden:use.request.local_program -->
+```json
+{"name":"sudo","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"program":"sudo","use":"sudo_password","target":{"user":"root"},"command":"apt upgrade","workdir":"/home/alice","purpose":"update packages","expects":"password prompt","undoable":"no"}}
+```
+
+<!-- golden:use.result.released.local_program -->
+```json
+{"status":"released","kind":"local_program","use":"sudo_password","value":"example password"}
+```
+
+SSH signs only a strict RFC 4252 publickey userauth packet for an enrolled
+Ed25519 key. The sample packet contains a public-key blob, not private material;
+the vault also requires that blob to match the enrolled key. Requests and targets
+are closed, and the target's user must equal the packet's user.
+
+<!-- golden:ssh_sign.request -->
+```json
+{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}
+```
+
+<!-- golden:ssh_sign.result.signed -->
+```json
+{"status":"signed","signature_b64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+```
+
+The signature above is a 64-byte framing placeholder. Tests verify a real signature
+over the exact packet. Without a grant, the reply has the same four members as
+`use.result.approval_required`, with a `ck-secret-local-use-statement/v1` statement
+carrying the vault-authored key identity and fingerprint, not a secret name.
+
+Checks stop in this order: AFT admission; closed params and signing-id grammar;
+feature switch; stamp and scope-only coverage; target, text and userauth grammar;
+key enrollment, target coverage and public-key match; grant or approval. The first
+three refusals write no diagnostics. Keys not enrolled with `ssh-key allow`, absent
+keys, keys whose enrolled targets do not cover the request, and requests carrying
+another public-key blob all answer the same `not_found` bytes. Local
+`limit_exceeded` bodies use class `permanent`; the existing HTTPS API-key and
+browser-login `secret.use` refusal framing defined above remains unchanged.
+
+`federation.secret_ssh_sign` is a query whose closed params are exactly
+`{aad, sender, call}`, with sender `aft` and call equal to `ssh_sign.request`.
+Its AAD has the same fields as `federation.secret_use.aad`, but `secret_name`
+contains the signing credential id and the digest binds the SSH call. Both computers'
+feature switches must be on. The home requires the current pairing's `secret_use`
+member grant before parsing, then repeats all local checks before receipt replay.
+
+<!-- golden:federation.secret_ssh_sign.request -->
+```json
+{"aad":"{\"secret_name\":\"signing:agent:ssh\",\"requester\":\"fed-computer:11111111111111111111111111111111\",\"home\":\"fed-computer:22222222222222222222222222222222\",\"nonce\":\"0123456789abcdef0123456789abcdef\",\"recipient_key_id\":\"0123456789abcdef\",\"call_sha256\":\"696dfd73eeebeadcb35e29769bbdf69cfeb7163046b1b2614038a3f0c08285d9\"}","sender":"aft","call":{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}}
+```
+
+<!-- golden:federation.secret_ssh_sign.result.sealed -->
+```json
+{"status":"sealed","enc":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","ciphertext":"AA=="}
+```
+
+The sealed bytes are placeholders as in `federation.secret_use.result.sealed`.
+Real SSH replies use HPKE info `cortexkit/claustrum/ssh-sign-release/v1`, never
+`secret-release/v1`. Exact lost-reply retries replay the existing release receipt,
+including for a consumed `once` grant, without another signature or approval card.
 
 ## 16. Vault connectors (`connectors.list`, `connectors.watch`)
 
@@ -4855,3 +4927,31 @@ The writer also updates `tests/vectors/manifest-binding-v1.json` and its
 }
 ```
 <!-- manifest-binding-generated:end -->
+
+### Agent SSH enrollment admin operations
+
+`admin.ssh_key_agent_allow` takes `{v: 2, id, targets}`; `id` names a local
+`signing:` Ed25519 credential. Each target contains only `{host, user?, port?}`:
+canonical lowercase DNS, IPv4 or canonical unbracketed IPv6 host, optional ASCII
+login name, and optional integer port 1–65535. There must be 1–16 unique targets.
+The operation replaces, never unions, the complete set inside the sealed record's
+additive `agent_ssh: {targets}` member. `admin.ssh_key_agent_deny` takes
+`{v: 2, id}` and removes that member. Both return `{targets: [...]}`; deny returns
+an empty array. An identical repeat changes nothing and writes no audit row.
+Allow requires `secret.local_programs` on (`secret_local_programs_disabled` when
+off or unreadable); deny works in either state. Both use the existing online
+admin authentication or offline writer lease. Online, the credential's lock
+serializes enrollment changes with other operations on the same key.
+
+CLI forms are `ck auth ssh-key allow <id> --target [user@]host[:port]...` (repeat
+the target flag) and `ck auth ssh-key deny <id>`. IPv6 must be bracketed on the
+CLI even without a port: `[2001:db8::1]`, `root@[2001:db8::1]:22`. Brackets are
+not stored. Both print the resulting target object as JSON.
+
+Generic create and overwrite operations refuse incoming `agent_ssh` with
+`invalid_params`. Every successful `signing:` overwrite stores an unenrolled key.
+Enrollment changes, signing-key replacement and removal atomically delete grants
+and pending requests addressed to the credential id, regardless of whether the old
+envelope can be decoded. Receipts for its incarnation remain until expiry with
+`aad_sha256 = "invalidated"` and empty `enc` and `ciphertext`, keeping the old
+requester/nonce occupied. Re-enrollment never restores old authority.

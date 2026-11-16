@@ -49,6 +49,9 @@ pub enum AuditOp {
     SecretDepositKeyCreate,
     SecretPhoneGateSet,
     SecretMultiHostSet,
+    SecretLocalProgramsSet,
+    SshKeyAgentAllow,
+    SshKeyAgentDeny,
     /// The operator set or cleared `secrets.home_member`, the vault that holds agent secrets.
     SecretHomeSet,
     SecretPhoneRegister,
@@ -58,6 +61,8 @@ pub enum AuditOp {
     SecretGrantRevoke,
     SecretGrantExpire,
     SecretFirstRelease,
+    SecretLocalRelease,
+    SecretSshSign,
     SecretQuarantine,
 
     GhManifestPropose,
@@ -225,6 +230,9 @@ impl AuditOp {
             AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
             AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
             AuditOp::SecretMultiHostSet => "secret_multi_host_set",
+            AuditOp::SecretLocalProgramsSet => "secret_local_programs_set",
+            AuditOp::SshKeyAgentAllow => "ssh_key_agent_allow",
+            AuditOp::SshKeyAgentDeny => "ssh_key_agent_deny",
             AuditOp::SecretHomeSet => "secret_home_set",
             AuditOp::SecretPhoneRegister => "secret_phone_register",
             AuditOp::SecretStore => "secret_store",
@@ -233,6 +241,8 @@ impl AuditOp {
             AuditOp::SecretGrantRevoke => "secret_grant_revoke",
             AuditOp::SecretGrantExpire => "secret_grant_expire",
             AuditOp::SecretFirstRelease => "secret_first_release",
+            AuditOp::SecretLocalRelease => "secret_local_release",
+            AuditOp::SecretSshSign => "secret_ssh_sign",
             AuditOp::SecretQuarantine => "secret_quarantine",
 
             AuditOp::GhManifestPropose => "gh_manifest_propose",
@@ -909,6 +919,9 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
                 AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
                 AuditOp::SecretMultiHostSet => AuditOp::SecretMultiHostSet.as_str(),
+                AuditOp::SecretLocalProgramsSet => AuditOp::SecretLocalProgramsSet.as_str(),
+                AuditOp::SshKeyAgentAllow => AuditOp::SshKeyAgentAllow.as_str(),
+                AuditOp::SshKeyAgentDeny => AuditOp::SshKeyAgentDeny.as_str(),
                 AuditOp::SecretHomeSet => AuditOp::SecretHomeSet.as_str(),
                 AuditOp::SecretPhoneRegister => AuditOp::SecretPhoneRegister.as_str(),
                 AuditOp::SecretStore => AuditOp::SecretStore.as_str(),
@@ -917,6 +930,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretGrantRevoke => AuditOp::SecretGrantRevoke.as_str(),
                 AuditOp::SecretGrantExpire => AuditOp::SecretGrantExpire.as_str(),
                 AuditOp::SecretFirstRelease => AuditOp::SecretFirstRelease.as_str(),
+                AuditOp::SecretLocalRelease => AuditOp::SecretLocalRelease.as_str(),
+                AuditOp::SecretSshSign => AuditOp::SecretSshSign.as_str(),
                 AuditOp::SecretQuarantine => AuditOp::SecretQuarantine.as_str(),
 
                 AuditOp::GhManifestPropose => AuditOp::GhManifestPropose.as_str(),
@@ -978,6 +993,8 @@ mod vocabulary_documentation_tests {
         }
 
         assert_documented(section, "audit_log.op", value(AuditOp::Put));
+        assert_documented(section, "audit_log.op", value(AuditOp::SecretLocalRelease));
+        assert_documented(section, "audit_log.op", value(AuditOp::SecretSshSign));
         assert_documented(section, "audit_log.op", value(AuditOp::Import));
         assert_documented(section, "audit_log.op", value(AuditOp::Login));
         assert_documented(section, "audit_log.op", value(AuditOp::Overwrite));
@@ -1019,6 +1036,10 @@ mod vocabulary_documentation_tests {
             assert_documented(section, "audit_log.op", value(op));
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
+        for op in [AuditOp::SshKeyAgentAllow, AuditOp::SshKeyAgentDeny] {
+            assert_documented(section, "audit_log.op", value(op));
+            assert!(WIRE_CONTRACT.contains(value(op)));
+        }
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::LoginSharingSet)));
         for op in [

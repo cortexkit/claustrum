@@ -49,6 +49,28 @@ fn valid_op() -> AdminOpBody {
     op(ID, api_record(), settings(), vec![PROVIDER.into()])
 }
 
+#[test]
+fn gateway_create_refuses_incoming_agent_ssh_without_writing() {
+    let (_root, store) = rig("gateway-ssh", 204);
+    let before = state(&store);
+    let mut record = api_record();
+    record.agent_ssh = Some(crate::record::AgentSsh {
+        targets: vec![crate::record::AgentSshTarget {
+            user: None,
+            host: "::1".into(),
+            port: None,
+        }],
+    });
+    let error = apply(
+        &store,
+        op(ID, record, settings(), vec![PROVIDER.into()]),
+        "operator:test",
+    )
+    .unwrap_err();
+    assert_eq!(error.wire_code(), Some("invalid_params"));
+    assert_eq!(state(&store), before);
+}
+
 fn rows(store: &EncryptedStore, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
     store
         .with_raw_conn(|conn| {
@@ -571,8 +593,8 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 45);
-    assert_eq!(newest_migration_version(), 45);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 46);
+    assert_eq!(newest_migration_version(), 46);
     let added: Vec<_> = table_names(&store)
         .into_iter()
         .filter(|name| !tables_before.contains(name))

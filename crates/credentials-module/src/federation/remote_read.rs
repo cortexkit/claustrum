@@ -66,7 +66,8 @@ use tokio::sync::watch;
 use super::ingress::{
     decode_peer_transfer_key, secret_call_sha256, Lookup, CALLOSUM_MODULE_ID, OP_REMOTE_TOKEN,
     OP_REPORT_AUTH_FAILURE, OP_SECRET_REQUEST_FLOW_APPROVAL, OP_SECRET_REVOKE_FLOW_GRANTS,
-    OP_SECRET_USE, REMOTE_TOKEN_INFO, SECRET_RELEASE_INFO,
+    OP_SECRET_SSH_SIGN, OP_SECRET_USE, REMOTE_TOKEN_INFO, SECRET_RELEASE_INFO,
+    SSH_SIGN_RELEASE_INFO,
 };
 use super::outbound::{
     is_permanent_callosum_class, management_surface, OutboundClient, OutboundError, RouteCall,
@@ -1400,6 +1401,8 @@ const SECRET_FORWARD_RETRY_PAUSE: Duration = Duration::from_millis(100);
 /// member. The sender was admitted by this vault, exactly as for a local call; the
 /// params are the sender's own, unchanged.
 pub enum SecretCall<'a> {
+    /// AFT's `secret.ssh_sign`.
+    SshSign(&'a Value),
     /// `secret.use` from AFT, Cerebellum or basal.
     Use {
         sender: SecretSender,
@@ -1414,6 +1417,7 @@ pub enum SecretCall<'a> {
 impl SecretCall<'_> {
     fn sender(&self) -> SecretSender {
         match self {
+            Self::SshSign(_) => SecretSender::Aft,
             Self::Use { sender, .. } => *sender,
             Self::RequestFlowApproval(_) | Self::RevokeFlowGrants(_) => SecretSender::Basal,
         }
@@ -1422,7 +1426,14 @@ impl SecretCall<'_> {
     /// The secret the call names, when it is a valid secret name: the diagnostic
     /// subject. A revoke names a flow, not a secret.
     fn secret_name(&self) -> Option<&str> {
+        if let Self::SshSign(params) = self {
+            return params.get("key").and_then(Value::as_str).filter(|id| {
+                id.starts_with("signing:")
+                    && credentials_core::store::validate_deposit_credential_id(id).is_ok()
+            });
+        }
         let params = match self {
+            Self::SshSign(_) => unreachable!(),
             Self::Use { call, .. } => call,
             Self::RequestFlowApproval(params) => params,
             Self::RevokeFlowGrants(_) => return None,
@@ -1489,7 +1500,8 @@ fn sender_wire(sender: SecretSender) -> &'static str {
 
 /// Every §15 secret refusal code, so a home refusal in that vocabulary is relayed as
 /// the exact body this vault's own store would answer.
-const SECRET_ERRORS: [SecretError; 12] = [
+const SECRET_ERRORS: [SecretError; 13] = [
+    SecretError::SecretLocalProgramsDisabled,
     SecretError::InvalidParams,
     SecretError::LimitExceeded,
     SecretError::NotFound,
@@ -1528,8 +1540,8 @@ fn string_members(object: &Value, required: &[&str], optional: &[&str]) -> bool 
         })
 }
 
-/// The opened plaintext is exactly a §15 `released` object: an API key, or a site
-/// login with an optional TOTP code. Anything else is not passed to the sender.
+/// The opened plaintext is exactly a `released` object: an API key, a site login
+/// with an optional TOTP code, or a local sudo password. Anything else is refused.
 fn valid_released(released: &Value) -> bool {
     match released.get("kind").and_then(Value::as_str) {
         _ if released.get("status").and_then(Value::as_str) != Some("released") => false,
@@ -1541,6 +1553,10 @@ fn valid_released(released: &Value) -> bool {
             &["status", "kind", "username", "password"],
             &["totp"],
         ),
+        Some("local_program") => {
+            string_members(released, &["status", "kind", "use", "value"], &[])
+                && released["use"] == "sudo_password"
+        }
         _ => false,
     }
 }
@@ -1653,6 +1669,23 @@ impl RemoteReader {
         match self.store.secret_home_role() {
             SecretHomeRole::Single | SecretHomeRole::Home { .. } => SecretRoute::Local,
             SecretHomeRole::Remote { home_member } => {
+                let (sender, params, ssh) = match &call {
+                    SecretCall::SshSign(params) => (SecretSender::Aft, *params, true),
+                    SecretCall::Use { sender, call } => (*sender, *call, false),
+                    _ => (SecretSender::Basal, &Value::Null, false),
+                };
+                if let Err(answer) =
+                    crate::secret_use::preflight_forward(&self.store, sender, params, ssh)
+                {
+                    return SecretRoute::Answer(match answer {
+                        crate::secret_use::UseAnswer::Reply(reply) => {
+                            SecretForwardAnswer::Reply(reply)
+                        }
+                        crate::secret_use::UseAnswer::InvalidParams => {
+                            SecretForwardAnswer::InvalidParams
+                        }
+                    });
+                }
                 SecretRoute::Answer(self.forward_secret_call(&home_member, call).await)
             }
             SecretHomeRole::RemoteSetupIncomplete { self_member } => refused(
@@ -1676,7 +1709,13 @@ impl RemoteReader {
     ) -> SecretForwardAnswer {
         let budget = tokio::time::Instant::now() + SECRET_FORWARD_DEADLINE;
         let outcome = match &call {
-            SecretCall::Use { sender, call } => self.forward_use(home, *sender, call, budget).await,
+            SecretCall::Use { sender, call } => {
+                self.forward_use(home, *sender, call, budget, false).await
+            }
+            SecretCall::SshSign(call) => {
+                self.forward_use(home, SecretSender::Aft, call, budget, true)
+                    .await
+            }
             SecretCall::RequestFlowApproval(params) => {
                 self.forward_flow(home, OP_SECRET_REQUEST_FLOW_APPROVAL, params, budget)
                     .await
@@ -1686,7 +1725,7 @@ impl RemoteReader {
                     .await
             }
         };
-        let (answer, code) = match outcome {
+        let (mut answer, code) = match outcome {
             Ok((reply, code)) => (SecretForwardAnswer::Reply(reply), code),
             Err(SecretFault::Refused(refusal)) => (
                 SecretForwardAnswer::Reply(json!({ "error": refusal.body() })),
@@ -1696,8 +1735,25 @@ impl RemoteReader {
                 (SecretForwardAnswer::InvalidParams, "invalid_params")
             }
         };
-        self.store
-            .record_secret_forward(call.sender(), call.secret_name(), code);
+        let local = matches!(&call, SecretCall::SshSign(_))
+            || matches!(&call, SecretCall::Use { call, .. } if crate::secret_use::is_local_use(call));
+        if local && code == "limit_exceeded" {
+            if let SecretForwardAnswer::Reply(reply) = &mut answer {
+                reply["error"]["class"] = "permanent".into();
+            }
+        }
+        // The home owns local-use refusal diagnostics. A forwarding diagnostic for
+        // these codes could expose an admission or closed-params refusal that must
+        // leave no authentication-event record on either computer.
+        if !(local
+            && matches!(
+                code,
+                "secret_local_programs_disabled" | "not_found" | "invalid_params"
+            ))
+        {
+            self.store
+                .record_secret_forward(call.sender(), call.secret_name(), code);
+        }
         answer
     }
 
@@ -1710,11 +1766,12 @@ impl RemoteReader {
         sender: SecretSender,
         call: &Value,
         budget: tokio::time::Instant,
+        ssh: bool,
     ) -> Result<(Value, &'static str), SecretFault> {
         // The aad names the secret and binds the exact params. A call with no name, or
         // with a number no §15 param can hold, is one the home's parser refuses anyway.
         let Some(secret_name) = call
-            .get("name")
+            .get(if ssh { "key" } else { "name" })
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
         else {
@@ -1735,14 +1792,18 @@ impl RemoteReader {
         })
         .map_err(|_| Failure::store_error())?;
         let request = json!({
-            "method": OP_SECRET_USE,
+            "method": if ssh { OP_SECRET_SSH_SIGN } else { OP_SECRET_USE },
             "params": { "aad": aad, "sender": sender, "call": call },
         });
         let reply = self.call_home(home, &request, budget).await?;
         match reply.get("status").and_then(Value::as_str) {
             Some("sealed") => {
-                let released = open_release(&reply, &aad, &pem, &home_key.public)?;
-                Ok((released, "released"))
+                let released = if ssh {
+                    open_release_for(&reply, &aad, &pem, &home_key.public, true)?
+                } else {
+                    open_release(&reply, &aad, &pem, &home_key.public)?
+                };
+                Ok((released, if ssh { "signed" } else { "released" }))
             }
             Some("approval_required") if valid_approval_required(&reply) => {
                 Ok((reply, "approval_required"))
@@ -1826,6 +1887,16 @@ impl RemoteReader {
 /// sealed for another request, by another member or for another purpose does not open
 /// and releases nothing. The opened object goes to the sender and is never stored.
 fn open_release(reply: &Value, aad: &str, pem: &str, home_public: &[u8]) -> Result<Value, Failure> {
+    open_release_for(reply, aad, pem, home_public, false)
+}
+
+fn open_release_for(
+    reply: &Value,
+    aad: &str,
+    pem: &str,
+    home_public: &[u8],
+    ssh: bool,
+) -> Result<Value, Failure> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let field = |key: &str| {
         reply
@@ -1844,13 +1915,28 @@ fn open_release(reply: &Value, aad: &str, pem: &str, home_public: &[u8]) -> Resu
         home_public,
         &enc,
         &ciphertext,
-        SECRET_RELEASE_INFO,
+        if ssh {
+            SSH_SIGN_RELEASE_INFO
+        } else {
+            SECRET_RELEASE_INFO
+        },
         aad.as_bytes(),
     )
     .map_err(|_| Failure::seal_invalid())?;
     let released: Value =
         serde_json::from_slice(&plaintext).map_err(|_| Failure::reply_invalid("shape"))?;
-    if valid_released(&released) {
+    let valid = if ssh {
+        string_members(&released, &["status", "signature_b64url"], &[])
+            && released["status"] == "signed"
+            && released["signature_b64url"].as_str().is_some_and(|s| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(s)
+                    .is_ok_and(|b| b.len() == 64)
+            })
+    } else {
+        valid_released(&released)
+    };
+    if valid {
         Ok(released)
     } else {
         Err(Failure::reply_invalid("shape"))

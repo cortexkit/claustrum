@@ -301,3 +301,203 @@ fn secret_use_grammar_targets_and_key_sets() {
         assert_eq!(run(&p), SecretError::NotFound.body());
     }
 }
+
+fn local_params() -> Value {
+    json!({"name":"sudo","stamp":stamp(ScopeKind::Head),"target":{
+        "program":"sudo","use":"sudo_password","target":{"user":"root"},
+        "command":"apt upgrade","workdir":"/home/alice","purpose":"update packages",
+        "expects":"password prompt","undoable":"no"
+    }})
+}
+
+fn ssh_params() -> Value {
+    json!({"key":"signing:ssh:1","stamp":stamp(ScopeKind::Head),
+        "target":{"user":"alice","host":params()["target"]["host"],"port":22},
+        "command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":""})
+}
+
+fn programs_on(store: &EncryptedStore) {
+    store
+        .set_secret_local_programs_audited(
+            true,
+            credentials_core::audit::AuditCtx::admin(
+                credentials_core::audit::AuditOp::SecretLocalProgramsSet,
+            ),
+        )
+        .unwrap();
+}
+
+#[test]
+fn local_ops_check_admission_closed_params_setting_then_scope_and_text() {
+    let (_root, store) = rig("local-order");
+    assert!(
+        !store.secret_local_programs_enabled().unwrap(),
+        "missing means off"
+    );
+    let invalid = json!({"transport":"invalid_params"});
+    let disabled = SecretError::SecretLocalProgramsDisabled.body();
+    for ssh in [false, true] {
+        let run = |who: Option<&Principal>, p: &Value| {
+            body(if ssh {
+                serve_ssh_sign(&store, who, p, || 1000)
+            } else {
+                serve(&store, who, p, || 1000)
+            })
+        };
+        let mut p = if ssh { ssh_params() } else { local_params() };
+        p["stamp"] = json!({});
+        if ssh {
+            p["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES + 1));
+        } else {
+            p["target"]["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES + 1));
+        }
+        for who in [
+            None,
+            Some(Principal::Direct),
+            Some(principal("basal")),
+            Some(principal("cerebellum")),
+            Some(principal("cingulate")),
+        ] {
+            assert_eq!(run(who.as_ref(), &p), SecretError::NotFound.body());
+        }
+        let mut extra = p.clone();
+        extra["unknown"] = json!(true);
+        assert_eq!(
+            run(Some(&principal("aft")), &extra),
+            invalid,
+            "closed before off"
+        );
+        if ssh {
+            extra = p.clone();
+            extra["key"] = json!("apikey:ssh");
+            assert_eq!(
+                run(Some(&principal("aft")), &extra),
+                invalid,
+                "key grammar before off"
+            );
+        } else {
+            for required in ["expects", "undoable"] {
+                extra = p.clone();
+                extra["target"].as_object_mut().unwrap().remove(required);
+                assert_eq!(
+                    run(Some(&principal("aft")), &extra),
+                    invalid,
+                    "missing {required} before off"
+                );
+            }
+        }
+        assert_eq!(
+            run(Some(&principal("aft")), &p),
+            disabled,
+            "off before stamp or cap"
+        );
+    }
+    assert!(
+        store.recent_auth_events(100).unwrap().is_empty(),
+        "steps 1–3 are silent"
+    );
+    programs_on(&store);
+    assert!(store.secret_local_programs_enabled().unwrap());
+    for ssh in [false, true] {
+        let run = |p: &Value| {
+            body(if ssh {
+                serve_ssh_sign(&store, Some(&principal("aft")), p, || 1000)
+            } else {
+                serve(&store, Some(&principal("aft")), p, || 1000)
+            })
+        };
+        let base = if ssh { ssh_params() } else { local_params() };
+        let mut p = base.clone();
+        p["stamp"] = json!({});
+        if ssh {
+            p["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES + 1));
+        } else {
+            p["target"]["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES + 1));
+        }
+        assert_eq!(run(&p), SecretError::NotFound.body(), "stamp before text");
+        p["stamp"] = base["stamp"].clone();
+        p["coverage"] = json!("agent_and_workers");
+        assert_eq!(run(&p), invalid, "coverage before text");
+        p["coverage"] = json!("scope");
+        assert_eq!(
+            run(&p),
+            json!({"error":{"code":"limit_exceeded","class":"permanent"}}),
+            "cap before lookup"
+        );
+        for text in ["", "echo\npassword", "echo\u{202e}password"] {
+            p = base.clone();
+            if ssh {
+                p["command"] = json!(text);
+            } else {
+                p["target"]["command"] = json!(text);
+            }
+            assert_eq!(run(&p), invalid);
+        }
+    }
+    let events = store.recent_auth_events(100).unwrap();
+    assert!(events
+        .iter()
+        .all(|e| e.credential_id == "secret|sudo" || e.credential_id == "signing:ssh:1"));
+    assert!(!format!("{events:?}").contains("password"));
+}
+
+#[test]
+fn local_use_closed_target_and_legacy_limit_framing_stay_distinct() {
+    let (_root, store) = rig("local-shapes");
+    programs_on(&store);
+    let run = |p: &Value| body(serve(&store, Some(&principal("aft")), p, || 1000));
+    let invalid = json!({"transport":"invalid_params"});
+    for key in [
+        "program", "use", "target", "command", "workdir", "purpose", "expects", "undoable",
+    ] {
+        let mut p = local_params();
+        p["target"].as_object_mut().unwrap().remove(key);
+        assert_eq!(run(&p), invalid, "missing {key}");
+    }
+    for (key, value) in [
+        ("extra", json!(1)),
+        ("expects", Value::Null),
+        ("undoable", Value::Null),
+        ("workdir", json!("C:/windows")),
+        ("use", json!("ssh_sign")),
+    ] {
+        let mut p = local_params();
+        p["target"][key] = value;
+        assert_eq!(run(&p), invalid, "bad {key}");
+    }
+    let mut local = local_params();
+    local["target"]["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES));
+    assert_eq!(
+        run(&local),
+        SecretError::NotFound.body(),
+        "last accepted command length"
+    );
+    local["target"]["command"] = json!("x".repeat(MAX_LOCAL_COMMAND_BYTES + 1));
+    assert_eq!(
+        run(&local),
+        json!({"error":{"code":"limit_exceeded","class":"permanent"}})
+    );
+    let mut legacy = params();
+    legacy["name"] = json!("a".repeat(65));
+    assert_eq!(
+        serde_json::to_vec(&run(&legacy)).unwrap(),
+        br#"{"error":{"class":"context_overflow","code":"limit_exceeded"}}"#
+    );
+    for target in [
+        params()["target"].clone(),
+        json!({"origin":"https://x.test"}),
+    ] {
+        let mut legacy = params();
+        legacy["target"] = target;
+        legacy["target"]["command"] = json!("unexpected local field");
+        assert_eq!(
+            body(serve(
+                &store,
+                Some(&principal("cerebellum")),
+                &legacy,
+                || 1000
+            )),
+            invalid
+        );
+    }
+}

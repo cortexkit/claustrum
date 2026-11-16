@@ -66,6 +66,9 @@ fn put(name: &str, kind: &str, fields: &Value, location: Option<&str>) -> Secret
         origin: fields["origin"].as_str().map(str::to_owned),
         rules: fields.get("rules").cloned(),
         origins: fields.get("origins").cloned(),
+        program: None,
+        r#use: None,
+        targets: None,
         location: location.map(str::to_owned),
         material_b64url: URL_SAFE_NO_PAD
             .encode(agent_secret::deposit_plaintext(&material(kind)).expose()),

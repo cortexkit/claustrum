@@ -32,6 +32,7 @@ crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v1 ck-secret
 crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v2 ck-secret-use-statement/v2
 crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v3 ck-secret-use-statement/v3
 crates/credentials-core/src/agent_secret.rs cortexkit/claustrum/secret-deposit/v1 cortexkit/claustrum/secret-deposit/v1
+crates/credentials-core/src/agent_secret_approval.rs ck-secret-local-use-statement/v1 ck-secret-local-use-statement/v1
 crates/credentials-core/src/audit.rs cortexkit-credentials/audit-payload-key/v1 cortexkit-credentials/audit-payload-key/v1
 crates/credentials-core/src/deposit_cookie.rs ck-deposit-cookie/v1 ck-deposit-cookie/v1
 crates/credentials-core/src/envelope.rs cortexkit-credentials/envelope-aad/v1 cortexkit-credentials/envelope-aad/v1
@@ -43,4 +44,5 @@ crates/credentials-core/src/store.rs cortexkit-credentials/refresh-token-hash/v1
 crates/credentials-core/src/store_credential_permissions.rs claustrum-credential-permission/v1\0 claustrum-credential-permission/v1\0
 crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/remote-token/v1 cortexkit/claustrum/remote-token/v1
 crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/secret-release/v1 cortexkit/claustrum/secret-release/v1
+crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/ssh-sign-release/v1 cortexkit/claustrum/ssh-sign-release/v1
 crates/credentials-module/src/federation/transfer.rs cortexkit/claustrum/transfer/v1 cortexkit/claustrum/transfer/v1

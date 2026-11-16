@@ -948,6 +948,7 @@ mod connectors_contract {
                 | "secret.revoke_grant"
                 | "secret.home"
                 | "secret.use"
+                | "secret.ssh_sign"
                 | "manifest.propose_binding"
                 | "manifest.latest"
                 | "manifest.watch"
@@ -974,6 +975,7 @@ mod connectors_contract {
                 | federation::ingress::OP_REPORT_AUTH_FAILURE
                 | federation::ingress::OP_TRANSFER_DELIVER
                 | federation::ingress::OP_SECRET_USE
+                | federation::ingress::OP_SECRET_SSH_SIGN
                 | federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL
                 | federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS => None,
                 name => panic!("unclassified operation: {name}"),

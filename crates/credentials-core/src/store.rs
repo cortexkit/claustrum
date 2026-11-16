@@ -125,6 +125,7 @@ pub const PLAN_TIER_SINCE_SCHEMA_VERSION: u32 = 44;
 
 /// Last-seen approved module declarations, retained for operator inspection only.
 pub const DECLARED_GRANTS_SCHEMA_VERSION: u32 = 45;
+pub const LOCAL_PROGRAM_SECRET_SCHEMA_VERSION: u32 = 46;
 
 /// The migration that added `credential_provider_ids`, the operator's record of which
 /// catalog provider ids each credential serves.
@@ -1130,6 +1131,28 @@ const MIGRATIONS: &[Migration] = &[
             first_seen_ms INTEGER NOT NULL\
         );",
     },
+    Migration {
+        version: LOCAL_PROGRAM_SECRET_SCHEMA_VERSION,
+        statements: "CREATE TABLE agent_secrets_v46 (\
+            name TEXT PRIMARY KEY, \
+            kind TEXT NOT NULL CHECK (kind IN ('agent_api_key', 'site_login', 'local_program')), \
+            incarnation TEXT NOT NULL UNIQUE CHECK (length(incarnation) = 32), \
+            state TEXT NOT NULL CHECK (state IN ('active', 'corrupt')), \
+            host TEXT, path_prefix TEXT, location TEXT, origin TEXT, \
+            record_version INTEGER NOT NULL CHECK (record_version = 1), \
+            key_id TEXT NOT NULL, envelope BLOB NOT NULL, created_at_ms INTEGER NOT NULL, scope_json TEXT, \
+            CHECK ((kind = 'agent_api_key' AND location IS NOT NULL AND location != '' AND origin IS NULL \
+                AND ((host IS NOT NULL AND scope_json IS NULL) OR (host IS NULL AND path_prefix IS NULL AND scope_json IS NOT NULL))) \
+                OR (kind = 'site_login' AND host IS NULL AND path_prefix IS NULL AND location IS NULL \
+                    AND ((origin IS NOT NULL AND scope_json IS NULL) OR (origin IS NULL AND scope_json IS NOT NULL))) \
+                OR (kind = 'local_program' AND host IS NULL AND path_prefix IS NULL AND location IS NULL AND origin IS NULL AND scope_json IS NOT NULL))\
+        ); \
+        INSERT INTO agent_secrets_v46 SELECT * FROM agent_secrets; \
+        DROP TABLE agent_secrets; \
+        ALTER TABLE agent_secrets_v46 RENAME TO agent_secrets; \
+        ALTER TABLE secret_grants ADD COLUMN local_use TEXT; \
+        ALTER TABLE secret_pending_requests ADD COLUMN local_use TEXT;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1583,6 +1606,8 @@ pub fn refresh_token_hash(refresh_token: &str) -> String {
 /// A store operation failure. Distinct, typed, fail-closed — never a panic.
 #[derive(Debug)]
 pub enum StoreOpError {
+    /// SSH enrollment is malformed or was supplied through a generic record write.
+    InvalidAgentSsh,
     /// The credential id does not exist.
     NotFound,
     /// A create was attempted for an id that already exists (create-only default).
@@ -1594,9 +1619,13 @@ pub enum StoreOpError {
     /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
     InvalidCategoryName,
     /// An API-key service cannot be named by the interactive put flow.
-    InvalidServiceName { service: String },
+    InvalidServiceName {
+        service: String,
+    },
     /// The fixed API-key catalog already owns this service's defaults.
-    ServiceInProviderCatalog { service: String },
+    ServiceInProviderCatalog {
+        service: String,
+    },
     /// A tier is not a lowercase ASCII identifier of 1–32 characters.
     InvalidPlanTier,
     /// An enrollment display name failed the shared person-facing label validation.
@@ -1619,9 +1648,13 @@ pub enum StoreOpError {
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
     /// This tuple appears in the module's approved declaration; no manually managed grant was revoked.
-    DeclaredGrant { module_id: String },
+    DeclaredGrant {
+        module_id: String,
+    },
     /// Approval would hand existing name-bound grants to a new consumer without consent.
-    EnrollmentNameHasGrants { name: String },
+    EnrollmentNameHasGrants {
+        name: String,
+    },
     /// Deposit grants are restricted to reserved principals and browser-session categories.
     InvalidDepositGrant,
     /// The existing cookie belongs to another creator, or has no known creator.
@@ -1643,7 +1676,9 @@ pub enum StoreOpError {
     /// The payload is a short-term Amazon Bedrock API key, which expires within 12 hours
     /// and cannot be renewed by the vault. `expires_at_ms` is decoded from the key when
     /// its presigned URL carries one.
-    ShortTermBedrockKey { expires_at_ms: Option<i64> },
+    ShortTermBedrockKey {
+        expires_at_ms: Option<i64>,
+    },
     /// The record is quarantined (`corrupt`) and cannot be served.
     Quarantined,
     /// The record is `needs_reauth` and must not be served until re-authenticated.
@@ -1657,7 +1692,9 @@ pub enum StoreOpError {
     /// A member id is not `fed-computer:` followed by 32 lowercase hex characters.
     InvalidMemberId,
     /// Callosum owns this grant; a manual revoke would be undone by reconciliation.
-    MemberGrantSharingSwitch { member_id: String },
+    MemberGrantSharingSwitch {
+        member_id: String,
+    },
     /// The home controls this row and its categories until an operator converts it
     /// with a remote add for the same home.
     RemoteRecordHomeWatch {
@@ -1680,17 +1717,22 @@ pub enum StoreOpError {
     /// An API key with multiple host rules or a wildcard, or a login with multiple
     /// origins, requires `secret.multi_host` to be on.
     SecretMultiHostDisabled,
+    SecretLocalProgramsDisabled,
     /// An agent secret already exists under the requested name, live or `corrupt`.
     /// Names are create-only, so the operator must delete before storing again.
     SecretNameExists,
     /// This vault's `secrets.home_member` setting names another member, so agent secrets
     /// live in that member's vault and none may be created here. `home_member` is the
     /// member whose vault the operator should use instead.
-    SecretHomeElsewhere { home_member: String },
+    SecretHomeElsewhere {
+        home_member: String,
+    },
     /// The `secrets.home_member` setting names a member, but this vault's own member id
     /// is unset or equal to it, so the vault cannot tell whether it is the home. The
     /// operator of this vault (`remedy_member`, when its id is known) must fix it.
-    SecretRemoteSetupIncomplete { remedy_member: Option<String> },
+    SecretRemoteSetupIncomplete {
+        remedy_member: Option<String>,
+    },
     /// Pointing `secrets.home_member` at another member was refused because this vault
     /// still holds agent secret state that would be stranded there. The counts say what
     /// must be deleted or revoked first.
@@ -1706,7 +1748,10 @@ pub enum StoreOpError {
     Corrupt(String),
     /// A fenced write was rejected because a newer writer holds the database (the
     /// lease-handover race). The write was NOT applied.
-    Fenced { holder_epoch: u64, db_epoch: u64 },
+    Fenced {
+        holder_epoch: u64,
+        db_epoch: u64,
+    },
     /// A serialization failure building the record body.
     Encode(String),
     /// The vault's sealed audit key is missing on a non-empty vault — a genuinely
@@ -1747,8 +1792,10 @@ enum IdentityPolicyOverwriteOutcome {
 impl std::fmt::Display for StoreOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreOpError::InvalidAgentSsh => f.write_str("invalid_params: invalid SSH enrollment"),
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => f.write_str("secret_multi_host_disabled: secret.multi_host is off or unreadable; enable it with ck auth secret multi-host on"),
+            StoreOpError::SecretLocalProgramsDisabled => f.write_str("secret_local_programs_disabled: secret.local_programs is off or unreadable; enable it with ck auth secret local-programs on"),
             StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
             // These three print the same `code/class: detail` text the daemon's admin
             // route answers with, so the online and offline `ck auth secret` paths agree.
@@ -1886,8 +1933,10 @@ impl StoreOpError {
     /// Stable refusal code for taxonomy inputs that must never be retried unchanged.
     pub fn wire_code(&self) -> Option<&'static str> {
         match self {
+            StoreOpError::InvalidAgentSsh => Some("invalid_params"),
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
+            StoreOpError::SecretLocalProgramsDisabled => Some("secret_local_programs_disabled"),
             StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
@@ -4751,6 +4800,7 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        refuse_incoming_agent_ssh(record)?;
         validate_deposit_credential_id(credential_id)?;
         // A create for the transfer key's id must not slip past the replace fence by
         // failing first and being retried as a create.
@@ -4852,6 +4902,68 @@ impl EncryptedStore {
         Ok(())
     }
 
+    /// Replace or clear the complete SSH enrollment in the same transaction that
+    /// revokes grants, pending requests and replayable replies for the old enrollment.
+    pub fn set_agent_ssh_audited(
+        &self,
+        id: &str,
+        enrollment: Option<crate::record::AgentSsh>,
+        actor: &str,
+    ) -> Result<Option<crate::record::AgentSsh>, StoreOpError> {
+        if !id.starts_with("signing:") {
+            return Err(StoreOpError::InvalidAgentSsh);
+        }
+        validate_deposit_credential_id(id)?;
+        let enrollment = enrollment
+            .map(crate::record::AgentSsh::canonicalized)
+            .transpose()
+            .map_err(|_| StoreOpError::InvalidAgentSsh)?;
+        self.fenced_write(|tx| {
+            if enrollment.is_some() && !store_agent_secrets::local_programs_enabled(tx) {
+                return Ok(Err(StoreOpError::SecretLocalProgramsDisabled));
+            }
+            let row: Option<(i64, Vec<u8>)> = tx.query_row(
+                "SELECT record_version, envelope FROM credentials WHERE credential_id=?1",
+                [id], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?;
+            let Some((version, blob)) = row else {
+                return Ok(Err(StoreOpError::NotFound));
+            };
+            let record = envelope::open(&self.key, &blob, &RecordBinding {
+                credential_id: id, record_version: version as u64,
+            }).ok().and_then(|bytes| VaultRecord::decode(&bytes).ok());
+            let Some(mut record) = record else {
+                return Ok(Err(StoreOpError::NotFound));
+            };
+            if record.kind != CredentialKind::SigningKey
+                || std::str::from_utf8(record.payload.expose()).ok()
+                    .and_then(|pem| crate::signing::public_key_ed25519(pem).ok()).is_none()
+            {
+                return Ok(Err(StoreOpError::InvalidAgentSsh));
+            }
+            if record.agent_ssh == enrollment {
+                return Ok(Ok(enrollment));
+            }
+            record.agent_ssh = enrollment.clone();
+            record.record_version = (version as u64).saturating_add(1);
+            let blob = self.seal_record(id, &record)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            clear_agent_ssh_state_tx(tx, id)?;
+            tx.execute(
+                "UPDATE credentials SET record_version=?2, envelope=?3, updated_at_ms=?4 WHERE credential_id=?1",
+                rusqlite::params![id, record.record_version as i64, blob, now_ms()],
+            )?;
+            append_audit_tx(tx, &self.audit_key, &AuditRecord {
+                op: if enrollment.is_some() { AuditOp::SshKeyAgentAllow } else { AuditOp::SshKeyAgentDeny },
+                credential_id: Some(id.to_owned()),
+                payload_hash: Some(hex32(&audit::payload_fingerprint(&self.audit_key,
+                    &serde_json::to_vec(&enrollment).expect("SSH enrollment JSON")))),
+                actor: actor.to_owned(), alarm: None,
+            })?;
+            Ok(Ok(enrollment))
+        })?
+    }
+
     /// Create a record (CREATE-ONLY), auditing it as a vault-owned `Put`. Convenience
     /// wrapper over [`create_audited`] for callers (and tests) that do not need to
     /// specify the op/actor; production admin writes use `create_audited` with an
@@ -4873,6 +4985,7 @@ impl EncryptedStore {
         expected_payload_hash: &[u8; 32],
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        refuse_incoming_agent_ssh(record)?;
         validate_deposit_credential_id(credential_id)?;
         // A CAS replace at the current version is still a replace: the transfer key's
         // active record cannot be overwritten under it.
@@ -4933,6 +5046,7 @@ impl EncryptedStore {
                     &record.identity,
                     ctx,
                 )?;
+                clear_agent_ssh_state_tx(tx, credential_id)?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -5000,6 +5114,7 @@ impl EncryptedStore {
         preserve_existing_identity: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        refuse_incoming_agent_ssh(record)?;
         refuse_short_term_bedrock_key(record)?;
         self.check_vault_transfer_key_writable(credential_id)?;
         let incoming = normalize_record_identity(record.clone());
@@ -5111,6 +5226,7 @@ impl EncryptedStore {
             )?;
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                clear_agent_ssh_state_tx(tx, credential_id)?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -6023,6 +6139,7 @@ impl EncryptedStore {
                 [credential_id],
                 |row| row.get(0),
             )?;
+            clear_agent_ssh_state_tx(tx, credential_id)?;
             let n = tx.execute(
                 "DELETE FROM credentials WHERE credential_id = ?1",
                 rusqlite::params![credential_id],
@@ -7352,6 +7469,18 @@ impl EncryptedStore {
         credential_id: &str,
         record: &VaultRecord,
     ) -> Result<Vec<u8>, StoreOpError> {
+        if let Some(enrollment) = &record.agent_ssh {
+            if !credential_id.starts_with("signing:")
+                || record.kind != CredentialKind::SigningKey
+                || std::str::from_utf8(record.payload.expose())
+                    .ok()
+                    .and_then(|pem| crate::signing::public_key_ed25519(pem).ok())
+                    .is_none()
+                || enrollment.clone().canonicalized().ok().as_ref() != Some(enrollment)
+            {
+                return Err(StoreOpError::InvalidAgentSsh);
+            }
+        }
         // An OAuth record may intentionally contain no access token while retaining a
         // refresh token; first use then refreshes it. Every non-OAuth credential is the
         // served payload itself, so sealing zero bytes would create a successful read
@@ -7534,6 +7663,34 @@ fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite:
         "DELETE FROM refresh_intent WHERE credential_id = ?1",
         rusqlite::params![credential_id],
     )
+}
+
+fn refuse_incoming_agent_ssh(record: &VaultRecord) -> Result<(), StoreOpError> {
+    if record.agent_ssh.is_some() {
+        return Err(StoreOpError::InvalidAgentSsh);
+    }
+    Ok(())
+}
+
+/// Use plaintext row identity, not the old envelope: replacing a damaged key must
+/// revoke its authority too. Keep receipt nonces occupied until their normal expiry.
+fn clear_agent_ssh_state_tx(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
+    if !id.starts_with("signing:") || read_schema_version(tx)? < AGENT_SECRET_SCHEMA_VERSION {
+        return Ok(());
+    }
+    tx.execute("DELETE FROM secret_grants WHERE secret_name=?1", [id])?;
+    tx.execute(
+        "DELETE FROM secret_pending_requests WHERE secret_name=?1",
+        [id],
+    )?;
+    if read_schema_version(tx)? >= SECRET_RELEASE_RECEIPT_SCHEMA_VERSION {
+        tx.execute(
+            "UPDATE secret_release_receipts SET aad_sha256='invalidated', enc=X'', ciphertext=X'' \
+             WHERE incarnation=(SELECT incarnation FROM credentials WHERE credential_id=?1)",
+            [id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Load the vault's sealed audit key, or create it on a brand-new vault.
@@ -10237,6 +10394,403 @@ mod tests {
         EncryptedStore::migrate(&store).expect("migrate");
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
         (root, EncryptedStore::open(store, key).expect("open vault"))
+    }
+
+    mod ssh_enrollment {
+        use super::*;
+        use crate::admin_ops::{
+            apply, AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+        };
+        use crate::record::{AgentSsh, AgentSshTarget};
+        use base64::Engine;
+
+        const ID: &str = "signing:ssh-enrollment";
+
+        fn key() -> VaultRecord {
+            let der =
+                ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap();
+            let pem = format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+                base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+            );
+            VaultRecord::new_static(
+                CredentialKind::SigningKey,
+                "operator",
+                pem.into_bytes(),
+                None,
+            )
+        }
+
+        fn targets(host: &str) -> Vec<AgentSshTarget> {
+            vec![AgentSshTarget {
+                user: Some("root".into()),
+                host: host.into(),
+                port: Some(22),
+            }]
+        }
+
+        fn allow(store: &EncryptedStore, host: &str) -> serde_json::Value {
+            apply(
+                store,
+                AdminOpBody::SshKeyAgentAllow {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    id: ID.into(),
+                    targets: targets(host),
+                },
+                "route:operator",
+            )
+            .unwrap()
+        }
+
+        fn enabled(store: &EncryptedStore, on: bool) {
+            store
+                .set_secret_local_programs_audited(
+                    on,
+                    AuditCtx::admin(AuditOp::SecretLocalProgramsSet),
+                )
+                .unwrap();
+        }
+
+        fn seed_state(store: &EncryptedStore, id: &str, tag: &str) {
+            let incarnation = store.credential_incarnation(id).unwrap();
+            store.fenced_write(|tx| {
+                tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES (?1,?2,?3,'aft','session','scope','scope','hour',9999999999999,1,'hash')", rusqlite::params![tag,id,incarnation])?;
+                tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms) VALUES (?1,'approve',?2,?3,'phone',X'01','hash',9999999999999)", rusqlite::params![tag,id,incarnation])?;
+                tx.execute("INSERT INTO secret_release_receipts VALUES ('requester',?1,'hash',?2,'once',?1,X'01',X'02',9999999999999)", rusqlite::params![tag,incarnation])?;
+                Ok(())
+            }).unwrap();
+        }
+
+        fn assert_cleaned(store: &EncryptedStore, id: &str, tag: &str) {
+            store.store.with_conn(|conn| {
+                for table in ["secret_grants", "secret_pending_requests"] {
+                    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE secret_name=?1"), [id], |r| r.get(0))?;
+                    assert_eq!(count, 0, "{table}");
+                }
+                let receipt: (String, Vec<u8>, Vec<u8>, i64) = conn.query_row("SELECT aad_sha256,enc,ciphertext,expires_at_ms FROM secret_release_receipts WHERE requester='requester' AND nonce=?1", [tag], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+                assert_eq!(receipt, ("invalidated".into(), vec![], vec![], 9999999999999));
+                Ok(())
+            }).unwrap();
+        }
+
+        #[test]
+        fn allow_replaces_targets_noop_preserves_state_and_deny_clears_authority_while_off() {
+            let (_root, store) = tmp_store(0xa1);
+            store.create(ID, &key()).unwrap();
+            assert!(matches!(
+                apply(
+                    &store,
+                    AdminOpBody::SshKeyAgentAllow {
+                        v: ADMIN_OP_SCHEMA_V2,
+                        id: ID.into(),
+                        targets: targets("192.0.2.1")
+                    },
+                    "operator"
+                ),
+                Err(StoreOpError::SecretLocalProgramsDisabled)
+            ));
+            assert_eq!(store.read_audit(Some(20)).unwrap().len(), 1);
+            enabled(&store, true);
+            assert_eq!(
+                allow(&store, "192.0.2.1"),
+                serde_json::json!({"targets":targets("192.0.2.1")})
+            );
+            seed_state(&store, ID, "old");
+            let version = store.get(ID).unwrap().record_version;
+            let tip = store.read_audit(Some(1)).unwrap();
+            allow(&store, "192.0.2.1");
+            assert_eq!(store.get(ID).unwrap().record_version, version);
+            assert_eq!(store.read_audit(Some(1)).unwrap(), tip);
+            store
+                .store
+                .with_conn(|c| {
+                    assert_eq!(
+                        c.query_row("SELECT count(*) FROM secret_grants", [], |r| r
+                            .get::<_, i64>(0))?,
+                        1
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            allow(&store, "192.0.2.2");
+            assert_eq!(
+                store.get(ID).unwrap().agent_ssh.unwrap().targets,
+                targets("192.0.2.2")
+            );
+            assert_cleaned(&store, ID, "old");
+            seed_state(&store, ID, "denied");
+            enabled(&store, false);
+            let result = apply(
+                &store,
+                AdminOpBody::SshKeyAgentDeny {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    id: ID.into(),
+                },
+                "route:operator",
+            )
+            .unwrap();
+            assert_eq!(result, serde_json::json!({"targets":[]}));
+            assert!(store.get(ID).unwrap().agent_ssh.is_none());
+            assert_cleaned(&store, ID, "denied");
+            enabled(&store, true);
+            allow(&store, "192.0.2.2");
+            assert_cleaned(&store, ID, "denied");
+            let audit = store.read_audit(Some(20)).unwrap();
+            assert_eq!(
+                audit
+                    .iter()
+                    .filter(|r| r.op == "ssh_key_agent_allow")
+                    .count(),
+                3
+            );
+            assert_eq!(
+                audit
+                    .iter()
+                    .filter(|r| r.op == "ssh_key_agent_deny")
+                    .count(),
+                1
+            );
+            assert_eq!(store.verify_audit_chain().unwrap(), None);
+        }
+
+        #[test]
+        fn generic_admin_writes_refuse_incoming_enrollment_for_every_mode_and_identity_policy() {
+            let (_root, store) = tmp_store(0xa2);
+            store.create(ID, &key()).unwrap();
+            let original = store.get(ID).unwrap();
+            let mut marked = key();
+            marked.agent_ssh = Some(AgentSsh {
+                targets: targets("::1"),
+            });
+            for mode in [
+                StoreMode::Create,
+                StoreMode::ReplaceCas {
+                    expected_hash_hex: hex32(&payload_hash(original.payload.expose())),
+                },
+                StoreMode::ReplaceUnconditional,
+            ] {
+                let error = apply(
+                    &store,
+                    AdminOpBody::Store {
+                        v: ADMIN_OP_SCHEMA_V1,
+                        id: ID.into(),
+                        record: Box::new(marked.clone()),
+                        audit_op: AdminAuditOp::Overwrite,
+                        mode,
+                    },
+                    "operator",
+                )
+                .unwrap_err();
+                assert_eq!(error.wire_code(), Some("invalid_params"));
+            }
+            let error = apply(
+                &store,
+                AdminOpBody::StoreWithIdentityPolicy {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: ID.into(),
+                    record: Box::new(marked),
+                    audit_op: AdminAuditOp::Overwrite,
+                    clear_identity: true,
+                },
+                "operator",
+            )
+            .unwrap_err();
+            assert_eq!(error.wire_code(), Some("invalid_params"));
+            assert_eq!(store.get(ID).unwrap(), original);
+            assert_eq!(store.read_audit(Some(20)).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn signing_overwrites_clear_ssh_state_even_when_the_old_envelope_is_corrupt() {
+            for mode in 0..3 {
+                let (_root, store) = tmp_store(0xa3);
+                store.create(ID, &key()).unwrap();
+                store.create("signing:other", &key()).unwrap();
+                enabled(&store, true);
+                allow(&store, "::1");
+                seed_state(&store, ID, "replaced");
+                seed_state(&store, "signing:other", "other");
+                let old = store.get(ID).unwrap();
+                let incarnation = store.credential_incarnation(ID).unwrap();
+                if mode != 0 {
+                    store
+                        .fenced_write(|tx| {
+                            tx.execute(
+                                "UPDATE credentials SET envelope=X'00' WHERE credential_id=?1",
+                                [ID],
+                            )
+                        })
+                        .unwrap();
+                }
+                let replacement = key();
+                let op = if mode == 2 {
+                    AdminOpBody::StoreWithIdentityPolicy {
+                        v: ADMIN_OP_SCHEMA_V1,
+                        id: ID.into(),
+                        record: Box::new(replacement),
+                        audit_op: AdminAuditOp::Overwrite,
+                        clear_identity: true,
+                    }
+                } else {
+                    AdminOpBody::Store {
+                        v: ADMIN_OP_SCHEMA_V1,
+                        id: ID.into(),
+                        record: Box::new(replacement),
+                        audit_op: AdminAuditOp::Overwrite,
+                        mode: if mode == 0 {
+                            StoreMode::ReplaceCas {
+                                expected_hash_hex: hex32(&payload_hash(old.payload.expose())),
+                            }
+                        } else {
+                            StoreMode::ReplaceUnconditional
+                        },
+                    }
+                };
+                apply(&store, op, "operator").unwrap();
+                assert!(store.get(ID).unwrap().agent_ssh.is_none());
+                assert_eq!(store.credential_incarnation(ID).unwrap(), incarnation);
+                assert_cleaned(&store, ID, "replaced");
+                store.store.with_conn(|c| {
+                    assert_eq!(c.query_row("SELECT aad_sha256 FROM secret_release_receipts WHERE nonce='other'", [], |r| r.get::<_,String>(0))?, "hash");
+                    assert_eq!(c.query_row("SELECT count(*) FROM secret_grants WHERE secret_name='signing:other'", [], |r| r.get::<_,i64>(0))?, 1);
+                    Ok(())
+                }).unwrap();
+            }
+        }
+
+        #[test]
+        fn removing_an_enrolled_key_invalidates_receipts_and_recreation_has_no_authority() {
+            let (_root, store) = tmp_store(0xa4);
+            store.create(ID, &key()).unwrap();
+            enabled(&store, true);
+            allow(&store, "::1");
+            seed_state(&store, ID, "removed");
+            let incarnation = store.credential_incarnation(ID).unwrap();
+            store
+                .remove_audited(ID, AuditCtx::admin(AuditOp::Remove))
+                .unwrap();
+            assert_cleaned(&store, ID, "removed");
+            store.create(ID, &key()).unwrap();
+            assert_ne!(store.credential_incarnation(ID).unwrap(), incarnation);
+            assert!(store.get(ID).unwrap().agent_ssh.is_none());
+        }
+
+        #[test]
+        fn allow_refuses_wrong_id_kind_and_non_ed25519_without_writes() {
+            let (_root, store) = tmp_store(0xa5);
+            enabled(&store, true);
+            store.create("opaque:ssh", &key()).unwrap();
+            store
+                .create(
+                    ID,
+                    &VaultRecord::new_static(
+                        CredentialKind::SigningKey,
+                        "operator",
+                        b"not a key".to_vec(),
+                        None,
+                    ),
+                )
+                .unwrap();
+            store
+                .create(
+                    "signing:wrong-kind",
+                    &VaultRecord::new_static(
+                        CredentialKind::Opaque,
+                        "operator",
+                        key().payload.expose().to_vec(),
+                        None,
+                    ),
+                )
+                .unwrap();
+            let tip = store.read_audit(Some(1)).unwrap();
+            for id in ["opaque:ssh", ID, "signing:wrong-kind"] {
+                assert!(matches!(
+                    store.set_agent_ssh_audited(
+                        id,
+                        Some(AgentSsh {
+                            targets: targets("::1")
+                        }),
+                        "operator"
+                    ),
+                    Err(StoreOpError::InvalidAgentSsh)
+                ));
+            }
+            assert_eq!(store.read_audit(Some(1)).unwrap(), tip);
+        }
+
+        #[test]
+        fn sealing_and_refresh_refuse_marks_on_non_signing_or_non_ed25519_records() {
+            let (_root, store) = tmp_store(0xa6);
+            let mut marked = key();
+            marked.agent_ssh = Some(AgentSsh {
+                targets: targets("::1"),
+            });
+            assert!(store.seal_record(ID, &marked).is_ok());
+            assert!(matches!(
+                store.seal_record("opaque:ssh", &marked),
+                Err(StoreOpError::InvalidAgentSsh)
+            ));
+            store.create("opaque:ssh", &key()).unwrap();
+            assert!(matches!(
+                store.commit_refresh("opaque:ssh", 1, &marked),
+                Err(StoreOpError::InvalidAgentSsh)
+            ));
+            marked.kind = CredentialKind::Opaque;
+            assert!(matches!(
+                store.seal_record(ID, &marked),
+                Err(StoreOpError::InvalidAgentSsh)
+            ));
+            marked.kind = CredentialKind::SigningKey;
+            marked.payload = b"not an Ed25519 key".to_vec().into();
+            assert!(matches!(
+                store.seal_record(ID, &marked),
+                Err(StoreOpError::InvalidAgentSsh)
+            ));
+            assert!(store.get("opaque:ssh").unwrap().agent_ssh.is_none());
+        }
+
+        #[test]
+        fn master_key_rotation_preserves_ssh_enrollment_grants_and_receipts() {
+            let (_root, mut store) = tmp_store(0xa8);
+            store.create(ID, &key()).unwrap();
+            enabled(&store, true);
+            allow(&store, "::1");
+            seed_state(&store, ID, "rotation");
+            let old = store.get(ID).unwrap();
+            let incarnation = store.credential_incarnation(ID).unwrap();
+            assert!(store
+                .rotate_master_key(MasterKey::from_bytes([0xa9; MASTER_KEY_LEN]))
+                .unwrap()
+                .is_empty());
+            assert_eq!(store.get(ID).unwrap(), old);
+            assert_eq!(store.credential_incarnation(ID).unwrap(), incarnation);
+            store.store.with_conn(|c| {
+                assert_eq!(c.query_row("SELECT count(*) FROM secret_grants WHERE grant_id='rotation'", [], |r| r.get::<_,i64>(0))?, 1);
+                assert_eq!(c.query_row("SELECT count(*) FROM secret_pending_requests WHERE request_id='rotation'", [], |r| r.get::<_,i64>(0))?, 1);
+                assert_eq!(c.query_row("SELECT aad_sha256 FROM secret_release_receipts WHERE nonce='rotation'", [], |r| r.get::<_,String>(0))?, "hash");
+                Ok(())
+            }).unwrap();
+        }
+
+        #[test]
+        fn enrollment_cleanup_and_audit_failure_roll_back_together() {
+            let (_root, store) = tmp_store(0xa7);
+            store.create(ID, &key()).unwrap();
+            enabled(&store, true);
+            allow(&store, "::1");
+            seed_state(&store, ID, "rollback");
+            let old = store.get(ID).unwrap();
+            store.fenced_write(|tx| tx.execute_batch("CREATE TRIGGER fail_ssh_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;")).unwrap();
+            assert!(store.set_agent_ssh_audited(ID, None, "operator").is_err());
+            assert_eq!(store.get(ID).unwrap(), old);
+            store.store.with_conn(|c| {
+                assert_eq!(c.query_row("SELECT count(*) FROM secret_grants WHERE grant_id='rollback'", [], |r| r.get::<_,i64>(0))?, 1);
+                assert_eq!(c.query_row("SELECT count(*) FROM secret_pending_requests WHERE request_id='rollback'", [], |r| r.get::<_,i64>(0))?, 1);
+                assert_eq!(c.query_row("SELECT aad_sha256 FROM secret_release_receipts WHERE nonce='rollback'", [], |r| r.get::<_,String>(0))?, "hash");
+                Ok(())
+            }).unwrap();
+        }
     }
 
     #[test]
@@ -14232,7 +14786,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            45,
+            46,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16399,11 +16953,51 @@ mod migration_10_tests {
             .unwrap();
         let before = every_table_row(&store.store);
         EncryptedStore::migrate(&store.store).unwrap();
-        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 45);
+        assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 46);
         let mut after = every_table_row(&store.store);
         assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
         assert_eq!(after, before);
         assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
+        let (_root, sqlite) = sqlite("local-program-upgrade", 228);
+        migrate_through_for_test(&sqlite, 45).unwrap();
+        sqlite.with_conn(|conn| {
+            conn.execute_batch("INSERT INTO agent_secrets VALUES ('legacy','agent_api_key','00000000000000000000000000000001','active','x.test',NULL,'authorization_bearer',NULL,1,'key',X'0102',1,NULL);
+                INSERT INTO agent_secrets VALUES ('extended','site_login','00000000000000000000000000000002','active',NULL,NULL,NULL,NULL,1,'key',X'0304',2,'[\"https://a.test\",\"https://b.test\"]');
+                INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES ('g','legacy','00000000000000000000000000000001','owner','head','H','scope','hour',100,1,'digest');
+                INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms) VALUES ('r','approve','legacy','00000000000000000000000000000001','member',X'0506','digest',100);")
+        }).unwrap();
+        let before = every_table_row(&sqlite);
+        EncryptedStore::migrate(&sqlite).unwrap();
+        let mut after = every_table_row(&sqlite);
+        for table in ["secret_grants", "secret_pending_requests"] {
+            assert_eq!(after[table].len(), 1);
+            assert_eq!(
+                after.get_mut(table).unwrap()[0].pop(),
+                Some(rusqlite::types::Value::Null)
+            );
+        }
+        assert_eq!(
+            after, before,
+            "migration must preserve every pre-existing byte"
+        );
+        sqlite.with_conn(|conn| {
+            let insert = "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms,scope_json) VALUES ('local','local_program','00000000000000000000000000000003','active',?1,?2,?3,?4,1,'key',X'0708',3,?5)";
+            for (host, prefix, location, origin, scope) in [
+                (None, None, None, None, None),
+                (Some("x.test"), None, None, None, Some("{}")),
+                (None, Some("/"), None, None, Some("{}")),
+                (None, None, Some("header:X"), None, Some("{}")),
+                (None, None, None, Some("https://x.test"), Some("{}")),
+            ] {
+                assert!(conn.execute(insert, rusqlite::params![host,prefix,location,origin,scope]).is_err());
+            }
+            conn.execute(insert, rusqlite::params![None::<String>,None::<String>,None::<String>,None::<String>,"{}"])?;
+            Ok(())
+        }).unwrap();
     }
 
     /// Every row of every vault table, sorted by all of its columns, keyed by table name.
@@ -17343,6 +17937,55 @@ mod migration_10_tests {
         };
 
         for (table, expected) in [
+            (
+                "secret_grants",
+                vec![
+                    column("grant_id", "TEXT", false, None, true),
+                    column("secret_name", "TEXT", true, None, false),
+                    column("incarnation", "TEXT", true, None, false),
+                    column("scope_owner", "TEXT", true, None, false),
+                    column("scope_kind", "TEXT", true, None, false),
+                    column("scope_ref", "TEXT", true, None, false),
+                    column("coverage", "TEXT", true, None, false),
+                    column("duration", "TEXT", true, None, false),
+                    column("expires_at_ms", "INTEGER", true, None, false),
+                    column("granted_at_ms", "INTEGER", true, None, false),
+                    column("envelope_sha256", "TEXT", true, None, false),
+                    column("agent_id", "TEXT", false, None, false),
+                    column("card_ref", "TEXT", false, None, false),
+                    column("first_released", "INTEGER", true, Some("0"), false),
+                    column("last_use_ms", "INTEGER", false, None, false),
+                    column("asking_member_id", "TEXT", true, Some("''"), false),
+                    column("local_use", "TEXT", false, None, false),
+                ],
+            ),
+            (
+                "secret_pending_requests",
+                vec![
+                    column("request_id", "TEXT", false, None, true),
+                    column("request_kind", "TEXT", true, None, false),
+                    column("secret_name", "TEXT", true, None, false),
+                    column("incarnation", "TEXT", true, None, false),
+                    column("member_id", "TEXT", true, None, false),
+                    column("mapped_owner", "TEXT", false, None, false),
+                    column("mapped_kind", "TEXT", false, None, false),
+                    column("mapped_ref", "TEXT", false, None, false),
+                    column("mapped_epoch", "INTEGER", false, None, false),
+                    column("coverage", "TEXT", false, None, false),
+                    column("agent_id", "TEXT", false, None, false),
+                    column("statement_bytes", "BLOB", true, None, false),
+                    column("statement_sha256", "TEXT", true, None, false),
+                    column("request_expires_at_ms", "INTEGER", true, None, false),
+                    column("consumed", "INTEGER", true, Some("0"), false),
+                    column("flow_id", "TEXT", false, None, false),
+                    column("flow_version", "INTEGER", false, None, false),
+                    column("flow_code_hash", "TEXT", false, None, false),
+                    column("flow_install_id", "TEXT", false, None, false),
+                    column("methods", "TEXT", false, None, false),
+                    column("asking_member_id", "TEXT", true, Some("''"), false),
+                    column("local_use", "TEXT", false, None, false),
+                ],
+            ),
             (
                 "declared_grant_sets",
                 vec![
@@ -19156,8 +19799,9 @@ pub use store_agent_secrets::{
     SecretHomeStatus, SECRET_HOME_SELF, SECRET_HOME_SETTING,
 };
 pub use store_agent_secrets::{
-    secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,
-    PhoneOperation, SecretDepositPublicKey, SecretUseOutcome,
+    secret_local_programs_status_read_only, secret_multi_host_status_read_only,
+    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
+    SecretUseOutcome,
 };
 /// Sealed releases to paired computers and the receipts that answer their retries.
 pub use store_agent_secrets::{

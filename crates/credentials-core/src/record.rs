@@ -254,6 +254,94 @@ pub struct VaultRecord {
     /// the key; old records default off. Operator signatures are always audited.
     #[serde(default, skip_serializing_if = "signature_audit_disabled")]
     pub operator_sign: bool,
+    /// Agent SSH enrollment is sealed with the key; generic record writes cannot
+    /// grant it. Old records and older decoders leave the key unenrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ssh: Option<AgentSsh>,
+}
+
+/// The complete target set authorized for agent SSH authentication.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSsh {
+    pub targets: Vec<AgentSshTarget>,
+}
+
+/// A canonical host, optionally restricted to one login name and port.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSshTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+/// DNS labels in SSH destinations contain only letters, digits and hyphens.
+pub const MAX_SSH_DNS_LABEL_BYTES: usize = 63;
+
+impl AgentSsh {
+    /// Validate before sorting, so duplicates are refused rather than merged.
+    pub fn canonicalized(mut self) -> Result<Self, crate::agent_secret::ValidationError> {
+        use crate::agent_secret::{ValidationError::InvalidParams, MAX_LOCAL_PROGRAM_TARGETS};
+        if self.targets.is_empty() || self.targets.len() > MAX_LOCAL_PROGRAM_TARGETS {
+            return Err(InvalidParams);
+        }
+        let mut ordered = std::collections::BTreeMap::new();
+        for target in self.targets {
+            target.validate()?;
+            let bytes = serde_json::to_value(&target)
+                .and_then(|value| serde_json::to_vec(&value))
+                .map_err(|_| InvalidParams)?;
+            if ordered.insert(bytes, target).is_some() {
+                return Err(InvalidParams);
+            }
+        }
+        self.targets = ordered.into_values().collect();
+        Ok(self)
+    }
+}
+
+impl AgentSshTarget {
+    pub fn validate(&self) -> Result<(), crate::agent_secret::ValidationError> {
+        use crate::agent_secret::{
+            validate_local_user, ValidationError::InvalidParams, MAX_SECRET_HOST_BYTES,
+        };
+        if let Some(user) = &self.user {
+            validate_local_user(user)?;
+        }
+        if self.port == Some(0) {
+            return Err(InvalidParams);
+        }
+        if self.host.is_empty() || self.host.len() > MAX_SECRET_HOST_BYTES {
+            return Err(InvalidParams);
+        }
+        if self.host.contains(':') {
+            let address = self
+                .host
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|_| InvalidParams)?;
+            if address.to_string() != self.host {
+                return Err(InvalidParams);
+            }
+        } else if self.host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            self.host
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| InvalidParams)?;
+        } else if !self.host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= MAX_SSH_DNS_LABEL_BYTES
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        }) {
+            return Err(InvalidParams);
+        }
+        Ok(())
+    }
 }
 
 fn signature_audit_disabled(enabled: &bool) -> bool {
@@ -300,6 +388,7 @@ impl std::fmt::Debug for VaultRecord {
             .field("identity", &self.identity)
             .field("audit_each_signature", &self.audit_each_signature)
             .field("operator_sign", &self.operator_sign)
+            .field("agent_ssh", &self.agent_ssh)
             .finish()
     }
 }
@@ -332,6 +421,7 @@ impl VaultRecord {
             detected_plan_tier_observed_at_ms: None,
             audit_each_signature: false,
             operator_sign: false,
+            agent_ssh: None,
         }
     }
 
@@ -390,6 +480,7 @@ impl VaultRecord {
             detected_plan_tier_observed_at_ms: None,
             audit_each_signature: false,
             operator_sign: false,
+            agent_ssh: None,
         }
     }
 
@@ -860,5 +951,141 @@ mod operator_sign_rollback_tests {
         );
         assert!(rewritten.audit_each_signature);
         assert_eq!(rewritten.payload, record.payload);
+    }
+}
+
+#[cfg(test)]
+mod agent_ssh_tests {
+    use super::*;
+
+    #[test]
+    fn agent_ssh_is_additive_and_readable_by_the_previous_decoder() {
+        #[derive(Deserialize, Serialize)]
+        struct PreviousRecord {
+            schema_version: u32,
+            kind: CredentialKind,
+            source: String,
+            record_version: u64,
+            expires_at_ms: Option<i64>,
+            refresh_adapter: Option<String>,
+            oauth: Option<OAuthCredential>,
+            payload: SecretBytes,
+            #[serde(default)]
+            identity: RecordIdentity,
+            #[serde(default)]
+            detected_plan: Option<crate::plan_detection::DetectedPlan>,
+            #[serde(default)]
+            detected_plan_tier_observed_at_ms: Option<i64>,
+            #[serde(default)]
+            audit_each_signature: bool,
+            #[serde(default)]
+            operator_sign: bool,
+        }
+        let mut record =
+            VaultRecord::new_static(CredentialKind::SigningKey, "operator", vec![42], None);
+        record.operator_sign = true;
+        record.audit_each_signature = true;
+        let old_bytes = record.encode().unwrap();
+        assert!(!serde_json::from_slice::<serde_json::Value>(&old_bytes)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("agent_ssh"));
+        assert!(VaultRecord::decode(&old_bytes).unwrap().agent_ssh.is_none());
+        record.agent_ssh = Some(AgentSsh {
+            targets: vec![target("::1")],
+        });
+        let bytes = record.encode().unwrap();
+        assert_eq!(VaultRecord::decode(&bytes).unwrap(), record);
+        let previous: PreviousRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(previous.payload, record.payload);
+        let rewritten = VaultRecord::decode(&serde_json::to_vec(&previous).unwrap()).unwrap();
+        assert!(rewritten.agent_ssh.is_none());
+        assert!(rewritten.operator_sign && rewritten.audit_each_signature);
+    }
+
+    fn target(host: &str) -> AgentSshTarget {
+        AgentSshTarget {
+            user: None,
+            host: host.into(),
+            port: None,
+        }
+    }
+
+    #[test]
+    fn agent_ssh_targets_are_closed_canonical_unique_and_bounded() {
+        let targets: Vec<_> = (1..=16).map(|i| target(&format!("192.0.2.{i}"))).collect();
+        assert_eq!(
+            AgentSsh {
+                targets: targets.clone()
+            }
+            .canonicalized()
+            .unwrap()
+            .targets
+            .len(),
+            16
+        );
+        let mut over = targets;
+        over.push(target("192.0.2.17"));
+        assert!(AgentSsh { targets: over }.canonicalized().is_err());
+        assert!(AgentSsh { targets: vec![] }.canonicalized().is_err());
+        assert!(AgentSsh {
+            targets: vec![target("::1"), target("::1")]
+        }
+        .canonicalized()
+        .is_err());
+        for host in [
+            "EXAMPLE.COM",
+            "example.com.",
+            "*.example.com",
+            "[::1]",
+            "2001:0db8::1",
+            "",
+            "1.2.3.999",
+        ] {
+            assert!(target(host).validate().is_err(), "{host}");
+        }
+        for user in ["-root", "", "a@b", "root\n"] {
+            let mut entry = target("::1");
+            entry.user = Some(user.into());
+            assert!(entry.validate().is_err());
+        }
+        let mut entry = target("::1");
+        for port in [1, 65535] {
+            entry.port = Some(port);
+            assert!(entry.validate().is_ok());
+        }
+        entry.port = Some(0);
+        assert!(entry.validate().is_err());
+        assert!(serde_json::from_str::<AgentSshTarget>(r#"{"host":"::1","extra":1}"#).is_err());
+        let mut a = target("192.0.2.1");
+        a.user = Some("root".into());
+        a.port = Some(22);
+        let b = target("::1");
+        // RFC 8785 sorts object keys: host precedes port and user, not struct order.
+        assert_eq!(
+            AgentSsh {
+                targets: vec![b.clone(), a.clone()]
+            }
+            .canonicalized()
+            .unwrap()
+            .targets,
+            vec![a, b]
+        );
+    }
+
+    #[test]
+    fn agent_ssh_host_and_user_boundaries() {
+        assert!(target(&"a".repeat(63)).validate().is_ok());
+        assert!(target(&"a".repeat(64)).validate().is_err());
+        let host = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+        assert_eq!(host.len(), 253);
+        assert!(target(&host).validate().is_ok());
+        assert!(target(&(host + "a")).validate().is_err());
+        let mut entry = target("localhost");
+        entry.user = Some("a".repeat(64));
+        assert!(entry.validate().is_ok());
+        entry.user = Some("a".repeat(65));
+        assert!(entry.validate().is_err());
     }
 }

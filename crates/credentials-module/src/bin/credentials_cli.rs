@@ -389,6 +389,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args, options),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
+        "ssh-key" => cmd_ssh_key(&global, &args),
         "sign" => cmd_sign(&global, &args),
         "mint-kem-key" => cmd_mint_kem_key(&global, &args),
         "import" => cmd_import(&global, &args),
@@ -487,6 +488,10 @@ impl ParsedOptions {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    if command == "ssh-key" {
+        parse_ssh_key_op(args)?;
+        return Ok(ParsedOptions::default());
+    }
     if command == "manifest" {
         return cli_support::manifest_cli::guard_args(args).map(|()| ParsedOptions::default());
     }
@@ -636,6 +641,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
                 "revoke",
                 "phone-gate",
                 "multi-host",
+                "local-programs",
                 "on",
                 "off",
                 "status",
@@ -712,6 +718,7 @@ fn usage_short() -> String {
        manifest            import, sign and track GitHub routing manifests\n\
            put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
+           ssh-key             allow or deny agent SSH use of a signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
          import              import from opencode/pi/gemini-cli/antigravity\n\
@@ -770,6 +777,19 @@ fn help_verb(verb: &str) -> String {
         return cli_support::manifest_cli::help_text(verb.strip_prefix("manifest "));
     }
     let body = match verb {
+        "ssh-key" => {
+            "ck auth ssh-key allow <id> --target [user@]host[:port]...\n\
+             ck auth ssh-key deny <id>\n\
+             \n\
+             \x20 --target <target>  allowed destination (allow; repeatable)\n\
+             \n\
+             NOTES\n\
+             allow replaces the whole target set and requires local-programs on.\n\
+             Repeat --target for each destination. Bracket IPv6 even without a port:\n\
+             [2001:db8::1] or user@[2001:db8::1]:22. Hosts must be canonical.\n\
+             deny clears enrollment and works even with local-programs off.\n\
+             Both print the resulting targets; changed enrollment revokes old grants."
+        }
         "provider" => {
             "ck auth provider list\n\
              ck auth provider set --service <name> [--category <c>]...\n\
@@ -2303,6 +2323,101 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     println!("{success} {id}");
     println!("public_key_hex {}", public.public_key_hex);
     println!("key_id {}", public.key_id);
+    Ok(())
+}
+
+fn parse_ssh_key_op(args: &[String]) -> Result<AdminOpBody, CliError> {
+    let usage =
+        || CliError::Usage("ssh-key allow <id> --target <target>... | ssh-key deny <id>".into());
+    let verb = args.first().ok_or_else(usage)?;
+    let id = args
+        .get(1)
+        .filter(|id| !id.starts_with('-'))
+        .ok_or_else(usage)?;
+    if !id.starts_with("signing:") {
+        return Err(CliError::Usage(
+            "ssh-key requires a signing: credential id".into(),
+        ));
+    }
+    match verb.as_str() {
+        "deny" if args.len() == 2 => Ok(AdminOpBody::SshKeyAgentDeny {
+            v: ADMIN_OP_SCHEMA_V2,
+            id: id.clone(),
+        }),
+        "allow" => {
+            let mut targets = Vec::new();
+            let (pairs, remainder) = args[2..].as_chunks::<2>();
+            for pair in pairs {
+                if pair[0] != "--target" {
+                    return Err(usage());
+                }
+                targets.push(parse_ssh_key_target(&pair[1])?);
+            }
+            if !remainder.is_empty() {
+                return Err(usage());
+            }
+            let enrollment = credentials_core::record::AgentSsh { targets }
+                .canonicalized()
+                .map_err(|_| usage())?;
+            Ok(AdminOpBody::SshKeyAgentAllow {
+                v: ADMIN_OP_SCHEMA_V2,
+                id: id.clone(),
+                targets: enrollment.targets,
+            })
+        }
+        _ => Err(usage()),
+    }
+}
+
+fn parse_ssh_key_target(input: &str) -> Result<credentials_core::record::AgentSshTarget, CliError> {
+    let invalid = || {
+        CliError::Usage("invalid SSH target; bracket IPv6 hosts, including without a port".into())
+    };
+    let (user, address) = match input.split_once('@') {
+        Some((user, address)) => (Some(user.to_owned()), address),
+        None => (None, input),
+    };
+    let (host, port) = if let Some(rest) = address.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']').ok_or_else(invalid)?;
+        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':').ok_or_else(invalid)?)
+        };
+        (host, port)
+    } else {
+        if address.matches(':').count() > 1 {
+            return Err(invalid());
+        }
+        match address.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (address, None),
+        }
+    };
+    let port = port
+        .map(|p| {
+            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            p.parse::<u16>().map_err(|_| invalid())
+        })
+        .transpose()?;
+    let target = credentials_core::record::AgentSshTarget {
+        user,
+        host: host.to_owned(),
+        port,
+    };
+    target.validate().map_err(|_| invalid())?;
+    Ok(target)
+}
+
+fn cmd_ssh_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let result = commit_admin(global, parse_ssh_key_op(args)?)?;
+    println!(
+        "{}",
+        serde_json::to_string(&result).expect("SSH enrollment result")
+    );
     Ok(())
 }
 

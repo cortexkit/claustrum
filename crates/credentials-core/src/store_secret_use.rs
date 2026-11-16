@@ -194,7 +194,13 @@ impl EncryptedStore {
             .map_err(|_| SecretError::StoreError)?;
         match answer {
             Ok(answer) => answer,
-            Err(refusal) => self.use_refused(selected.as_ref().expect("selected secret"), refusal),
+            // A refusal comes only from the named path, which runs after a secret was
+            // selected; a missing selection would be a store bug, answered as one
+            // rather than by crashing the vault.
+            Err(refusal) => match selected.as_ref() {
+                Some(call) => self.use_refused(call, refusal),
+                None => Err(SecretError::StoreError),
+            },
         }
     }
 
@@ -784,10 +790,13 @@ impl EncryptedStore {
         }
         match answer.map_err(|_| SecretError::StoreError)? {
             Forwarded::Answer(answer) => answer.map(Ok),
-            Forwarded::Refused(refusal) => {
-                let call = selected.as_ref().expect("selected secret");
-                Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
-            }
+            Forwarded::Refused(refusal) => match selected.as_ref() {
+                Some(call) => {
+                    Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
+                }
+                // As in `secret_use_by_target`: only reachable through a store bug.
+                None => Err(SecretError::StoreError),
+            },
         }
     }
 

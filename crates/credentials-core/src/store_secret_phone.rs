@@ -159,6 +159,13 @@ pub enum PhoneOperation {
 }
 
 impl EncryptedStore {
+    /// Read the local-program feature switch without opening any secret record.
+    pub fn secret_local_programs_enabled(&self) -> Result<bool, SecretError> {
+        self.store
+            .with_conn(|conn| Ok(local_programs_enabled(conn)))
+            .map_err(|_| SecretError::StoreError)
+    }
+
     pub fn set_secret_multi_host_audited(
         &self,
         enabled: bool,

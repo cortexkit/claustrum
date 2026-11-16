@@ -71,6 +71,12 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "use.request.api_key",
     "use.request.api_key.defaults",
     "use.request.site_login",
+    "use.request.local_program",
+    "use.result.released.local_program",
+    "ssh_sign.request",
+    "ssh_sign.result.signed",
+    "federation.secret_ssh_sign.request",
+    "federation.secret_ssh_sign.result.sealed",
     "use.result.released.api_key",
     "use.result.released.site_login",
     "use.result.approval_required",
@@ -2133,4 +2139,593 @@ async fn sc_dispatch(
         .expect("serve request");
     let reply = responses.recv().await.expect("route response");
     (reply.header.ty, reply.body)
+}
+
+const SC_LOCAL_GOLDENS: &[&str] = &[
+    "use.request.local_program",
+    "use.result.released.local_program",
+    "ssh_sign.request",
+    "ssh_sign.result.signed",
+    "federation.secret_ssh_sign.request",
+    "federation.secret_ssh_sign.result.sealed",
+];
+const SC_SSH_KEY: &str = "signing:agent:ssh";
+
+fn sc_programs(store: &EncryptedStore, enabled: bool) {
+    store
+        .set_secret_local_programs_audited(
+            enabled,
+            AuditCtx::admin(AuditOp::SecretLocalProgramsSet),
+        )
+        .unwrap();
+}
+
+fn sc_ssh_seed(store: &EncryptedStore) -> Vec<u8> {
+    let vectors = catalog_vectors::fixture();
+    let pem = catalog_vectors::trusted_key_pem(&vectors);
+    let public = credentials_core::signing::public_key_ed25519(&pem).unwrap();
+    store
+        .create_audited(
+            SC_SSH_KEY,
+            &VaultRecord::new_static(CredentialKind::SigningKey, "test", pem.into_bytes(), None),
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    let call = secret_golden("ssh_sign.request");
+    store
+        .set_agent_ssh_audited(
+            SC_SSH_KEY,
+            Some(credentials_core::record::AgentSsh {
+                targets: vec![credentials_core::record::AgentSshTarget {
+                    user: Some("alice".into()),
+                    host: call["target"]["host"].as_str().unwrap().into(),
+                    port: Some(22),
+                }],
+            }),
+            "operator",
+        )
+        .unwrap();
+    sc_unhex(&public.public_key_hex)
+}
+
+fn sc_ssh_data(public: &[u8], user: &str) -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    let mut blob = Vec::new();
+    string(&mut blob, b"ssh-ed25519");
+    string(&mut blob, public);
+    let mut data = Vec::new();
+    string(&mut data, &[7; 32]);
+    data.push(50);
+    string(&mut data, user.as_bytes());
+    string(&mut data, b"ssh-connection");
+    string(&mut data, b"publickey");
+    data.push(1);
+    string(&mut data, b"ssh-ed25519");
+    string(&mut data, &blob);
+    data
+}
+
+fn sc_ssh_call(public: &[u8]) -> serde_json::Value {
+    let mut call = secret_golden("ssh_sign.request");
+    call["data"] = json!(sc_b64(&sc_ssh_data(public, "alice")));
+    call
+}
+
+fn sc_ssh_local(flow: &SecretFlow, call: &serde_json::Value) -> serde_json::Value {
+    sc_use_answer(crate::secret_use::serve_ssh_sign(
+        &flow.store,
+        Some(&subc_protocol::Principal::Reserved {
+            module_id: "aft".into(),
+        }),
+        call,
+        sc_now_ms,
+    ))
+}
+
+async fn sc_approve_once(flow: &SecretFlow, asked: &serde_json::Value) -> serde_json::Value {
+    assert_eq!(asked["status"], "approval_required", "{asked}");
+    let now = sc_now_ms();
+    let request = flow.signed("approve.request", json!([{
+        "request_id": asked["request_id"], "statement_sha256": sc_sha256_hex(&sc_unb64(asked["statement_b64url"].as_str().unwrap()))
+    }]), "once", now + 600_000, now);
+    flow.phone("secret.approve", request).await
+}
+
+fn sc_local_counts(flow: &SecretFlow) -> (i64, i64, i64, usize) {
+    let conn = rusqlite::Connection::open(flow._root.join("store.db")).unwrap();
+    let count = |table: &str| {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    (
+        count("secret_pending_requests"),
+        count("secret_grants"),
+        count("secret_release_receipts"),
+        flow.store.read_audit(None).unwrap().len(),
+    )
+}
+
+#[test]
+fn local_ops_preserve_every_legacy_golden_byte() {
+    let mut pinned = String::new();
+    let mut count = 0;
+    for part in SECRET_CONTRACT_DOC.split("<!-- golden:").skip(1) {
+        let (id, rest) = part.split_once(" -->\n```json\n").expect("golden fence");
+        if SC_LOCAL_GOLDENS.contains(&id) {
+            continue;
+        }
+        let (text, _) = rest.split_once("\n```").unwrap();
+        pinned.push_str(id);
+        pinned.push('\n');
+        pinned.push_str(text);
+        pinned.push('\n');
+        count += 1;
+    }
+    assert_eq!(count, 104);
+    assert_eq!(
+        sc_sha256_hex(pinned.as_bytes()),
+        "09ec6ee3dbb43828e8fdd7259c60a47986b8563ff92ca64fff595933551a362f"
+    );
+}
+
+#[tokio::test]
+async fn local_ops_goldens_match_closed_requests_and_real_replies() {
+    let flow = SecretFlow::new(201).await;
+    sc_programs(&flow.store, true);
+    let sudo = assert_secret_golden_shape("use.request.local_program", "name stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref stamp.scope_epoch stamp.kind stamp.attributes stamp.attributes.agent_id stamp.owner_authorized target target.program target.use target.target target.target.user target.command target.workdir target.purpose target.expects target.undoable");
+    let ssh = assert_secret_golden_shape("ssh_sign.request", "key stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref stamp.scope_epoch stamp.kind stamp.attributes stamp.attributes.agent_id stamp.owner_authorized target target.user target.host target.port command workdir purpose data");
+    for (call, is_ssh) in [(&sudo, false), (&ssh, true)] {
+        let run = |p: &serde_json::Value| {
+            if is_ssh {
+                sc_ssh_local(&flow, p)
+            } else {
+                flow.use_secret("aft", p)
+            }
+        };
+        assert_eq!(run(call), sh_not_found(), "valid golden reaches lookup");
+        for key in call.as_object().unwrap().keys() {
+            let mut p = call.clone();
+            p.as_object_mut().unwrap().remove(key);
+            assert_eq!(
+                run(&p),
+                json!({"transport":"invalid_params"}),
+                "missing {key}"
+            );
+        }
+        let mut p = call.clone();
+        p["extra"] = json!(1);
+        assert_eq!(run(&p), json!({"transport":"invalid_params"}));
+    }
+    let public = sc_ssh_seed(&flow.store);
+    let call = sc_ssh_call(&public);
+    let asked = sc_ssh_local(&flow, &call);
+    assert_secret_reply_matches("use.result.approval_required", &asked);
+    let statement = SecretHome::statement(&asked);
+    assert_eq!(statement["v"], "ck-secret-local-use-statement/v1");
+    assert!(statement.get("secret").is_none());
+    assert_eq!(statement["key"]["credential_id"], SC_SSH_KEY);
+    assert_eq!(statement["durations"], json!(["once", "hour", "session"]));
+    assert_eq!(
+        sc_approve_once(&flow, &asked).await["results"][0]["outcome"],
+        "granted"
+    );
+    let signed = sc_ssh_local(&flow, &call);
+    assert_secret_golden_shape("ssh_sign.result.signed", "status signature_b64url");
+    assert_secret_reply_matches("ssh_sign.result.signed", &signed);
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public)
+        .verify(
+            &sc_unb64(call["data"].as_str().unwrap()),
+            &sc_unb64(signed["signature_b64url"].as_str().unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        sc_ssh_local(&flow, &call)["status"],
+        "approval_required",
+        "once consumed"
+    );
+}
+
+#[tokio::test]
+async fn local_ops_ssh_invisibility_and_userauth_refusals_write_no_authority() {
+    let flow = SecretFlow::new(202).await;
+    sc_programs(&flow.store, true);
+    let public = sc_ssh_seed(&flow.store);
+    let base = sc_ssh_call(&public);
+    let before = sc_local_counts(&flow);
+    let mut absent = base.clone();
+    absent["key"] = json!("signing:absent");
+    let mut uncovered = base.clone();
+    uncovered["target"]["port"] = json!(23);
+    let mut wrong_public = base.clone();
+    wrong_public["data"] = json!(sc_b64(&sc_ssh_data(&[0x11; 32], "alice")));
+    let expected = serde_json::to_vec(&sh_not_found()).unwrap();
+    for call in [&absent, &uncovered, &wrong_public] {
+        assert_eq!(
+            serde_json::to_vec(&sc_ssh_local(&flow, call)).unwrap(),
+            expected
+        );
+        assert_eq!(sc_local_counts(&flow), before);
+    }
+    flow.store
+        .set_agent_ssh_audited(SC_SSH_KEY, None, "operator")
+        .unwrap();
+    let before = sc_local_counts(&flow);
+    assert_eq!(
+        serde_json::to_vec(&sc_ssh_local(&flow, &base)).unwrap(),
+        expected
+    );
+    assert_eq!(sc_local_counts(&flow), before);
+    for (data, target_user, expected) in [
+        (
+            sc_b64(b"SSHSIG arbitrary bytes"),
+            "alice",
+            json!({"transport":"invalid_params"}),
+        ),
+        (
+            sc_b64(&sc_ssh_data(&public, "bob")),
+            "alice",
+            json!({"transport":"invalid_params"}),
+        ),
+        (
+            format!("{}=", base["data"].as_str().unwrap()),
+            "alice",
+            json!({"transport":"invalid_params"}),
+        ),
+        (
+            sc_b64(&vec![
+                0;
+                credentials_core::agent_secret::MAX_SSH_USERAUTH_BYTES
+                    + 1
+            ]),
+            "alice",
+            json!({"error":{"code":"limit_exceeded","class":"permanent"}}),
+        ),
+    ] {
+        let mut call = base.clone();
+        call["data"] = json!(data);
+        call["target"]["user"] = json!(target_user);
+        assert_eq!(sc_ssh_local(&flow, &call), expected);
+        assert_eq!(sc_local_counts(&flow), before);
+    }
+    assert!(flow
+        .store
+        .recent_auth_events(100)
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "secret_use_refusal")
+        .all(|e| e.credential_id.starts_with("signing:")));
+}
+
+fn sc_sudo_seed(store: &EncryptedStore) {
+    use credentials_core::agent_secret::{SecretMaterial, SecretPut};
+    let material = SecretMaterial::LocalProgram(credentials_core::secret::Secret::new(
+        "example password".into(),
+    ));
+    store
+        .secret_put_audited(
+            &SecretPut {
+                kind: "local_program".into(),
+                name: "sudo".into(),
+                host: None,
+                path_prefix: None,
+                location: None,
+                origin: None,
+                rules: None,
+                origins: None,
+                program: Some("sudo".into()),
+                r#use: Some("sudo_password".into()),
+                targets: Some(json!([{"user":"root"}])),
+                material_b64url: sc_b64(
+                    credentials_core::agent_secret::deposit_plaintext(&material).expose(),
+                ),
+            },
+            "operator",
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn local_ops_sudo_release_golden_and_cross_kind_invisibility() {
+    let flow = SecretFlow::new(203).await;
+    sc_programs(&flow.store, true);
+    sc_sudo_seed(&flow.store);
+    flow.deposit_both().await;
+    let local = secret_golden("use.request.local_program");
+    let mut https = secret_golden("use.request.api_key");
+    https["name"] = json!("sudo");
+    let mut reverse = local.clone();
+    reverse["name"] = json!("key");
+    let before = sc_local_counts(&flow);
+    assert_eq!(flow.use_secret("aft", &https), sh_not_found());
+    assert_eq!(flow.use_secret("aft", &reverse), sh_not_found());
+    assert_eq!(sc_local_counts(&flow), before);
+    let asked = flow.use_secret("aft", &local);
+    assert_eq!(SecretHome::statement(&asked)["durations"], json!(["once"]));
+    assert_eq!(
+        sc_approve_once(&flow, &asked).await["results"][0]["outcome"],
+        "granted"
+    );
+    assert_secret_golden_shape("use.result.released.local_program", "status kind use value");
+    assert_eq!(
+        flow.use_secret("aft", &local),
+        secret_golden("use.result.released.local_program")
+    );
+    assert_eq!(
+        flow.use_secret("aft", &local)["status"],
+        "approval_required"
+    );
+}
+
+#[tokio::test]
+async fn local_ops_ssh_approval_after_deny_is_refused_without_grant() {
+    let flow = SecretFlow::new(204).await;
+    sc_programs(&flow.store, true);
+    let public = sc_ssh_seed(&flow.store);
+    let call = sc_ssh_call(&public);
+    let asked = sc_ssh_local(&flow, &call);
+    flow.store
+        .set_agent_ssh_audited(SC_SSH_KEY, None, "operator")
+        .unwrap();
+    let before = sc_local_counts(&flow);
+    assert_eq!(
+        sc_approve_once(&flow, &asked).await["results"],
+        json!([{"request_id":asked["request_id"],"outcome":"refused","code":"approval_invalid"}])
+    );
+    let after = sc_local_counts(&flow);
+    assert_eq!((after.0, after.1, after.2), (before.0, before.1, before.2));
+    assert_eq!(sc_ssh_local(&flow, &call), sh_not_found());
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_ops_forwarding_requires_both_settings_for_sudo_and_ssh() {
+    let home = Arc::new(SecretHome::new(205, Some("self")).await);
+    sc_programs(&home.flow.store, true);
+    let public = sc_ssh_seed(&home.flow.store);
+    sc_sudo_seed(&home.flow.store);
+    let asker = AskingVault::new(206, true);
+    let line = asker.attach(&home);
+    let calls = [
+        ("secret.use", secret_golden("use.request.local_program")),
+        ("secret.ssh_sign", sc_ssh_call(&public)),
+    ];
+    for (asking_on, home_on) in [(false, false), (false, true), (true, false), (true, true)] {
+        sc_programs(&asker.store, asking_on);
+        sc_programs(&home.flow.store, home_on);
+        for (method, call) in &calls {
+            let before = sc_local_counts(&home.flow);
+            let home_events = home.flow.store.recent_auth_events(1000).unwrap().len();
+            let ask_events = asker.store.recent_auth_events(1000).unwrap().len();
+            let sent = line.lock().unwrap().sent.len();
+            let reply = asker.call(92, method, call).await;
+            if asking_on && home_on {
+                assert_eq!(reply["status"], "approval_required", "{method}");
+                let statement = SecretHome::statement(&reply);
+                assert_eq!(statement["asking_member_id"], HOME_ASKER);
+                assert_eq!(
+                    sc_approve_once(&home.flow, &reply).await["results"][0]["outcome"],
+                    "granted"
+                );
+                let released = asker.call(92, method, call).await;
+                if *method == "secret.use" {
+                    assert_eq!(released, secret_golden("use.result.released.local_program"));
+                } else {
+                    assert_secret_reply_matches("ssh_sign.result.signed", &released);
+                }
+            } else {
+                assert_eq!(
+                    reply,
+                    json!({"error":{"code":"secret_local_programs_disabled","class":"permanent"}}),
+                    "{method}: asking={asking_on} home={home_on}"
+                );
+                assert_eq!(sc_local_counts(&home.flow), before);
+                assert_eq!(
+                    home.flow.store.recent_auth_events(1000).unwrap().len(),
+                    home_events
+                );
+                assert_eq!(
+                    asker.store.recent_auth_events(1000).unwrap().len(),
+                    ask_events
+                );
+                let mut unmapped = call.clone();
+                unmapped["stamp"] = json!({});
+                assert_eq!(
+                    asker.call(92, method, &unmapped).await,
+                    reply,
+                    "either off switch precedes stamp mapping"
+                );
+            }
+            assert_eq!(
+                line.lock().unwrap().sent.len() - sent,
+                usize::from(asking_on) * 2
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_ops_forwarded_ssh_once_lost_reply_replays_one_signature_without_card() {
+    use base64::Engine as _;
+    let home = Arc::new(SecretHome::new(207, Some("self")).await);
+    sc_programs(&home.flow.store, true);
+    let public = sc_ssh_seed(&home.flow.store);
+    let call = sc_ssh_call(&public);
+    let asker = AskingVault::new(208, true);
+    sc_programs(&asker.store, true);
+    let line = asker.attach(&home);
+    let asked = asker.call(92, "secret.ssh_sign", &call).await;
+    assert_eq!(
+        sc_approve_once(&home.flow, &asked).await["results"][0]["outcome"],
+        "granted"
+    );
+    let before = sc_local_counts(&home.flow);
+    line.lock().unwrap().drop_replies = 1;
+    let signed = asker.call(92, "secret.ssh_sign", &call).await;
+    assert_secret_reply_matches("ssh_sign.result.signed", &signed);
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public)
+        .verify(
+            &sc_unb64(call["data"].as_str().unwrap()),
+            &sc_unb64(signed["signature_b64url"].as_str().unwrap()),
+        )
+        .unwrap();
+    let (params, sealed) = {
+        let line = line.lock().unwrap();
+        assert_eq!(line.sent.len(), 3, "approval request, lost release, retry");
+        assert_eq!(line.sent[1], line.sent[2], "exact retry bytes");
+        assert_eq!(line.replies[1], line.replies[2], "same sealed receipt");
+        (line.sent[1].clone(), line.replies[1].clone())
+    };
+    assert_secret_reply_matches("federation.secret_ssh_sign.result.sealed", &sealed);
+    let after = sc_local_counts(&home.flow);
+    assert_eq!(
+        (after.0, after.1, after.2),
+        (before.0, before.1 - 1, before.2 + 1)
+    );
+    assert_eq!(after.3, before.3 + 1, "one signature audit");
+    assert_eq!(
+        home.flow
+            .store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|r| r.op == "secret_ssh_sign")
+            .count(),
+        1
+    );
+    let aad = params["aad"].as_str().unwrap();
+    assert!(
+        home.open(&sealed, aad).is_err(),
+        "SSH seal cannot open as a secret release"
+    );
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let plaintext = credentials_core::kem::open_auth(
+        &home.asker_pem,
+        &home.home_pub,
+        &b64.decode(sealed["enc"].as_str().unwrap()).unwrap(),
+        &b64.decode(sealed["ciphertext"].as_str().unwrap()).unwrap(),
+        federation::ingress::SSH_SIGN_RELEASE_INFO,
+        aad.as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&plaintext).unwrap(),
+        signed
+    );
+    let mut changed = params.clone();
+    let changed_aad: serde_json::Value = serde_json::from_str(aad).unwrap();
+    changed["aad"] = json!(changed_aad.to_string());
+    assert_ne!(changed["aad"], params["aad"], "same fields in another order");
+    assert_eq!(
+        home.serve(federation::ingress::OP_SECRET_SSH_SIGN, changed)
+            .await,
+        sh_not_found()
+    );
+    assert_eq!(sc_local_counts(&home.flow), after);
+    assert_eq!(
+        asker.call(92, "secret.ssh_sign", &call).await["status"],
+        "approval_required",
+        "new nonce needs a new card"
+    );
+}
+
+#[tokio::test]
+async fn local_ops_federation_ssh_golden_binding_closed_params_and_member_gate() {
+    let golden = assert_secret_golden_shape("federation.secret_ssh_sign.request", "aad sender call call.key call.stamp call.stamp.owner call.stamp.owner.kind call.stamp.owner.module_id call.stamp.ref call.stamp.scope_epoch call.stamp.kind call.stamp.attributes call.stamp.attributes.agent_id call.stamp.owner_authorized call.target call.target.user call.target.host call.target.port call.command call.workdir call.purpose call.data");
+    assert_eq!(golden["call"], secret_golden("ssh_sign.request"));
+    let aad: serde_json::Value = serde_json::from_str(golden["aad"].as_str().unwrap()).unwrap();
+    assert_eq!(aad["secret_name"], SC_SSH_KEY);
+    assert_eq!(
+        aad["call_sha256"],
+        federation::ingress::secret_call_sha256("aft", &golden["call"]).unwrap()
+    );
+    assert!(federation::ingress::FEDERATION_OPS.contains(&federation::ingress::OP_SECRET_SSH_SIGN));
+    let home = SecretHome::new(209, Some("self")).await;
+    sc_programs(&home.flow.store, true);
+    let public = sc_ssh_seed(&home.flow.store);
+    let call = sc_ssh_call(&public);
+    let aad = home.aad_with(
+        SC_SSH_KEY,
+        HOME_ASKER,
+        SC_MEMBER,
+        "0123456789abcdef0123456789abcdef",
+        &home.asker_key_id,
+        &federation::ingress::secret_call_sha256("aft", &call).unwrap(),
+    );
+    let params = json!({"aad":aad,"sender":"aft","call":call});
+    for field in ["aad", "sender", "call"] {
+        let mut p = params.clone();
+        p.as_object_mut().unwrap().remove(field);
+        assert_eq!(
+            home.serve(federation::ingress::OP_SECRET_SSH_SIGN, p).await,
+            json!({"transport":"invalid_params"})
+        );
+    }
+    let mut p = params.clone();
+    p["extra"] = json!(true);
+    assert_eq!(
+        home.serve(federation::ingress::OP_SECRET_SSH_SIGN, p).await,
+        json!({"transport":"invalid_params"})
+    );
+    let before = sc_local_counts(&home.flow);
+    let events = home.flow.store.recent_auth_events(1000).unwrap().len();
+    let mut p = params.clone();
+    p["sender"] = json!("cerebellum");
+    assert_eq!(
+        home.serve(federation::ingress::OP_SECRET_SSH_SIGN, p).await,
+        sh_not_found()
+    );
+    assert_eq!(
+        home.flow.store.recent_auth_events(1000).unwrap().len(),
+        events
+    );
+    assert_eq!(sc_local_counts(&home.flow), before);
+    home.set_callosum("callosum.paired_devices_read", Some(json!({"devices":[]})));
+    assert_eq!(
+        home.serve(
+            federation::ingress::OP_SECRET_SSH_SIGN,
+            json!({"bad":"params"})
+        )
+        .await,
+        sh_not_found(),
+        "pairing gate precedes parsing"
+    );
+}
+
+#[tokio::test]
+async fn local_ops_ssh_decoded_size_boundary_and_trailing_packet_bytes() {
+    use credentials_core::agent_secret::MAX_SSH_USERAUTH_BYTES;
+    let flow = SecretFlow::new(210).await;
+    sc_programs(&flow.store, true);
+    let public = sc_ssh_seed(&flow.store);
+    let mut call = sc_ssh_call(&public);
+    let original = sc_unb64(call["data"].as_str().unwrap());
+    let session_len = 32 + MAX_SSH_USERAUTH_BYTES - original.len();
+    let mut data = (session_len as u32).to_be_bytes().to_vec();
+    data.extend(vec![7; session_len]);
+    data.extend_from_slice(&original[36..]);
+    assert_eq!(data.len(), MAX_SSH_USERAUTH_BYTES);
+    call["data"] = json!(sc_b64(&data));
+    assert_eq!(
+        sc_ssh_local(&flow, &call)["status"],
+        "approval_required",
+        "last accepted decoded size"
+    );
+    let before = sc_local_counts(&flow);
+    data.push(0);
+    call["data"] = json!(sc_b64(&data));
+    assert_eq!(
+        sc_ssh_local(&flow, &call),
+        json!({"error":{"code":"limit_exceeded","class":"permanent"}}),
+        "first refused decoded size"
+    );
+    let mut trailing = original;
+    trailing.push(0);
+    call["data"] = json!(sc_b64(&trailing));
+    assert_eq!(
+        sc_ssh_local(&flow, &call),
+        json!({"transport":"invalid_params"})
+    );
+    assert_eq!(sc_local_counts(&flow), before);
 }

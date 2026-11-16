@@ -197,6 +197,15 @@ impl AdminSurface {
             chrono::Utc::now().timestamp_millis()
         })
     }
+    pub fn serve_secret_ssh_sign(
+        &self,
+        principal: Option<&Principal>,
+        params: &serde_json::Value,
+    ) -> crate::secret_use::UseAnswer {
+        crate::secret_use::serve_ssh_sign(self.engine.store(), principal, params, || {
+            chrono::Utc::now().timestamp_millis()
+        })
+    }
     pub fn serve_flow_approval(
         &self,
         principal: Option<&Principal>,

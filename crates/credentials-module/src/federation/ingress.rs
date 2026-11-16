@@ -68,6 +68,8 @@ pub const OP_TRANSFER_DELIVER: &str = "federation.transfer_deliver";
 /// A peer forwards its local sender's `secret.use` to the secret home (a `query`:
 /// callosum keeps no reply body on disk, and the release in it is sealed).
 pub const OP_SECRET_USE: &str = "federation.secret_use";
+/// A peer forwards its AFT's SSH userauth signing call; the reply is sealed.
+pub const OP_SECRET_SSH_SIGN: &str = "federation.secret_ssh_sign";
 /// A peer forwards its basal's `secret.request_flow_approval` to the secret home.
 pub const OP_SECRET_REQUEST_FLOW_APPROVAL: &str = "federation.secret_request_flow_approval";
 /// A peer forwards its basal's `secret.revoke_flow_grants` to the secret home.
@@ -77,11 +79,12 @@ pub const OP_MANIFEST_WATCH: &str = "federation.manifest_watch";
 pub const OP_MANIFEST_REPORT_ACTIVE: &str = "federation.manifest_report_active";
 
 /// The closed allowlist of a federation channel. Nothing else is dispatched there.
-pub const FEDERATION_OPS: [&str; 10] = [
+pub const FEDERATION_OPS: [&str; 11] = [
     OP_REMOTE_TOKEN,
     OP_REPORT_AUTH_FAILURE,
     OP_TRANSFER_DELIVER,
     OP_SECRET_USE,
+    OP_SECRET_SSH_SIGN,
     OP_SECRET_REQUEST_FLOW_APPROVAL,
     OP_SECRET_REVOKE_FLOW_GRANTS,
     OP_REMOTE_WATCH,
@@ -97,6 +100,8 @@ pub const REMOTE_TOKEN_INFO: &[u8] = b"cortexkit/claustrum/remote-token/v1";
 /// The HPKE `info` of a sealed `federation.secret_use` release. Distinct from the token
 /// reply's and the transfer envelope's, so none of the three opens as another.
 pub const SECRET_RELEASE_INFO: &[u8] = b"cortexkit/claustrum/secret-release/v1";
+/// SSH signatures cannot be opened as secret-value releases, or vice versa.
+pub const SSH_SIGN_RELEASE_INFO: &[u8] = b"cortexkit/claustrum/ssh-sign-release/v1";
 
 /// The module id of callosum, which relays other computers' calls on routes it opens
 /// as itself.
@@ -1121,7 +1126,8 @@ impl HomeVault {
                     )
                     .await
                     .map_err(Refusal::InvalidParams),
-                    OP_SECRET_USE => self.secret_use(member, params, budget).await,
+                    OP_SECRET_USE => self.secret_use(member, params, budget, false).await,
+                    OP_SECRET_SSH_SIGN => self.secret_use(member, params, budget, true).await,
                     OP_SECRET_REQUEST_FLOW_APPROVAL | OP_SECRET_REVOKE_FLOW_GRANTS => {
                         self.secret_flow_op(member, method, params, budget).await
                     }
@@ -1461,6 +1467,7 @@ impl HomeVault {
         member: &str,
         params: &Value,
         budget: tokio::time::Instant,
+        ssh: bool,
     ) -> Result<Value, Refusal> {
         // 1. Only a home-role vault serves forwarded secret ops; nothing else falls back
         // to local state or forwards again.
@@ -1468,12 +1475,20 @@ impl HomeVault {
         // 2. The member's current pairing id, and a `secret_use` member grant under it.
         // The grant is checked before anything is parsed, as for the flow ops, so a
         // member without it cannot drive the grammar or binding diagnostics below.
-        let pairing_id = self.current_pairing(member, OP_SECRET_USE, budget).await?;
-        self.require_secret_use_grant(member, &pairing_id, OP_SECRET_USE)?;
+        let op = if ssh {
+            OP_SECRET_SSH_SIGN
+        } else {
+            OP_SECRET_USE
+        };
+        let pairing_id = self.current_pairing(member, op, budget).await?;
+        self.require_secret_use_grant(member, &pairing_id, op)?;
         // 3. Strict parse of the params, the aad and the sender.
         let request: SecretUseParams = serde_json::from_value(params.clone())
             .map_err(|error| Refusal::InvalidParams(error.to_string()))?;
         let aad = parse_secret_aad(&request.aad)?;
+        if ssh && request.sender != "aft" {
+            return Err(Refusal::NotFound);
+        }
         let sender = forwarded_sender(&request.sender).ok_or_else(|| {
             Refusal::InvalidParams("sender is not aft, cerebellum or basal".into())
         })?;
@@ -1490,14 +1505,23 @@ impl HomeVault {
         };
         let sender_pem = self.active_transfer_key(&self_id)?;
         // 6. The aad must be meant for this home and bound to exactly these params.
-        let subject = format!("secret|{}", aad.secret_name);
+        let subject = if ssh {
+            aad.secret_name.clone()
+        } else {
+            format!("secret|{}", aad.secret_name)
+        };
         if aad.home != self_id {
             return Err(self.secret_refusal(&subject, member, "home_mismatch"));
         }
         if aad.call_sha256 != call_sha256 {
             return Err(self.secret_refusal(&subject, member, "call_sha256_mismatch"));
         }
-        if request.call.get("name").and_then(Value::as_str) != Some(aad.secret_name.as_str()) {
+        if request
+            .call
+            .get(if ssh { "key" } else { "name" })
+            .and_then(Value::as_str)
+            != Some(aad.secret_name.as_str())
+        {
             return Err(self.secret_refusal(&subject, member, "secret_name_mismatch"));
         }
         // 7. The requester's announced key, matching the aad's key id.
@@ -1525,14 +1549,23 @@ impl HomeVault {
                 &sender_pem,
                 &peer.public,
                 &plaintext,
-                SECRET_RELEASE_INFO,
+                if ssh {
+                    SSH_SIGN_RELEASE_INFO
+                } else {
+                    SECRET_RELEASE_INFO
+                },
                 request.aad.as_bytes(),
             )
             .map_err(|error| seal_refusal(error, member, &self_id))?;
             Ok(SealedRelease { enc, ciphertext })
         };
         let clock = Arc::clone(&self.secret_clock);
-        let answer = crate::secret_use::serve_forwarded(
+        let serve = if ssh {
+            crate::secret_use::serve_ssh_sign_forwarded
+        } else {
+            crate::secret_use::serve_forwarded
+        };
+        let answer = serve(
             self.engine.store(),
             sender,
             &request.call,
@@ -1550,7 +1583,11 @@ impl HomeVault {
                 }))
             }
             ForwardedUseAnswer::Reply(reply) => {
-                self.note_forwarded_refusal(&subject, member, &reply);
+                // Local-use parsers own their diagnostics, including the deliberately
+                // silent admission, closed-params and disabled-setting refusals.
+                if !ssh && !crate::secret_use::is_local_use(&request.call) {
+                    self.note_forwarded_refusal(&subject, member, &reply);
+                }
                 Ok(reply)
             }
             ForwardedUseAnswer::InvalidParams => {

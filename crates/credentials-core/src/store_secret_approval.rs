@@ -1355,6 +1355,100 @@ console.log('2 Node Ed25519 verification checks passed');
         }
 
         #[test]
+        fn ssh_userauth_user_mismatch_with_grant_is_refused_without_consumption() {
+            assert_ssh_userauth_mismatch_is_refused(true, UserauthMismatch::User);
+        }
+
+        #[test]
+        fn ssh_userauth_user_mismatch_without_grant_is_refused_without_pending() {
+            assert_ssh_userauth_mismatch_is_refused(false, UserauthMismatch::User);
+        }
+
+        #[test]
+        fn ssh_userauth_public_key_mismatch_with_grant_is_refused_without_consumption() {
+            assert_ssh_userauth_mismatch_is_refused(true, UserauthMismatch::PublicKey);
+        }
+
+        #[test]
+        fn ssh_userauth_public_key_mismatch_without_grant_is_refused_without_pending() {
+            assert_ssh_userauth_mismatch_is_refused(false, UserauthMismatch::PublicKey);
+        }
+
+        enum UserauthMismatch {
+            User,
+            PublicKey,
+        }
+
+        fn assert_ssh_userauth_mismatch_is_refused(with_grant: bool, mismatch: UserauthMismatch) {
+            let mismatch_name = match &mismatch {
+                UserauthMismatch::User => "user",
+                UserauthMismatch::PublicKey => "public-key",
+            };
+            let (_root, store) = setup(&format!("ssh-userauth-{mismatch_name}-{with_grant}"));
+            let mut call = ssh(&store, "ssh deploy@ssh.test", "deploy", "ssh.test", 22);
+            if with_grant {
+                let pending = request(&store, &call);
+                assert_eq!(
+                    v2_approve(&store, &pending, "once")["results"][0]["outcome"],
+                    "granted"
+                );
+            }
+            let expected_error = match mismatch {
+                UserauthMismatch::User => {
+                    call.data =
+                        ssh(&store, "ssh deploy@ssh.test", "other-user", "ssh.test", 22).data;
+                    assert_eq!(call.local_use.user(), "deploy");
+                    assert_eq!(call.data.user(), "other-user");
+                    SecretError::InvalidParams
+                }
+                UserauthMismatch::PublicKey => {
+                    let original_key = call.data.public_key().to_vec();
+                    let mut bytes = call.data.as_bytes().to_vec();
+                    *bytes.last_mut().unwrap() ^= 1;
+                    call.data = SshUserauth::parse(bytes).unwrap();
+                    assert_ne!(call.data.public_key(), original_key);
+                    assert_eq!(call.data.user(), call.local_use.user());
+                    SecretError::NotFound
+                }
+            };
+            let pending_before = count(&store, "SELECT count(*) FROM secret_pending_requests");
+            let audit_before = count(&store, "SELECT count(*) FROM audit_log");
+            let grant_snapshot = || {
+                store.store.with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT grant_id,first_released,last_use_ms FROM secret_grants WHERE secret_name=?1",
+                        [KEY],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<i64>>(2)?)),
+                    ).optional()
+                }).unwrap()
+            };
+            let grant_before = grant_snapshot();
+            assert_eq!(grant_before.is_some(), with_grant);
+            let result = store
+                .secret_ssh_sign(&call, || V2_NOW)
+                .map(|outcome| outcome.reply);
+            assert_eq!(result, Err(expected_error));
+            assert_eq!(grant_snapshot(), grant_before);
+            assert_eq!(
+                count(&store, "SELECT count(*) FROM secret_pending_requests"),
+                pending_before
+            );
+            assert_eq!(
+                count(&store, "SELECT count(*) FROM audit_log"),
+                audit_before
+            );
+            assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op IN ('secret_ssh_sign','secret_local_release','secret_first_release')"), 0);
+            let valid = ssh(&store, "ssh deploy@ssh.test", "deploy", "ssh.test", 22);
+            if with_grant {
+                assert_eq!(request(&store, &valid)["status"], "signed");
+                assert!(grant_snapshot().is_none());
+            } else {
+                assert_eq!(pending_before, 0);
+                assert_eq!(request(&store, &valid)["status"], "approval_required");
+            }
+        }
+
+        #[test]
         fn local_ssh_invisibility_refusals_do_not_create_pending_or_release_audits() {
             let (_root, store) = setup("local-ssh-invisible");
             let mut call = ssh(&store, "ssh", "u", "ssh.test", 22);

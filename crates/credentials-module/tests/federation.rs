@@ -38,6 +38,9 @@ mod callosum_vectors;
 #[path = "federation/sharing.rs"]
 mod sharing;
 
+#[path = "federation/fleet.rs"]
+mod fleet;
+
 #[path = "federation/home_watch_stream.rs"]
 mod home_watch_stream;
 

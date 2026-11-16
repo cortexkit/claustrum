@@ -551,6 +551,25 @@ async fn account_token_unusable_refusal_bodies_are_transient_at_both_stages() {
 }
 
 #[tokio::test]
+async fn account_token_machine_json_cannot_select_a_bus_signing_key() {
+    for id in credentials_core::signing::BUS_SIGNING_KEY_IDS {
+        let rig = Rig::new(vec![]);
+        let mut machine: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/account-machine/machine.json"
+        ))
+        .unwrap();
+        machine["vault_key_id"] = json!(id);
+        rig.write_machine(machine);
+        let e = error(rig.call().await);
+        assert_eq!(e.code, "account_login_required");
+        assert!(
+            rig.http.requests().is_empty(),
+            "a bus key must not sign an account-token challenge"
+        );
+    }
+}
+
+#[tokio::test]
 async fn account_token_machine_file_shape_and_custody() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../tests/fixtures/account-machine/machine.json"

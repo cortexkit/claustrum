@@ -1514,6 +1514,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operator_bus_signing_returns_invalid_params_without_a_signature_or_audit() {
+        use base64::Engine as _;
+        let r = rig(0x63);
+        r.admin.record_bind(5, Principal::Direct);
+        r.store.ensure_fleet_keys(1).unwrap();
+        for id in credentials_core::signing::BUS_SIGNING_KEY_IDS {
+            let mut record = r.store.get(id).unwrap();
+            record.operator_sign = true;
+            r.store
+                .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+                .unwrap();
+            let body = serde_json::json!({"v":1,"op":"admin.operator_sign","id":id,"payload_b64":base64::engine::general_purpose::STANDARD.encode(b"wrong purpose")}).to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let before = r.store.read_audit(None).unwrap();
+            let AdminOutcome::Refused(reason) = r.admin.execute(5, body.as_bytes(), &tag).await
+            else {
+                panic!("wrong purpose must not return a signature");
+            };
+            assert!(reason.starts_with("invalid_params/permanent:"), "{reason}");
+            assert_eq!(r.store.read_audit(None).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
     async fn operator_sign_uses_both_admin_gates_and_route_admin_audit() {
         use base64::Engine;
         let r = rig(0x62);

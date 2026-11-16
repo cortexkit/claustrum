@@ -66,6 +66,8 @@ pub fn transfer_key_admits_grant(
     principal: &str,
     operation: GrantOperation,
 ) -> Result<(), String> {
+    bus_key_admits_grant(credential_id, principal, operation)?;
+    fleet_key_admits_grant(credential_id, principal, operation)?;
     if !is_vault_transfer_id(credential_id) {
         return Ok(());
     }
@@ -76,6 +78,98 @@ pub fn transfer_key_admits_grant(
         "transfer_key_reserved: {credential_id} is the vault transfer key; its only \
          grant is read to {TRANSFER_ANNOUNCE_PRINCIPAL} for the public-key announce"
     ))
+}
+
+/// Fence fleet keys even when a new generation uses a different numeric suffix.
+/// Ordinary credential ids are outside this fence.
+pub fn fleet_key_admits_grant(
+    credential_id: &str,
+    principal: &str,
+    operation: GrantOperation,
+) -> Result<(), String> {
+    let wrap = credential_id.starts_with("kem:fleet-epoch-wrap:");
+    let signing = credential_id.starts_with("signing:fleet-record:");
+    if !wrap && !signing {
+        return Ok(());
+    }
+    let allowed = (operation == GrantOperation::Read && principal == "reserved:callosum")
+        || (signing
+            && principal == "reserved:entorhinal"
+            && matches!(operation, GrantOperation::Read | GrantOperation::Sign));
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!("fleet_key_reserved: {credential_id}"))
+    }
+}
+
+pub fn is_fleet_key_id(id: &str) -> bool {
+    id.starts_with("kem:fleet-epoch-wrap:") || id.starts_with("signing:fleet-record:")
+}
+
+/// Bus signing keys belong only to ck-bus, including future key generations.
+pub fn bus_key_admits_grant(
+    credential_id: &str,
+    principal: &str,
+    operation: GrantOperation,
+) -> Result<(), String> {
+    if !is_bus_key_id(credential_id)
+        || (principal == "reserved:ckbus"
+            && matches!(operation, GrantOperation::Read | GrantOperation::Sign))
+    {
+        Ok(())
+    } else {
+        Err(format!("bus_key_reserved: {credential_id}"))
+    }
+}
+
+pub fn is_bus_key_id(id: &str) -> bool {
+    crate::signing::bus_key_purpose(id).is_some()
+}
+
+pub(crate) fn key_grant_refusal(id: &str) -> StoreOpError {
+    if is_bus_key_id(id) {
+        StoreOpError::BusKeyReserved
+    } else if is_fleet_key_id(id) {
+        StoreOpError::FleetKeyReserved
+    } else {
+        StoreOpError::TransferKeyReserved
+    }
+}
+
+#[cfg(test)]
+mod fleet_grant_tests {
+    use super::*;
+
+    #[test]
+    fn fleet_grants_are_fenced_for_every_generation() {
+        for suffix in ["1", "2", "future"] {
+            let wrap = format!("kem:fleet-epoch-wrap:{suffix}");
+            let signing = format!("signing:fleet-record:{suffix}");
+            for principal in ["reserved:callosum", "reserved:entorhinal", "reserved:other"] {
+                for op in [
+                    GrantOperation::Read,
+                    GrantOperation::Sign,
+                    GrantOperation::Open,
+                    GrantOperation::Seal,
+                    GrantOperation::List,
+                ] {
+                    for id in [&wrap, &signing] {
+                        let allowed = (op == GrantOperation::Read
+                            && principal == "reserved:callosum")
+                            || (id == &signing
+                                && principal == "reserved:entorhinal"
+                                && matches!(op, GrantOperation::Read | GrantOperation::Sign));
+                        let result = transfer_key_admits_grant(id, principal, op);
+                        assert_eq!(result.is_ok(), allowed, "{id} {principal} {op:?}");
+                        if !allowed {
+                            assert!(result.unwrap_err().starts_with("fleet_key_reserved:"));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// True for exactly `fed-computer:` followed by 32 lowercase hex characters.

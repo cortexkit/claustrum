@@ -424,6 +424,19 @@ pub struct SignResult {
     pub key_id: String,
 }
 
+/// Signing keeps bad protocol input on the classless transport-refusal lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignError {
+    InvalidParams,
+    Credential(ReadError),
+}
+
+impl From<ReadError> for SignError {
+    fn from(error: ReadError) -> Self {
+        Self::Credential(error)
+    }
+}
+
 /// A `credential.public_key` request.
 ///
 /// A capability handle and a principal-scoped credential id are deliberately separate
@@ -776,6 +789,136 @@ mod get_scoped_tests {
     use credentials_core::record::{CredentialKind, VaultRecord};
     use credentials_core::store::SelectorKind;
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn consumer_bus_signing_checks_purpose_and_preserves_unaudited_keys() {
+        use base64::Engine as _;
+        use ring::signature::{UnparsedPublicKey, ED25519};
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(213);
+        store.ensure_fleet_keys(1).unwrap();
+        let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(
+            subc_protocol::Principal::Reserved {
+                module_id: "ckbus".into(),
+            },
+        ));
+        for id in credentials_core::signing::BUS_SIGNING_KEY_IDS {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "ckbus",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            let record = store.get(id).unwrap();
+            let public = credentials_core::signing::public_key_ed25519(
+                std::str::from_utf8(record.payload.expose()).unwrap(),
+            )
+            .unwrap();
+            let public: Vec<_> = (0..public.public_key_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
+                .collect();
+            let params = |payload: &[u8]| SignParams {
+                handle: None,
+                credential_id: Some(id.into()),
+                payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+                enrollment_token: None,
+            };
+            let (accepted, refused) = credentials_core::test_support::bus_signing_inputs(id);
+            let audit_before = store.read_audit(None).unwrap();
+            let events_before = store.recent_auth_events(1000).unwrap().len();
+            for payload in refused {
+                assert_eq!(
+                    surface
+                        .sign(213, &caller, &params(&payload))
+                        .await
+                        .unwrap_err(),
+                    SignError::InvalidParams,
+                    "{id}: {} bytes",
+                    payload.len()
+                );
+                assert_eq!(store.read_audit(None).unwrap(), audit_before);
+                assert_eq!(
+                    store.recent_auth_events(1000).unwrap().len(),
+                    events_before,
+                    "refused input must not record first use"
+                );
+            }
+            for payload in accepted {
+                let signed = surface.sign(213, &caller, &params(&payload)).await.unwrap();
+                let signature = base64::engine::general_purpose::STANDARD
+                    .decode(signed.signature_b64)
+                    .unwrap();
+                UnparsedPublicKey::new(&ED25519, &public)
+                    .verify(&payload, &signature)
+                    .unwrap();
+                assert_eq!(
+                    store.read_audit(None).unwrap(),
+                    audit_before,
+                    "consumer signatures must not flood the audit chain"
+                );
+            }
+            // Opting into history must not allow malformed input to append a row.
+            let mut record = store.get(id).unwrap();
+            record.audit_each_signature = true;
+            store
+                .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+                .unwrap();
+            let before = store.read_audit(None).unwrap();
+            assert_eq!(
+                surface
+                    .sign(213, &caller, &params(b"wrong purpose"))
+                    .await
+                    .unwrap_err(),
+                SignError::InvalidParams
+            );
+            assert_eq!(store.read_audit(None).unwrap(), before);
+        }
+        let mut ordinary = store.get("signing:bus-leaf:1").unwrap();
+        ordinary.audit_each_signature = false;
+        store.create("signing:ordinary:1", &ordinary).unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ckbus",
+                SelectorKind::Exact,
+                "signing:ordinary:1",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let payload = [0, 0xff, b'.', b'\n'];
+        let signed = surface
+            .sign(
+                213,
+                &caller,
+                &SignParams {
+                    handle: None,
+                    credential_id: Some("signing:ordinary:1".into()),
+                    payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+                    enrollment_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let public = credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(ordinary.payload.expose()).unwrap(),
+        )
+        .unwrap();
+        let public: Vec<_> = (0..public.public_key_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
+            .collect();
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(signed.signature_b64)
+            .unwrap();
+        UnparsedPublicKey::new(&ED25519, public)
+            .verify(&payload, &signature)
+            .unwrap();
+    }
 
     fn openai_descriptor() -> Value {
         json!({
@@ -2190,8 +2333,10 @@ fn meets_min_ttl(record: &credentials_core::record::VaultRecord, min_ttl_ms: i64
 /// cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferKeyUse {
-    /// Every op except the announce.
+    /// Operations with no fleet-key or transfer-key exception.
     Ordinary,
+    /// `credential.sign`: only Entorhinal may exercise the fleet record key.
+    Sign,
     /// `credential.public_key`: the read callosum makes to announce the key's public
     /// half.
     PublicKeyAnnounce,
@@ -2231,8 +2376,21 @@ enum TransferKeyAccess<'a> {
 /// tell it which version to read (see [`TransferKeyUse::AnnounceVersion`]). Everything
 /// else answers the uniform `not_found` or leaves the key out of a list.
 fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
+    if credentials_core::federation::is_bus_key_id(credential_id) {
+        return !matches!(
+            access,
+            TransferKeyAccess::Scoped {
+                kind: "reserved",
+                id: "ckbus",
+                ..
+            }
+        );
+    }
     // Deposit keys have no announce exception: only the secret deposit receiver uses them.
     if credentials_core::agent_secret::is_deposit_key(credential_id) {
+        return true;
+    }
+    if fleet_key_fenced(credential_id, access) {
         return true;
     }
     if !credentials_core::federation::is_vault_transfer_id(credential_id) {
@@ -2246,6 +2404,37 @@ fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bo
             usage: TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::AnnounceVersion,
         }
     )
+}
+
+/// Fleet purpose keys expose only the routes used to announce or sign records.
+/// Existing handles and category grants must not bypass the purpose restriction.
+fn fleet_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
+    let allowed = match access {
+        TransferKeyAccess::Scoped {
+            kind: "reserved",
+            id: "callosum",
+            usage,
+        } => {
+            matches!(
+                usage,
+                TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::AnnounceVersion
+            )
+        }
+        TransferKeyAccess::Scoped {
+            kind: "reserved",
+            id: "entorhinal",
+            usage,
+        } if credential_id.starts_with("signing:fleet-record:") => {
+            matches!(
+                usage,
+                TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::Sign
+            )
+        }
+        _ => false,
+    };
+    (credential_id.starts_with("kem:fleet-epoch-wrap:")
+        || credential_id.starts_with("signing:fleet-record:"))
+        && !allowed
 }
 
 fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusal> {
@@ -2439,7 +2628,7 @@ impl ReadSurface {
         connection_id: u64,
         caller: &crate::federation::ingress::ScopedCaller,
         params: &SignParams,
-    ) -> Result<SignResult, ReadError> {
+    ) -> Result<SignResult, SignError> {
         let principal = caller.as_ref();
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
         let resolved = self
@@ -2449,7 +2638,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Sign,
-                TransferKeyUse::Ordinary,
+                TransferKeyUse::Sign,
             )
             .await?;
 
@@ -2463,32 +2652,34 @@ impl ReadSurface {
             Ok(r) => r,
             Err(StoreOpError::NotFound) if params.credential_id.is_some() => {
                 self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::NotFound);
-                return Err(ReadError::NotFound);
+                return Err(ReadError::NotFound.into());
             }
-            Err(e) => return Err(map_store_error(&e)),
+            Err(e) => return Err(map_store_error(&e).into()),
         };
         let record = snapshot.record;
 
         // The fence is checked before the payload is decoded, so a non-signing
         // credential refuses identically whatever bytes were presented.
         if record.kind != credentials_core::record::CredentialKind::SigningKey {
-            return Err(ReadError::KindNotSignable);
+            return Err(ReadError::KindNotSignable.into());
         }
 
         let payload = base64::engine::general_purpose::STANDARD
             .decode(params.payload_b64.as_bytes())
             .map_err(|_| ReadError::MalformedEncoding)?;
+        credentials_core::signing::validate_signing_input(&credential_id, &payload)
+            .map_err(|_| SignError::InvalidParams)?;
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
         let prepared = match credentials_core::signing::prepare_ed25519(pem, &payload) {
             Ok(prepared) => prepared,
             Err(credentials_core::signing::SignError::TooLarge { .. }) => {
-                return Err(ReadError::SignPayloadTooLarge);
+                return Err(ReadError::SignPayloadTooLarge.into());
             }
             // An unusable key is OUR bytes failing, not the caller's request: the
             // record holds something that is not a signing key despite being typed as
             // one, which is the same class as a record that will not decrypt.
             Err(credentials_core::signing::SignError::UnusableKey(_)) => {
-                return Err(ReadError::Corrupt)
+                return Err(ReadError::Corrupt.into())
             }
         };
         if record.audit_each_signature {
@@ -2498,6 +2689,7 @@ impl ReadSurface {
             // transport principal. Anonymous handle holders retain channel attribution.
             let actor = resolved
                 .principal
+                .clone()
                 .or_else(|| self.scoped_principal(principal, None))
                 .map(|(kind, id)| format!("{kind}:{id}"))
                 .unwrap_or_else(|| format!("conn-{}", connection_id as u16));
@@ -2525,6 +2717,14 @@ impl ReadSurface {
             })?;
         }
         let sig = prepared.sign();
+        if let Some((kind, id)) = resolved.principal {
+            let _ = self.engine.store().record_scoped_first_use(
+                &credential_id,
+                kind,
+                Some(&id),
+                GrantOperation::Sign,
+            );
+        }
         Ok(SignResult {
             signature_b64: sig.signature_b64,
             key_id: sig.key_id,
@@ -3448,9 +3648,9 @@ impl ReadSurface {
             );
             return Err(ReadError::NotFound);
         }
-        // THE ONE CHOKEPOINT EVERY SCOPED OP PASSES THROUGH, which is why the record sits
-        // here rather than at `get_scoped`, `sign` and `public_key` separately: three
-        // call sites is three chances for the next scoped op to be added without one.
+        // Record first use at shared scoped authorization, except for deposit and sign,
+        // which can still reject caller input after authorization and record success
+        // only once their write or signature has completed.
         //
         // Records the RESOLVED principal (`kind`, `id`) rather than the bus principal the
         // refusal path logs. For an enrollment token those differ -- the bus says
@@ -3460,10 +3660,9 @@ impl ReadSurface {
         // Best-effort, deliberately: a diagnostic that could fail an authorized read
         // would be worse than the blindness it cures. The store call is idempotent, so
         // this is one INSERT ever and a cheap NOT EXISTS thereafter.
-        // Deposit authorization alone is not a successful use: the write can still
-        // refuse ownership or roll back its audit. The deposit route records first use
-        // only after the data and audit have committed.
-        if operation != GrantOperation::Deposit {
+        // Deposit can still refuse ownership or roll back its audit, and signing can
+        // still reject purpose-bound input. Their routes record first use on success.
+        if !matches!(operation, GrantOperation::Deposit | GrantOperation::Sign) {
             let _ = self.engine.store().record_scoped_first_use(
                 credential_id,
                 kind,

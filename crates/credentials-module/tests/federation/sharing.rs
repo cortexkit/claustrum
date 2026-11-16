@@ -507,3 +507,126 @@ async fn unknown_device_class_gets_no_grants_and_other_devices_still_reconcile()
         4
     );
 }
+
+#[tokio::test]
+async fn fleet_tombstones_persist_from_the_existing_watch_but_local_unpair_does_not_change_epochs()
+{
+    use credentials_core::fleet::FleetPeer;
+    let mut rig = Rig::new("fleet-sharing-tombstones", snapshot("all_classes")).await;
+    let myself = "fed-computer:00000000000000000000000000000001";
+    rig.home
+        .store
+        .set_federation_self_member_audited(myself, AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    rig.home.store.ensure_fleet_keys(1).unwrap();
+    let public =
+        credentials_core::kem::public_half(&credentials_core::kem::generate_key().unwrap())
+            .unwrap()
+            .0;
+    let peer = FleetPeer::new(MEMBER.into(), public.try_into().unwrap()).unwrap();
+    let minted = rig
+        .home
+        .store
+        .fleet_epoch_mint(&[myself.into(), MEMBER.into()], &[peer])
+        .unwrap();
+    rig.home
+        .store
+        .fleet_epoch_commit(minted.epoch, &minted.mint_id)
+        .unwrap();
+    rig.start().await;
+    rig.grants(2).await;
+    let status = rig.home.store.fleet_epoch_status().unwrap();
+    rig.callosum.watch_snapshot(Some(snapshot("empty"))).await;
+    rig.grants(0).await;
+    assert_eq!(rig.home.store.fleet_epoch_status().unwrap(), status);
+    rig.home
+        .store
+        .fleet_epoch_seal(b"", b"still paired at account level")
+        .unwrap();
+    let tombstone = json!([{"fingerprint":&MEMBER[13..],"removal_id":"opaque:account-removal"}]);
+    let mut removed = snapshot("all_classes");
+    removed["tombstones"] = tombstone.clone();
+    rig.callosum.watch_snapshot(Some(removed)).await;
+    rig.grants(2).await;
+    wait_until(|| {
+        rig.home
+            .store
+            .fleet_epoch_status()
+            .unwrap()
+            .sealing_blocked_by
+            == vec![MEMBER.to_string()]
+    })
+    .await;
+    assert_eq!(
+        rig.home
+            .store
+            .fleet_epoch_seal(b"", b"blocked")
+            .unwrap_err(),
+        credentials_core::fleet::FleetError::EpochUnavailable
+    );
+    let mut repeat = snapshot("empty");
+    repeat["tombstones"] = tombstone;
+    rig.callosum.watch_snapshot(Some(repeat)).await;
+    rig.grants(0).await;
+    rig.callosum
+        .watch_snapshot(Some(snapshot("all_classes")))
+        .await;
+    rig.grants(2).await;
+    assert_eq!(
+        rig.home
+            .store
+            .fleet_epoch_status()
+            .unwrap()
+            .sealing_blocked_by,
+        vec![MEMBER.to_string()]
+    );
+    assert_eq!(
+        rig.home
+            .store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|a| a.op == "fleet_removal")
+            .count(),
+        1
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn fleet_removal_write_failure_does_not_block_sharing_and_retries_on_next_snapshot_without_self(
+) {
+    let mut rig = Rig::new("fleet-sharing-failure", snapshot("empty")).await;
+    rig.start().await;
+    let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_fleet_removal BEFORE INSERT ON fleet_removals BEGIN SELECT RAISE(ABORT, 'fleet removal failure'); END;").unwrap();
+    let mut changed = snapshot("all_classes");
+    changed["tombstones"] =
+        json!([{"fingerprint":&MEMBER[13..],"removal_id":"opaque:account-removal"}]);
+    rig.callosum.watch_snapshot(Some(changed.clone())).await;
+    rig.grants(2).await;
+    assert!(!rig
+        .home
+        .store
+        .read_audit(None)
+        .unwrap()
+        .iter()
+        .any(|a| a.op == "fleet_removal"));
+    conn.execute_batch("DROP TRIGGER fail_fleet_removal")
+        .unwrap();
+    changed["devices"] = json!([]);
+    rig.callosum.watch_snapshot(Some(changed)).await;
+    rig.grants(0).await;
+    assert_eq!(
+        rig.home
+            .store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|a| a.op == "fleet_removal")
+            .count(),
+        1
+    );
+    assert_eq!(rig.home.store.verify_audit_chain().unwrap(), None);
+    rig.stop().await;
+}

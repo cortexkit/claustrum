@@ -51,6 +51,8 @@ impl EncryptedStore {
     ) -> Result<crate::signing::Signature, StoreOpError> {
         let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
         let record = self.gh_manifest_root_in_tx(tx)?;
+        crate::signing::validate_signing_input(GH_MANIFEST_ROOT_KEY_ID, manifest_bytes)
+            .map_err(|reason| StoreOpError::Encode(format!("invalid_params: {reason}")))?;
         let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
         let prepared =

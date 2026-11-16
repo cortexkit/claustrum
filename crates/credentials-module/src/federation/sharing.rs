@@ -22,6 +22,14 @@ struct Snapshot {
     devices: Vec<Device>,
     #[serde(rename = "self")]
     identity: Identity,
+    #[serde(default)]
+    tombstones: Vec<Tombstone>,
+}
+
+#[derive(Deserialize)]
+struct Tombstone {
+    fingerprint: String,
+    removal_id: String,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +61,13 @@ struct Share {
     enabled: bool,
 }
 
+/// An account removal, independent of the device roster and local pairing state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingTombstone {
+    pub member_id: String,
+    pub removal_id: String,
+}
+
 /// A validated full snapshot, never a partial list salvaged from malformed data.
 #[derive(Debug)]
 pub struct VaultSharingSnapshot {
@@ -60,6 +75,7 @@ pub struct VaultSharingSnapshot {
     pub enabled: bool,
     pub devices: Vec<(String, String)>,
     pub computers: Vec<(String, String)>,
+    pub tombstones: Vec<SharingTombstone>,
 }
 
 pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
@@ -99,11 +115,27 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
         }
         devices.push((device.fingerprint, device.pairing_id));
     }
+    let mut tombstone_fingerprints = BTreeSet::new();
+    let mut tombstones = Vec::new();
+    for tombstone in snapshot.tombstones {
+        if !is_lower_hex_16_bytes(&tombstone.fingerprint)
+            || tombstone.removal_id.is_empty()
+            || !tombstone_fingerprints.insert(tombstone.fingerprint.clone())
+        {
+            return None;
+        }
+        tombstones.push(SharingTombstone {
+            member_id: format!("fed-computer:{}", tombstone.fingerprint),
+            removal_id: tombstone.removal_id,
+        });
+    }
+    tombstones.sort_by(|a, b| a.member_id.cmp(&b.member_id));
     Some(VaultSharingSnapshot {
         members,
         enabled,
         devices,
         computers,
+        tombstones,
     })
 }
 
@@ -131,6 +163,18 @@ async fn apply(
         pairings.send_replace(Some(snapshot.computers));
     }
     tokio::task::spawn_blocking(move || {
+        if !snapshot.tombstones.is_empty() {
+            let removals: Vec<_> = snapshot.tombstones.into_iter().map(|item| {
+                credentials_core::fleet::FleetRemoval {
+                    member_id: item.member_id, removal_id: item.removal_id,
+                }
+            }).collect();
+            // Fleet persistence must not hold back the shipped login-sharing path.
+            // Callosum repeats tombstones in subsequent snapshots, so failures retry.
+            if store.fleet_record_removals(&removals, super::transfer::wall_now_ms()).is_err() {
+                tracing::warn!(target: "federation", "fleet removals not recorded; retrying on the next paired-device snapshot");
+            }
+        }
         if snapshot.enabled {
             super::transfer::ensure_transfer_key(&store, "vault")?;
         }

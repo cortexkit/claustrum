@@ -23,6 +23,7 @@
 mod admin_surface;
 mod connectors;
 mod federation;
+mod fleet_ops;
 mod limiter;
 mod manifest;
 mod manifest_active_report;
@@ -916,6 +917,9 @@ async fn build_surface(
     store
         .ensure_secret_deposit_key()
         .map_err(|e| ModuleError::Message(format!("bootstrap deposit key: {e}")))?;
+    store
+        .ensure_fleet_keys(federation::transfer::wall_now_ms())
+        .map_err(|e| ModuleError::Message(format!("bootstrap fleet keys: {e}")))?;
     let store = Arc::new(store);
     // Legacy startup reads before surface construction. Gate delivery applies in
     // the module loop before exposing routes or starting federation workers.
@@ -1616,6 +1620,11 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if method.as_ref().is_some_and(|r| fleet_ops::is_op(&r.method))
+        && !matches!(&caller, federation::RouteCaller::Principal(context) if fleet_ops::admitted(context.as_ref()))
+    {
+        return send_route_result(writer, header, uniform_not_found()).await;
+    }
     if let Some(request) = method.as_ref().filter(|r| manifest::is_op(&r.method)) {
         if !matches!(&caller, federation::RouteCaller::Principal(principal) if manifest::admitted(&request.method, principal.as_ref()))
         {
@@ -1897,6 +1906,30 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        method if fleet_ops::is_op(method) => {
+            match fleet_ops::serve(
+                Arc::clone(surface.store()),
+                admin.home().outbound(),
+                principal.as_ref(),
+                method,
+                &request.params,
+            )
+            .await
+            {
+                fleet_ops::Answer::Reply(reply) => wrap_result(reply),
+                fleet_ops::Answer::InvalidParams => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid fleet parameters",
+                    )
+                    .await;
+                }
+            }
+        }
         method if manifest::is_op(method) => {
             return manifest::serve(
                 frame.header,
@@ -2141,9 +2174,20 @@ async fn handle_read_request(
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface.sign(connection_id, &caller, &p).await {
                     Ok(r) => wrap_result(r),
+                    Err(read_surface::SignError::InvalidParams) => {
+                        return invalid_params(
+                            writer,
+                            ver,
+                            channel,
+                            epoch,
+                            corr,
+                            "signing input does not match the bus key purpose",
+                        )
+                        .await
+                    }
                     // Keep the same { code, class } shape every other op uses: the class
                     // gives retry policy and the code names the request-specific remedy.
-                    Err(code) => wrap_result(json!({
+                    Err(read_surface::SignError::Credential(code)) => wrap_result(json!({
                         "error": read_surface::ErrorBody { code, class: code.class() }
                     })),
                 }
@@ -2863,6 +2907,46 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
+                name: "fleet.epoch_seal".into(),
+                description: Some("Seal shared records under the current fleet epoch; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_open".into(),
+                description: Some("Open shared records under a held fleet epoch; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_status".into(),
+                description: Some("Read fleet epoch state and recover a pending mint; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_mint".into(),
+                description: Some("Mint a pending fleet epoch with rotation wraps; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_commit".into(),
+                description: Some("Commit a matching pending fleet mint; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_discard".into(),
+                description: Some("Discard a matching pending fleet mint; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_import".into(),
+                description: Some("Import an authenticated fleet epoch wrap; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_wrap_for".into(),
+                description: Some("Export held fleet history to a paired computer; Entorhinal only.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
                 name: OP_GET_SCOPED.to_string(),
                 description: Some("Serve a credential's secret bytes by id to a reserved principal holding a read grant. Refuses signing keys.".to_string()),
                 kind: ManagementOperationKind::Query,
@@ -3045,6 +3129,9 @@ mod tests {
     }
     mod usage_report_tests {
         include!("usage_report_tests.rs");
+    }
+    mod fleet_ops_tests {
+        include!("fleet_ops_tests.rs");
     }
     include!("watch_scoped_tests.rs");
     include!("connectors_tests.rs");
@@ -13613,7 +13700,9 @@ mod tests {
                 )
                 .await
                 .err(),
-            Some(read_surface::ReadError::NotFound),
+            Some(read_surface::SignError::Credential(
+                read_surface::ReadError::NotFound
+            )),
             "sign must refuse a list-only principal"
         );
         surface
@@ -14654,7 +14743,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err(),
-            read_surface::ReadError::NotFound
+            read_surface::SignError::Credential(read_surface::ReadError::NotFound)
         );
         for _ in 0..16 {
             assert_eq!(
@@ -15548,6 +15637,52 @@ mod tests {
             .remove(0);
         assert_eq!(event.kind, "scoped_read_refusal");
         assert_eq!(event.detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn bus_signing_purpose_errors_are_classless_only_after_authorization() {
+        use base64::Engine as _;
+        let (surface, admin, store) = scoped_rig(212);
+        store.ensure_fleet_keys(1).unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ckbus",
+                SelectorKind::Exact,
+                "signing:bus-leaf:1",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let malformed = base64::engine::general_purpose::STANDARD.encode(b"bad nonce");
+        admin.record_bind(
+            212,
+            subc_protocol::Principal::Reserved {
+                module_id: "other".into(),
+            },
+        );
+        let unauthorized =
+            scoped_sign_request(&surface, &admin, 212, "signing:bus-leaf:1", &malformed).await;
+        assert_eq!(
+            unauthorized["result"]["error"],
+            json!({"code":"not_found", "class":"permanent"})
+        );
+        assert!(unauthorized.get("code").is_none());
+        admin.record_bind(
+            212,
+            subc_protocol::Principal::Reserved {
+                module_id: "ckbus".into(),
+            },
+        );
+        let audit = store.read_audit(None).unwrap();
+        let events = store.recent_auth_events(1000).unwrap().len();
+        let refused =
+            scoped_sign_request(&surface, &admin, 212, "signing:bus-leaf:1", &malformed).await;
+        assert_eq!(refused["code"], "invalid_params");
+        assert!(refused.get("class").is_none());
+        assert!(refused.get("result").is_none());
+        assert_eq!(store.read_audit(None).unwrap(), audit);
+        assert_eq!(store.recent_auth_events(1000).unwrap().len(), events);
     }
 
     fn signature_audit_rig(
@@ -16583,6 +16718,9 @@ mod tests {
             )
             .await
             .expect_err("an ApiKey record must NOT sign even holding valid PEM");
+        let read_surface::SignError::Credential(err) = err else {
+            panic!("a wrong-kind refusal remains a classified credential error");
+        };
         assert_eq!(
             err,
             read_surface::ReadError::KindNotSignable,
@@ -19494,13 +19632,17 @@ mod tests {
     ///   warn!     skipped declaration: module id and digest from the daemon's bind attestation, fixed reasons and indices; never entry values, grants_json or request fields
     ///   warn!     declaration persistence failure: module id and digest from the daemon's bind attestation and fixed text; never entry values, grants_json or request fields
     ///   warn!     incomplete declared inventory: fixed text only; no module id, digest, entry values, grants_json or request fields
+    ///   warn!     fleet removal persistence failure: fixed retry text only, never
+    ///             member ids, removal ids, wraps or error details
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers thirteen source files linked
-    /// into the daemon binary, the two agent-secret files each with its own controls.
+    /// the one shape every secret read must take. Covers the fleet boundary and sharing
+    /// reconciler as well as the read, admin and agent-secret source files. The phone,
+    /// secret sender and fleet boundary each pin the scanned file's identity and
+    /// verify that a planted secret read is detected.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
     /// `println!` is counted net of `eprintln!` because one contains the other.
@@ -19530,6 +19672,11 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/federation/login_sharing.rs"
             )),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fleet_ops.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/sharing.rs"
+            )),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -19546,7 +19693,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 22, 0),
+            (1, 2, 25, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -19565,6 +19712,11 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(output_site_arguments(sources[15], &shapes), vec![
+            ("info".into(), "target: \"federation\", \"vault sharing snapshot reconciliation recovered\"".into()),
+            ("warn".into(), "target: \"federation\", \"fleet removals not recorded; retrying on the next paired-device snapshot\"".into()),
+            ("warn".into(), "target: \"federation\", %error, \"vault sharing unchanged until Callosum supplies a valid snapshot\"".into()),
+        ]);
         assert_eq!(output_site_arguments(sources[13], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![
             ("warn".into(), "target: \"federation\", path = %self.path.display(), %reason, \"invalid login sharing configuration; applied value retained or off at startup\"".into()),
             ("warn".into(), "target: \"federation\", path = %self.path.display(), \"login sharing configuration apply failed; retrying\"".into()),
@@ -19633,6 +19785,7 @@ mod tests {
                 "secret_use.rs",
                 "//! The trusted sender boundary for secret release.",
             ),
+            (14, "fleet_ops.rs", "//! Entorhinal's fleet boundary:"),
         ] {
             assert!(
                 sources[slot].starts_with(module_doc),

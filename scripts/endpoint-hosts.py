@@ -78,6 +78,10 @@ TEST_ONLY_FILES = {
 # decryption". Nothing in 240 unit tests, 8 e2e arms or 4 rotation crash cuts
 # noticed the change.
 DOMAIN_RE = re.compile(r'b"([a-z][a-z0-9.-]*(?:/[a-z0-9.-]+)*/v\d[^"]*)"')
+# RFC 8446 uses an unversioned context; pin only this named protocol constant.
+TLS_CONTEXT_RE = re.compile(
+    r'pub const TLS_SERVER_CERTIFICATE_VERIFY_CONTEXT:\s*&\[u8\]\s*=\s*b"([^"]+)";'
+)
 DOMAIN_MANIFEST = ROOT / "docs" / "domain-separators.txt"
 
 # `#[cfg(test)]` immediately followed by a module declaration -- the conventional
@@ -210,11 +214,14 @@ def discover_domains() -> list[tuple[str, str, str]]:
             text = path.read_text(encoding="utf-8")
             test_mods = [m.start() for m in TEST_MOD_RE.finditer(text)]
             cutoff = min(test_mods) if test_mods else len(text)
-            for m in DOMAIN_RE.finditer(text):
+            for m in [*DOMAIN_RE.finditer(text), *TLS_CONTEXT_RE.finditer(text)]:
                 if m.start() > cutoff:
                     continue
                 rel = path.relative_to(ROOT).as_posix()
-                found.append((rel, m.group(1), m.group(1)))
+                # Manifest fields are whitespace-delimited; retain literal spaces as
+                # Rust byte escapes rather than creating additional columns.
+                value = m.group(1).replace(" ", r"\x20")
+                found.append((rel, value, value))
     return sorted(set(found))
 
 

@@ -809,6 +809,29 @@ class ScriptContracts(unittest.TestCase):
                           .replace('ck-control-cookie/v1', 'ck-control-cookie/v2'))
         self.assertEqual(endpoints.main(), 1)
 
+    def test_tls_certificate_verify_context_is_pinned_and_update_is_stable(self):
+        import sys
+        from unittest.mock import patch
+        endpoints = cast(Any, module('endpoint-hosts'))
+        endpoints.ROOT = self.root
+        endpoints.SOURCE_DIRS = [self.root]
+        endpoints.MANIFEST = self.root / 'hosts'
+        endpoints.DOMAIN_MANIFEST = self.root / 'domains'
+        context = r'TLS 1.3, server CertificateVerify\0'
+        (self.root / 'signing.rs').write_text(
+            'const TOKEN_URL: &str = "https://provider.example/token";\n'
+            f'pub const TLS_SERVER_CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"{context}";\n'
+            'const UNRELATED: &[u8] = b"TLS 1.3, unrelated context";\n')
+        pinned = context.replace(' ', r'\x20')
+        self.assertEqual(endpoints.discover_domains(), [('signing.rs', pinned, pinned)])
+        with patch.object(sys, 'argv', ['endpoint-hosts.py', '--update']):
+            self.assertEqual(endpoints.main(), 0)
+            first = (endpoints.MANIFEST.read_bytes(), endpoints.DOMAIN_MANIFEST.read_bytes())
+            self.assertEqual(endpoints.main(), 0)
+        self.assertEqual((endpoints.MANIFEST.read_bytes(), endpoints.DOMAIN_MANIFEST.read_bytes()), first)
+        with patch.object(sys, 'argv', ['endpoint-hosts.py']):
+            self.assertEqual(endpoints.main(), 0)
+
     def test_uncovered_fixture_directory_is_refused(self):
         from unittest.mock import patch
         fixtures = module('check-fixture-line-endings')

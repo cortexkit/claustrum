@@ -1,4 +1,7 @@
 # One line per THRESHOLD constant: <constant> <file> <boundary test>
+MAX_BYTES crates/credentials-core/src/fleet.rs fleet_byte_caps_and_auth_join_boundaries
+MAX_HOLDERS crates/credentials-core/src/fleet.rs fleet_holder_cap_checks_unions_and_wraps_before_writing
+MAX_EPOCHS crates/credentials-core/src/fleet.rs fleet_history_cap_and_full_join_round_trip
 #
 # Hand-maintained, and checked by scripts/threshold-controls.py. Unlike the
 # endpoint and domain-separator manifests this one is NOT derived: the mapping
@@ -59,6 +62,10 @@ MAX_DECLARED_GRANTS crates/credentials-core/src/store_declared_grants.rs declara
 MAX_DISPLAY_NAME_CHARS crates/credentials-core/src/display_name.rs display_names_accept_40_scalars_and_refuse_41
 ENROLLMENT_TERMINAL_MAX_ROWS crates/credentials-core/src/enrollment.rs terminal_rows_and_enrollment_events_stay_bounded_without_chain_growth
 MAX_SIGN_PAYLOAD crates/credentials-core/src/signing.rs the_signing_cap_refuses_one_byte_over_and_accepts_the_cap
+MAX_BUS_LEAF_NONCE_BYTES crates/credentials-core/src/signing.rs bus_signing_purposes_accept_only_protocol_inputs_at_boundaries
+MAX_BUS_JWT_BYTES crates/credentials-core/src/signing.rs bus_signing_purposes_accept_only_protocol_inputs_at_boundaries
+MIN_TLS_TRANSCRIPT_HASH_BYTES crates/credentials-core/src/signing.rs bus_signing_purposes_accept_only_protocol_inputs_at_boundaries
+MAX_TLS_TRANSCRIPT_HASH_BYTES crates/credentials-core/src/signing.rs bus_signing_purposes_accept_only_protocol_inputs_at_boundaries
 MAX_SEAL_PLAINTEXT crates/credentials-core/src/kem.rs seal_caps_accept_the_cap_and_refuse_one_byte_over
 MAX_SEAL_INFO crates/credentials-core/src/kem.rs seal_caps_accept_the_cap_and_refuse_one_byte_over
 MAX_SEAL_AAD crates/credentials-core/src/kem.rs seal_caps_accept_the_cap_and_refuse_one_byte_over

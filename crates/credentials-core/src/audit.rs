@@ -47,6 +47,13 @@ pub(crate) fn payload_fingerprint(audit_key: &[u8; 32], payload: &[u8]) -> [u8; 
 pub enum AuditOp {
     /// Daemon bootstrap generated the reserved HPKE deposit receiver.
     SecretDepositKeyCreate,
+    FleetKeyCreate,
+    FleetEpochMint,
+    FleetEpochCommit,
+    FleetEpochDiscard,
+    FleetEpochImport,
+    FleetEpochWrapFor,
+    FleetRemoval,
     SecretPhoneGateSet,
     SecretMultiHostSet,
     SecretBasicAuthSet,
@@ -229,6 +236,13 @@ impl AuditOp {
     pub fn as_str(self) -> &'static str {
         match self {
             AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
+            AuditOp::FleetKeyCreate => "fleet_key_create",
+            AuditOp::FleetEpochMint => "fleet_epoch_mint",
+            AuditOp::FleetEpochCommit => "fleet_epoch_commit",
+            AuditOp::FleetEpochDiscard => "fleet_epoch_discard",
+            AuditOp::FleetEpochImport => "fleet_epoch_import",
+            AuditOp::FleetEpochWrapFor => "fleet_epoch_wrap_for",
+            AuditOp::FleetRemoval => "fleet_removal",
             AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
             AuditOp::SecretMultiHostSet => "secret_multi_host_set",
             AuditOp::SecretBasicAuthSet => "secret_basic_auth_set",
@@ -919,6 +933,13 @@ mod vocabulary_documentation_tests {
         fn value(op: AuditOp) -> &'static str {
             match op {
                 AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
+                AuditOp::FleetKeyCreate => AuditOp::FleetKeyCreate.as_str(),
+                AuditOp::FleetEpochMint => AuditOp::FleetEpochMint.as_str(),
+                AuditOp::FleetEpochCommit => AuditOp::FleetEpochCommit.as_str(),
+                AuditOp::FleetEpochDiscard => AuditOp::FleetEpochDiscard.as_str(),
+                AuditOp::FleetEpochImport => AuditOp::FleetEpochImport.as_str(),
+                AuditOp::FleetEpochWrapFor => AuditOp::FleetEpochWrapFor.as_str(),
+                AuditOp::FleetRemoval => AuditOp::FleetRemoval.as_str(),
                 AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
                 AuditOp::SecretMultiHostSet => AuditOp::SecretMultiHostSet.as_str(),
                 AuditOp::SecretBasicAuthSet => AuditOp::SecretBasicAuthSet.as_str(),
@@ -996,6 +1017,17 @@ mod vocabulary_documentation_tests {
         }
 
         assert_documented(section, "audit_log.op", value(AuditOp::Put));
+        for op in [
+            AuditOp::FleetKeyCreate,
+            AuditOp::FleetEpochMint,
+            AuditOp::FleetEpochCommit,
+            AuditOp::FleetEpochDiscard,
+            AuditOp::FleetEpochImport,
+            AuditOp::FleetEpochWrapFor,
+            AuditOp::FleetRemoval,
+        ] {
+            assert_documented(section, "audit_log.op", value(op));
+        }
         assert_documented(section, "audit_log.op", value(AuditOp::SecretLocalRelease));
         assert_documented(section, "audit_log.op", value(AuditOp::SecretSshSign));
         assert_documented(section, "audit_log.op", value(AuditOp::Import));

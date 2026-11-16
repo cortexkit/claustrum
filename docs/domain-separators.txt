@@ -36,9 +36,13 @@ crates/credentials-core/src/agent_secret_approval.rs ck-secret-local-use-stateme
 crates/credentials-core/src/audit.rs cortexkit-credentials/audit-payload-key/v1 cortexkit-credentials/audit-payload-key/v1
 crates/credentials-core/src/deposit_cookie.rs ck-deposit-cookie/v1 ck-deposit-cookie/v1
 crates/credentials-core/src/envelope.rs cortexkit-credentials/envelope-aad/v1 cortexkit-credentials/envelope-aad/v1
+crates/credentials-core/src/fleet.rs ck-fleet-epoch-aad/v1 ck-fleet-epoch-aad/v1
+crates/credentials-core/src/fleet.rs ck-fleet-epoch-store/v1 ck-fleet-epoch-store/v1
+crates/credentials-core/src/fleet.rs ck-fleet-epoch-wrap/v1 ck-fleet-epoch-wrap/v1
 crates/credentials-core/src/gh_manifest.rs ck-manifest-binding-envelope/v1 ck-manifest-binding-envelope/v1
 crates/credentials-core/src/gh_manifest.rs ck-manifest-binding-statement/v1 ck-manifest-binding-statement/v1
 crates/credentials-core/src/key.rs cortexkit-credentials/key-id/v1 cortexkit-credentials/key-id/v1
+crates/credentials-core/src/signing.rs TLS\x201.3,\x20server\x20CertificateVerify\0 TLS\x201.3,\x20server\x20CertificateVerify\0
 crates/credentials-core/src/store.rs cortexkit-credentials/handle/v1 cortexkit-credentials/handle/v1
 crates/credentials-core/src/store.rs cortexkit-credentials/refresh-token-hash/v1 cortexkit-credentials/refresh-token-hash/v1
 crates/credentials-core/src/store_credential_permissions.rs claustrum-credential-permission/v1\0 claustrum-credential-permission/v1\0

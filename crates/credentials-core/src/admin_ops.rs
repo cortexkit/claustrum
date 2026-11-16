@@ -1642,6 +1642,8 @@ pub fn apply(
             let payload = base64::engine::general_purpose::STANDARD
                 .decode(&payload_b64)
                 .map_err(|_| StoreOpError::Encode("payload is not valid base64".into()))?;
+            crate::signing::validate_signing_input(&id, &payload)
+                .map_err(|reason| StoreOpError::Encode(format!("invalid_params: {reason}")))?;
             if payload.len() > MAX_OPERATOR_SIGN_PAYLOAD {
                 return Err(StoreOpError::Encode(
                     "payload exceeds the 64 KiB operator signing cap".into(),
@@ -1970,7 +1972,7 @@ pub fn apply(
                     &format!("{principal_kind}:{principal_id}"),
                     operation,
                 )
-                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+                .map_err(|_| crate::federation::key_grant_refusal(&selector))?;
             }
             let stored_selector = selector;
             // Re-granting an identical row is a no-op, not a failure: setup scripts re-run
@@ -2028,7 +2030,7 @@ pub fn apply(
                     &format!("{principal_kind}:{principal_id}"),
                     operation,
                 )
-                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+                .map_err(|_| crate::federation::key_grant_refusal(&stored_selector))?;
             }
             let declared = declared_covers(
                 store,
@@ -3503,6 +3505,57 @@ mod operator_sign_tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&value[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn operator_bus_signing_checks_purpose_before_any_write() {
+        let (_root, store) = vault();
+        store.ensure_fleet_keys(1).unwrap();
+        for id in crate::signing::BUS_SIGNING_KEY_IDS {
+            let (accepted, refused) = crate::test_support::bus_signing_inputs(id);
+            assert!(
+                sign(&store, id, &accepted[0], "offline-cli").is_err(),
+                "startup must not opt into operator signing"
+            );
+            let mut record = store.get(id).unwrap();
+            record.operator_sign = true;
+            store
+                .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+                .unwrap();
+            for payload in refused {
+                let changes: u64 = store
+                    .with_raw_conn(|conn| {
+                        conn.query_row("SELECT total_changes()", [], |r| r.get(0))
+                    })
+                    .unwrap();
+                assert!(
+                    matches!(
+                        sign(&store, id, &payload, "offline-cli"),
+                        Err(StoreOpError::Encode(_))
+                    ),
+                    "{id}: {} bytes",
+                    payload.len()
+                );
+                let after: u64 = store
+                    .with_raw_conn(|conn| {
+                        conn.query_row("SELECT total_changes()", [], |r| r.get(0))
+                    })
+                    .unwrap();
+                assert_eq!(after, changes, "refused operator input must write nothing");
+            }
+            for payload in accepted {
+                let count = store.read_audit(None).unwrap().len();
+                let result = sign(&store, id, &payload, "offline-cli").unwrap();
+                UnparsedPublicKey::new(&ED25519, unhex(result["public_key_hex"].as_str().unwrap()))
+                    .verify(&payload, &unhex(result["signature_hex"].as_str().unwrap()))
+                    .unwrap();
+                assert_eq!(
+                    store.read_audit(None).unwrap().len(),
+                    count + 1,
+                    "operator signatures always retain history"
+                );
+            }
+        }
     }
 
     #[test]

@@ -274,6 +274,19 @@ fn alter_aad(aad: &str, field: AadField) -> String {
     altered
 }
 
+fn toggle_aad_name(aad: &str) -> String {
+    let mut parsed: Value = serde_json::from_str(aad).unwrap();
+    if parsed
+        .as_object_mut()
+        .unwrap()
+        .remove("secret_name")
+        .is_none()
+    {
+        parsed["secret_name"] = json!("basic");
+    }
+    serde_json::to_string(&parsed).unwrap()
+}
+
 /// What the stand-in answers one forwarded `federation.secret_use` with.
 #[derive(Clone, Copy, Debug)]
 enum Step {
@@ -281,9 +294,11 @@ enum Step {
     Forward,
     /// A's real answer to B's request with this AAD field changed on the way.
     AlterAtHome(AadField),
+    AlterNamePresenceAtHome,
     /// A decoy release sealed by A's real key to B's real key, over B's AAD with this
     /// field changed.
     SealedOver(AadField),
+    SealedOverOtherNamePresence,
     /// A decoy release sealed by A's real key over B's exact AAD, to a key that is not
     /// B's.
     SealedToAnotherKey,
@@ -326,11 +341,21 @@ impl HomeLine {
                 params["aad"] = json!(alter_aad(&aad, field));
                 self.serve(OP_SECRET_USE, &params).await
             }
+            Step::AlterNamePresenceAtHome => {
+                params["aad"] = json!(toggle_aad_name(&aad));
+                self.serve(OP_SECRET_USE, &params).await
+            }
             Step::SealedOver(field) => Reply::Ok(sealed_reply(
                 &self.home_pem,
                 &self.asker_public,
                 &decoy_release(),
                 &alter_aad(&aad, field),
+            )),
+            Step::SealedOverOtherNamePresence => Reply::Ok(sealed_reply(
+                &self.home_pem,
+                &self.asker_public,
+                &decoy_release(),
+                &toggle_aad_name(&aad),
             )),
             Step::SealedToAnotherKey => {
                 let other = credentials_core::kem::generate_key().unwrap();
@@ -1220,4 +1245,41 @@ async fn forwarded_nameless_basic_auth_reuses_named_card_and_releases_sealed() {
     );
     assert_eq!(rig.secret_use_replies().last().unwrap()["status"], "sealed");
     rig.assert_reply_custody(&[]);
+}
+
+#[tokio::test]
+async fn forwarded_named_call_refuses_aad_without_secret_name() {
+    let rig = Rig::new("basic-forward-named-aad").await;
+    let call = golden("use.request.api_key");
+    rig.then(Step::AlterNamePresenceAtHome);
+    assert_eq!(rig.use_on_b("aft", &call).await, not_found());
+    assert_eq!(
+        rig.use_on_b("aft", &call).await["status"],
+        "approval_required"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_nameless_call_refuses_aad_with_secret_name_and_mismatched_sealed_reply() {
+    let rig = Rig::new("basic-forward-nameless-aad").await;
+    rig.a
+        .store
+        .set_secret_basic_auth_audited(true, AuditCtx::admin(AuditOp::SecretBasicAuthSet))
+        .unwrap();
+    let mut put = api_key_put();
+    put.name = "basic".into();
+    put.location = Some("authorization_basic:git".into());
+    put_secret(&rig.a.store, put);
+    let mut call = golden("use.request.api_key");
+    call.as_object_mut().unwrap().remove("name");
+    rig.then(Step::AlterNamePresenceAtHome);
+    assert_eq!(rig.use_on_b("aft", &call).await, not_found());
+    let card = rig.use_on_b("aft", &call).await;
+    assert_eq!(card["status"], "approval_required");
+    rig.grant(&card, "hour");
+    rig.then(Step::SealedOverOtherNamePresence);
+    let refused = rig.use_on_b("aft", &call).await;
+    assert_eq!(error_code(&refused), "remote_seal_invalid");
+    assert!(!refused.to_string().contains(&b64url(DECOY_KEY)));
+    assert_eq!(rig.use_on_b("aft", &call).await["status"], "released");
 }

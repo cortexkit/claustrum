@@ -2000,7 +2000,7 @@ handles cannot be minted and active-key mutation is protected.
 |---|---|---|
 | Token reply | `cortexkit/claustrum/remote-token/v1` | `credential_id`, `requester`, `home`, `nonce`, `recipient_key_id` |
 | Transfer | `cortexkit/claustrum/transfer/v1` | `transfer_id`, `credential_id`, `sender`, `receiver`, `recipient_key_id` |
-| Secret release | `cortexkit/claustrum/secret-release/v1` | `secret_name`, `requester`, `home`, `nonce`, `recipient_key_id`, `call_sha256` |
+| Secret release | `cortexkit/claustrum/secret-release/v1` | `secret_name?` (omitted only for name-less `secret.use`), `requester`, `home`, `nonce`, `recipient_key_id`, `call_sha256` |
 
 The requester (token, secret release) or sender (transfer) serializes the aad exactly once, as compact JSON
 in the listed order, and transmits those bytes. `nonce` (fresh per fetch, per sender call for a secret release) and `transfer_id`
@@ -2162,7 +2162,15 @@ announced key and one exact call. `nonce` is 16 random bytes in lower hex, one p
 call: every transport retry of that call resends the same aad, and a new sender call gets
 a new nonce. `call_sha256` is the lower-hex SHA-256 of the RFC 8785 encoding of
 `{"sender","call"}` (keys sorted at every level, compact JSON, exact-range integers
-only). Parsing is strict as for the token aad: unknown, missing or duplicate fields, or
+only). `secret_name` is omitted only when `secret.use` omits `name`; named calls keep
+the existing AAD bytes unchanged. The home selects a Basic sign-in secret for a
+name-less call, with `call_sha256` binding its unchanged target and scope. Presence
+must agree exactly: a named call without `secret_name`, or a name-less call with
+`secret_name`, is refused `not_found`. Null is not omission. The asking computer
+opens a sealed reply over the exact AAD bytes it sent; any changed AAD refuses the
+reply as `remote_seal_invalid`.
+
+Parsing is strict as for the token aad: unknown, duplicate or other missing fields, or
 a field that is not well formed (`secret_name` empty, a member id that is not
 `fed-computer:<32 lowercase hex>`, a `nonce` that is not 32 lowercase hex, an empty
 `recipient_key_id`, a `call_sha256` that is not 64 lowercase hex), refuses the call. After
@@ -2181,7 +2189,8 @@ The home runs its checks in order and stops at the first refusal:
 3. Strict parse of the params, the aad and the sender.
 4. The aad's `requester` equals the attested harness member; the home's self id and active
    transfer key are read; the aad's `home` equals that self id, its `call_sha256` equals the
-   recomputed digest of the received params, and `call.name` equals its `secret_name`.
+   recomputed digest of the received params, and `call.name` equals its `secret_name`
+   with the same presence on both sides. Only a name-less `secret.use` omits both.
 5. The requester's announced transfer key matches the aad's `recipient_key_id`.
 6. The sender's grammar, then the store's grant choice, release receipt and seal, all under
    the asking member. AFT and Cerebellum take the agent path with a required `ScopeStamp`;

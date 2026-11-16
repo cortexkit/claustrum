@@ -838,17 +838,23 @@ struct SecretUseParams {
     call: Value,
 }
 
-/// The release `aad`: `{secret_name, requester, home, nonce, recipient_key_id,
-/// call_sha256}`. Unknown, missing and duplicate fields are refused.
+/// The release `aad`: `{secret_name?, requester, home, nonce, recipient_key_id,
+/// call_sha256}`. Only a name-less secret.use omits secret_name; unknown,
+/// duplicate and other missing fields are refused.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SecretAad {
-    secret_name: String,
+    #[serde(default, deserialize_with = "aad_secret_name")]
+    secret_name: Option<String>,
     requester: String,
     home: String,
     nonce: String,
     recipient_key_id: String,
     call_sha256: String,
+}
+
+fn aad_secret_name<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(input).map(Some)
 }
 
 /// Parse the received release aad bytes strictly, as [`parse_token_aad`] does.
@@ -858,7 +864,7 @@ fn parse_secret_aad(bytes: &str) -> Result<SecretAad, Refusal> {
     }
     let aad: SecretAad = serde_json::from_str(bytes)
         .map_err(|error| Refusal::InvalidParams(format!("aad: {error}")))?;
-    if aad.secret_name.is_empty()
+    if aad.secret_name.as_deref() == Some("")
         || !credentials_core::federation::is_lower_hex_16_bytes(&aad.nonce)
         || !valid_member_id(&aad.requester)
         || !valid_member_id(&aad.home)
@@ -1505,10 +1511,10 @@ impl HomeVault {
         };
         let sender_pem = self.active_transfer_key(&self_id)?;
         // 6. The aad must be meant for this home and bound to exactly these params.
-        let subject = if ssh {
-            aad.secret_name.clone()
-        } else {
-            format!("secret|{}", aad.secret_name)
+        let subject = match aad.secret_name.as_deref() {
+            Some(name) if ssh => name.to_owned(),
+            Some(name) => format!("secret|{name}"),
+            None => "secret-use|unaddressed".to_owned(),
         };
         if aad.home != self_id {
             return Err(self.secret_refusal(&subject, member, "home_mismatch"));
@@ -1516,12 +1522,15 @@ impl HomeVault {
         if aad.call_sha256 != call_sha256 {
             return Err(self.secret_refusal(&subject, member, "call_sha256_mismatch"));
         }
-        if request
-            .call
-            .get(if ssh { "key" } else { "name" })
-            .and_then(Value::as_str)
-            != Some(aad.secret_name.as_str())
-        {
+        let name_matches = match (
+            request.call.get(if ssh { "key" } else { "name" }),
+            aad.secret_name.as_deref(),
+        ) {
+            (Some(Value::String(name)), Some(bound)) => name == bound,
+            (None, None) => !ssh,
+            _ => false,
+        };
+        if !name_matches {
             return Err(self.secret_refusal(&subject, member, "secret_name_mismatch"));
         }
         // 7. The requester's announced key, matching the aad's key id.
@@ -2130,10 +2139,20 @@ mod tests {
         for field in good.as_object().unwrap().keys() {
             let mut missing = good.clone();
             missing.as_object_mut().unwrap().remove(field);
-            cases.push(missing);
+            if field == "secret_name" {
+                // Name-less calls omit this field; the home later checks that
+                // the call also omits its name before it can select a secret.
+                assert!(parse_secret_aad(&missing.to_string())
+                    .unwrap()
+                    .secret_name
+                    .is_none());
+            } else {
+                cases.push(missing);
+            }
         }
         for (field, bad) in [
             ("secret_name", json!("")),
+            ("secret_name", Value::Null),
             (
                 "requester",
                 json!("fed-phone:0123456789abcdef0123456789abcdef"),

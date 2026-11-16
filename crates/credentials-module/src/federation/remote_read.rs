@@ -1481,7 +1481,8 @@ impl From<Failure> for SecretFault {
 /// bytes travel with every retry of the call and the sealed reply is opened over them.
 #[derive(Serialize)]
 struct SecretAad<'a> {
-    secret_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_name: Option<&'a str>,
     requester: &'a str,
     home: &'a str,
     nonce: &'a str,
@@ -1770,14 +1771,12 @@ impl RemoteReader {
         budget: tokio::time::Instant,
         ssh: bool,
     ) -> Result<(Value, &'static str), SecretFault> {
-        // The aad names the secret and binds the exact params. A call with no name, or
-        // with a number no §15 param can hold, is one the home's parser refuses anyway.
-        let Some(secret_name) = call
-            .get(if ssh { "key" } else { "name" })
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-        else {
-            return Err(SecretFault::InvalidParams);
+        // Bind the exact params even when the home must select the secret. Only
+        // target-only AFT calls omit the name; SSH always names an enrolled key.
+        let secret_name = match call.get(if ssh { "key" } else { "name" }) {
+            Some(Value::String(name)) if !name.is_empty() => Some(name.as_str()),
+            None if !ssh && sender == SecretSender::Aft && call.get("target").is_some() => None,
+            _ => return Err(SecretFault::InvalidParams),
         };
         let sender = sender_wire(sender);
         let call_sha256 = secret_call_sha256(sender, call).ok_or(SecretFault::InvalidParams)?;
@@ -2063,6 +2062,39 @@ impl RemoteReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_secret_name_preserves_the_existing_named_aad_golden_bytes() {
+        let doc = include_str!("../../../../docs/wire-contract-v1.md");
+        let block = doc
+            .split("<!-- golden:federation.secret_use.aad -->\n```json\n")
+            .nth(1)
+            .unwrap()
+            .split("\n```")
+            .next()
+            .unwrap();
+        let bytes: String = serde_json::from_str(block).unwrap();
+        let value: Value = serde_json::from_str(&bytes).unwrap();
+        let text = |key: &str| value[key].as_str().unwrap();
+        let mut aad = SecretAad {
+            secret_name: Some(text("secret_name")),
+            requester: text("requester"),
+            home: text("home"),
+            nonce: text("nonce"),
+            recipient_key_id: text("recipient_key_id"),
+            call_sha256: text("call_sha256"),
+        };
+        assert_eq!(
+            serde_json::to_string(&aad).unwrap().as_bytes(),
+            bytes.as_bytes()
+        );
+        aad.secret_name = None;
+        let target_only = serde_json::to_value(aad).unwrap();
+        assert!(target_only.get("secret_name").is_none());
+        let mut expected = value;
+        expected.as_object_mut().unwrap().remove("secret_name");
+        assert_eq!(target_only, expected);
+    }
 
     #[test]
     fn the_home_demand_adds_the_margin_and_saturates_instead_of_wrapping() {

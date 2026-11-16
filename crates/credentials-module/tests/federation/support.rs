@@ -295,6 +295,7 @@ fn parse_catalogue(source: &str) -> Vec<(String, OpKind)> {
         ("OP_REPORT_AUTH_FAILURE", ingress::OP_REPORT_AUTH_FAILURE),
         ("OP_TRANSFER_DELIVER", ingress::OP_TRANSFER_DELIVER),
         ("OP_SECRET_USE", ingress::OP_SECRET_USE),
+        ("OP_SECRET_SSH_SIGN", ingress::OP_SECRET_SSH_SIGN),
         (
             "OP_SECRET_REQUEST_FLOW_APPROVAL",
             ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,

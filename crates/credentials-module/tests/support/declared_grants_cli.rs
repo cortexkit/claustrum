@@ -229,7 +229,10 @@ fn declared_inventory_empty_and_step_44_print_no_extra_output() {
     for old in [false, true] {
         if old {
             let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
-            conn.execute_batch("DROP TABLE declared_grant_sets; DELETE FROM cortexkit_schema_version WHERE version = 45;").unwrap();
+            // A step-44 store records no step at or above 45. Removing only 45 would
+            // leave later steps' markers, and the store would read as newer than
+            // declared grants with their table missing.
+            conn.execute_batch("DROP TABLE declared_grant_sets; DELETE FROM cortexkit_schema_version WHERE version >= 45;").unwrap();
         }
         let plain = vault.run(&["grants"]);
         assert_ok(&plain);

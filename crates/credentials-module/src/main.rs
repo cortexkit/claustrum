@@ -9933,7 +9933,13 @@ mod tests {
                 Some(LaunchNonceSource::Env)
             }
         );
-        let listener = tokio::net::TcpListener::from_std(endpoint.try_clone().unwrap()).unwrap();
+        // tokio needs the listener it wraps to be non-blocking. Set it on the clone
+        // itself rather than relying on the clone inheriting it from `endpoint`: on
+        // Windows this test hung in `accept` without this line, which on this
+        // single-threaded runtime also starves the module that should connect.
+        let clone = endpoint.try_clone().unwrap();
+        clone.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(clone).unwrap();
         let daemon = tokio::spawn(async move {
             let mut peer: Box<dyn ModuleStream> = if channel {
                 Box::new(peer)

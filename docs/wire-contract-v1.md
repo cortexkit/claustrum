@@ -68,6 +68,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, `reserved`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
+| `hub_audience_reserved` | permanent | an `account_token` grant for `cortexkit-hub` names any principal other than `reserved:ckbus`; no grant or audit row is written |
 | `enrollment_name_has_grants` | permanent | enrollment approval needs explicit consent to inherit existing name-bound grants; revoke them first or pass `--keep-grants` |
 | `invalid_plan_tier` | permanent | a plan tier set with `ck auth set-plan` is outside `^[a-z][a-z0-9_]{0,31}$` |
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
@@ -83,8 +84,8 @@ or an operator replacement must resolve that intent before the credential is ser
 
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
 `invalid_service_name`, `service_in_provider_catalog`,
-`invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`
-and `enrollment_name_has_grants` are store-taxonomy
+`invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`,
+`enrollment_name_has_grants`, and `hub_audience_reserved` are store-taxonomy
 refusals (`StoreOpError::wire_code` in `credentials-core/src/store.rs`). A read never
 produces them. Every other code in the table is a `ReadError` the read surface emits;
 `read_error_wire_codes_are_golden_and_match_the_doc_table` in `read_surface.rs` checks
@@ -1779,11 +1780,19 @@ machine signing access. Request (optional fields may be omitted):
 ```
 
 `audience` is an exact string. The supported account-service audiences are
-`cortexkit-runners`, `cortexkit-account`, and `cortexkit-webhook-relay`. Authorization
-uses the same scoped principal resolver as other scoped operations: an explicitly
-presented enrollment token takes precedence over the route-bound reserved principal;
-a bad token never falls back to ambient authority. Unknown, uncovered, and
-unauthenticated callers receive the identical `not_found`/`permanent` body.
+`cortexkit-runners`, `cortexkit-account`, `cortexkit-webhook-relay`, and `cortexkit-hub`.
+Authorization uses the same scoped principal resolver as other scoped operations:
+an explicitly presented enrollment token takes precedence over the route-bound
+reserved principal; a bad token never falls back to ambient authority. Unknown,
+uncovered, and unauthenticated callers receive the identical `not_found`/`permanent` body.
+
+`cortexkit-hub` admits only the resolved principal `reserved:ckbus`. Hand grants for
+any other principal are refused with `hub_audience_reserved`/`permanent` before any
+write or audit row. Approved declarations from modules other than `ckbus` skip the
+hub grant with a reason naming that reservation; other valid entries still apply.
+At use time every other principal receives the uniform `not_found`/`permanent`,
+even if a grant row already exists, without contacting the account service or
+touching the token cache. An enrollment token cannot borrow ck-bus's route identity.
 
 The sole grant form is operation `account_token`, selector kind `audience`, selector
 exactly equal to the requested audience. Category, prefix, and wildcard coverage do

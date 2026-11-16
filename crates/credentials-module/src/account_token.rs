@@ -394,7 +394,9 @@ impl ReadSurface {
                 GrantOperation::AccountToken,
             )
             .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?;
-        if !AUDIENCES.contains(&params.audience.as_str()) {
+        if !AUDIENCES.contains(&params.audience.as_str())
+            || (params.audience == "cortexkit-hub" && (kind != "reserved" || id != "ckbus"))
+        {
             return Err(AccountTokenError::new("not_found", ErrorClass::Permanent));
         }
         let config = &self.account_tokens;

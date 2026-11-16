@@ -1910,6 +1910,8 @@ first consumer:
 ck auth grant --principal reserved:ck-motor --selector-kind audience --selector cortexkit-runners --operation account_token
 ```
 
+For hosted message-hub tokens, grant only to ck-bus: `ck auth grant --principal reserved:ckbus --selector-kind audience --selector cortexkit-hub --operation account_token`.
+
 `ck auth grants` renders these rows with `token` in REACHES rather than a credential
 count. The grant authorizes `credential.account_token`, not arbitrary signing or
 retrieval of the machine key. The machine must already be enrolled by `ck account

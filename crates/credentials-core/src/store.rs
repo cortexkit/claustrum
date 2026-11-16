@@ -1725,6 +1725,8 @@ pub enum StoreOpError {
     TransferKeyReserved,
     FleetKeyReserved,
     BusKeyReserved,
+    /// Hosted message-hub tokens belong only to the supervised ck-bus module.
+    HubAudienceReserved,
     /// The vault transfer key is `Active`, so every operation that would change its
     /// state, payload, identity or kind is refused: the federation peers sealed to it
     /// could not open anything signed by a replacement. Recovery is an operator
@@ -1931,6 +1933,7 @@ impl std::fmt::Display for StoreOpError {
             ),
             StoreOpError::FleetKeyReserved => f.write_str("fleet_key_reserved: fleet keys admit only their purpose-specific grants and no handles"),
             StoreOpError::BusKeyReserved => f.write_str("bus_key_reserved: bus signing keys admit only exact read/sign grants to reserved:ckbus and no handles"),
+            StoreOpError::HubAudienceReserved => f.write_str("hub_audience_reserved: cortexkit-hub audience admits only account_token grants to reserved:ckbus"),
             StoreOpError::TransferKeyProtected => f.write_str(
                 "transfer_key_protected: the vault transfer key is active, so its record cannot be replaced, re-identified, invalidated, retired, reactivated or removed",
             ),
@@ -1982,6 +1985,7 @@ impl StoreOpError {
             StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
             StoreOpError::FleetKeyReserved => Some("fleet_key_reserved"),
             StoreOpError::BusKeyReserved => Some("bus_key_reserved"),
+            StoreOpError::HubAudienceReserved => Some("hub_audience_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
         }
@@ -8395,6 +8399,13 @@ fn validate_read_grant(
     selector: &str,
     operation: GrantOperation,
 ) -> Result<(), StoreOpError> {
+    if selector_kind == SelectorKind::Audience
+        && selector == "cortexkit-hub"
+        && operation == GrantOperation::AccountToken
+        && (principal_kind != "reserved" || principal_id != "ckbus")
+    {
+        return Err(StoreOpError::HubAudienceReserved);
+    }
     if crate::federation::is_bus_key_id(selector) {
         if selector_kind != SelectorKind::Exact {
             return Err(StoreOpError::BusKeyReserved);

@@ -193,6 +193,170 @@ fn error(outcome: Mint) -> AccountTokenError {
 }
 
 #[tokio::test]
+async fn hub_audience_planted_grant_is_not_found_without_exchange_or_cache_access() {
+    for module in ["motor", "ck-motor", "CKBUS"] {
+        let rig = Rig::new(exchange());
+        // Model a grant left by a build that did not reserve the hub audience.
+        rusqlite::Connection::open(rig.root.join("store.db")).unwrap().execute(
+            "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+             VALUES ('reserved', ?1, 'audience', 'cortexkit-hub', 'account_token', 0)",
+            [module],
+        ).unwrap();
+        assert!(rig
+            .store
+            .list_read_grants()
+            .unwrap()
+            .iter()
+            .any(|grant| grant.principal_id == module && grant.selector == "cortexkit-hub"));
+        let p = AccountTokenParams {
+            audience: "cortexkit-hub".into(),
+            ..params()
+        };
+        let caller =
+            crate::federation::ingress::ScopedCaller::hand_only(Some(Principal::Reserved {
+                module_id: module.into(),
+            }));
+        let tip = rig.store.audit_tip().unwrap();
+        let outcome = rig.surface.account_token(&caller, &p).await;
+        assert!(
+            rig.http.requests().is_empty(),
+            "a refused hub caller reached the account service"
+        );
+        let refusal = error(outcome);
+        assert_eq!(refusal.code, "not_found");
+        assert_eq!(refusal.class, ErrorClass::Permanent);
+        assert!(rig.surface.account_tokens.entries.lock().await.is_empty());
+        assert_eq!(rig.store.audit_tip().unwrap(), tip);
+
+        rig.surface.account_tokens.entries.lock().await.insert(
+            "cortexkit-hub".into(),
+            Entry {
+                identity: "untouched".into(),
+                cached: Some(AccountTokenResult {
+                    jwt: credentials_core::secret::Secret::new("test-cached-token".into()),
+                    expires_at_ms: 1_800_000_900_000,
+                    audience: "cortexkit-hub".into(),
+                    account: ACCOUNT.into(),
+                }),
+                flight: None,
+            },
+        );
+        assert_eq!(
+            error(rig.surface.account_token(&caller, &p).await).code,
+            "not_found"
+        );
+        let entries = rig.surface.account_tokens.entries.lock().await;
+        let cached = entries.get("cortexkit-hub").unwrap();
+        assert_eq!(cached.identity, "untouched");
+        assert_eq!(
+            cached.cached.as_ref().unwrap().jwt.expose(),
+            "test-cached-token"
+        );
+        assert!(cached.flight.is_none());
+        assert!(rig.http.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn hub_audience_enrolled_token_cannot_borrow_ckbus_identity() {
+    let rig = Rig::new(exchange());
+    let secret = "a".repeat(64);
+    let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+    let request = rig.store.propose_enrollment("hub-test", &hash).unwrap();
+    rig.store
+        .approve_enrollment(&request.request_id, "hub-test", "operator")
+        .unwrap();
+    let token = match rig
+        .store
+        .poll_enrollment(&request.request_id, &secret)
+        .unwrap()
+    {
+        credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+        other => panic!("expected enrollment token, got {other:?}"),
+    };
+    rusqlite::Connection::open(rig.root.join("store.db")).unwrap().execute(
+        "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+         VALUES ('enrolled', 'hub-test', 'audience', 'cortexkit-hub', 'account_token', 0)",
+        [],
+    ).unwrap();
+    let p = AccountTokenParams {
+        audience: "cortexkit-hub".into(),
+        enrollment_token: Some(token),
+        ..params()
+    };
+    for principal in [
+        Principal::Direct,
+        Principal::Reserved {
+            module_id: "ckbus".into(),
+        },
+    ] {
+        let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(principal));
+        let outcome = rig.surface.account_token(&caller, &p).await;
+        assert!(
+            rig.http.requests().is_empty(),
+            "enrolled hub caller reached the account service"
+        );
+        let refusal = error(outcome);
+        assert_eq!(refusal.code, "not_found");
+        assert_eq!(refusal.class, ErrorClass::Permanent);
+        assert!(rig.surface.account_tokens.entries.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn hub_audience_ckbus_can_exchange_and_cache_worker_tokens() {
+    let audience = "cortexkit-hub";
+    let mut challenge = challenge();
+    let (payload, mac) = challenge["challenge"]
+        .as_str()
+        .unwrap()
+        .split_once('.')
+        .unwrap();
+    let mut payload: Value = serde_json::from_slice(&decode(payload).unwrap()).unwrap();
+    payload["aud"] = json!(audience);
+    challenge["challenge"] = json!(format!(
+        "{}.{mac}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+    ));
+    let mut token = success();
+    let parts: Vec<_> = token["jwt"].as_str().unwrap().split('.').collect();
+    let mut claims: Value = serde_json::from_slice(&decode(parts[1]).unwrap()).unwrap();
+    claims["aud"] = json!(audience);
+    token["jwt"] = json!(format!(
+        "{}.{}.{}",
+        parts[0],
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()),
+        parts[2]
+    ));
+    let rig = Rig::new(vec![reply(200, challenge), reply(200, token)]);
+    rig.store
+        .create_read_grant_audited(
+            "reserved",
+            "ckbus",
+            SelectorKind::Audience,
+            audience,
+            GrantOperation::AccountToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(Principal::Reserved {
+        module_id: "ckbus".into(),
+    }));
+    let p = AccountTokenParams {
+        audience: audience.into(),
+        ..params()
+    };
+    for _ in 0..2 {
+        let result = rig.surface.account_token(&caller, &p).await.unwrap();
+        assert_eq!(result.audience, audience);
+        assert_eq!(result.account, ACCOUNT);
+    }
+    let requests = rig.http.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|(_, body)| body["aud"] == audience));
+}
+
+#[tokio::test]
 async fn account_token_granted_vector_signature_and_audit() {
     let rig = Rig::new(exchange());
     let before = rig.store.audit_tip().unwrap();

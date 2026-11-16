@@ -5415,6 +5415,7 @@ mod error_class_tests {
                 value: String::new(),
             },
             StoreOpError::InvalidPrincipal,
+            StoreOpError::HubAudienceReserved,
             StoreOpError::EnrollmentNameHasGrants {
                 name: String::new(),
             },

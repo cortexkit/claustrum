@@ -298,7 +298,11 @@ fn declaration_skips_whole_entries_before_hand_grant_validation() {
             (14, "entry")
         ]
     );
-    for audience in ACCOUNT_TOKEN_AUDIENCES {
+    for audience in [
+        "cortexkit-runners",
+        "cortexkit-account",
+        "cortexkit-webhook-relay",
+    ] {
         let (grants, diagnostics) =
             parse(json!([{"audience":audience,"operation":"account_token"}]));
         assert_eq!(grants.grants().len(), 1);
@@ -311,6 +315,109 @@ fn declaration_skips_whole_entries_before_hand_grant_validation() {
         ]}),
     );
     assert_eq!(invalid_module.skipped[0].reason, "tuple");
+}
+
+#[test]
+fn hub_audience_declarations_admit_only_ckbus_and_skip_without_losing_other_grants() {
+    let (_root, store) = rig("hub-audience-declarations", 228);
+    let declaration = json!({"v":1,"grants":[
+        {"audience":"cortexkit-hub","operation":"account_token"},
+        {"audience":"cortexkit-account","operation":"account_token"}
+    ]});
+    let (bus, diagnostics) = parse_declared_grants("ckbus", &declaration);
+    assert_eq!(bus.grants().len(), 2);
+    assert_eq!(diagnostics, DeclarationDiagnostics::default());
+    assert!(store
+        .read_grant_covers(
+            "reserved",
+            "ckbus",
+            "cortexkit-hub",
+            GrantOperation::AccountToken,
+            &bus,
+        )
+        .unwrap());
+    assert_eq!(
+        DeclaredGrantSet::from_grants_json("ckbus", &bus.grants_json()).unwrap(),
+        bus
+    );
+    for module in ["motor", "striatum", "CKBUS"] {
+        let (other, diagnostics) = parse_declared_grants(module, &declaration);
+        assert_eq!(diagnostics.whole_reason, None);
+        assert_eq!(diagnostics.skipped_count, 1);
+        assert_eq!(
+            diagnostics.skipped,
+            vec![SkippedDeclaredGrant {
+                index: 0,
+                reason: "cortexkit-hub audience is reserved for reserved:ckbus",
+            }]
+        );
+        assert_eq!(other.grants().len(), 1);
+        assert_eq!(other.grants()[0].selector, "cortexkit-account");
+        assert!(!store
+            .read_grant_covers(
+                "reserved",
+                module,
+                "cortexkit-hub",
+                GrantOperation::AccountToken,
+                &other,
+            )
+            .unwrap());
+        assert!(store
+            .read_grant_covers(
+                "reserved",
+                module,
+                "cortexkit-account",
+                GrantOperation::AccountToken,
+                &other,
+            )
+            .unwrap());
+        assert!(DeclaredGrantSet::from_grants_json(module, &bus.grants_json()).is_err());
+    }
+}
+
+#[test]
+fn hub_audience_grants_admit_only_reserved_ckbus_without_refused_writes() {
+    let (_root, store) = rig("hub-audience-grants", 227);
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "ckbus",
+            SelectorKind::Audience,
+            "cortexkit-hub",
+            GrantOperation::AccountToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let grants = store.list_read_grants().unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].principal_id, "ckbus");
+    assert_eq!(grants[0].selector, "cortexkit-hub");
+    for (kind, id) in [
+        ("reserved", "motor"),
+        ("reserved", "CKBUS"),
+        ("enrolled", "x"),
+        ("enrolled", "ckbus"),
+        ("direct", ""),
+        ("direct", "ckbus"),
+    ] {
+        let tip = store.audit_tip().unwrap();
+        let refused = store
+            .create_read_grant_audited(
+                kind,
+                id,
+                SelectorKind::Audience,
+                "cortexkit-hub",
+                GrantOperation::AccountToken,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap_err();
+        assert_eq!(refused.wire_code(), Some("hub_audience_reserved"));
+        assert_eq!(refused.wire_class(), Some("permanent"));
+        assert!(matches!(refused, StoreOpError::HubAudienceReserved));
+        assert!(refused.to_string().contains("reserved:ckbus"));
+        assert_eq!(store.list_read_grants().unwrap(), grants);
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
 }
 
 #[test]

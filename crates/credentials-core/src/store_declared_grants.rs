@@ -3,10 +3,11 @@
 use super::*;
 
 /// Account-token audiences accepted by both the exchange and declaration parser.
-pub const ACCOUNT_TOKEN_AUDIENCES: [&str; 3] = [
+pub const ACCOUNT_TOKEN_AUDIENCES: [&str; 4] = [
     "cortexkit-runners",
     "cortexkit-account",
     "cortexkit-webhook-relay",
+    "cortexkit-hub",
 ];
 
 pub const MAX_DECLARED_GRANTS: usize = 32;
@@ -200,7 +201,12 @@ fn validate_declared_grant(module_id: &str, grant: &DeclaredGrant) -> Result<(),
         &grant.selector,
         grant.operation,
     )
-    .map_err(|_| "tuple")?;
+    .map_err(|error| match error {
+        StoreOpError::HubAudienceReserved => {
+            "cortexkit-hub audience is reserved for reserved:ckbus"
+        }
+        _ => "tuple",
+    })?;
     if grant.selector_kind == SelectorKind::Audience
         && !ACCOUNT_TOKEN_AUDIENCES.contains(&grant.selector.as_str())
     {

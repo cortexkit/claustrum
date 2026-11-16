@@ -520,7 +520,7 @@ fn read_only_listing_reports_scopes_grants_and_excludes_secrets_from_the_deposit
 }
 
 #[test]
-fn local_use_listing_is_keyless_and_permissions_keep_only_legacy_grants() {
+fn local_use_listing_is_keyless_and_permissions_preserve_legacy_rows() {
     let (root, store) = setup("local-use-listing-operator");
     store
         .secret_put_audited(&api_key_put("ops-key", None), "offline-cli")
@@ -609,9 +609,13 @@ fn local_use_listing_is_keyless_and_permissions_keep_only_legacy_grants() {
         assert_eq!(grant.last_use_ms, Some(NOW));
         assert_eq!(grant.expires_at_ms, Some(NOW + 1000));
     }
+    let live_permissions = store.secret_permissions_list(None, NOW).unwrap();
+    assert_eq!(live_permissions["grants"].as_array().unwrap().len(), 2);
+    assert_eq!(live_permissions["grants"][0], permissions["grants"][0]);
+    assert_eq!(live_permissions["grants"][1]["scope"], "local_sudo");
     assert_eq!(
-        store.secret_permissions_list(None, NOW).unwrap(),
-        permissions
+        live_permissions["grants"][1]["scope_label"],
+        "run sudo as root on this computer, once"
     );
     assert_eq!(
         store.secret_permissions_list(Some("agent-A"), NOW).unwrap(),

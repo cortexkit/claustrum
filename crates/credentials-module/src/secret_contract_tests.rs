@@ -2758,3 +2758,80 @@ async fn basic_auth_goldens_pin_target_only_request_and_permanent_refusals() {
         assert_eq!(secret_golden(id), error.body());
     }
 }
+
+#[tokio::test]
+async fn permissions_local_grants_dispatcher_pins_real_approval_samples() {
+    use sha2::{Digest, Sha256};
+    let seed = 217;
+    let flow = SecretFlow::new(seed).await;
+    sc_programs(&flow.store, true);
+    sc_sudo_seed(&flow.store);
+    let public = sc_ssh_seed(&flow.store);
+    let sudo = secret_golden("use.request.local_program");
+    let mut ssh = sc_ssh_call(&public);
+    ssh["stamp"] = secret_worker_call(json!({"on_behalf_of_agent":"agent-A"}))["stamp"].clone();
+    let mut fingerprint = String::new();
+    for (call, is_ssh, duration) in [(&sudo, false, "once"), (&ssh, true, "session")] {
+        let pending = if is_ssh { sc_ssh_local(&flow, call) } else { flow.use_secret("aft", call) };
+        assert_eq!(pending["status"], "approval_required");
+        if is_ssh {
+            fingerprint = SecretHome::statement(&pending)["key"]["fingerprint"].as_str().unwrap().into();
+        }
+        let now = sc_now_ms();
+        let mut approval = flow.signed("approve.request", json!([{
+            "request_id":pending["request_id"],
+            "statement_sha256":sc_sha256_hex(&sc_unb64(pending["statement_b64url"].as_str().unwrap()))
+        }]), duration, now + if is_ssh { 86_400_000 } else { 600_000 }, now);
+        approval["card_ref"] = json!("local-permissions-card");
+        assert_eq!(flow.phone("secret.approve", approval).await["results"][0]["outcome"], "granted");
+    }
+    // Approval creates the grants. Only random ids and wall-clock metadata are
+    // fixed afterwards so repeated real dispatcher replies have identical bytes.
+    let conn = rusqlite::Connection::open(flow._root.join("store.db")).unwrap();
+    for (name, id, lifetime) in [("sudo", "local-sudo-sample", 600_000), (SC_SSH_KEY, "local-ssh-sample", 86_400_000)] {
+        assert_eq!(conn.execute("UPDATE secret_grants SET grant_id=?1,granted_at_ms=?2,expires_at_ms=?3 WHERE secret_name=?4",
+            rusqlite::params![id,CP_NOW,CP_NOW+lifetime,name]).unwrap(), 1);
+    }
+    let engine = Arc::new(RefreshEngine::new(Arc::clone(&flow.store), Vec::new(), Arc::new(crate::test_support::NoHttp)));
+    let surface = Arc::new(ReadSurface::new(Arc::clone(&engine), FetchLimiter::new(Caps::default())));
+    let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+    let admin = Arc::new(admin_surface::AdminSurface::new(
+        engine, credentials_core::admin_auth::AdminMacKey::derive(&key),
+        credentials_core::vault_id_for(&flow._root).unwrap(), key.key_id(),
+    ));
+    admin.record_bind_at(101, 1, reserved("cingulate"), "");
+    let tip = flow.store.audit_tip().unwrap();
+    let list = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+    assert_eq!(flow.store.audit_tip().unwrap(), tip);
+    let body: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(body, json!({"result":{"grants":[
+        {"id":"local-ssh-sample","agent_id":"agent-A","holder":{"kind":"worker","scope_ref":"W","agent_id":"agent-A"},"module":"claustrum","subject_label":SC_SSH_KEY,"scope":"local_ssh_sign","scope_label":format!("sign SSH logins to alice@x.test, port 22, with key {fingerprint}, for this session"),"granted_at_ms":CP_NOW,"expires_at_ms":CP_NOW+86_400_000,"card_ref":"local-permissions-card"},
+        {"id":"local-sudo-sample","agent_id":"agent-A","holder":{"kind":"agent","scope_ref":"H","agent_id":"agent-A"},"module":"claustrum","subject_label":"sudo","scope":"local_sudo","scope_label":"run sudo as root on this computer, once","granted_at_ms":CP_NOW,"expires_at_ms":CP_NOW+600_000,"card_ref":"local-permissions-card"}
+    ]}}));
+    let emitted = serde_json::to_vec_pretty(&json!({
+        "v":"ck-permissions-local-grants-vectors/v1",
+        "cases":[{"case":"local_grants_list","request":{"method":"permissions.list","params":{}},
+            "reply_b64url":sc_b64(&list),"reply_sha256":format!("{:x}",Sha256::digest(&list)),"reply":body}]
+    })).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../credentials-core/tests/vectors/permissions-local-grants-v1.json");
+    let sums_path = path.with_file_name("permissions-local-grants-v1.SHA256SUMS");
+    let sums = format!("{:x}  permissions-local-grants-v1.json\n", Sha256::digest(&emitted));
+    if std::env::var("CK_EMIT_SECRET_VECTORS").as_deref() == Ok("1") {
+        std::fs::write(&path, &emitted).unwrap();
+        std::fs::write(&sums_path, &sums).unwrap();
+        println!("emitted a sudo once and worker SSH session pair through permissions.list after real phone approvals");
+    }
+    assert_eq!(std::fs::read(&path).expect("generate the pinned local permissions samples"), emitted);
+    assert_eq!(std::fs::read(&sums_path).unwrap(), sums.as_bytes());
+    let checked = std::process::Command::new("sha256sum").args(["-c", "permissions-local-grants-v1.SHA256SUMS"])
+        .current_dir(path.parent().unwrap()).output().unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    for (id, is_ssh) in [("local-sudo-sample", false), ("local-ssh-sample", true)] {
+        assert_eq!(cp_reply(&surface, &admin, "permissions.revoke", json!({"id":id})).await,
+            br#"{"result":{"outcome":"revoked"}}"#);
+        let next = if is_ssh { sc_ssh_local(&flow, &ssh) } else { flow.use_secret("aft", &sudo) };
+        assert_eq!(next["status"], "approval_required");
+    }
+    assert_eq!(cp_reply(&surface, &admin, "permissions.list", json!({})).await, br#"{"result":{"grants":[]}}"#);
+}

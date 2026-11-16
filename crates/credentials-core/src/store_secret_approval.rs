@@ -72,6 +72,7 @@ impl EncryptedStore {
                 credential_rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
                 grants.extend(credential_rows);
             }
+            grants.extend(local_permission_rows(conn, agent_id, now)?);
             Ok(json!({"grants":grants}))
         }).map_err(|_|SecretError::StoreError)
     }
@@ -673,6 +674,88 @@ fn envelope_audit(
     .map(|_| ())
 }
 
+/// Local grants keep the approved target and key fingerprint even when a remembered
+/// SSH grant no longer stores the command. Only those target fields enter the label.
+fn local_permission_scope(
+    local: &Value,
+    duration: &str,
+) -> rusqlite::Result<(&'static str, String)> {
+    let text = |value: &Value, key: &str| {
+        value[key]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| rusqlite_err("invalid stored local grant"))
+    };
+    let user = text(&local["target"], "user")?;
+    agent_secret::validate_local_user(&user)
+        .map_err(|_| rusqlite_err("invalid stored local target"))?;
+    let duration_label = match duration {
+        "once" => "once",
+        "hour" => "for one hour",
+        "session" => "for this session",
+        _ => return Err(rusqlite_err("invalid stored local duration")),
+    };
+    match (local["program"].as_str(), local["use"].as_str()) {
+        (Some("sudo"), Some("sudo_password")) if duration == "once" => Ok((
+            "local_sudo",
+            format!("run sudo as {user} on this computer, {duration_label}"),
+        )),
+        (Some("ssh"), Some("ssh_sign")) => {
+            let host = text(&local["target"], "host")?;
+            let port = local["target"]["port"]
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0)
+                .ok_or_else(|| rusqlite_err("invalid stored local port"))?;
+            crate::record::AgentSshTarget {
+                user: Some(user.clone()),
+                host: host.clone(),
+                port: Some(port),
+            }
+            .validate()
+            .map_err(|_| rusqlite_err("invalid stored local target"))?;
+            let fingerprint = text(&local["key"], "fingerprint")?;
+            Ok(("local_ssh_sign", format!("sign SSH logins to {user}@{host}, port {port}, with key {fingerprint}, {duration_label}")))
+        }
+        _ => Err(rusqlite_err("invalid stored local grant")),
+    }
+}
+
+fn local_permission_rows(
+    conn: &rusqlite::Connection,
+    agent_id: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<Vec<Value>> {
+    conn.prepare("SELECT g.grant_id,g.agent_id,g.scope_kind,g.scope_ref,g.secret_name,g.duration,g.expires_at_ms,g.granted_at_ms,g.card_ref,g.local_use FROM secret_grants g WHERE g.local_use IS NOT NULL AND g.expires_at_ms>?1 AND (?2 IS NULL OR g.agent_id=?2) AND (EXISTS (SELECT 1 FROM agent_secrets s WHERE s.name=g.secret_name AND s.incarnation=g.incarnation) OR EXISTS (SELECT 1 FROM credentials c WHERE c.credential_id=g.secret_name AND c.incarnation=g.incarnation)) ORDER BY g.grant_id")?
+        .query_map(rusqlite::params![now, agent_id], |r| {
+            let raw: String = r.get(9)?;
+            let local: Value = serde_json::from_str(&raw)
+                .map_err(|_| rusqlite_err("invalid stored local grant"))?;
+            let duration: String = r.get(5)?;
+            let (scope, label) = local_permission_scope(&local, &duration)?;
+            let scope_kind: String = r.get(2)?;
+            let mut row = json!({
+                "id":r.get::<_,String>(0)?,
+                "holder":{"kind":if scope_kind=="head" {"agent"}else{"worker"},"scope_ref":r.get::<_,String>(3)?},
+                "module":"claustrum",
+                "subject_label":r.get::<_,String>(4)?,
+                "scope":scope,
+                "scope_label":label,
+                "granted_at_ms":r.get::<_,i64>(7)?,
+                "expires_at_ms":r.get::<_,i64>(6)?,
+            });
+            if let Some(agent) = r.get::<_,Option<String>>(1)? {
+                row["agent_id"] = json!(agent);
+                row["holder"]["agent_id"] = json!(agent);
+            }
+            if let Some(card) = r.get::<_,Option<String>>(8)? {
+                row["card_ref"] = json!(card);
+            }
+            Ok(row)
+        })?
+        .collect()
+}
+
 fn extended_permission_scope_label(
     name: &str,
     kind: &str,
@@ -942,6 +1025,153 @@ mod v2_approval_tests {
         }
 
         #[test]
+        fn local_sudo_permissions_list_once_until_use_or_expiry() {
+            let (_root, store) = setup("local-sudo-permissions");
+            let call = sudo("apt upgrade");
+            let pending = store.secret_use(&call, || V2_NOW).unwrap().reply;
+            assert_eq!(
+                v2_approve(&store, &pending, "once")["results"][0]["outcome"],
+                "granted"
+            );
+            let listed = store.secret_permissions_list(None, V2_NOW).unwrap();
+            let rows = listed["grants"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                json!({
+                    "id":rows[0]["id"], "agent_id":"agent-A",
+                    "holder":{"kind":"agent","scope_ref":call.scope.scope_ref,"agent_id":"agent-A"},
+                    "module":"claustrum", "subject_label":"sudo-pw", "scope":"local_sudo",
+                    "scope_label":"run sudo as root on this computer, once",
+                    "granted_at_ms":V2_NOW, "expires_at_ms":V2_NOW+600_000, "card_ref":"card-1"
+                })
+            );
+            assert_eq!(
+                store
+                    .secret_permissions_list(Some("agent-A"), V2_NOW)
+                    .unwrap(),
+                listed
+            );
+            assert_eq!(
+                store
+                    .secret_permissions_list(Some("other"), V2_NOW)
+                    .unwrap()["grants"],
+                json!([])
+            );
+            assert_eq!(
+                store
+                    .secret_permissions_list(None, V2_NOW + 600_000)
+                    .unwrap()["grants"],
+                json!([])
+            );
+            assert_eq!(
+                store.secret_use(&call, || V2_NOW).unwrap().reply["status"],
+                "released"
+            );
+            assert_eq!(
+                store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
+                json!([])
+            );
+            assert_eq!(
+                store.secret_use(&call, || V2_NOW).unwrap().reply["status"],
+                "approval_required"
+            );
+        }
+
+        #[test]
+        fn local_ssh_permissions_list_worker_session_approved_target_and_key() {
+            let (_root, store) = setup("local-ssh-permissions");
+            let mut call = ssh(
+                &store,
+                "ssh command must not be listed",
+                "u",
+                "ssh.test",
+                2222,
+            );
+            call.scope.kind = "worker".into();
+            call.scope.scope_ref = "worker-1".into();
+            let pending = request(&store, &call);
+            let statement: Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(pending["statement_b64url"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            let fingerprint = statement["key"]["fingerprint"].as_str().unwrap();
+            assert_eq!(
+                v2_approve(&store, &pending, "session")["results"][0]["outcome"],
+                "granted"
+            );
+            let listed = store.secret_permissions_list(None, V2_NOW).unwrap();
+            let rows = listed["grants"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                json!({
+                    "id":rows[0]["id"], "agent_id":"agent-A",
+                    "holder":{"kind":"worker","scope_ref":"worker-1","agent_id":"agent-A"},
+                    "module":"claustrum", "subject_label":KEY, "scope":"local_ssh_sign",
+                    "scope_label":format!("sign SSH logins to u@ssh.test, port 2222, with key {fingerprint}, for this session"),
+                    "granted_at_ms":V2_NOW, "expires_at_ms":V2_NOW+86_400_000, "card_ref":"card-1"
+                })
+            );
+            assert_eq!(
+                store
+                    .secret_permissions_list(Some("agent-A"), V2_NOW)
+                    .unwrap(),
+                listed
+            );
+            assert_eq!(
+                store
+                    .secret_permissions_list(None, V2_NOW + 86_400_000)
+                    .unwrap()["grants"],
+                json!([])
+            );
+            assert_eq!(request(&store, &call)["status"], "signed");
+            assert_eq!(store.secret_permissions_list(None, V2_NOW).unwrap(), listed);
+        }
+
+        #[test]
+        fn local_permissions_revoke_by_listed_id_prevents_release_and_sign() {
+            for is_ssh in [false, true] {
+                let (_root, store) = setup(&format!("local-permissions-revoke-{is_ssh}"));
+                let sudo_call = sudo("apt upgrade");
+                let ssh_call = ssh(&store, "ssh login", "u", "ssh.test", 22);
+                let pending = if is_ssh {
+                    request(&store, &ssh_call)
+                } else {
+                    store.secret_use(&sudo_call, || V2_NOW).unwrap().reply
+                };
+                assert_eq!(
+                    v2_approve(&store, &pending, if is_ssh { "session" } else { "once" })
+                        ["results"][0]["outcome"],
+                    "granted"
+                );
+                let listed = store.secret_permissions_list(None, V2_NOW).unwrap();
+                assert_eq!(listed["grants"].as_array().unwrap().len(), 1);
+                let id = listed["grants"][0]["id"].as_str().unwrap();
+                assert_eq!(
+                    store
+                        .secret_permissions_revoke(id, "provider", V2_NOW)
+                        .unwrap(),
+                    json!({"outcome":"revoked"})
+                );
+                assert_eq!(
+                    store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
+                    json!([])
+                );
+                let next = if is_ssh {
+                    request(&store, &ssh_call)
+                } else {
+                    store.secret_use(&sudo_call, || V2_NOW).unwrap().reply
+                };
+                assert_eq!(next["status"], "approval_required");
+                assert!(next.get("value").is_none());
+                assert!(next.get("signature_b64url").is_none());
+            }
+        }
+
+        #[test]
         fn sudo_cards_bind_full_members_and_release_once_with_audit() {
             let (_root, store) = setup("local-sudo-cards");
             let a = store
@@ -1048,8 +1278,11 @@ mod v2_approval_tests {
                 );
                 assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op='secret_grant_create' AND credential_id='signing:local-login'"), 1);
                 assert_eq!(
-                    store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
-                    json!([])
+                    store.secret_permissions_list(None, V2_NOW).unwrap()["grants"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    usize::from(duration != "once")
                 );
                 let raw: String = store
                     .store

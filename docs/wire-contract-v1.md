@@ -2552,6 +2552,34 @@ Only the wrapper admits Direct. Plain `permissions.list {agent_id?}` and
 vendored vectors in `crates/credentials-module/tests/vectors/permissions-v1/`) and admit
 only `reserved:cingulate`.
 
+#### Local-program permissions rows
+
+Live sudo releases and SSH signing grants are included in `permissions.list`,
+including agent-filtered replies when their stored `agent_id` matches. They use the
+existing secret-grant row shape: holder `agent` or `worker` with `scope_ref`, the
+secret name or signing-key id as `subject_label`, and the stored `card_ref`,
+`granted_at_ms` and `expires_at_ms`. Known agent ids appear on the row and holder.
+No command line, secret material or SSH signing data is projected.
+
+The scope tokens are `local_sudo` and `local_ssh_sign`. Readers treat `scope` as
+opaque: retain unfamiliar tokens, show `scope_label`, and revoke by `id` as for
+other grants. Labels describe the approved target and duration, for example
+`run sudo as root on this computer, once` or
+`sign SSH logins to git@github.com, port 22, with key SHA256:<fingerprint>, for this session`.
+The SSH fingerprint is the vault-authored fingerprint retained from the approval,
+not one supplied by the calling program. Once grants disappear after use or expiry;
+revocation removes the grant and prevents its next release or signature. The local
+approval options (`once`, and SSH's `hour` and `session`) are not danger options,
+so these rows omit `group`.
+
+The producer-generated pair is published in
+`crates/credentials-core/tests/vectors/permissions-local-grants-v1.json`, with its
+companion `permissions-local-grants-v1.SHA256SUMS`. Regenerate it on Linux with
+`CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --features
+credentials-core/test-support
+permissions_local_grants_dispatcher_pins_real_approval_samples -- --nocapture`.
+The existing credential-grant permissions corpus remains byte-identical.
+
 #### Credential-grant permissions rows
 
 An unfiltered `permissions.list {}` also lists the vault's credential grants for

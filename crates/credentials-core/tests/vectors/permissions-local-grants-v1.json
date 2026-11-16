@@ -1,0 +1,52 @@
+{
+  "cases": [
+    {
+      "case": "local_grants_list",
+      "reply": {
+        "result": {
+          "grants": [
+            {
+              "agent_id": "agent-A",
+              "card_ref": "local-permissions-card",
+              "expires_at_ms": 1800086400000,
+              "granted_at_ms": 1800000000000,
+              "holder": {
+                "agent_id": "agent-A",
+                "kind": "worker",
+                "scope_ref": "W"
+              },
+              "id": "local-ssh-sample",
+              "module": "claustrum",
+              "scope": "local_ssh_sign",
+              "scope_label": "sign SSH logins to alice@x.test, port 22, with key SHA256:IHVSi/O0NvVKWWOFQrXQwOjBFvqTcbSxBMWE3MJt5v0, for this session",
+              "subject_label": "signing:agent:ssh"
+            },
+            {
+              "agent_id": "agent-A",
+              "card_ref": "local-permissions-card",
+              "expires_at_ms": 1800000600000,
+              "granted_at_ms": 1800000000000,
+              "holder": {
+                "agent_id": "agent-A",
+                "kind": "agent",
+                "scope_ref": "H"
+              },
+              "id": "local-sudo-sample",
+              "module": "claustrum",
+              "scope": "local_sudo",
+              "scope_label": "run sudo as root on this computer, once",
+              "subject_label": "sudo"
+            }
+          ]
+        }
+      },
+      "reply_b64url": "eyJyZXN1bHQiOnsiZ3JhbnRzIjpbeyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjYXJkX3JlZiI6ImxvY2FsLXBlcm1pc3Npb25zLWNhcmQiLCJleHBpcmVzX2F0X21zIjoxODAwMDg2NDAwMDAwLCJncmFudGVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJob2xkZXIiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIiwia2luZCI6IndvcmtlciIsInNjb3BlX3JlZiI6IlcifSwiaWQiOiJsb2NhbC1zc2gtc2FtcGxlIiwibW9kdWxlIjoiY2xhdXN0cnVtIiwic2NvcGUiOiJsb2NhbF9zc2hfc2lnbiIsInNjb3BlX2xhYmVsIjoic2lnbiBTU0ggbG9naW5zIHRvIGFsaWNlQHgudGVzdCwgcG9ydCAyMiwgd2l0aCBrZXkgU0hBMjU2OklIVlNpL08wTnZWS1dXT0ZRclhRd09qQkZ2cVRjYlN4Qk1XRTNNSnQ1djAsIGZvciB0aGlzIHNlc3Npb24iLCJzdWJqZWN0X2xhYmVsIjoic2lnbmluZzphZ2VudDpzc2gifSx7ImFnZW50X2lkIjoiYWdlbnQtQSIsImNhcmRfcmVmIjoibG9jYWwtcGVybWlzc2lvbnMtY2FyZCIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImdyYW50ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImhvbGRlciI6eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJraW5kIjoiYWdlbnQiLCJzY29wZV9yZWYiOiJIIn0sImlkIjoibG9jYWwtc3Vkby1zYW1wbGUiLCJtb2R1bGUiOiJjbGF1c3RydW0iLCJzY29wZSI6ImxvY2FsX3N1ZG8iLCJzY29wZV9sYWJlbCI6InJ1biBzdWRvIGFzIHJvb3Qgb24gdGhpcyBjb21wdXRlciwgb25jZSIsInN1YmplY3RfbGFiZWwiOiJzdWRvIn1dfX0",
+      "reply_sha256": "752b7805e5897238ee8ae69d289afb0a576d0219c4e0a867043ec16b683c564e",
+      "request": {
+        "method": "permissions.list",
+        "params": {}
+      }
+    }
+  ],
+  "v": "ck-permissions-local-grants-vectors/v1"
+}

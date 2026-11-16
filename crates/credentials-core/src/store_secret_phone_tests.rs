@@ -1357,10 +1357,42 @@ fn local_use_listing_projects_grants_and_omits_ssh_keys_without_grants() {
     );
     assert!(!listed.to_string().contains("command-canary"));
     assert!(!listed.to_string().contains("password-canary"));
-    assert_eq!(
-        store.secret_permissions_list(None, 1000).unwrap(),
-        json!({"grants":[]})
-    );
+    let permissions = store.secret_permissions_list(None, 1000).unwrap();
+    let rows = permissions["grants"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    for (row, (id, name, scope, label)) in rows.iter().zip([
+        (
+            "a-grant",
+            "signing:a",
+            "local_ssh_sign",
+            "sign SSH logins to u@localhost, port 22, with key SHA256:signing:a, for this session",
+        ),
+        (
+            "b-grant",
+            "signing:a",
+            "local_ssh_sign",
+            "sign SSH logins to u@localhost, port 22, with key SHA256:signing:a, once",
+        ),
+        (
+            "sudo-grant",
+            "sudo",
+            "local_sudo",
+            "run sudo as root on this computer, once",
+        ),
+        (
+            "z-grant",
+            "signing:z",
+            "local_ssh_sign",
+            "sign SSH logins to u@localhost, port 22, with key SHA256:signing:z, for one hour",
+        ),
+    ]) {
+        let mut expected = json!({"id":id,"holder":{"kind":"agent","scope_ref":"H"},"module":"claustrum","subject_label":name,"scope":scope,"scope_label":label,"granted_at_ms":1000,"expires_at_ms":2000});
+        if scope == "local_ssh_sign" {
+            expected["agent_id"] = json!("agent-A");
+            expected["holder"]["agent_id"] = json!("agent-A");
+        }
+        assert_eq!(*row, expected);
+    }
     for id in ["a-grant", "b-grant", "z-grant"] {
         run(
             &store,

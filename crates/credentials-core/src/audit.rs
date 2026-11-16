@@ -61,6 +61,8 @@ pub enum AuditOp {
     SecretGrantRevoke,
     SecretGrantExpire,
     SecretFirstRelease,
+    SecretLocalRelease,
+    SecretSshSign,
     SecretQuarantine,
 
     GhManifestPropose,
@@ -239,6 +241,8 @@ impl AuditOp {
             AuditOp::SecretGrantRevoke => "secret_grant_revoke",
             AuditOp::SecretGrantExpire => "secret_grant_expire",
             AuditOp::SecretFirstRelease => "secret_first_release",
+            AuditOp::SecretLocalRelease => "secret_local_release",
+            AuditOp::SecretSshSign => "secret_ssh_sign",
             AuditOp::SecretQuarantine => "secret_quarantine",
 
             AuditOp::GhManifestPropose => "gh_manifest_propose",
@@ -926,6 +930,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretGrantRevoke => AuditOp::SecretGrantRevoke.as_str(),
                 AuditOp::SecretGrantExpire => AuditOp::SecretGrantExpire.as_str(),
                 AuditOp::SecretFirstRelease => AuditOp::SecretFirstRelease.as_str(),
+                AuditOp::SecretLocalRelease => AuditOp::SecretLocalRelease.as_str(),
+                AuditOp::SecretSshSign => AuditOp::SecretSshSign.as_str(),
                 AuditOp::SecretQuarantine => AuditOp::SecretQuarantine.as_str(),
 
                 AuditOp::GhManifestPropose => AuditOp::GhManifestPropose.as_str(),
@@ -987,6 +993,8 @@ mod vocabulary_documentation_tests {
         }
 
         assert_documented(section, "audit_log.op", value(AuditOp::Put));
+        assert_documented(section, "audit_log.op", value(AuditOp::SecretLocalRelease));
+        assert_documented(section, "audit_log.op", value(AuditOp::SecretSshSign));
         assert_documented(section, "audit_log.op", value(AuditOp::Import));
         assert_documented(section, "audit_log.op", value(AuditOp::Login));
         assert_documented(section, "audit_log.op", value(AuditOp::Overwrite));

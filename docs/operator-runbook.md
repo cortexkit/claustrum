@@ -1192,7 +1192,14 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `secret_grant_revoke` | Phone, Cingulate or operator removes a grant; target `secret\|<name>`, payload fields: grant id, incarnation. |
 | `secret_grant_expire` | Vault sweeps an expired grant after an admitted use or phone list; target `secret\|<name>`, payload fields: grant id, incarnation, expiry as u64 LE. |
 | `secret_first_release` | Sender module first exercises a grant; target `secret\|<name>`, payload fields: grant id, incarnation. The grant's `first_released` marker, not prunable diagnostics, deduplicates this transition. |
+| `secret_local_release` | Release a sudo password; target `secret\|<name>`, payload fields: grant id, incarnation, canonical JSON object containing `program`, `use` and `target`, and the asking member id when forwarded. |
+| `secret_ssh_sign` | Sign SSH userauth data with an enrolled key; target is the bare signing-key credential id. Payload fields: grant id, incarnation, canonical JSON object containing `program`, `use` and `target`, lowercase hex of the keyed payload fingerprint of the signed bytes, and the asking member id when forwarded. |
 | `secret_quarantine` | Vault flips an active secret to corrupt after an authenticated-scope mismatch; target `secret\|<name>`, payload fields: incarnation. Failed flips remain opaque. Master-key rotation records corrupt secrets under `rotate_master_key`, with no separate quarantine row. |
+
+For SSH grants, `secret_grant_create`, `secret_grant_revoke` and
+`secret_grant_expire` name the bare signing-key credential id instead of a
+`secret\|<name>` target. Local-use releases and signatures audit every use, including
+uses under remembered grants; they never use `secret_first_release`.
 
 Secret grants are also visible through the `permissions/v1` provider. Cingulate uses
 `permissions.list` and `permissions.revoke`; the local operator uses those operation

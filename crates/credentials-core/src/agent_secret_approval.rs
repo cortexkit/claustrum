@@ -15,6 +15,473 @@ pub const USE_STATEMENT_V2: &str = "ck-secret-use-statement/v2";
 pub const FLOW_STATEMENT_V2: &str = "ck-secret-flow-statement/v2";
 pub const USE_STATEMENT_V3: &str = "ck-secret-use-statement/v3";
 pub const FLOW_STATEMENT_V3: &str = "ck-secret-flow-statement/v3";
+pub const LOCAL_USE_STATEMENT: &str = "ck-secret-local-use-statement/v1";
+pub const LOCAL_USE_STATEMENT_TAG: &[u8] = b"ck-secret-local-use-statement/v1";
+pub const MAX_LOCAL_COMMAND_BYTES: usize = 2048;
+pub const MAX_LOCAL_WORKDIR_BYTES: usize = 1024;
+pub const MAX_LOCAL_PURPOSE_BYTES: usize = 512;
+pub const MAX_LOCAL_EXPECTS_BYTES: usize = 512;
+pub const MAX_SSH_USERAUTH_BYTES: usize = 8192;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocalUseKind {
+    Sudo {
+        user: String,
+        expects: String,
+        undoable: String,
+    },
+    Ssh {
+        user: String,
+        host: String,
+        port: u16,
+    },
+}
+
+/// Validated request members. Construction never normalizes text or destinations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalUse {
+    kind: LocalUseKind,
+    command: String,
+    workdir: String,
+    purpose: String,
+}
+
+impl LocalUse {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, SecretError> {
+        use SecretError::InvalidParams;
+        let object = value.as_object().ok_or(InvalidParams)?;
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or(InvalidParams)
+        };
+        let command = local_text(text("command")?, MAX_LOCAL_COMMAND_BYTES)?;
+        let workdir = local_text(text("workdir")?, MAX_LOCAL_WORKDIR_BYTES)?;
+        let purpose = local_text(text("purpose")?, MAX_LOCAL_PURPOSE_BYTES)?;
+        if !workdir.starts_with('/') {
+            return Err(InvalidParams);
+        }
+        let target = value
+            .get("target")
+            .and_then(serde_json::Value::as_object)
+            .ok_or(InvalidParams)?;
+        let user = target
+            .get("user")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(InvalidParams)?;
+        super::validate_local_user(user)?;
+        let kind = match (text("program")?, text("use")?) {
+            ("sudo", "sudo_password") => {
+                if object.len() != 8 || target.len() != 1 {
+                    return Err(InvalidParams);
+                }
+                let expects = local_text(text("expects")?, MAX_LOCAL_EXPECTS_BYTES)?;
+                let undoable = text("undoable")?;
+                if !matches!(undoable, "yes" | "no" | "unknown") {
+                    return Err(InvalidParams);
+                }
+                LocalUseKind::Sudo {
+                    user: user.into(),
+                    expects,
+                    undoable: undoable.into(),
+                }
+            }
+            ("ssh", "ssh_sign") => {
+                if object.len() != 6 || target.len() != 3 {
+                    return Err(InvalidParams);
+                }
+                let host = target
+                    .get("host")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(InvalidParams)?;
+                let port = target
+                    .get("port")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| u16::try_from(v).ok())
+                    .filter(|v| *v != 0)
+                    .ok_or(InvalidParams)?;
+                crate::record::AgentSshTarget {
+                    user: Some(user.into()),
+                    host: host.into(),
+                    port: Some(port),
+                }
+                .validate()?;
+                LocalUseKind::Ssh {
+                    user: user.into(),
+                    host: host.into(),
+                    port,
+                }
+            }
+            _ => return Err(InvalidParams),
+        };
+        Ok(Self {
+            kind,
+            command,
+            workdir,
+            purpose,
+        })
+    }
+
+    pub fn is_ssh(&self) -> bool {
+        match &self.kind {
+            LocalUseKind::Sudo { .. } => false,
+            LocalUseKind::Ssh { .. } => true,
+        }
+    }
+    pub fn user(&self) -> &str {
+        match &self.kind {
+            LocalUseKind::Sudo { user, .. } | LocalUseKind::Ssh { user, .. } => user,
+        }
+    }
+    pub fn triple(&self) -> serde_json::Value {
+        use serde_json::json;
+        match &self.kind {
+            LocalUseKind::Sudo { user, .. } => {
+                json!({"program":"sudo","use":"sudo_password","target":{"user":user}})
+            }
+            LocalUseKind::Ssh { user, host, port } => {
+                json!({"program":"ssh","use":"ssh_sign","target":{"user":user,"host":host,"port":port}})
+            }
+        }
+    }
+    pub fn members(&self) -> serde_json::Value {
+        let mut value = self.triple();
+        value["command"] = self.command.clone().into();
+        value["workdir"] = self.workdir.clone().into();
+        value["purpose"] = self.purpose.clone().into();
+        match &self.kind {
+            LocalUseKind::Sudo {
+                expects, undoable, ..
+            } => {
+                value["expects"] = expects.clone().into();
+                value["undoable"] = undoable.clone().into();
+            }
+            LocalUseKind::Ssh { .. } => {}
+        }
+        value
+    }
+    pub fn matches_scope(&self, scope: &super::SecretScope) -> bool {
+        match &self.kind {
+            LocalUseKind::Sudo { user, .. } => match scope {
+                super::SecretScope::LocalProgram {
+                    program: super::LocalProgram::Sudo,
+                    r#use: super::LocalProgramUse::SudoPassword,
+                    targets,
+                } => targets.iter().any(|t| match t {
+                    super::LocalProgramTarget::Sudo { user: stored } => user == stored,
+                }),
+                super::SecretScope::ApiKey { .. }
+                | super::SecretScope::ApiKeyRules { .. }
+                | super::SecretScope::SiteLogin { .. }
+                | super::SecretScope::SiteLoginOrigins { .. } => false,
+            },
+            LocalUseKind::Ssh { .. } => false,
+        }
+    }
+    pub fn matches_enrollment(&self, enrollment: &crate::record::AgentSsh) -> bool {
+        match &self.kind {
+            LocalUseKind::Sudo { .. } => false,
+            LocalUseKind::Ssh { user, host, port } => enrollment.targets.iter().any(|t| {
+                t.host == *host
+                    && t.user.as_ref().is_none_or(|u| u == user)
+                    && t.port.is_none_or(|p| p == *port)
+            }),
+        }
+    }
+    pub fn durations(&self) -> Vec<&'static str> {
+        match &self.kind {
+            LocalUseKind::Sudo { .. } => vec!["once"],
+            LocalUseKind::Ssh { .. } => vec!["once", "hour", "session"],
+        }
+    }
+}
+
+fn local_text(value: &str, cap: usize) -> Result<String, SecretError> {
+    if value.len() > cap {
+        return Err(SecretError::LimitExceeded);
+    }
+    // Unicode General_Category=Cf, including supplementary-plane format controls.
+    let format_control = |c| matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}');
+    if value.is_empty() || value.chars().any(|c| c.is_control() || format_control(c)) {
+        return Err(SecretError::InvalidParams);
+    }
+    Ok(value.into())
+}
+
+/// Strict RFC 4252 publickey userauth bytes; only this parsed type reaches signing.
+pub struct SshUserauth {
+    bytes: Vec<u8>,
+    user: String,
+    public_key: Vec<u8>,
+    session_id: Vec<u8>,
+}
+impl SshUserauth {
+    pub fn parse(bytes: Vec<u8>) -> Result<Self, SecretError> {
+        use SecretError::InvalidParams;
+        if bytes.len() > MAX_SSH_USERAUTH_BYTES {
+            return Err(SecretError::LimitExceeded);
+        }
+        fn string<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8], SecretError> {
+            let len = u32::from_be_bytes(
+                rest.get(..4)
+                    .ok_or(SecretError::InvalidParams)?
+                    .try_into()
+                    .map_err(|_| SecretError::InvalidParams)?,
+            ) as usize;
+            *rest = &rest[4..];
+            let value = rest.get(..len).ok_or(SecretError::InvalidParams)?;
+            *rest = &rest[len..];
+            Ok(value)
+        }
+        let mut rest = bytes.as_slice();
+        let session_id = string(&mut rest)?.to_vec();
+        if session_id.is_empty() || rest.first() != Some(&50) {
+            return Err(InvalidParams);
+        }
+        rest = &rest[1..];
+        let user = std::str::from_utf8(string(&mut rest)?)
+            .map_err(|_| InvalidParams)?
+            .to_owned();
+        super::validate_local_user(&user)?;
+        if string(&mut rest)? != b"ssh-connection"
+            || string(&mut rest)? != b"publickey"
+            || rest.first() != Some(&1)
+        {
+            return Err(InvalidParams);
+        }
+        rest = &rest[1..];
+        if string(&mut rest)? != b"ssh-ed25519" {
+            return Err(InvalidParams);
+        }
+        let public_key = string(&mut rest)?.to_vec();
+        if !rest.is_empty()
+            || public_key.len() != 51
+            || public_key[..19] != *b"\0\0\0\x0bssh-ed25519\0\0\0\x20"
+        {
+            return Err(InvalidParams);
+        }
+        Ok(Self {
+            bytes,
+            user,
+            public_key,
+            session_id,
+        })
+    }
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+    pub fn session_id(&self) -> &[u8] {
+        &self.session_id
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// The vault supplies the secret/key identity, not the asking program.
+#[allow(clippy::too_many_arguments)]
+pub fn local_approval_statement(
+    id: &str,
+    member: &str,
+    incarnation: &str,
+    call: &super::SecretUse,
+    local: &LocalUse,
+    fingerprint: Option<&str>,
+    expiry: i64,
+    asking_member: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+    let mut statement = local.members();
+    statement["v"] = json!(LOCAL_USE_STATEMENT);
+    statement["request_id"] = json!(id);
+    statement["member_id"] = json!(member);
+    statement["scope"] = json!({"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch});
+    statement["coverage"] = json!("scope");
+    statement["durations"] = json!(local.durations());
+    statement["request_expires_at_ms"] = json!(expiry);
+    if let Some(agent) = &call.agent_id {
+        statement["agent_id"] = json!(agent);
+    }
+    if !asking_member.is_empty() {
+        statement["asking_member_id"] = json!(asking_member);
+    }
+    match &local.kind {
+        LocalUseKind::Sudo { .. } => {
+            statement["secret"] =
+                json!({"name":call.name,"kind":"local_program","incarnation":incarnation})
+        }
+        LocalUseKind::Ssh { .. } => {
+            statement["key"] = json!({"credential_id":call.name,"incarnation":incarnation,"fingerprint":fingerprint.expect("vault SSH fingerprint")})
+        }
+    }
+    statement
+}
+
+#[cfg(test)]
+mod local_statement_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sudo() -> serde_json::Value {
+        json!({"program":"sudo","use":"sudo_password","target":{"user":"root"},"command":"apt upgrade","workdir":"/home/u","purpose":"update","expects":"password prompt","undoable":"no"})
+    }
+
+    #[test]
+    fn local_text_caps_count_utf8_bytes_and_refuse_controls() {
+        for (field, cap) in [
+            ("command", MAX_LOCAL_COMMAND_BYTES),
+            ("workdir", MAX_LOCAL_WORKDIR_BYTES),
+            ("purpose", MAX_LOCAL_PURPOSE_BYTES),
+            ("expects", MAX_LOCAL_EXPECTS_BYTES),
+        ] {
+            let mut value = sudo();
+            let text = if field == "workdir" {
+                format!("/{}x", "é".repeat((cap - 2) / 2))
+            } else {
+                "é".repeat(cap / 2)
+            };
+            assert_eq!(text.len(), cap);
+            value[field] = json!(text);
+            assert!(LocalUse::from_value(&value).is_ok(), "{field}");
+            value[field] = json!(format!("{}x", value[field].as_str().unwrap()));
+            assert_eq!(
+                LocalUse::from_value(&value),
+                Err(SecretError::LimitExceeded)
+            );
+            for text in ["", "a\n", "a\u{85}", "a\u{ad}", "a\u{200b}", "a\u{e007f}"] {
+                value[field] = json!(text);
+                assert_eq!(
+                    LocalUse::from_value(&value),
+                    Err(SecretError::InvalidParams)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_request_grammar_is_closed_and_never_normalized() {
+        for (field, bad) in [
+            ("program", json!("ssh")),
+            ("undoable", json!("maybe")),
+            ("workdir", json!("relative")),
+            ("expects", serde_json::Value::Null),
+            ("target", json!({"user":"-root"})),
+            ("target", json!({"user":"root","host":"extra"})),
+        ] {
+            let mut value = sudo();
+            value[field] = bad;
+            assert_eq!(
+                LocalUse::from_value(&value),
+                Err(SecretError::InvalidParams)
+            );
+        }
+        let mut value = sudo();
+        value["extra"] = json!(true);
+        assert_eq!(
+            LocalUse::from_value(&value),
+            Err(SecretError::InvalidParams)
+        );
+        for target in [
+            json!({"user":"u","host":"Example.test","port":22}),
+            json!({"user":"u","host":"::01","port":22}),
+            json!({"user":"u","host":"host.test","port":0}),
+            json!({"user":"u","host":"host.test","port":65536}),
+            json!({"user":"u","host":"host.test"}),
+        ] {
+            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":target,"command":"ssh","workdir":"/","purpose":"login"})).is_err());
+        }
+        for port in [1, 65535] {
+            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":port},"command":"ssh","workdir":"/","purpose":"login"})).is_ok());
+        }
+    }
+
+    #[test]
+    fn local_statement_has_exact_members_and_omits_absent_attribution() {
+        let local = LocalUse::from_value(&sudo()).unwrap();
+        let call = super::super::SecretUse {
+            name: "pw".into(),
+            sender: super::super::SecretSender::Aft,
+            scope: super::super::AskingScope {
+                owner: "o".into(),
+                kind: "worker".into(),
+                scope_ref: "W".into(),
+                epoch: 7,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: None,
+            target: super::super::UseTarget::LocalProgram(local.clone()),
+        };
+        let statement = local_approval_statement("r", "m", "i", &call, &local, None, 42, "");
+        let expected = br#"{"command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
+        assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
+        let ssh = LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/","purpose":"login"})).unwrap();
+        let statement =
+            local_approval_statement("r", "m", "i", &call, &ssh, Some("SHA256:test"), 42, "asker");
+        assert_eq!(statement["durations"], json!(["once", "hour", "session"]));
+        assert_eq!(
+            statement["key"],
+            json!({"credential_id":"pw","incarnation":"i","fingerprint":"SHA256:test"})
+        );
+        assert_eq!(statement["asking_member_id"], "asker");
+        assert!(
+            statement.get("secret").is_none()
+                && statement.get("expects").is_none()
+                && statement.get("undoable").is_none()
+                && statement.get("agent_id").is_none()
+        );
+        assert_eq!(statement.as_object().unwrap().len(), 15);
+    }
+
+    fn userauth(session_len: usize) -> Vec<u8> {
+        fn push(out: &mut Vec<u8>, value: &[u8]) {
+            out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            out.extend_from_slice(value);
+        }
+        let mut out = vec![];
+        push(&mut out, &vec![1; session_len]);
+        out.push(50);
+        for value in [b"u".as_slice(), b"ssh-connection", b"publickey"] {
+            push(&mut out, value);
+        }
+        out.push(1);
+        push(&mut out, b"ssh-ed25519");
+        let mut key = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        key.extend_from_slice(&[2; 32]);
+        push(&mut out, &key);
+        out
+    }
+
+    #[test]
+    fn ssh_userauth_is_strict_and_accepts_only_through_8192_bytes() {
+        let overhead = userauth(0).len();
+        let bytes = userauth(MAX_SSH_USERAUTH_BYTES - overhead);
+        assert_eq!(bytes.len(), MAX_SSH_USERAUTH_BYTES);
+        let parsed = SshUserauth::parse(bytes.clone()).unwrap();
+        assert_eq!(parsed.user(), "u");
+        assert_eq!(parsed.public_key().len(), 51);
+        assert!(!parsed.session_id().is_empty());
+        assert!(matches!(
+            SshUserauth::parse(userauth(MAX_SSH_USERAUTH_BYTES - overhead + 1)),
+            Err(SecretError::LimitExceeded)
+        ));
+        assert!(SshUserauth::parse(userauth(0)).is_err());
+        for end in 0..userauth(1).len() {
+            assert!(SshUserauth::parse(userauth(1)[..end].to_vec()).is_err());
+        }
+        let mut trailing = userauth(1);
+        trailing.push(0);
+        assert!(SshUserauth::parse(trailing).is_err());
+        let mut unsigned = userauth(1);
+        unsigned[42] = 0;
+        assert!(SshUserauth::parse(unsigned).is_err());
+        assert!(SshUserauth::parse(b"SSHSIG".to_vec()).is_err());
+    }
+}
 
 pub fn approval_statement(
     id: &str,

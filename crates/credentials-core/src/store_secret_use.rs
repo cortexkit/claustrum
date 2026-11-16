@@ -16,13 +16,27 @@ pub struct SecretUseOutcome {
     pub last_use: Option<(String, i64)>,
 }
 
-struct Record {
-    incarnation: String,
+pub(super) struct Record {
+    pub incarnation: String,
     scope: SecretScope,
     material: SecretMaterial,
 }
 
-struct Refusal {
+pub(super) struct SshRecord {
+    pub incarnation: String,
+    pub record: VaultRecord,
+    pub fingerprint: String,
+}
+
+pub(super) fn secret_subject(name: &str) -> String {
+    if name.starts_with("signing:") {
+        name.to_owned()
+    } else {
+        format!("secret|{name}")
+    }
+}
+
+pub(super) struct Refusal {
     detail: &'static str,
     addressed: bool,
 }
@@ -122,6 +136,211 @@ impl ReceiptGrant {
 }
 
 impl EncryptedStore {
+    fn validate_local_use(
+        &self,
+        call: &SecretUse,
+        _local: &agent_secret::LocalUse,
+        now: i64,
+    ) -> Result<(), SecretError> {
+        if call.sender != SecretSender::Aft {
+            return Err(SecretError::NotFound);
+        }
+        if !self
+            .store
+            .with_conn(|conn| Ok(phone::local_programs_enabled(conn)))
+            .map_err(|_| SecretError::StoreError)?
+        {
+            return Err(SecretError::SecretLocalProgramsDisabled);
+        }
+        if call.coverage != "scope"
+            || !matches!(call.scope.kind.as_str(), "head" | "worker")
+            || call.scope.epoch > agent_secret::MAX_SECRET_JSON_INTEGER
+            || now < 0
+            || now as u64
+                > agent_secret::MAX_SECRET_JSON_INTEGER
+                    .saturating_sub(SECRET_PENDING_LIFETIME_LIMIT_MS as u64)
+        {
+            return Err(SecretError::InvalidParams);
+        }
+        Ok(())
+    }
+
+    /// Re-open the enrolled record under the caller's transaction. Approval uses the
+    /// same coverage and incarnation check as signing, without needing userauth bytes.
+    pub(super) fn enrolled_ssh(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+        local: &agent_secret::LocalUse,
+        public_key: Option<&[u8]>,
+    ) -> rusqlite::Result<Option<SshRecord>> {
+        if !local.is_ssh() {
+            return Ok(None);
+        }
+        let row: Option<(String, u64, Vec<u8>)> = conn.query_row("SELECT incarnation,record_version,envelope FROM credentials WHERE credential_id=?1 AND state='active'", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        let Some((incarnation, version, blob)) = row else {
+            return Ok(None);
+        };
+        let Some(record) = envelope::open(
+            &self.key,
+            &blob,
+            &RecordBinding {
+                credential_id: id,
+                record_version: version,
+            },
+        )
+        .ok()
+        .and_then(|b| VaultRecord::decode(&b).ok()) else {
+            return Ok(None);
+        };
+        if record.kind != CredentialKind::SigningKey
+            || !record
+                .agent_ssh
+                .as_ref()
+                .is_some_and(|a| local.matches_enrollment(a))
+        {
+            return Ok(None);
+        }
+        let Some(public) = std::str::from_utf8(record.payload.expose())
+            .ok()
+            .and_then(|pem| crate::signing::public_key_ed25519(pem).ok())
+        else {
+            return Ok(None);
+        };
+        let mut blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        for pair in public.public_key_hex.as_bytes().as_chunks::<2>().0 {
+            let byte = std::str::from_utf8(pair)
+                .ok()
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+                .ok_or_else(|| rusqlite_err("invalid Ed25519 public key"))?;
+            blob.push(byte);
+        }
+        if public_key.is_some_and(|p| p != blob) {
+            return Ok(None);
+        }
+        let fingerprint = format!(
+            "SHA256:{}",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload_hash(&blob))
+        );
+        Ok(Some(SshRecord {
+            incarnation,
+            record,
+            fingerprint,
+        }))
+    }
+
+    pub fn secret_ssh_sign(
+        &self,
+        call: &agent_secret::SecretSshSign,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        self.secret_ssh_sign_from(call, LOCAL_ASKING_MEMBER, clock)
+    }
+
+    /// The caller authenticates the asking member, just as for `secret_use_from`.
+    pub fn secret_ssh_sign_from(
+        &self,
+        call: &agent_secret::SecretSshSign,
+        asking_member: &str,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        let answer = self.ssh_sign_run(
+            call,
+            asking_member,
+            None,
+            |_| {
+                Ok::<_, std::convert::Infallible>(SealedRelease {
+                    enc: vec![],
+                    ciphertext: vec![],
+                })
+            },
+            clock,
+        )?;
+        match answer {
+            Ok(ForwardedUse::Reply(reply)) => Ok(SecretUseOutcome {
+                reply,
+                last_use: None,
+            }),
+            Ok(ForwardedUse::Sealed(_)) => Err(SecretError::StoreError),
+            Err(never) => match never {},
+        }
+    }
+
+    /// Seal and receipt a signature in the same writer fence that consumes its grant.
+    /// The caller must re-check pairing and forwarding authority on every retry.
+    pub fn secret_ssh_sign_sealed<E>(
+        &self,
+        call: &agent_secret::SecretSshSign,
+        request: &ReleaseRequest<'_>,
+        seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+        clock: impl Fn() -> i64,
+    ) -> Result<Result<ForwardedUse, E>, SecretError> {
+        request.validate()?;
+        self.ssh_sign_run(call, request.requester, Some(request), seal, clock)
+    }
+
+    fn ssh_sign_run<E>(
+        &self,
+        ssh: &agent_secret::SecretSshSign,
+        asking_member: &str,
+        request: Option<&ReleaseRequest<'_>>,
+        seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+        clock: impl Fn() -> i64,
+    ) -> Result<Result<ForwardedUse, E>, SecretError> {
+        let call = ssh.as_secret_use();
+        if call.sender != SecretSender::Aft {
+            return Err(SecretError::NotFound);
+        }
+        if !ssh.key.starts_with("signing:") || validate_deposit_credential_id(&ssh.key).is_err() {
+            return Err(SecretError::InvalidParams);
+        }
+        self.validate_local_use(&call, &ssh.local_use, clock())?;
+        if !ssh.local_use.is_ssh() || ssh.data.user() != ssh.local_use.user() {
+            return Err(SecretError::InvalidParams);
+        }
+        let mut seal_failure = None;
+        let answer = self.fenced_write(|tx| {
+            let now = clock();
+            if !phone::local_programs_enabled(tx) { return Ok(Forwarded::Answer(Err(SecretError::SecretLocalProgramsDisabled))); }
+            let Some(record) = self.enrolled_ssh(tx, &ssh.key, &ssh.local_use, Some(ssh.data.public_key()))? else { return Ok(Forwarded::Refused(Refusal { detail: "ssh_key", addressed: true })); };
+            let aad_hash = request.map(|r| phone::hex(&payload_hash(r.aad)));
+            if let Some(request) = request {
+                if let Some(answer) = replay(tx, request, aad_hash.as_deref().expect("receipt hash"), &record.incarnation, &[ReceiptGrant::Agent, ReceiptGrant::Once], now)? { return Ok(answer); }
+            }
+            phone::sweep(tx, &self.audit_key, now)?;
+            let Some(grant) = choose_grant(tx, &call, asking_member, &record.incarnation, now)? else {
+                return Ok(Forwarded::Answer(pending(tx, &call, asking_member, &record.incarnation, None, Some(&record.fingerprint), now)?.map(|o| ForwardedUse::Reply(o.reply))));
+            };
+            let pem = std::str::from_utf8(record.record.payload.expose()).map_err(|_| rusqlite_err("invalid signing key"))?;
+            let prepared = crate::signing::prepare_ed25519(pem, ssh.data.as_bytes()).map_err(|_| rusqlite_err("invalid signing key"))?;
+            let triple = ssh.local_use.triple().to_string();
+            let data_hash = phone::hex(&audit::payload_fingerprint(&self.audit_key, ssh.data.as_bytes()));
+            let mut fields = vec![grant.id.as_bytes(), record.incarnation.as_bytes(), triple.as_bytes(), data_hash.as_bytes()];
+            if !asking_member.is_empty() { fields.push(asking_member.as_bytes()); }
+            phone::audit(tx, &self.audit_key, AuditOp::SecretSshSign, Some(ssh.key.clone()), call.sender.actor(), &fields)?;
+            let signature = prepared.sign();
+            let raw = base64::engine::general_purpose::STANDARD.decode(signature.signature_b64).map_err(|_| rusqlite_err("signature encoding"))?;
+            let reply = json!({"status":"signed","signature_b64url":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)});
+            let answer = if let Some(request) = request {
+                let sealed = match seal(&reply) { Ok(s) => s, Err(e) => { seal_failure = Some(e); return Err(rusqlite_err("signature seal failed")); } };
+                write_receipt(tx, request, aad_hash.as_deref().expect("receipt hash"), &record.incarnation, if grant.duration == "once" { ReceiptGrant::Once } else { ReceiptGrant::Agent }, &grant.id, &sealed, now)?;
+                ForwardedUse::Sealed(sealed)
+            } else { ForwardedUse::Reply(reply) };
+            if grant.duration == "once" { tx.execute("DELETE FROM secret_grants WHERE grant_id=?1", [&grant.id])?; }
+            else { tx.execute("UPDATE secret_grants SET first_released=1,last_use_ms=?2 WHERE grant_id=?1", rusqlite::params![grant.id, now])?; }
+            Ok(Forwarded::Answer(Ok(answer)))
+        });
+        if let Some(error) = seal_failure {
+            return Ok(Err(error));
+        }
+        match answer.map_err(|_| SecretError::StoreError)? {
+            Forwarded::Answer(answer) => answer.map(Ok),
+            Forwarded::Refused(refusal) => {
+                Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
+            }
+        }
+    }
+
     /// Diagnostics are separate from release/quarantine transactions and cannot change replies.
     pub fn record_secret_use_refusal(
         &self,
@@ -129,10 +348,7 @@ impl EncryptedStore {
         name: Option<&str>,
         detail: &'static str,
     ) {
-        let subject = name.map_or_else(
-            || "secret-use|unaddressed".to_owned(),
-            |n| format!("secret|{n}"),
-        );
+        let subject = name.map_or_else(|| "secret-use|unaddressed".to_owned(), secret_subject);
         let _ = self.store.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             append_secret_auth_event_tx(
@@ -277,6 +493,12 @@ impl EncryptedStore {
         asking_member: &str,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
+        if let agent_secret::UseTarget::LocalProgram(local) = &call.target {
+            self.validate_local_use(call, local, clock())?;
+            if local.is_ssh() {
+                return Err(SecretError::InvalidParams);
+            }
+        }
         if call.sender == SecretSender::Basal {
             return self.use_refused(
                 call,
@@ -296,7 +518,11 @@ impl EncryptedStore {
         }).map_err(|_|SecretError::StoreError)?;
         match snapshot {
             Err(refusal) => return self.use_refused(call, refusal),
-            Ok((record, Some(grant), false)) if grant.first && grant.duration != "once" => {
+            Ok((record, Some(grant), false))
+                if grant.first
+                    && grant.duration != "once"
+                    && !matches!(call.target, agent_secret::UseTarget::LocalProgram(_)) =>
+            {
                 let reply = release(&record, now)?;
                 return Ok(SecretUseOutcome {
                     reply,
@@ -325,7 +551,16 @@ impl EncryptedStore {
                         last_use: None,
                     })));
                 }
-                pending(tx, call, asking_member, &record, now).map(Ok)
+                pending(
+                    tx,
+                    call,
+                    asking_member,
+                    &record.incarnation,
+                    Some(&record.scope),
+                    None,
+                    now,
+                )
+                .map(Ok)
             })
             .map_err(|_| SecretError::StoreError)?;
         match answer {
@@ -349,7 +584,25 @@ impl EncryptedStore {
         record: &Record,
         now: i64,
     ) -> rusqlite::Result<()> {
-        if !grant.first || grant.duration == "once" {
+        if let agent_secret::UseTarget::LocalProgram(local) = &call.target {
+            let triple = local.triple().to_string();
+            let mut fields = vec![
+                grant.id.as_bytes(),
+                record.incarnation.as_bytes(),
+                triple.as_bytes(),
+            ];
+            if asking_member != LOCAL_ASKING_MEMBER {
+                fields.push(asking_member.as_bytes());
+            }
+            phone::audit(
+                tx,
+                &self.audit_key,
+                AuditOp::SecretLocalRelease,
+                Some(format!("secret|{}", call.name)),
+                call.sender.actor(),
+                &fields,
+            )?;
+        } else if !grant.first || grant.duration == "once" {
             let mut fields: Vec<&[u8]> = vec![grant.id.as_bytes(), record.incarnation.as_bytes()];
             if asking_member != LOCAL_ASKING_MEMBER {
                 fields.push(asking_member.as_bytes());
@@ -403,6 +656,12 @@ impl EncryptedStore {
         clock: impl Fn() -> i64,
     ) -> Result<Result<ForwardedUse, E>, SecretError> {
         request.validate()?;
+        if let agent_secret::UseTarget::LocalProgram(local) = &call.target {
+            self.validate_local_use(call, local, clock())?;
+            if local.is_ssh() {
+                return Err(SecretError::InvalidParams);
+            }
+        }
         if call.sender == SecretSender::Basal {
             return Err(self.refuse_secret_target(
                 &call.name,
@@ -432,8 +691,16 @@ impl EncryptedStore {
             let Some(grant) = choose_grant(tx, call, request.requester, &record.incarnation, now)?
             else {
                 return Ok(Forwarded::Answer(
-                    pending(tx, call, request.requester, &record, now)?
-                        .map(|outcome| ForwardedUse::Reply(outcome.reply)),
+                    pending(
+                        tx,
+                        call,
+                        request.requester,
+                        &record.incarnation,
+                        Some(&record.scope),
+                        None,
+                        now,
+                    )?
+                    .map(|outcome| ForwardedUse::Reply(outcome.reply)),
                 ));
             };
             let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
@@ -488,6 +755,9 @@ impl EncryptedStore {
         target: &agent_secret::UseTarget,
         refusal: Refusal,
     ) -> SecretError {
+        if refusal.detail == "local_programs_disabled" {
+            return SecretError::SecretLocalProgramsDisabled;
+        }
         if refusal.detail == "sealed_scope" {
             // The flip is compare-and-set and audited in one transaction. Failure remains opaque.
             let _ = self.fenced_write(|tx| {
@@ -506,11 +776,19 @@ impl EncryptedStore {
         SecretError::NotFound
     }
 
-    fn check_secret_use(
+    pub(super) fn check_secret_use(
         &self,
         conn: &rusqlite::Connection,
         call: &SecretUse,
     ) -> rusqlite::Result<Result<Record, Refusal>> {
+        if matches!(call.target, agent_secret::UseTarget::LocalProgram(_))
+            && !phone::local_programs_enabled(conn)
+        {
+            return Ok(Err(Refusal {
+                detail: "local_programs_disabled",
+                addressed: false,
+            }));
+        }
         self.check_secret_target(conn, &call.name, call.sender, &call.target)
     }
 
@@ -575,7 +853,7 @@ fn choose_grant(
     incarnation: &str,
     now: i64,
 ) -> rusqlite::Result<Option<Grant>> {
-    let mut stmt=conn.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,first_released FROM secret_grants WHERE incarnation=?1 AND secret_name=?2 AND (duration='permanent' OR expires_at_ms>?3) AND asking_member_id=?4 ORDER BY (duration='once'), (duration='permanent') DESC, CASE WHEN duration!='once' THEN expires_at_ms ELSE 0 END DESC, granted_at_ms, grant_id")?;
+    let mut stmt=conn.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,first_released,local_use FROM secret_grants WHERE incarnation=?1 AND secret_name=?2 AND (duration='permanent' OR expires_at_ms>?3) AND asking_member_id=?4 ORDER BY (duration='once'), (duration='permanent') DESC, CASE WHEN duration!='once' THEN expires_at_ms ELSE 0 END DESC, granted_at_ms, grant_id")?;
     let rows = stmt.query_map(
         rusqlite::params![incarnation, call.name, now, asking_member],
         |r| {
@@ -587,11 +865,41 @@ fn choose_grant(
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, bool>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         },
     )?;
     for row in rows {
-        let (id, owner, kind, scope_ref, coverage, duration, first) = row?;
+        let (id, owner, kind, scope_ref, coverage, duration, first, local_use) = row?;
+        match &call.target {
+            agent_secret::UseTarget::LocalProgram(local) => {
+                let Some(raw) = local_use else {
+                    continue;
+                };
+                let mut stored: Value =
+                    serde_json::from_str(&raw).map_err(|_| rusqlite_err("invalid local grant"))?;
+                stored
+                    .as_object_mut()
+                    .ok_or_else(|| rusqlite_err("invalid local grant"))?
+                    .remove("key");
+                let expected = if duration == "once" {
+                    local.members()
+                } else {
+                    local.triple()
+                };
+                if !local.durations().contains(&duration.as_str())
+                    || stored != expected
+                    || coverage != "scope"
+                {
+                    continue;
+                }
+            }
+            agent_secret::UseTarget::ApiKey { .. } | agent_secret::UseTarget::SiteLogin { .. } => {
+                if local_use.is_some() {
+                    continue;
+                }
+            }
+        }
         let equal = |scope: &AskingScope| {
             scope.owner == owner && scope.kind == kind && scope.scope_ref == scope_ref
         };
@@ -715,6 +1023,9 @@ fn write_receipt(
 
 fn release(record: &Record, now: i64) -> Result<Value, SecretError> {
     match (&record.scope, &record.material) {
+        (SecretScope::LocalProgram { r#use, .. }, SecretMaterial::LocalProgram(value)) => Ok(
+            json!({"status":"released","kind":"local_program","use":r#use,"value":value.expose()}),
+        ),
         (
             SecretScope::ApiKey { location, .. } | SecretScope::ApiKeyRules { location, .. },
             SecretMaterial::ApiKey(key),
@@ -748,11 +1059,14 @@ fn approval_reply(id: &str, statement: &[u8], expiry: i64) -> SecretUseOutcome {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pending(
     tx: &rusqlite::Transaction<'_>,
     call: &SecretUse,
     asking_member: &str,
-    record: &Record,
+    incarnation: &str,
+    scope: Option<&SecretScope>,
+    fingerprint: Option<&str>,
     now: i64,
 ) -> rusqlite::Result<Result<SecretUseOutcome, SecretError>> {
     let member = match phone::self_member(tx) {
@@ -761,20 +1075,32 @@ fn pending(
         Err(error) => return Ok(Err(error)),
     };
     let run = || -> rusqlite::Result<Result<SecretUseOutcome, SecretError>> {
+        let local_use = match &call.target {
+            agent_secret::UseTarget::LocalProgram(local) => {
+                let mut members = local.members();
+                if let Some(fp) = fingerprint {
+                    members["key"] = json!({"credential_id":call.name,"fingerprint":fp});
+                }
+                Some(members.to_string())
+            }
+            agent_secret::UseTarget::ApiKey { .. } | agent_secret::UseTarget::SiteLogin { .. } => {
+                None
+            }
+        };
         // Housekeeping only: drop consumed and expired requests, and requests
         // whose serving member id is no longer this vault's. Live requests from any
         // asker stay.
         tx.execute("DELETE FROM secret_pending_requests WHERE consumed!=0 OR request_expires_at_ms<=?1 OR member_id!=?2",rusqlite::params![now,member])?;
         // A request is reused only for the same asker, so two computers whose agents carry
         // the same scope stamp each get their own approval, never a shared one.
-        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5 AND asking_member_id=?6",rusqlite::params![record.incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage,asking_member],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
+        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5 AND asking_member_id=?6 AND local_use IS ?7",rusqlite::params![incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage,asking_member,local_use],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
         if let Some((id, bytes, expiry)) = prior {
             return Ok(Ok(approval_reply(&id, &bytes, expiry)));
         }
         // The per-scope limit counts this asker's requests only, so another computer
         // cannot use up the quota of a scope stamp it happens to share.
-        let (total,scope):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3 AND asking_member_id=?4),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref,asking_member],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        if total >= MAX_SECRET_PENDING_TOTAL || scope >= MAX_SECRET_PENDING_PER_SCOPE {
+        let (total,scope_count):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3 AND asking_member_id=?4),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref,asking_member],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        if total >= MAX_SECRET_PENDING_TOTAL || scope_count >= MAX_SECRET_PENDING_PER_SCOPE {
             return Ok(Err(SecretError::PendingLimit));
         }
         let id = agent_secret::request_id(now)
@@ -785,19 +1111,32 @@ fn pending(
         // `agent` and `scope.ref` retain their UTF-8 bytes without normalization.
         // A forwarded request carries the v1 object plus `asking_member_id` under a
         // v2 tag; a local one stays v1 byte for byte.
-        let statement = agent_secret::approval_statement_for_asker(
-            &id,
-            &member,
-            &record.incarnation,
-            call,
-            &record.scope,
-            expiry,
-            asking_member,
-        );
+        let statement = if let agent_secret::UseTarget::LocalProgram(local) = &call.target {
+            agent_secret::local_approval_statement(
+                &id,
+                &member,
+                incarnation,
+                call,
+                local,
+                fingerprint,
+                expiry,
+                asking_member,
+            )
+        } else {
+            agent_secret::approval_statement_for_asker(
+                &id,
+                &member,
+                incarnation,
+                call,
+                scope.expect("value secret scope"),
+                expiry,
+                asking_member,
+            )
+        };
         let bytes = serde_json::to_vec(&statement)
             .map_err(|_| rusqlite_err("statement encoding failed"))?;
         let digest = phone::hex(&payload_hash(&bytes));
-        tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,asking_member_id) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",rusqlite::params![id,call.name,record.incarnation,member,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.scope.epoch,call.coverage,call.agent_id,bytes,digest,expiry,asking_member])?;
+        tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,asking_member_id,local_use) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",rusqlite::params![id,call.name,incarnation,member,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.scope.epoch,call.coverage,call.agent_id,bytes,digest,expiry,asking_member,local_use])?;
         Ok(Ok(approval_reply(&id, &bytes, expiry)))
     };
     run()

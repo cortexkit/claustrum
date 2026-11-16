@@ -65,6 +65,34 @@ pub struct SecretUse {
     pub target: UseTarget,
 }
 
+/// The route derives scope, parent and agent attribution from the decoded
+/// `subc_protocol::scope::ScopeStamp` and parses userauth before calling the store.
+/// The key field names an enrolled signing credential; it never contains a private
+/// key or a password.
+pub struct SecretSshSign {
+    pub key: String,
+    pub sender: SecretSender,
+    pub scope: AskingScope,
+    pub worker_parent: Option<AskingScope>,
+    pub coverage: String,
+    pub agent_id: Option<String>,
+    pub local_use: super::LocalUse,
+    pub data: super::SshUserauth,
+}
+impl SecretSshSign {
+    pub fn as_secret_use(&self) -> SecretUse {
+        SecretUse {
+            name: self.key.clone(),
+            sender: self.sender,
+            scope: self.scope.clone(),
+            worker_parent: self.worker_parent.clone(),
+            coverage: self.coverage.clone(),
+            agent_id: self.agent_id.clone(),
+            target: UseTarget::LocalProgram(self.local_use.clone()),
+        }
+    }
+}
+
 /// Install-time approval inputs, separate from agent session scopes.
 pub struct SecretFlowApproval {
     pub name: String,
@@ -90,11 +118,14 @@ pub fn validate_flow_methods(
     match (target, methods) {
         (UseTarget::ApiKey { .. }, Some(methods)) => super::sorted_flow_methods(methods).map(Some),
         (UseTarget::SiteLogin { .. }, None) => Ok(None),
-        _ => Err(ValidationError::InvalidParams),
+        (UseTarget::ApiKey { .. }, None)
+        | (UseTarget::SiteLogin { .. }, Some(_))
+        | (UseTarget::LocalProgram(_), _) => Err(ValidationError::InvalidParams),
     }
 }
 
 pub enum UseTarget {
+    LocalProgram(super::LocalUse),
     ApiKey {
         scheme: String,
         host: String,
@@ -109,6 +140,7 @@ pub enum UseTarget {
 impl UseTarget {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::LocalProgram(_) => Ok(()),
             Self::ApiKey {
                 scheme, host, path, ..
             } => {
@@ -130,6 +162,7 @@ impl UseTarget {
         use secret_rules::scope::{SecretScope as RuleScope, UseTarget as RuleTarget};
         let normalized_origin;
         let target = match self {
+            Self::LocalProgram(local) => return local.matches_scope(scope),
             Self::ApiKey {
                 scheme,
                 host,

@@ -30,6 +30,7 @@ struct Pending {
     /// The computer whose request this is, `''` for this vault's own. Each grant the
     /// request's approval creates records the same asker.
     asking_member: String,
+    local_use: Option<String>,
 }
 
 impl EncryptedStore {
@@ -40,7 +41,7 @@ impl EncryptedStore {
         now: i64,
     ) -> Result<Value, SecretError> {
         self.store.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT g.grant_id,g.agent_id,g.scope_kind,g.scope_ref,s.name,s.kind,s.host,s.path_prefix,s.origin,g.duration,g.expires_at_ms,g.granted_at_ms,g.card_ref,s.location,s.scope_json FROM secret_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name WHERE (g.duration='permanent' OR g.expires_at_ms>?1) AND (?2 IS NULL OR g.agent_id=?2) ORDER BY g.grant_id")?;
+            let mut stmt = conn.prepare("SELECT g.grant_id,g.agent_id,g.scope_kind,g.scope_ref,s.name,s.kind,s.host,s.path_prefix,s.origin,g.duration,g.expires_at_ms,g.granted_at_ms,g.card_ref,s.location,s.scope_json FROM secret_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name WHERE g.local_use IS NULL AND (g.duration='permanent' OR g.expires_at_ms>?1) AND (?2 IS NULL OR g.agent_id=?2) ORDER BY g.grant_id")?;
             let rows = stmt.query_map(rusqlite::params![now,agent_id],|r| {
                 let name: String = r.get(4)?;
                 let kind: String = r.get(5)?;
@@ -173,6 +174,11 @@ impl EncryptedStore {
         }
         let mut results = Vec::with_capacity(envelope.items.len());
         for item in &envelope.items {
+            let local_item: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM secret_pending_requests WHERE request_id=?1 AND local_use IS NOT NULL)", [&item.request_id], |r| r.get(0))?;
+            if local_item && !phone::local_programs_enabled(tx) {
+                results.push(json!({"request_id":item.request_id,"outcome":"refused","code":"secret_local_programs_disabled"}));
+                continue;
+            }
             let accepted = self.secret_approval_item_tx(
                 tx,
                 item,
@@ -215,7 +221,7 @@ impl EncryptedStore {
         delete: bool,
         now: i64,
     ) -> rusqlite::Result<bool> {
-        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods,asking_member_id FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?,flow_id:r.get(14)?,flow_version:r.get(15)?,flow_code_hash:r.get(16)?,flow_install_id:r.get(17)?,methods:r.get(18)?,asking_member:r.get(19)?})).optional()?;
+        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods,asking_member_id,local_use FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?,flow_id:r.get(14)?,flow_version:r.get(15)?,flow_code_hash:r.get(16)?,flow_install_id:r.get(17)?,methods:r.get(18)?,asking_member:r.get(19)?,local_use:r.get(20)?})).optional()?;
         let Some(p) = pending else {
             return Ok(false);
         };
@@ -240,8 +246,9 @@ impl EncryptedStore {
             || statement["member_id"] != p.member
             || statement["request_id"] != item.request_id
             || statement["request_expires_at_ms"] != p.expiry
-            || statement["secret"]["name"] != p.name
-            || statement["secret"]["incarnation"] != p.incarnation
+            || (p.local_use.is_none()
+                && (statement["secret"]["name"] != p.name
+                    || statement["secret"]["incarnation"] != p.incarnation))
             || p.kind != if delete { "delete" } else { "approve" }
             || e.decision != if delete { "delete" } else { "allow" }
         {
@@ -270,6 +277,19 @@ impl EncryptedStore {
         };
         if expected_expiry != Some(e.grant_expires_at_ms as i64) {
             return Ok(false);
+        }
+        if p.local_use.is_some() {
+            return self.secret_local_approval_item_tx(
+                tx,
+                item,
+                e,
+                &p,
+                &statement,
+                fingerprint,
+                envelope_hash,
+                card_ref,
+                now,
+            );
         }
         let row = tx.query_row("SELECT kind,state,host,path_prefix,location,origin,envelope,scope_json FROM agent_secrets WHERE name=?1 AND incarnation=?2",rusqlite::params![p.name,p.incarnation], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Vec<u8>>(6)?,r.get::<_,Option<String>>(7)?))).optional()?;
         let Some((kind, state, host, path_prefix, location, origin, blob, scope_json)) = row else {
@@ -391,6 +411,122 @@ impl EncryptedStore {
             AuditOp::SecretGrantCreate,
             &p.name,
             &actor,
+            envelope_hash,
+        )?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn secret_local_approval_item_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        item: &ApprovalItem,
+        e: &ApprovalEnvelope,
+        p: &Pending,
+        statement: &Value,
+        fingerprint: &str,
+        envelope_hash: &str,
+        card_ref: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<bool> {
+        if !phone::local_programs_enabled(tx)
+            || e.decision != "allow"
+            || p.coverage.as_deref() != Some("scope")
+            || !matches!(p.scope_kind.as_deref(), Some("head" | "worker"))
+            || p.flow_id.is_some()
+        {
+            return Ok(false);
+        }
+        let mut members: Value =
+            match serde_json::from_str(p.local_use.as_deref().expect("local pending")) {
+                Ok(v) => v,
+                Err(_) => return Ok(false),
+            };
+        let saved_key = members.as_object_mut().and_then(|v| v.remove("key"));
+        let local = match agent_secret::LocalUse::from_value(&members) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        if !local.durations().contains(&e.duration.as_str()) {
+            return Ok(false);
+        }
+        let (Some(owner), Some(kind), Some(scope_ref), Some(epoch)) =
+            (&p.owner, &p.scope_kind, &p.scope_ref, p.epoch)
+        else {
+            return Ok(false);
+        };
+        let call = agent_secret::SecretUse {
+            name: p.name.clone(),
+            sender: agent_secret::SecretSender::Aft,
+            scope: agent_secret::AskingScope {
+                owner: owner.clone(),
+                kind: kind.clone(),
+                scope_ref: scope_ref.clone(),
+                epoch,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: p.agent_id.clone(),
+            target: agent_secret::UseTarget::LocalProgram(local.clone()),
+        };
+        let key_fp = if local.is_ssh() {
+            let Some(record) = self.enrolled_ssh(tx, &p.name, &local, None)? else {
+                return Ok(false);
+            };
+            if record.incarnation != p.incarnation
+                || saved_key
+                    != Some(json!({"credential_id":p.name,"fingerprint":record.fingerprint}))
+            {
+                return Ok(false);
+            }
+            Some(record.fingerprint)
+        } else {
+            if saved_key.is_some() {
+                return Ok(false);
+            }
+            let record = match self.check_secret_use(tx, &call)? {
+                Ok(r) => r,
+                Err(_) => return Ok(false),
+            };
+            if record.incarnation != p.incarnation {
+                return Ok(false);
+            }
+            None
+        };
+        let expected = agent_secret::local_approval_statement(
+            &item.request_id,
+            &p.member,
+            &p.incarnation,
+            &call,
+            &local,
+            key_fp.as_deref(),
+            p.expiry,
+            &p.asking_member,
+        );
+        if *statement != expected {
+            return Ok(false);
+        }
+        let mut granted = if e.duration == "once" {
+            local.members()
+        } else {
+            local.triple()
+        };
+        if let Some(fp) = key_fp {
+            granted["key"] = json!({"credential_id":p.name,"fingerprint":fp});
+        }
+        let id = agent_secret::request_id(now)
+            .map_err(|_| rusqlite_err("grant id generation failed"))?;
+        tx.execute(
+            "UPDATE secret_pending_requests SET consumed=1 WHERE request_id=?1",
+            [&item.request_id],
+        )?;
+        tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,agent_id,card_ref,asking_member_id,local_use) VALUES (?1,?2,?3,?4,?5,?6,'scope',?7,?8,?9,?10,?11,?12,?13,?14)", rusqlite::params![id,p.name,p.incarnation,p.owner,p.scope_kind,p.scope_ref,e.duration,e.grant_expires_at_ms,now,envelope_hash,p.agent_id,card_ref,p.asking_member,granted.to_string()])?;
+        envelope_audit(
+            tx,
+            &self.audit_key,
+            AuditOp::SecretGrantCreate,
+            &p.name,
+            &format!("fed-phone:{fingerprint}"),
             envelope_hash,
         )?;
         Ok(true)
@@ -528,7 +664,7 @@ fn envelope_audit(
         key,
         &AuditRecord {
             op,
-            credential_id: Some(format!("secret|{name}")),
+            credential_id: Some(use_secret::secret_subject(name)),
             payload_hash: Some(hash.to_owned()),
             actor: actor.to_owned(),
             alarm: None,
@@ -638,7 +774,7 @@ pub(super) fn revoke(
             tx,
             key,
             AuditOp::SecretGrantRevoke,
-            Some(format!("secret|{name}")),
+            Some(use_secret::secret_subject(&name)),
             actor,
             &[
                 id.as_bytes(),
@@ -654,7 +790,7 @@ pub(super) fn revoke(
         tx,
         key,
         AuditOp::SecretGrantRevoke,
-        Some(format!("secret|{name}")),
+        Some(use_secret::secret_subject(&name)),
         actor,
         &[id.as_bytes(), incarnation.as_bytes()],
     )?;
@@ -666,6 +802,740 @@ mod v2_approval_tests {
     use crate::{secret::Secret, store::taxonomy_tests::rig};
     use p256::ecdsa::{signature::Signer, SigningKey};
     use std::sync::Arc;
+
+    mod local_use_tests {
+        use super::*;
+        use agent_secret::{LocalUse, SecretSshSign, SshUserauth, UseTarget};
+        const KEY: &str = "signing:local-login";
+
+        fn setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
+            let (root, store) = v2_setup(tag);
+            store
+                .set_secret_local_programs_audited(
+                    true,
+                    AuditCtx::admin(AuditOp::SecretLocalProgramsSet),
+                )
+                .unwrap();
+            let scope = SecretScope::from_input(
+                "local_program",
+                &json!({"program":"sudo","use":"sudo_password","targets":[{"user":"root"}]}),
+                None,
+            )
+            .unwrap();
+            let incarnation = "000000000000000000000000000000ab";
+            let blob = agent_secret::seal(
+                &store.key,
+                incarnation,
+                "sudo-pw",
+                &scope,
+                &agent_secret::SecretMaterial::LocalProgram(Secret::new("pässwörd".into())),
+            )
+            .unwrap();
+            store.fenced_write(|tx| tx.execute("INSERT INTO agent_secrets (name,kind,incarnation,state,record_version,key_id,envelope,created_at_ms,scope_json) VALUES ('sudo-pw','local_program',?1,'active',1,?2,?3,?4,?5)", rusqlite::params![incarnation,store.key_id.to_hex(),blob,V2_NOW,scope.scope_json().unwrap()]).map(|_| ())).unwrap();
+            let der =
+                ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap();
+            let pem = format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+                base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+            );
+            store
+                .create(
+                    KEY,
+                    &VaultRecord::new_static(
+                        CredentialKind::SigningKey,
+                        "test",
+                        pem.into_bytes(),
+                        None,
+                    ),
+                )
+                .unwrap();
+            allow(&store);
+            (root, store)
+        }
+
+        fn allow(store: &EncryptedStore) {
+            store
+                .set_agent_ssh_audited(
+                    KEY,
+                    Some(crate::record::AgentSsh {
+                        targets: vec![crate::record::AgentSshTarget {
+                            user: None,
+                            host: "ssh.test".into(),
+                            port: None,
+                        }],
+                    }),
+                    "admin",
+                )
+                .unwrap();
+        }
+
+        fn sudo(command: &str) -> agent_secret::SecretUse {
+            let mut call = v2_call();
+            call.name = "sudo-pw".into();
+            call.target = UseTarget::LocalProgram(LocalUse::from_value(&json!({"program":"sudo","use":"sudo_password","target":{"user":"root"},"command":command,"workdir":"/home/u","purpose":"update","expects":"password prompt","undoable":"no"})).unwrap());
+            call
+        }
+
+        fn ssh(
+            store: &EncryptedStore,
+            command: &str,
+            user: &str,
+            host: &str,
+            port: u16,
+        ) -> SecretSshSign {
+            let public = crate::signing::public_key_ed25519(
+                std::str::from_utf8(store.get(KEY).unwrap().payload.expose()).unwrap(),
+            )
+            .unwrap();
+            let mut blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+            for pair in public.public_key_hex.as_bytes().as_chunks::<2>().0 {
+                blob.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+            }
+            fn push(out: &mut Vec<u8>, b: &[u8]) {
+                out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                out.extend_from_slice(b);
+            }
+            let mut data = vec![];
+            push(&mut data, b"session");
+            data.push(50);
+            for b in [user.as_bytes(), b"ssh-connection", b"publickey"] {
+                push(&mut data, b);
+            }
+            data.push(1);
+            push(&mut data, b"ssh-ed25519");
+            push(&mut data, &blob);
+            let call = v2_call();
+            SecretSshSign { key:KEY.into(), sender:agent_secret::SecretSender::Aft, scope:call.scope, worker_parent:None, coverage:"scope".into(), agent_id:call.agent_id, local_use:LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":user,"host":host,"port":port},"command":command,"workdir":"/home/u","purpose":"login"})).unwrap(), data:SshUserauth::parse(data).unwrap() }
+        }
+
+        fn count(store: &EncryptedStore, query: &str) -> i64 {
+            store
+                .store
+                .with_conn(|c| c.query_row(query, [], |r| r.get(0)))
+                .unwrap()
+        }
+        fn request(store: &EncryptedStore, call: &SecretSshSign) -> Value {
+            store.secret_ssh_sign(call, || V2_NOW).unwrap().reply
+        }
+        fn signed_envelope(requests: &[Value], duration: &str) -> (Vec<u8>, Vec<u8>) {
+            let envelope = v2_envelope(requests.iter().map(v2_item).collect(), duration, V2_NOW);
+            let bytes = serde_json::to_vec(&envelope).unwrap();
+            let sig: p256::ecdsa::Signature = v2_signer().sign(&bytes);
+            (bytes, sig.to_der().as_bytes().to_vec())
+        }
+        fn submit(store: &EncryptedStore, bytes: Vec<u8>, signature: Vec<u8>) -> Value {
+            store
+                .secret_phone_operation(
+                    V2_FP,
+                    Some("pair-A"),
+                    V2_NOW,
+                    &crate::store::store_agent_secrets::PhoneOperation::Approve {
+                        envelope: bytes,
+                        signature,
+                        card_ref: Some("local-card".into()),
+                    },
+                    || true,
+                    || V2_NOW,
+                )
+                .unwrap()
+        }
+
+        #[test]
+        fn sudo_cards_bind_full_members_and_release_once_with_audit() {
+            let (_root, store) = setup("local-sudo-cards");
+            let a = store
+                .secret_use(&sudo("apt upgrade"), || V2_NOW)
+                .unwrap()
+                .reply;
+            assert_eq!(
+                store
+                    .secret_use(&sudo("apt upgrade"), || V2_NOW)
+                    .unwrap()
+                    .reply,
+                a
+            );
+            let b = store
+                .secret_use(&sudo("apt remove"), || V2_NOW)
+                .unwrap()
+                .reply;
+            assert_ne!(a["request_id"], b["request_id"]);
+            assert_eq!(
+                v2_approve(&store, &a, "hour")["results"][0]["code"],
+                "approval_invalid"
+            );
+            assert_eq!(
+                v2_approve(&store, &a, "once")["results"][0]["outcome"],
+                "granted"
+            );
+            assert_eq!(
+                store
+                    .secret_use(&sudo("apt remove"), || V2_NOW)
+                    .unwrap()
+                    .reply,
+                b
+            );
+            let outcome = store.secret_use(&sudo("apt upgrade"), || V2_NOW).unwrap();
+            assert!(outcome.last_use.is_none());
+            assert_eq!(
+                outcome.reply,
+                json!({"status":"released","kind":"local_program","use":"sudo_password","value":"pässwörd"})
+            );
+            let fresh = store
+                .secret_use(&sudo("apt upgrade"), || V2_NOW)
+                .unwrap()
+                .reply;
+            assert_eq!(fresh["status"], "approval_required");
+            assert_ne!(fresh["request_id"], a["request_id"]);
+            assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op='secret_local_release' AND credential_id='secret|sudo-pw'"), 1);
+            assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op='secret_first_release' AND credential_id='secret|sudo-pw'"), 0);
+            assert_eq!(
+                store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
+                json!([])
+            );
+        }
+
+        #[test]
+        fn ssh_once_binds_members_and_remembered_grants_bind_triple_and_asker() {
+            for duration in ["once", "hour", "session"] {
+                let (_root, store) = setup(&format!("local-ssh-{duration}"));
+                let call = ssh(&store, "ssh first", "u", "ssh.test", 22);
+                let pending = request(&store, &call);
+                assert_eq!(
+                    v2_approve(&store, &pending, duration)["results"][0]["outcome"],
+                    "granted"
+                );
+                let changed = ssh(&store, "ssh changed", "u", "ssh.test", 22);
+                let changed_reply = request(&store, &changed);
+                if duration == "once" {
+                    assert_eq!(changed_reply["status"], "approval_required");
+                } else {
+                    assert_eq!(changed_reply["status"], "signed");
+                }
+                let signed = request(&store, &call);
+                assert_eq!(signed["status"], "signed");
+                let signature = URL_SAFE_NO_PAD
+                    .decode(signed["signature_b64url"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(signature.len(), 64);
+                ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ED25519,
+                    &call.data.public_key()[19..],
+                )
+                .verify(call.data.as_bytes(), &signature)
+                .unwrap();
+                assert_eq!(
+                    request(&store, &ssh(&store, "ssh first", "other", "ssh.test", 22))["status"],
+                    "approval_required"
+                );
+                assert_eq!(
+                    request(&store, &ssh(&store, "ssh first", "u", "ssh.test", 23))["status"],
+                    "approval_required"
+                );
+                assert_eq!(
+                    store
+                        .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
+                        .unwrap()
+                        .reply["status"],
+                    "approval_required"
+                );
+                assert_eq!(
+                    count(
+                        &store,
+                        "SELECT count(*) FROM audit_log WHERE op='secret_ssh_sign'"
+                    ),
+                    if duration == "once" { 1 } else { 2 }
+                );
+                assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op='secret_grant_create' AND credential_id='signing:local-login'"), 1);
+                assert_eq!(
+                    store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
+                    json!([])
+                );
+                let raw: String = store
+                    .store
+                    .with_conn(|c| {
+                        c.query_row(
+                            "SELECT local_use FROM secret_grants WHERE secret_name=?1",
+                            [KEY],
+                            |r| r.get(0),
+                        )
+                    })
+                    .unwrap_or_default();
+                if duration != "once" {
+                    let value: Value = serde_json::from_str(&raw).unwrap();
+                    assert!(value.get("command").is_none());
+                    assert_eq!(value["key"]["credential_id"], KEY);
+                }
+            }
+        }
+
+        #[test]
+        fn ssh_approval_after_deny_is_refused_without_grant() {
+            let (_root, store) = setup("local-ssh-approve-denied");
+            let pending = request(&store, &ssh(&store, "ssh", "u", "ssh.test", 22));
+            let (bytes, signature) = signed_envelope(&[pending], "once");
+            store.set_agent_ssh_audited(KEY, None, "admin").unwrap();
+            let reply = submit(&store, bytes, signature);
+            assert_eq!(reply["results"][0]["outcome"], "refused");
+            assert_eq!(reply["results"][0]["code"], "approval_invalid");
+            assert_eq!(count(&store, "SELECT count(*) FROM secret_grants"), 0);
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM audit_log WHERE op='secret_grant_create'"
+                ),
+                0
+            );
+        }
+
+        #[test]
+        fn local_ssh_signature_verifies_under_node_and_tampering_fails() {
+            let (_root, store) = setup("local-ssh-node-verify");
+            let call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            let pending = request(&store, &call);
+            assert_eq!(
+                v2_approve(&store, &pending, "once")["results"][0]["outcome"],
+                "granted"
+            );
+            let signed = request(&store, &call);
+            let script = r#"
+const {createPublicKey, verify} = require('node:crypto');
+const input = JSON.parse(process.argv[1]);
+const raw = Buffer.from(input.public_key, 'base64url');
+const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+const key = createPublicKey({key: spki, format: 'der', type: 'spki'});
+const data = Buffer.from(input.data, 'base64url');
+const signature = Buffer.from(input.signature, 'base64url');
+if (!verify(null, data, key, signature)) throw new Error('vault signature did not verify');
+data[0] ^= 1;
+if (verify(null, data, key, signature)) throw new Error('tampered userauth verified');
+console.log('2 Node Ed25519 verification checks passed');
+"#;
+            let input = json!({"public_key":URL_SAFE_NO_PAD.encode(&call.data.public_key()[19..]),"data":URL_SAFE_NO_PAD.encode(call.data.as_bytes()),"signature":signed["signature_b64url"]});
+            let result = std::process::Command::new("node")
+                .args(["-e", script, &input.to_string()])
+                .output()
+                .expect("Node is required for independent SSH-signature verification");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap().trim(),
+                "2 Node Ed25519 verification checks passed"
+            );
+        }
+
+        #[test]
+        fn mixed_approval_while_off_refuses_only_local_item_and_replays_reply() {
+            let (_root, store) = setup("local-approval-off");
+            let https = store.secret_use(&v2_call(), || V2_NOW).unwrap().reply;
+            let local = store
+                .secret_use(&sudo("apt upgrade"), || V2_NOW)
+                .unwrap()
+                .reply;
+            let (bytes, sig) = signed_envelope(&[https, local], "once");
+            store
+                .set_secret_local_programs_audited(
+                    false,
+                    AuditCtx::admin(AuditOp::SecretLocalProgramsSet),
+                )
+                .unwrap();
+            let reply = submit(&store, bytes.clone(), sig.clone());
+            assert_eq!(reply["results"][0]["outcome"], "granted");
+            assert_eq!(
+                reply["results"][1]["code"],
+                "secret_local_programs_disabled"
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM secret_grants WHERE secret_name='sudo-pw'"
+                ),
+                0
+            );
+            assert_eq!(submit(&store, bytes, sig), reply);
+            assert!(matches!(
+                store.secret_use(&sudo("apt upgrade"), || V2_NOW),
+                Err(SecretError::SecretLocalProgramsDisabled)
+            ));
+        }
+
+        #[test]
+        fn lost_once_signature_after_deny_and_reallow_cannot_consume_new_grant() {
+            let (_root, store) = setup("local-ssh-lost-once");
+            let call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            let aad = b"authenticated-signature-aad";
+            let receipt = use_secret::ReleaseRequest {
+                requester: V2_ASKER,
+                nonce: "0123456789abcdef0123456789abcdef",
+                aad,
+            };
+            let seal = |v: &Value| {
+                Ok::<_, ()>(use_secret::SealedRelease {
+                    enc: vec![1],
+                    ciphertext: serde_json::to_vec(v).unwrap(),
+                })
+            };
+            let pending = store
+                .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
+                .unwrap()
+                .reply;
+            v2_approve(&store, &pending, "once");
+            let first = store
+                .secret_ssh_sign_sealed(&call, &receipt, seal, || V2_NOW)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                store
+                    .secret_ssh_sign_sealed(
+                        &call,
+                        &receipt,
+                        |_| -> Result<_, ()> { panic!("retry must replay") },
+                        || V2_NOW
+                    )
+                    .unwrap()
+                    .unwrap(),
+                first
+            );
+            store.set_agent_ssh_audited(KEY, None, "admin").unwrap();
+            allow(&store);
+            let fresh = store
+                .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
+                .unwrap()
+                .reply;
+            assert_eq!(
+                v2_approve(&store, &fresh, "once")["results"][0]["outcome"],
+                "granted"
+            );
+            let before = count(&store, "SELECT count(*) FROM secret_pending_requests");
+            assert!(matches!(
+                store.secret_ssh_sign_sealed(&call, &receipt, seal, || V2_NOW),
+                Err(SecretError::NotFound)
+            ));
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM secret_grants WHERE secret_name='signing:local-login'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(&store, "SELECT count(*) FROM secret_pending_requests"),
+                before
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM audit_log WHERE op='secret_ssh_sign'"
+                ),
+                1
+            );
+            let tombstone: (String, Vec<u8>, Vec<u8>) = store
+                .store
+                .with_conn(|c| {
+                    c.query_row(
+                        "SELECT aad_sha256,enc,ciphertext FROM secret_release_receipts",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(tombstone, ("invalidated".into(), vec![], vec![]));
+            let fresh_receipt = use_secret::ReleaseRequest {
+                nonce: "1123456789abcdef0123456789abcdef",
+                ..receipt
+            };
+            assert!(matches!(
+                store
+                    .secret_ssh_sign_sealed(&call, &fresh_receipt, seal, || V2_NOW)
+                    .unwrap()
+                    .unwrap(),
+                use_secret::ForwardedUse::Sealed(_)
+            ));
+        }
+
+        #[test]
+        fn ssh_revoke_and_expire_audit_bare_credential_ids() {
+            let (_root, store) = setup("local-ssh-lifecycle-audit");
+            let call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            let pending = request(&store, &call);
+            v2_approve(&store, &pending, "hour");
+            let id: String = store
+                .store
+                .with_conn(|c| c.query_row("SELECT grant_id FROM secret_grants", [], |r| r.get(0)))
+                .unwrap();
+            store
+                .secret_permissions_revoke(&id, "admin", V2_NOW)
+                .unwrap();
+            let pending = request(&store, &call);
+            v2_approve(&store, &pending, "hour");
+            store
+                .fenced_write(|tx| phone::sweep(tx, &store.audit_key, V2_NOW + 3_600_000))
+                .unwrap();
+            for op in [
+                "secret_grant_create",
+                "secret_grant_revoke",
+                "secret_grant_expire",
+            ] {
+                let subjects: Vec<String> = store
+                    .store
+                    .with_conn(|c| {
+                        c.prepare("SELECT credential_id FROM audit_log WHERE op=?1")?
+                            .query_map([op], |r| r.get(0))?
+                            .collect()
+                    })
+                    .unwrap();
+                assert!(!subjects.is_empty());
+                assert!(subjects.iter().all(|s| s == KEY), "{op}: {subjects:?}");
+            }
+        }
+
+        #[test]
+        fn local_targets_are_disjoint_and_flows_refuse_them() {
+            let (_root, store) = setup("local-target-disjoint");
+            let mut local = sudo("apt upgrade");
+            local.name = "key".into();
+            assert!(matches!(
+                store.secret_use(&local, || V2_NOW),
+                Err(SecretError::NotFound)
+            ));
+            let mut https = v2_call();
+            https.name = "sudo-pw".into();
+            assert!(matches!(
+                store.secret_use(&https, || V2_NOW),
+                Err(SecretError::NotFound)
+            ));
+            assert!(agent_secret::validate_flow_methods(&sudo("apt").target, None).is_err());
+            let approval = agent_secret::SecretFlowApproval {
+                name: "sudo-pw".into(),
+                flow: v2_flow(),
+                target: sudo("apt").target,
+                methods: None,
+            };
+            assert!(matches!(
+                store.secret_request_flow_approval(&approval, || V2_NOW),
+                Err(SecretError::InvalidParams)
+            ));
+            let call = agent_secret::SecretFlowUse {
+                name: "sudo-pw".into(),
+                flow: v2_flow(),
+                target: sudo("apt").target,
+                method: None,
+            };
+            assert!(matches!(
+                store.secret_flow_use(&call, || V2_NOW),
+                Err(SecretError::InvalidParams)
+            ));
+        }
+
+        #[test]
+        fn local_approval_rechecks_secret_and_key_incarnations() {
+            for ssh_key in [false, true] {
+                let (_root, store) = setup(&format!("local-incarnation-{ssh_key}"));
+                let pending = if ssh_key {
+                    request(&store, &ssh(&store, "ssh", "u", "ssh.test", 22))
+                } else {
+                    store
+                        .secret_use(&sudo("apt upgrade"), || V2_NOW)
+                        .unwrap()
+                        .reply
+                };
+                let (bytes, signature) = signed_envelope(&[pending], "once");
+                store.fenced_write(|tx| {
+                    if ssh_key { tx.execute("UPDATE credentials SET incarnation='ffffffffffffffffffffffffffffffff' WHERE credential_id=?1", [KEY])?; }
+                    else { tx.execute("UPDATE agent_secrets SET incarnation='ffffffffffffffffffffffffffffffff' WHERE name='sudo-pw'", [])?; }
+                    Ok(())
+                }).unwrap();
+                let reply = submit(&store, bytes, signature);
+                assert_eq!(reply["results"][0]["code"], "approval_invalid");
+                assert_eq!(count(&store, "SELECT count(*) FROM secret_grants"), 0);
+            }
+        }
+
+        #[test]
+        fn local_ssh_invisibility_refusals_do_not_create_pending_or_release_audits() {
+            let (_root, store) = setup("local-ssh-invisible");
+            let mut call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            let mut replies = vec![];
+            call.key = "signing:absent".into();
+            replies.push(
+                store
+                    .secret_ssh_sign(&call, || V2_NOW)
+                    .err()
+                    .unwrap()
+                    .body(),
+            );
+            call.key = KEY.into();
+            call.local_use = ssh(&store, "ssh", "u", "other.test", 22).local_use;
+            replies.push(
+                store
+                    .secret_ssh_sign(&call, || V2_NOW)
+                    .err()
+                    .unwrap()
+                    .body(),
+            );
+            call.local_use = ssh(&store, "ssh", "u", "ssh.test", 22).local_use;
+            let mut wrong_blob = call.data.as_bytes().to_vec();
+            *wrong_blob.last_mut().unwrap() ^= 1;
+            call.data = SshUserauth::parse(wrong_blob).unwrap();
+            replies.push(
+                store
+                    .secret_ssh_sign(&call, || V2_NOW)
+                    .err()
+                    .unwrap()
+                    .body(),
+            );
+            call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            store.set_agent_ssh_audited(KEY, None, "admin").unwrap();
+            replies.push(
+                store
+                    .secret_ssh_sign(&call, || V2_NOW)
+                    .err()
+                    .unwrap()
+                    .body(),
+            );
+            assert!(replies.iter().all(|r| r == &SecretError::NotFound.body()));
+            assert_eq!(
+                count(&store, "SELECT count(*) FROM secret_pending_requests"),
+                0
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM audit_log WHERE op='secret_ssh_sign'"
+                ),
+                0
+            );
+            assert_eq!(count(&store, "SELECT count(*) FROM auth_events WHERE credential_id='signing:local-login' AND detail='ssh_key'"), 3);
+            let events = count(&store, "SELECT count(*) FROM auth_events");
+            store
+                .set_secret_local_programs_audited(
+                    false,
+                    AuditCtx::admin(AuditOp::SecretLocalProgramsSet),
+                )
+                .unwrap();
+            assert!(matches!(
+                store.secret_ssh_sign(&call, || V2_NOW),
+                Err(SecretError::SecretLocalProgramsDisabled)
+            ));
+            call.sender = agent_secret::SecretSender::Cerebellum;
+            assert!(matches!(
+                store.secret_ssh_sign(&call, || V2_NOW),
+                Err(SecretError::NotFound)
+            ));
+            assert_eq!(count(&store, "SELECT count(*) FROM auth_events"), events);
+        }
+
+        #[test]
+        fn local_audit_fields_and_sealing_failure_are_transactional() {
+            let (_root, store) = setup("local-audit-fields");
+            let call = ssh(&store, "ssh", "u", "ssh.test", 22);
+            let pending = store
+                .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
+                .unwrap()
+                .reply;
+            v2_approve(&store, &pending, "hour");
+            let (id, incarnation): (String, String) = store
+                .store
+                .with_conn(|c| {
+                    c.query_row("SELECT grant_id,incarnation FROM secret_grants", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                })
+                .unwrap();
+            let receipt = use_secret::ReleaseRequest {
+                requester: V2_ASKER,
+                nonce: "0123456789abcdef0123456789abcdef",
+                aad: b"signed-aad",
+            };
+            assert_eq!(
+                store
+                    .secret_ssh_sign_sealed(
+                        &call,
+                        &receipt,
+                        |_| Err::<use_secret::SealedRelease, _>("seal failed"),
+                        || V2_NOW
+                    )
+                    .unwrap(),
+                Err("seal failed")
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM audit_log WHERE op='secret_ssh_sign'"
+                ),
+                0
+            );
+            assert_eq!(
+                count(&store, "SELECT count(*) FROM secret_release_receipts"),
+                0
+            );
+            assert_eq!(count(&store, "SELECT first_released FROM secret_grants"), 0);
+            store
+                .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
+                .unwrap();
+            let triple = r#"{"program":"ssh","target":{"host":"ssh.test","port":22,"user":"u"},"use":"ssh_sign"}"#;
+            let keyed_data = phone::hex(&audit::payload_fingerprint(
+                &store.audit_key,
+                call.data.as_bytes(),
+            ));
+            let mut payload = vec![];
+            for field in [
+                id.as_bytes(),
+                incarnation.as_bytes(),
+                triple.as_bytes(),
+                keyed_data.as_bytes(),
+                V2_ASKER.as_bytes(),
+            ] {
+                payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                payload.extend_from_slice(field);
+            }
+            let hash: String = store
+                .store
+                .with_conn(|c| {
+                    c.query_row(
+                        "SELECT payload_hash FROM audit_log WHERE op='secret_ssh_sign'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(hash, phone::hex(&payload_hash(&payload)));
+            let pending = store
+                .secret_use_from(&sudo("apt upgrade"), V2_ASKER, || V2_NOW)
+                .unwrap()
+                .reply;
+            v2_approve(&store, &pending, "once");
+            let (id, incarnation): (String, String) = store.store.with_conn(|c| c.query_row("SELECT grant_id,incarnation FROM secret_grants WHERE secret_name='sudo-pw'", [], |r| Ok((r.get(0)?, r.get(1)?)))).unwrap();
+            store
+                .secret_use_from(&sudo("apt upgrade"), V2_ASKER, || V2_NOW)
+                .unwrap();
+            let triple = r#"{"program":"sudo","target":{"user":"root"},"use":"sudo_password"}"#;
+            let mut payload = vec![];
+            for field in [
+                id.as_bytes(),
+                incarnation.as_bytes(),
+                triple.as_bytes(),
+                V2_ASKER.as_bytes(),
+            ] {
+                payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                payload.extend_from_slice(field);
+            }
+            let hash: String = store
+                .store
+                .with_conn(|c| {
+                    c.query_row(
+                        "SELECT payload_hash FROM audit_log WHERE op='secret_local_release'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(hash, phone::hex(&payload_hash(&payload)));
+        }
+    }
 
     const V2_HOME: &str = "fed-computer:22222222222222222222222222222222";
     const V2_ASKER: &str = "fed-computer:11111111111111111111111111111111";

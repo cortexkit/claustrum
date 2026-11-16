@@ -38,6 +38,9 @@ fn rule_target(target: &UseTarget) -> RuleTarget<'_> {
             path,
         },
         UseTarget::SiteLogin { origin } => RuleTarget::SiteLogin { origin },
+        UseTarget::LocalProgram(_) => {
+            panic!("the HTTPS/site scope corpus has no local-program targets")
+        }
     }
 }
 

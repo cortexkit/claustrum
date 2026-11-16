@@ -639,7 +639,7 @@ pub(super) fn sweep(
             tx,
             key,
             AuditOp::SecretGrantExpire,
-            Some(format!("secret|{name}")),
+            Some(use_secret::secret_subject(&name)),
             "vault",
             &[id.as_bytes(), incarnation.as_bytes(), &expiry.to_le_bytes()],
         )?;

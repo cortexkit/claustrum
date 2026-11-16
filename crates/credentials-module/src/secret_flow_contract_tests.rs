@@ -218,8 +218,11 @@ async fn phone_attestation_bind(
 #[tokio::test]
 async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() {
     #[derive(Clone, Default)]
-    struct Warnings(Arc<std::sync::atomic::AtomicUsize>);
-    impl tracing::Subscriber for Warnings {
+    struct BindEvents(
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+    );
+    impl tracing::Subscriber for BindEvents {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
@@ -232,8 +235,31 @@ async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() 
         fn exit(&self, _: &tracing::span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
             if event.metadata().target() == "routes" {
-                assert_eq!(*event.metadata().level(), tracing::Level::WARN);
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    assert_eq!(*event.metadata().level(), tracing::Level::INFO);
+                    struct Fields(std::collections::BTreeMap<String, String>);
+                    impl tracing::field::Visit for Fields {
+                        fn record_debug(
+                            &mut self,
+                            field: &tracing::field::Field,
+                            value: &dyn std::fmt::Debug,
+                        ) {
+                            self.0.insert(field.name().into(), format!("{value:?}"));
+                        }
+                        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                            self.0.insert(field.name().into(), value.into());
+                        }
+                    }
+                    let mut fields = Fields(std::collections::BTreeMap::new());
+                    event.record(&mut fields);
+                    assert!(
+                        !format!("{:?}", fields.0).contains(SC_FP),
+                        "bind logs must not contain the phone fingerprint"
+                    );
+                    self.1.lock().unwrap().push(fields.0);
+                }
             }
         }
     }
@@ -243,10 +269,18 @@ async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() 
         .set_secret_phone_mapping_audited(true, AuditCtx::admin(AuditOp::SecretPhoneGateSet))
         .unwrap();
     let routes = Arc::new(RouteEpochs::default());
-    let warnings = Warnings::default();
+    let warnings = BindEvents::default();
     let _capture = tracing::subscriber::set_default(warnings.clone());
     phone_attestation_bind(&surface, &admin, &routes, 17, 1, Some(json!("production"))).await;
     assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let bind_line = |channel: &str, production: &str| {
+        std::collections::BTreeMap::from([
+            ("message".into(), "phone route bound".into()),
+            ("production_build".into(), production.into()),
+            ("route_channel".into(), channel.into()),
+        ])
+    };
+    assert_eq!(*warnings.1.lock().unwrap(), vec![bind_line("17", "true")]);
     let captured = admin.route_caller(17);
     let federation::RouteCaller::Phone(phone) = &captured else {
         panic!("not a phone route")
@@ -264,7 +298,13 @@ async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() 
         Some(json!({"build":"production"})),
     ] {
         let before = warnings.0.load(std::sync::atomic::Ordering::SeqCst);
+        let bind_lines_before = warnings.1.lock().unwrap().len();
         phone_attestation_bind(&surface, &admin, &routes, 18, 1, build.clone()).await;
+        assert_eq!(warnings.1.lock().unwrap().len(), bind_lines_before + 1);
+        assert_eq!(
+            warnings.1.lock().unwrap().last(),
+            Some(&bind_line("18", "false"))
+        );
         assert_eq!(
             warnings.0.load(std::sync::atomic::Ordering::SeqCst),
             before + usize::from(build.is_some()),
@@ -303,8 +343,17 @@ async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() 
             before + usize::from(build.is_some()),
             "requests do not repeat bind warnings"
         );
+        assert_eq!(
+            warnings.1.lock().unwrap().len(),
+            bind_lines_before + 1,
+            "requests do not repeat bind info lines"
+        );
     }
     phone_attestation_bind(&surface, &admin, &routes, 17, 2, None).await;
+    assert_eq!(
+        warnings.1.lock().unwrap().last(),
+        Some(&bind_line("17", "false"))
+    );
     assert_ne!(admin.route_caller(17), captured);
     let (ty, _) = sc_dispatch(&surface, &admin, captured, "secret.approve", json!(null)).await;
     assert_eq!(
@@ -317,6 +366,22 @@ async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() 
         admin.route_caller(17),
         federation::RouteCaller::Principal(_)
     ));
+    let before = warnings.1.lock().unwrap().len();
+    bind_reserved_route(
+        &surface,
+        &admin,
+        &routes,
+        19,
+        1,
+        "callosum",
+        "callosum-self",
+    )
+    .await;
+    assert_eq!(
+        warnings.1.lock().unwrap().len(),
+        before,
+        "non-phone binds do not emit phone bind info lines"
+    );
 }
 
 fn sf_identity() -> serde_json::Value {

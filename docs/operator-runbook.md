@@ -474,6 +474,13 @@ check Callosum's attestation and daemon version rather than retrying the signatu
 An invalid present `peer_build` value produces a warning at bind and is treated
 as unmarked.
 
+Immediately after deploy, open the real iPhone's route and check the vault log
+for `phone route bound` with `production_build=true`. The info line includes only
+the route channel and production-build boolean, never the phone fingerprint. A
+simulator, development build or route without the daemon's production-build
+attestation logs `production_build=false`. This lets the operator confirm
+production-build attestation before trying an approval.
+
 ```sh
 ck auth secret put ops-github --kind api-key --host api.github.com \
   --path-prefix /repos --location header:X-Api-Key --material-file ~/.config/gh.key

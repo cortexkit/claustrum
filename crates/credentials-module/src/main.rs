@@ -1440,6 +1440,9 @@ async fn handle_control_request(
             }
             let peer: subc_protocol::peer::RouteBindPeer =
                 serde_json::from_value(peer_body).map_err(ModuleError::Json)?;
+            if identity.harness.starts_with("fed-phone:") {
+                tracing::info!(target: "routes", route_channel, production_build = peer.peer_build.as_deref() == Some("production"), "phone route bound");
+            }
             admin.record_connector_bind(
                 route_channel,
                 epoch,
@@ -19510,6 +19513,8 @@ mod tests {
     ///             route channel number, never the stamp, its flow id, or the principal
     ///   warn!     invalid peer build on route bind: fixed text and route channel only,
     ///             once per bind, never the supplied build value or phone fingerprint
+    ///   info!     phone route bound: route_channel and production_build boolean only,
+    ///             once per bind, never the phone-identifying route label or fingerprint
     ///   warn!     engram-catalog.json could not be written: fixed text and the io error
     ///             KIND only (never its message, which can carry a path)
     ///   warn!     permanent account exchange failure: fixed text only, never the JWT,
@@ -19581,7 +19586,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 23, 0),
+            (1, 2, 24, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

@@ -333,6 +333,29 @@ fn programs_on(store: &EncryptedStore) {
 }
 
 #[test]
+fn ssh_sign_refuses_unreadable_card_key_ids_before_lookup_without_writes() {
+    let (_root, store) = rig("ssh-card-id");
+    for id in [
+        "signing:".to_owned(),
+        format!("signing:{}x", "é".repeat(124)),
+        "signing:a\nb".to_owned(),
+        "signing:a\u{e007f}b".to_owned(),
+        "signing:a\u{2028}b".to_owned(),
+        "signing:a\u{2029}b".to_owned(),
+        "signing:bad|id".to_owned(),
+    ] {
+        let mut p = ssh_params();
+        p["key"] = json!(id);
+        assert_eq!(
+            body(serve_ssh_sign(&store, Some(&principal("aft")), &p, || 1000)),
+            json!({"transport":"invalid_params"})
+        );
+    }
+    assert!(store.recent_auth_events(100).unwrap().is_empty());
+    assert!(store.read_audit(None).unwrap().is_empty());
+}
+
+#[test]
 fn local_ops_check_admission_closed_params_setting_then_scope_and_text() {
     let (_root, store) = rig("local-order");
     assert!(

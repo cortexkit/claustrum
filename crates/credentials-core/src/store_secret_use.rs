@@ -391,9 +391,7 @@ impl EncryptedStore {
         if call.sender != SecretSender::Aft {
             return Err(SecretError::NotFound);
         }
-        if !ssh.key.starts_with("signing:") || validate_deposit_credential_id(&ssh.key).is_err() {
-            return Err(SecretError::InvalidParams);
-        }
+        agent_secret::validate_ssh_card_key_id(&ssh.key)?;
         self.validate_local_use(&call, &ssh.local_use, clock())?;
         if !ssh.local_use.is_ssh() || ssh.data.user() != ssh.local_use.user() {
             return Err(SecretError::InvalidParams);
@@ -1233,7 +1231,7 @@ fn pending(
         // A forwarded request carries the v1 object plus `asking_member_id` under a
         // v2 tag; a local one stays v1 byte for byte.
         let statement = if let agent_secret::UseTarget::LocalProgram(local) = &call.target {
-            agent_secret::local_approval_statement(
+            match agent_secret::local_approval_statement(
                 &id,
                 &member,
                 incarnation,
@@ -1242,7 +1240,10 @@ fn pending(
                 fingerprint,
                 expiry,
                 asking_member,
-            )
+            ) {
+                Ok(statement) => statement,
+                Err(error) => return Ok(Err(error)),
+            }
         } else {
             agent_secret::approval_statement_for_asker(
                 &id,

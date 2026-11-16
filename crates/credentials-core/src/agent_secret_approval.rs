@@ -21,6 +21,7 @@ pub const MAX_LOCAL_COMMAND_BYTES: usize = 2048;
 pub const MAX_LOCAL_WORKDIR_BYTES: usize = 1024;
 pub const MAX_LOCAL_PURPOSE_BYTES: usize = 512;
 pub const MAX_LOCAL_EXPECTS_BYTES: usize = 512;
+pub const MAX_SSH_CARD_KEY_ID_BYTES: usize = 256;
 pub const MAX_SSH_USERAUTH_BYTES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,12 +202,31 @@ fn local_text(value: &str, cap: usize) -> Result<String, SecretError> {
     if value.len() > cap {
         return Err(SecretError::LimitExceeded);
     }
-    // Unicode General_Category=Cf, including supplementary-plane format controls.
-    let format_control = |c| matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}');
-    if value.is_empty() || value.chars().any(|c| c.is_control() || format_control(c)) {
+    if value.is_empty() || value.chars().any(unreadable_card_character) {
         return Err(SecretError::InvalidParams);
     }
     Ok(value.into())
+}
+
+fn unreadable_card_character(c: char) -> bool {
+    // Unicode General_Category=Cf, including supplementary-plane format controls.
+    let format_control = |c| matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}');
+    c.is_control() || format_control(c) || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// SSH key identities on approval cards use bounded, nonempty signing ids with no
+/// Unicode control, format, line-separator or paragraph-separator characters.
+pub fn validate_ssh_card_key_id(id: &str) -> Result<(), SecretError> {
+    if !id
+        .strip_prefix("signing:")
+        .is_some_and(|name| !name.is_empty())
+        || id.len() > MAX_SSH_CARD_KEY_ID_BYTES
+        || id.chars().any(unreadable_card_character)
+        || crate::store::validate_deposit_credential_id(id).is_err()
+    {
+        return Err(SecretError::InvalidParams);
+    }
+    Ok(())
 }
 
 /// Strict RFC 4252 publickey userauth bytes; only this parsed type reaches signing.
@@ -293,8 +313,11 @@ pub fn local_approval_statement(
     fingerprint: Option<&str>,
     expiry: i64,
     asking_member: &str,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, SecretError> {
     use serde_json::json;
+    if local.is_ssh() {
+        validate_ssh_card_key_id(&call.name)?;
+    }
     let mut statement = local.members();
     statement["v"] = json!(LOCAL_USE_STATEMENT);
     statement["request_id"] = json!(id);
@@ -316,7 +339,7 @@ pub fn local_approval_statement(
             statement["key"] = json!({"credential_id":call.name,"incarnation":incarnation,"fingerprint":fingerprint.expect("vault SSH fingerprint")})
         }
     }
-    statement
+    Ok(statement)
 }
 
 #[cfg(test)]
@@ -357,6 +380,74 @@ mod local_statement_tests {
                     Err(SecretError::InvalidParams)
                 );
             }
+        }
+    }
+
+    fn refuse_local_separator(separator: char) {
+        for field in ["command", "workdir", "purpose", "expects"] {
+            let mut value = sudo();
+            value[field] = json!(format!("/first{separator}second"));
+            assert_eq!(
+                LocalUse::from_value(&value),
+                Err(SecretError::InvalidParams),
+                "{field} must not add a card line"
+            );
+        }
+    }
+
+    #[test]
+    fn local_text_refuses_line_separator() {
+        refuse_local_separator('\u{2028}');
+    }
+
+    #[test]
+    fn local_text_refuses_paragraph_separator() {
+        refuse_local_separator('\u{2029}');
+    }
+
+    #[test]
+    fn ssh_card_key_id_accepts_256_utf8_bytes_and_refuses_257() {
+        let id = format!("signing:{}", "é".repeat(124));
+        assert_eq!(id.len(), 256);
+        assert_eq!(validate_ssh_card_key_id(&id), Ok(()));
+        let too_long = format!("{id}x");
+        assert_eq!(too_long.len(), 257);
+        assert_eq!(
+            validate_ssh_card_key_id(&too_long),
+            Err(SecretError::InvalidParams)
+        );
+    }
+
+    #[test]
+    fn ssh_card_key_id_requires_nonempty_signing_id_and_readable_deposit_grammar() {
+        for id in [
+            "",
+            "signing:",
+            "opaque:key",
+            "category:key",
+            "signing:bad|id",
+        ] {
+            assert_eq!(
+                validate_ssh_card_key_id(id),
+                Err(SecretError::InvalidParams)
+            );
+        }
+        for c in [
+            '\n',
+            '\u{85}',
+            '\u{ad}',
+            '\u{200b}',
+            '\u{e007f}',
+            '\u{2028}',
+            '\u{2029}',
+        ] {
+            assert_eq!(
+                validate_ssh_card_key_id(&format!("signing:a{c}b")),
+                Err(SecretError::InvalidParams)
+            );
+        }
+        for id in ["signing:a", "signing:鍵", "signing:é key"] {
+            assert_eq!(validate_ssh_card_key_id(id), Ok(()));
         }
     }
 
@@ -414,21 +505,25 @@ mod local_statement_tests {
             agent_id: None,
             target: super::super::UseTarget::LocalProgram(local.clone()),
         };
-        let statement = local_approval_statement("r", "m", "i", &call, &local, None, 42, "");
+        let statement =
+            local_approval_statement("r", "m", "i", &call, &local, None, 42, "").unwrap();
         let expected = br#"{"agent_id":null,"command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
         assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
         call.agent_id = Some("agent-A".into());
-        let statement = local_approval_statement("r", "m", "i", &call, &local, None, 42, "");
+        let statement =
+            local_approval_statement("r", "m", "i", &call, &local, None, 42, "").unwrap();
         let expected = br#"{"agent_id":"agent-A","command":"apt upgrade","coverage":"scope","durations":["once"],"expects":"password prompt","member_id":"m","program":"sudo","purpose":"update","request_expires_at_ms":42,"request_id":"r","scope":{"epoch":7,"kind":"worker","owner":"o","ref":"W"},"secret":{"incarnation":"i","kind":"local_program","name":"pw"},"target":{"user":"root"},"undoable":"no","use":"sudo_password","v":"ck-secret-local-use-statement/v1","workdir":"/home/u"}"#;
         assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
         call.agent_id = None;
+        call.name = "signing:ssh".into();
         let ssh = LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/","purpose":"login"})).unwrap();
         let statement =
-            local_approval_statement("r", "m", "i", &call, &ssh, Some("SHA256:test"), 42, "asker");
+            local_approval_statement("r", "m", "i", &call, &ssh, Some("SHA256:test"), 42, "asker")
+                .unwrap();
         assert_eq!(statement["durations"], json!(["once", "hour", "session"]));
         assert_eq!(
             statement["key"],
-            json!({"credential_id":"pw","incarnation":"i","fingerprint":"SHA256:test"})
+            json!({"credential_id":"signing:ssh","incarnation":"i","fingerprint":"SHA256:test"})
         );
         assert_eq!(statement["asking_member_id"], "asker");
         assert!(
@@ -438,6 +533,28 @@ mod local_statement_tests {
         );
         assert_eq!(statement.get("agent_id"), Some(&serde_json::Value::Null));
         assert_eq!(statement.as_object().unwrap().len(), 16);
+        for id in [
+            "signing:",
+            "signing:a\u{2028}b",
+            "signing:a\u{2029}b",
+            "signing:bad|id",
+            &format!("signing:{}", "x".repeat(249)),
+        ] {
+            call.name = id.into();
+            assert_eq!(
+                local_approval_statement(
+                    "r",
+                    "m",
+                    "i",
+                    &call,
+                    &ssh,
+                    Some("SHA256:test"),
+                    42,
+                    "asker"
+                ),
+                Err(SecretError::InvalidParams)
+            );
+        }
     }
 
     fn userauth(session_len: usize) -> Vec<u8> {

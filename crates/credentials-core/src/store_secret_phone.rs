@@ -668,6 +668,36 @@ pub(super) fn sweep_release_receipts(
     Ok(())
 }
 
+/// Listings expose only the approved program/use/target, not a once grant's command
+/// or the SSH key identity stored alongside it.
+pub(super) fn listing_local_use(raw: &str) -> rusqlite::Result<Value> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|_| rusqlite_err("invalid stored local use"))?;
+    let field = |name| {
+        value
+            .get(name)
+            .cloned()
+            .ok_or_else(|| rusqlite_err("invalid stored local use"))
+    };
+    Ok(json!({"program":field("program")?,"use":field("use")?,"target":field("target")?}))
+}
+
+fn listed_agent_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let duration: String = r.get(5)?;
+    // Keep `agent_id` present even when the grant has no agent.
+    let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration,"agent_id":r.get::<_,Option<String>>(8)?});
+    if duration != "permanent" {
+        grant["expires_at_ms"] = json!(r.get::<_, i64>(6)?);
+    }
+    if let Some(last) = r.get::<_, Option<i64>>(7)? {
+        grant["last_use_ms"] = json!(last);
+    }
+    if let Some(raw) = r.get::<_, Option<String>>(9)? {
+        grant["local_use"] = listing_local_use(&raw)?;
+    }
+    Ok(grant)
+}
+
 fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
     let mut stmt = tx.prepare("SELECT name,kind,incarnation,state,host,path_prefix,location,origin,scope_json FROM agent_secrets ORDER BY name")?;
     let mut secrets = stmt.query_map([], |r| {
@@ -689,16 +719,15 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         Ok(value)
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     for secret in &mut secrets {
-        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
-        secret["grants"] = Value::Array(grants.query_map([secret["incarnation"].as_str().expect("incarnation")], |r| {
-            let duration: String=r.get(5)?;
-            // `agent_id` is always present so the phone never has to tell a missing key
-            // from an agent-less grant: it is null when the grant named no agent.
-            let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration,"agent_id":r.get::<_,Option<String>>(8)?});
-            if duration != "permanent" { grant["expires_at_ms"]=json!(r.get::<_,i64>(6)?); }
-            if let Some(last)=r.get::<_,Option<i64>>(7)? { grant["last_use_ms"]=json!(last); }
-            Ok(grant)
-        })?.collect::<rusqlite::Result<Vec<_>>>()?);
+        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
+        secret["grants"] = Value::Array(
+            grants
+                .query_map(
+                    [secret["incarnation"].as_str().expect("incarnation")],
+                    listed_agent_grant,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
         // A flow grant answers a different question: "which installed flow version may
         // use this?" It therefore names its flow instead of an asking scope, has no
         // coverage and never expires, and carries `methods` only for an API key.
@@ -716,7 +745,38 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         secret["flow_grants"] = Value::Array(flow_grants);
     }
-    Ok(json!({"secrets":secrets}))
+    let mut ssh_keys: Vec<Value> = Vec::new();
+    let mut stmt = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use,secret_name,incarnation FROM secret_grants WHERE secret_name GLOB 'signing:*' AND local_use IS NOT NULL ORDER BY secret_name,grant_id")?;
+    let rows = stmt.query_map([], |r| {
+        let raw: String = r.get(9)?;
+        let local: Value =
+            serde_json::from_str(&raw).map_err(|_| rusqlite_err("invalid stored local use"))?;
+        let fingerprint = local["key"]["fingerprint"]
+            .as_str()
+            .ok_or_else(|| rusqlite_err("missing SSH grant fingerprint"))?
+            .to_owned();
+        Ok((
+            r.get::<_, String>(10)?,
+            r.get::<_, String>(11)?,
+            fingerprint,
+            listed_agent_grant(r)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, incarnation, fingerprint, grant) = row?;
+        if ssh_keys.last().is_none_or(|key| key["credential_id"] != id) {
+            ssh_keys.push(json!({"credential_id":id,"incarnation":incarnation,"fingerprint":fingerprint,"grants":[]}));
+        }
+        ssh_keys.last_mut().expect("SSH key group")["grants"]
+            .as_array_mut()
+            .expect("grants array")
+            .push(grant);
+    }
+    let mut reply = json!({"secrets":secrets});
+    if !ssh_keys.is_empty() {
+        reply["ssh_keys"] = json!(ssh_keys);
+    }
+    Ok(reply)
 }
 
 #[cfg(test)]

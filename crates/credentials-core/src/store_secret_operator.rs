@@ -545,6 +545,17 @@ pub struct OperatorGrantRow {
     pub last_use_ms: Option<i64>,
     /// The paired computer whose agent this grant serves; `None` for this vault's own.
     pub asking_member_id: Option<String>,
+    /// Only the program/use/target triple, including for a once grant.
+    pub local_use: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorSshKeyRow {
+    pub credential_id: String,
+    pub incarnation: String,
+    /// Read from the grant, never by opening the key's encrypted record.
+    pub fingerprint: String,
+    pub grants: Vec<OperatorGrantRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -580,6 +591,7 @@ pub struct OperatorPhoneRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OperatorSecretListing {
     pub secrets: Vec<OperatorSecretRow>,
+    pub ssh_keys: Vec<OperatorSshKeyRow>,
     pub phones: Vec<OperatorPhoneRow>,
 }
 
@@ -639,24 +651,32 @@ pub fn list_agent_secrets_read_only(
         "''"
     };
     let asking = |id: String| (!id.is_empty()).then_some(id);
+    let local_use = if schema_version >= LOCAL_PROGRAM_SECRET_SCHEMA_VERSION {
+        "local_use"
+    } else {
+        "NULL"
+    };
+    let grant_row = |r: &rusqlite::Row<'_>| {
+        let duration: String = r.get(5)?;
+        let raw: Option<String> = r.get(9)?;
+        Ok(OperatorGrantRow {
+            grant_id: r.get(0)?,
+            scope_owner: r.get(1)?,
+            scope_kind: r.get(2)?,
+            scope_ref: r.get(3)?,
+            coverage: r.get(4)?,
+            expires_at_ms: (duration != "permanent").then(|| r.get(6)).transpose()?,
+            duration,
+            last_use_ms: r.get(7)?,
+            asking_member_id: asking(r.get(8)?),
+            local_use: raw.as_deref().map(phone::listing_local_use).transpose()?,
+        })
+    };
     for secret in &mut secrets {
         secret.grants = conn
-            .prepare(&format!("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,{asking_member} FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id"))
+            .prepare(&format!("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,{asking_member},{local_use} FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id"))
             .map_err(map)?
-            .query_map([&secret.incarnation], |r| {
-                let duration: String = r.get(5)?;
-                Ok(OperatorGrantRow {
-                    grant_id: r.get(0)?,
-                    scope_owner: r.get(1)?,
-                    scope_kind: r.get(2)?,
-                    scope_ref: r.get(3)?,
-                    coverage: r.get(4)?,
-                    expires_at_ms: (duration != "permanent").then(|| r.get(6)).transpose()?,
-                    duration,
-                    last_use_ms: r.get(7)?,
-                    asking_member_id: asking(r.get(8)?),
-                })
-            })
+            .query_map([&secret.incarnation], grant_row)
             .map_err(map)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map)?;
@@ -687,6 +707,46 @@ pub fn list_agent_secrets_read_only(
                 .map_err(map)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(map)?;
+        }
+    }
+    let mut ssh_keys: Vec<OperatorSshKeyRow> = Vec::new();
+    if schema_version >= LOCAL_PROGRAM_SECRET_SCHEMA_VERSION {
+        let mut stmt = conn.prepare(&format!("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,{asking_member},local_use,secret_name,incarnation FROM secret_grants WHERE secret_name GLOB 'signing:*' AND local_use IS NOT NULL ORDER BY secret_name,grant_id")).map_err(map)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let raw: String = r.get(9)?;
+                let local: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|_| rusqlite_err("invalid stored local use"))?;
+                let fingerprint = local["key"]["fingerprint"]
+                    .as_str()
+                    .ok_or_else(|| rusqlite_err("missing SSH grant fingerprint"))?
+                    .to_owned();
+                Ok((
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    fingerprint,
+                    grant_row(r)?,
+                ))
+            })
+            .map_err(map)?;
+        for row in rows {
+            let (credential_id, incarnation, fingerprint, grant) = row.map_err(map)?;
+            if ssh_keys
+                .last()
+                .is_none_or(|key| key.credential_id != credential_id)
+            {
+                ssh_keys.push(OperatorSshKeyRow {
+                    credential_id,
+                    incarnation,
+                    fingerprint,
+                    grants: Vec::new(),
+                });
+            }
+            ssh_keys
+                .last_mut()
+                .expect("SSH key group")
+                .grants
+                .push(grant);
         }
     }
     let phones = conn
@@ -723,5 +783,9 @@ pub fn list_agent_secrets_read_only(
         .map_err(map)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map)?;
-    Ok(Some(OperatorSecretListing { secrets, phones }))
+    Ok(Some(OperatorSecretListing {
+        secrets,
+        ssh_keys,
+        phones,
+    }))
 }

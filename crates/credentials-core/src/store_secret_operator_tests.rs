@@ -520,6 +520,116 @@ fn read_only_listing_reports_scopes_grants_and_excludes_secrets_from_the_deposit
 }
 
 #[test]
+fn local_use_listing_is_keyless_and_permissions_keep_only_legacy_grants() {
+    let (root, store) = setup("local-use-listing-operator");
+    store
+        .secret_put_audited(&api_key_put("ops-key", None), "offline-cli")
+        .unwrap();
+    approve(&store, NOW);
+    let permissions = store.secret_permissions_list(None, NOW).unwrap();
+    assert_eq!(permissions["grants"].as_array().unwrap().len(), 1);
+    store
+        .set_secret_local_programs_audited(true, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap();
+    let mut put = api_key_put("sudo", None);
+    put.kind = "local_program".into();
+    put.host = None;
+    put.path_prefix = None;
+    put.location = None;
+    put.program = Some("sudo".into());
+    put.r#use = Some("sudo_password".into());
+    put.targets = Some(json!([{"user":"root"}]));
+    put.material_b64url = URL_SAFE_NO_PAD.encode(
+        crate::agent_secret::deposit_plaintext(&SecretMaterial::LocalProgram(Secret::new(
+            "password-canary".into(),
+        )))
+        .expose(),
+    );
+    let deposited = store.secret_put_audited(&put, "offline-cli").unwrap();
+    assert!(by_path(&store_file(&root)).unwrap().ssh_keys.is_empty());
+    let sudo = json!({"program":"sudo","use":"sudo_password","target":{"user":"root"}});
+    let ssh = json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"localhost","port":22}});
+    store.fenced_write(|tx| {
+        let mut once = sudo.clone();
+        once["command"] = json!("command-canary");
+        once["workdir"] = json!("/private");
+        once["purpose"] = json!("update");
+        once["expects"] = json!("password");
+        once["undoable"] = json!("no");
+        tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use) VALUES ('sudo-grant','sudo',?1,'owner','head','H','scope','once',?2,?3,'hash',?4)", rusqlite::params![deposited["incarnation"].as_str().unwrap(),NOW+1000,NOW,once.to_string()])?;
+        // Grant metadata is sufficient even if the key record is unavailable to a reader.
+        for (id, key, duration) in [("z-grant","signing:z","hour"),("b-grant","signing:a","once"),("a-grant","signing:a","session")] {
+            let mut local = ssh.clone();
+            local["key"] = json!({"credential_id":key,"fingerprint":format!("SHA256:{key}")});
+            if duration == "once" {
+                local["command"] = json!("command-canary");
+                local["workdir"] = json!("/private");
+                local["purpose"] = json!("login");
+            }
+            tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use,asking_member_id,last_use_ms) VALUES (?1,?2,'key-incarnation','owner','head','H','scope',?3,?4,?5,'hash',?6,?7,?5)", rusqlite::params![id,key,duration,NOW+1000,NOW,local.to_string(),MEMBER])?;
+        }
+        tx.execute("UPDATE agent_secrets SET envelope=x'00'", [])?;
+        Ok(())
+    }).unwrap();
+    store
+        .set_secret_local_programs_audited(false, AuditCtx::admin(AuditOp::SecretLocalProgramsSet))
+        .unwrap();
+    let listed = by_path(&store_file(&root)).unwrap();
+    assert_eq!(
+        listed
+            .secrets
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["ops-key", "sudo"]
+    );
+    assert_eq!(listed.secrets[0].grants[0].local_use, None);
+    assert_eq!(listed.secrets[1].grants[0].local_use, Some(sudo));
+    assert_eq!(
+        listed
+            .ssh_keys
+            .iter()
+            .map(|k| k.credential_id.as_str())
+            .collect::<Vec<_>>(),
+        ["signing:a", "signing:z"]
+    );
+    let key = &listed.ssh_keys[0];
+    assert_eq!(key.incarnation, "key-incarnation");
+    assert_eq!(key.fingerprint, "SHA256:signing:a");
+    assert_eq!(
+        key.grants
+            .iter()
+            .map(|g| g.grant_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-grant", "b-grant"]
+    );
+    for grant in &key.grants {
+        assert_eq!(grant.local_use, Some(ssh.clone()));
+        assert_eq!(grant.asking_member_id.as_deref(), Some(MEMBER));
+        assert_eq!(grant.last_use_ms, Some(NOW));
+        assert_eq!(grant.expires_at_ms, Some(NOW + 1000));
+    }
+    assert_eq!(
+        store.secret_permissions_list(None, NOW).unwrap(),
+        permissions
+    );
+    assert_eq!(
+        store.secret_permissions_list(Some("agent-A"), NOW).unwrap(),
+        permissions
+    );
+    for id in ["z-grant", "a-grant", "b-grant"] {
+        phone(
+            &store,
+            &PhoneOperation::Revoke {
+                grant_id: id.into(),
+            },
+            NOW,
+        );
+    }
+    assert!(by_path(&store_file(&root)).unwrap().ssh_keys.is_empty());
+}
+
+#[test]
 fn read_only_listing_reports_phone_keys_as_current_superseded_or_unobserved() {
     // `setup` registers a phone, and registering records that lookup as the fingerprint's
     // observation, so this vault starts out `current as of` the registration time.

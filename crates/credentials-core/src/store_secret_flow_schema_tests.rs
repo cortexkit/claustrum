@@ -349,6 +349,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
             expires_at_ms: None,
             last_use_ms: Some(12),
             asking_member_id: None,
+            local_use: None,
         }]
     );
 

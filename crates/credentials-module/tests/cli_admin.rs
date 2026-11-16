@@ -8964,6 +8964,145 @@ fn secret_list_and_grants_work_with_the_daemon_down_and_show_phone_key_state() {
 }
 
 #[test]
+fn local_use_listing_cli_orders_secret_ssh_and_phone_rows_without_a_key() {
+    let vault = GrantCliVault::new("local-use-listing-cli");
+    vault.bootstrap();
+    assert!(vault
+        .run(&["secret", "local-programs", "on"])
+        .status
+        .success());
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    for args in [
+        vec![
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "localhost",
+            "--material-file",
+            file.to_str().unwrap(),
+        ],
+        vec![
+            "secret",
+            "put",
+            "sudo",
+            "--kind",
+            "local-program",
+            "--program",
+            "sudo",
+            "--target",
+            "root",
+            "--target",
+            "admin",
+            "--material-file",
+            file.to_str().unwrap(),
+        ],
+    ] {
+        let out = vault.run(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    let local_rows = [
+        (
+            "sudo-grant",
+            "sudo",
+            "once",
+            r#"{"command":"command-canary","expects":"password","program":"sudo","purpose":"update","target":{"user":"root"},"undoable":"no","use":"sudo_password","workdir":"/private"}"#,
+        ),
+        (
+            "z-grant",
+            "signing:z",
+            "hour",
+            r#"{"key":{"credential_id":"signing:z","fingerprint":"SHA256:signing:z"},"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#,
+        ),
+        (
+            "b-grant",
+            "signing:a",
+            "once",
+            r#"{"command":"command-canary","key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","purpose":"login","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign","workdir":"/private"}"#,
+        ),
+        (
+            "a-grant",
+            "signing:a",
+            "session",
+            r#"{"key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#,
+        ),
+    ];
+    for (id, name, duration, local) in local_rows {
+        let incarnation: String = conn
+            .query_row(
+                "SELECT incarnation FROM agent_secrets WHERE name=?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "key-incarnation".into());
+        conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,local_use,asking_member_id) VALUES (?1,?2,?3,'owner','head','H','scope',?4,2000,1000,'hash',?5,?6)", rusqlite::params![id,name,incarnation,duration,local,if name.starts_with("signing:") { "remote" } else { "" }]).unwrap();
+    }
+    conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) SELECT 'legacy-grant',name,incarnation,'owner','head','H','scope','permanent',0,1000,'hash' FROM agent_secrets WHERE name='ops-key'", []).unwrap();
+    conn.execute("INSERT INTO secret_phone_keys (fingerprint,pairing_id,deposit_pub,approval_pub,created_at_ms) VALUES ('phone-fp','pair-A',zeroblob(32),zeroblob(65),1000)", []).unwrap();
+    conn.execute("UPDATE agent_secrets SET envelope=x'00'", [])
+        .unwrap();
+    std::fs::remove_file(&vault.key_path).unwrap();
+    // The CLI must use only stored grant metadata: there is no daemon, master key or
+    // decryptable secret envelope, and no SSH credential row to consult.
+    let sudo_suffix =
+        r#" local_use={"program":"sudo","target":{"user":"root"},"use":"sudo_password"}"#;
+    let ssh_suffix = r#" asking_member=remote local_use={"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign"}"#;
+    let list = vault.run(&["secret", "list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&list.stdout), format!(
+        "ops-key agent_api_key active host=localhost prefix= location=authorization_bearer\n  grant legacy-grant owner/head:H scope permanent\nsudo local_program active program=sudo use=sudo_password target=admin target=root\n  grant sudo-grant owner/head:H scope once until 1970-01-01T00:00:02Z{sudo_suffix}\nssh-key signing:a SHA256:signing:a\n  grant a-grant owner/head:H scope session until 1970-01-01T00:00:02Z{ssh_suffix}\n  grant b-grant owner/head:H scope once until 1970-01-01T00:00:02Z{ssh_suffix}\nssh-key signing:z SHA256:signing:z\n  grant z-grant owner/head:H scope hour until 1970-01-01T00:00:02Z{ssh_suffix}\nphone phone-fp pairing pair-A unobserved\n"
+    ));
+    let grants = vault.run(&["secret", "grants"]);
+    assert!(
+        grants.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grants.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&grants.stdout), format!(
+        "legacy-grant secret|ops-key owner/head:H scope permanent expiry=none last_use=never\nsudo-grant secret|sudo owner/head:H scope once expiry=2000 last_use=never{sudo_suffix}\na-grant signing:a SHA256:signing:a owner/head:H scope session expiry=2000 last_use=never{ssh_suffix}\nb-grant signing:a SHA256:signing:a owner/head:H scope once expiry=2000 last_use=never{ssh_suffix}\nz-grant signing:z SHA256:signing:z owner/head:H scope hour expiry=2000 last_use=never{ssh_suffix}\n"
+    ));
+    conn.execute(
+        "DELETE FROM secret_grants WHERE secret_name NOT GLOB 'signing:*'",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM agent_secrets", []).unwrap();
+    conn.execute("DELETE FROM secret_phone_keys", []).unwrap();
+    for verb in ["list", "grants"] {
+        let out = vault.run(&["secret", verb]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("signing:a SHA256:signing:a"), "{text}");
+        assert!(!text.contains("no agent-secret grants"), "{text}");
+        assert!(!text.contains("no agent secrets stored"), "{text}");
+    }
+    conn.execute("DELETE FROM secret_grants", []).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "grants"]).stdout),
+        "no agent-secret grants\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "list"]).stdout),
+        "no agent secrets stored\n"
+    );
+}
+
+#[test]
 fn secret_list_and_grants_on_a_pre_migration_store_print_no_agent_secret_tables() {
     let vault = GrantCliVault::new("secret-list-premigration");
     vault.bootstrap();

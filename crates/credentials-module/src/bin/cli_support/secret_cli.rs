@@ -775,7 +775,7 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
     };
     // Say so when nothing is stored: silent output would look the same as a verb that
     // failed to read the store, and the pre-migration case already prints its own line.
-    if listing.secrets.is_empty() && listing.phones.is_empty() {
+    if listing.secrets.is_empty() && listing.ssh_keys.is_empty() && listing.phones.is_empty() {
         println!("{NO_SECRETS}");
     }
     for secret in &listing.secrets {
@@ -835,19 +835,7 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         };
         println!("{} {} {} {scope}", secret.name, secret.kind, secret.state);
         for grant in &secret.grants {
-            println!(
-                "  grant {} {}/{}:{} {} {}{}",
-                grant.grant_id,
-                grant.scope_owner,
-                grant.scope_kind,
-                grant.scope_ref,
-                grant.coverage,
-                match grant.expires_at_ms {
-                    Some(expiry) => format!("{} until {}", grant.duration, stamp(expiry)),
-                    None => grant.duration.clone(),
-                },
-                asking_member(grant.asking_member_id.as_deref())
-            );
+            print_list_grant(grant, &stamp);
         }
         for grant in &secret.flow_grants {
             // A flow grant lists the installed version that owns it in place of an asking
@@ -865,6 +853,12 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
             );
         }
     }
+    for key in &listing.ssh_keys {
+        println!("ssh-key {} {}", key.credential_id, key.fingerprint);
+        for grant in &key.grants {
+            print_list_grant(grant, &stamp);
+        }
+    }
     // Phone keys are reported by their LAST OBSERVED pairing, never by a check made now:
     // this verb does not check the pairing at all, so "superseded" means a lookup saw
     // something else, not that the pairing is known to be dead.
@@ -880,6 +874,34 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+fn print_list_grant(
+    grant: &credentials_core::store::OperatorGrantRow,
+    stamp: &impl Fn(i64) -> String,
+) {
+    println!(
+        "  grant {} {}/{}:{} {} {}{}{}",
+        grant.grant_id,
+        grant.scope_owner,
+        grant.scope_kind,
+        grant.scope_ref,
+        grant.coverage,
+        match grant.expires_at_ms {
+            Some(expiry) => format!("{} until {}", grant.duration, stamp(expiry)),
+            None => grant.duration.clone(),
+        },
+        asking_member(grant.asking_member_id.as_deref()),
+        local_use_suffix(grant)
+    );
+}
+
+fn local_use_suffix(grant: &credentials_core::store::OperatorGrantRow) -> String {
+    grant
+        .local_use
+        .as_ref()
+        .map(|local| format!(" local_use={local}"))
+        .unwrap_or_default()
 }
 
 /// How the operator names the holder of a flow grant: one installed flow version.
@@ -909,30 +931,13 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         .secrets
         .iter()
         .all(|secret| secret.grants.is_empty())
+        && listing.ssh_keys.is_empty()
     {
         println!("{NO_SECRET_GRANTS}");
     }
     for secret in &listing.secrets {
         for grant in &secret.grants {
-            println!(
-                "{} secret|{} {}/{}:{} {} {} expiry={} last_use={}{}",
-                grant.grant_id,
-                secret.name,
-                grant.scope_owner,
-                grant.scope_kind,
-                grant.scope_ref,
-                grant.coverage,
-                grant.duration,
-                grant
-                    .expires_at_ms
-                    .map(|at| at.to_string())
-                    .unwrap_or_else(|| "none".into()),
-                grant
-                    .last_use_ms
-                    .map(|at| at.to_string())
-                    .unwrap_or_else(|| "never".into()),
-                asking_member(grant.asking_member_id.as_deref())
-            );
+            print_grant(grant, &format!("secret|{}", secret.name));
         }
         for grant in &secret.flow_grants {
             // A flow grant never expires, so its expiry is the same "none" a permanent
@@ -954,7 +959,35 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
             );
         }
     }
+    for key in &listing.ssh_keys {
+        for grant in &key.grants {
+            print_grant(grant, &format!("{} {}", key.credential_id, key.fingerprint));
+        }
+    }
     Ok(())
+}
+
+fn print_grant(grant: &credentials_core::store::OperatorGrantRow, subject: &str) {
+    println!(
+        "{} {} {}/{}:{} {} {} expiry={} last_use={}{}{}",
+        grant.grant_id,
+        subject,
+        grant.scope_owner,
+        grant.scope_kind,
+        grant.scope_ref,
+        grant.coverage,
+        grant.duration,
+        grant
+            .expires_at_ms
+            .map(|at| at.to_string())
+            .unwrap_or_else(|| "none".into()),
+        grant
+            .last_use_ms
+            .map(|at| at.to_string())
+            .unwrap_or_else(|| "never".into()),
+        asking_member(grant.asking_member_id.as_deref()),
+        local_use_suffix(grant)
+    );
 }
 
 fn read_listing(

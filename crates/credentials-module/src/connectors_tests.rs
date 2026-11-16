@@ -978,6 +978,8 @@ mod connectors_contract {
                 | federation::ingress::OP_SECRET_SSH_SIGN
                 | federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL
                 | federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS => None,
+                // Entorhinal-only by caller identity; no grant selector reaches them.
+                name if crate::fleet_ops::OPS.contains(&name) => None,
                 name => panic!("unclassified operation: {name}"),
             };
             if let Some(classification) = classification {

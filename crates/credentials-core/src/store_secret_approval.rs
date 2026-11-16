@@ -493,7 +493,7 @@ impl EncryptedStore {
             }
             None
         };
-        let expected = agent_secret::local_approval_statement(
+        let expected = match agent_secret::local_approval_statement(
             &item.request_id,
             &p.member,
             &p.incarnation,
@@ -502,7 +502,10 @@ impl EncryptedStore {
             key_fp.as_deref(),
             p.expiry,
             &p.asking_member,
-        );
+        ) {
+            Ok(statement) => statement,
+            Err(_) => return Ok(false),
+        };
         if *statement != expected {
             return Ok(false);
         }

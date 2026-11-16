@@ -3967,6 +3967,18 @@ when the scope names an agent, or `null` otherwise. Sudo statements carry
 `key: {credential_id, incarnation, fingerprint}`. These identities are supplied by
 the vault, not the asking program.
 
+Agent-supplied card text (`command`, `workdir`, `purpose`, and sudo `expects`)
+must be nonempty and contain no Cc, Cf, Zl or Zp characters. UTF-8 byte caps are
+2048 for `command`, 1024 for `workdir`, and 512 each for `purpose` and `expects`;
+`workdir` must start with `/`. Text is never normalized.
+
+An SSH card's `key.credential_id` must start with `signing:` and have at least
+one character after the prefix, be at most 256 UTF-8 bytes in total, contain no
+Cc, Cf, Zl or Zp characters, and pass the deposit-id grammar (no `category:`
+prefix or `|`). The same rule is checked when enrolling a key with `ssh-key
+allow` (`admin.ssh_key_agent_allow`) and when building a local-use SSH statement.
+An invalid card key id is refused as `invalid_params`.
+
 Checks stop in this order: AFT admission; closed params and signing-id grammar;
 feature switch; stamp and scope-only coverage; target, text and userauth grammar;
 key enrollment, target coverage and public-key match; grant or approval. The first

@@ -4913,10 +4913,16 @@ impl EncryptedStore {
         enrollment: Option<crate::record::AgentSsh>,
         actor: &str,
     ) -> Result<Option<crate::record::AgentSsh>, StoreOpError> {
-        if !id.starts_with("signing:") {
-            return Err(StoreOpError::InvalidAgentSsh);
+        if enrollment.is_some() {
+            crate::agent_secret::validate_ssh_card_key_id(id)
+                .map_err(|_| StoreOpError::InvalidAgentSsh)?;
+        } else {
+            // Revoking enrollment must remain possible even for an unreadable card id.
+            if !id.starts_with("signing:") {
+                return Err(StoreOpError::InvalidAgentSsh);
+            }
+            validate_deposit_credential_id(id)?;
         }
-        validate_deposit_credential_id(id)?;
         let enrollment = enrollment
             .map(crate::record::AgentSsh::canonicalized)
             .transpose()
@@ -10677,6 +10683,70 @@ mod tests {
             store.create(ID, &key()).unwrap();
             assert_ne!(store.credential_incarnation(ID).unwrap(), incarnation);
             assert!(store.get(ID).unwrap().agent_ssh.is_none());
+        }
+
+        #[test]
+        fn allow_refuses_unreadable_card_ids_without_writing() {
+            let (_root, store) = tmp_store(0xa6);
+            enabled(&store, true);
+            let accepted = format!("signing:{}", "é".repeat(124));
+            assert_eq!(accepted.len(), 256);
+            store.create(&accepted, &key()).unwrap();
+            apply(
+                &store,
+                AdminOpBody::SshKeyAgentAllow {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    id: accepted.clone(),
+                    targets: targets("::1"),
+                },
+                "operator",
+            )
+            .unwrap();
+            assert!(store.get(&accepted).unwrap().agent_ssh.is_some());
+
+            let ids = [
+                "signing:".to_owned(),
+                format!("{accepted}x"),
+                "signing:line\nbreak".to_owned(),
+                "signing:format\u{e007f}control".to_owned(),
+                "signing:line\u{2028}separator".to_owned(),
+                "signing:paragraph\u{2029}separator".to_owned(),
+            ];
+            for (index, id) in ids.iter().enumerate() {
+                store.create(id, &key()).unwrap();
+                let tag = format!("card-id-{index}");
+                seed_state(&store, id, &tag);
+                let before = store.store.with_conn(|conn| {
+                    conn.query_row("SELECT record_version,envelope,updated_at_ms FROM credentials WHERE credential_id=?1", [id], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,i64>(2)?)))
+                }).unwrap();
+                let audit = store.read_audit(None).unwrap();
+                let error = apply(
+                    &store,
+                    AdminOpBody::SshKeyAgentAllow {
+                        v: ADMIN_OP_SCHEMA_V2,
+                        id: id.clone(),
+                        targets: targets("::1"),
+                    },
+                    "operator",
+                )
+                .unwrap_err();
+                assert!(matches!(error, StoreOpError::InvalidAgentSsh));
+                assert_eq!(error.wire_code(), Some("invalid_params"));
+                assert_eq!(error.wire_class(), Some("permanent"));
+                assert_eq!(store.read_audit(None).unwrap(), audit);
+                store.store.with_conn(|conn| {
+                    let after = conn.query_row("SELECT record_version,envelope,updated_at_ms FROM credentials WHERE credential_id=?1", [id], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,i64>(2)?)))?;
+                    assert_eq!(after, before);
+                    for table in ["secret_grants", "secret_pending_requests"] {
+                        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE secret_name=?1"), [id], |r| r.get(0))?;
+                        assert_eq!(count, 1, "{table}");
+                    }
+                    let receipt: (String, Vec<u8>, Vec<u8>) = conn.query_row("SELECT aad_sha256,enc,ciphertext FROM secret_release_receipts WHERE requester='requester' AND nonce=?1", [&tag], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                    assert_eq!(receipt, ("hash".into(), vec![1], vec![2]));
+                    Ok(())
+                }).unwrap();
+                assert!(store.get(id).unwrap().agent_ssh.is_none());
+            }
         }
 
         #[test]

@@ -254,11 +254,8 @@ pub(crate) fn parse_ssh_sign(
 ) -> Result<SecretSshSign, UseAnswer> {
     let params: SshParams =
         serde_json::from_value(params.clone()).map_err(|_| UseAnswer::InvalidParams)?;
-    if !params.key.starts_with("signing:")
-        || credentials_core::store::validate_deposit_credential_id(&params.key).is_err()
-    {
-        return Err(UseAnswer::InvalidParams);
-    }
+    credentials_core::agent_secret::validate_ssh_card_key_id(&params.key)
+        .map_err(|_| UseAnswer::InvalidParams)?;
     local_enabled(store)?;
     let (scope, worker_parent, agent_id) =
         local_scope(store, &params.key, params.stamp, &params.coverage)?;

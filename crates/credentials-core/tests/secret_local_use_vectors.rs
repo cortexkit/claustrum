@@ -360,6 +360,7 @@ impl Rig {
                 first["expires_at_ms"].as_i64().unwrap(),
                 asker
             )
+            .unwrap()
         );
         let bytes = serde_json::to_vec(&statement).unwrap();
         // Replace the generated nonce before asking the store to replay its own card.
@@ -561,6 +562,28 @@ fn refusal_vectors(rig: &Rig, deposit: &PhoneDeposit, deposit_sample: &Value) ->
         auth_before
     );
     cases
+}
+
+#[test]
+fn ssh_sign_core_refuses_unreadable_card_key_ids_without_writing() {
+    let rig = Rig::new();
+    let before = rig.counts();
+    for id in [
+        "signing:".to_owned(),
+        format!("signing:{}x", "é".repeat(124)),
+        "signing:a\nb".to_owned(),
+        "signing:a\u{e007f}b".to_owned(),
+        "signing:a\u{2028}b".to_owned(),
+        "signing:a\u{2029}b".to_owned(),
+        "signing:bad|id".to_owned(),
+    ] {
+        assert!(matches!(
+            rig.store
+                .secret_ssh_sign(&ssh_call(true, userauth("alice"), &id), || NOW),
+            Err(SecretError::InvalidParams)
+        ));
+        assert_eq!(rig.counts(), before);
+    }
 }
 
 fn produce() -> Value {

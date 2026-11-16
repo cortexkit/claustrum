@@ -67,6 +67,93 @@ impl std::fmt::Display for SignError {
 /// manifest is under 4 KiB) and far below anything that would stall the loop.
 pub const MAX_SIGN_PAYLOAD: usize = 1024 * 1024;
 
+pub const BUS_SIGNING_KEY_IDS: [&str; 4] = [
+    "signing:bus-leaf:1",
+    "signing:bus-hub-operator:1",
+    "signing:bus-hub-account:1",
+    "signing:bus-hub-tls:1",
+];
+
+pub const MAX_BUS_LEAF_NONCE_BYTES: usize = 15;
+pub const MAX_BUS_JWT_BYTES: usize = 64 * 1024;
+pub const TLS_CERTIFICATE_VERIFY_PADDING_BYTES: usize = 64;
+pub const MIN_TLS_TRANSCRIPT_HASH_BYTES: usize = 32;
+pub const MAX_TLS_TRANSCRIPT_HASH_BYTES: usize = 48;
+pub const TLS_SERVER_CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVerify\0";
+
+#[derive(Clone, Copy)]
+pub(crate) enum BusKeyPurpose {
+    Leaf,
+    Jwt,
+    Tls,
+}
+
+pub(crate) fn bus_key_purpose(id: &str) -> Option<BusKeyPurpose> {
+    if id.starts_with("signing:bus-leaf:") {
+        Some(BusKeyPurpose::Leaf)
+    } else if id.starts_with("signing:bus-hub-operator:")
+        || id.starts_with("signing:bus-hub-account:")
+    {
+        Some(BusKeyPurpose::Jwt)
+    } else if id.starts_with("signing:bus-hub-tls:") {
+        Some(BusKeyPurpose::Tls)
+    } else {
+        None
+    }
+}
+
+/// Check the protocol input before any vault-key signature or audit write.
+/// Ordinary signing keys retain their arbitrary-byte signing contract.
+pub fn validate_signing_input(id: &str, payload: &[u8]) -> Result<(), &'static str> {
+    let base64url = |bytes: &[u8]| {
+        !bytes.is_empty()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    };
+    let valid = match bus_key_purpose(id) {
+        None => true,
+        Some(BusKeyPurpose::Leaf) => {
+            payload.len() == MAX_BUS_LEAF_NONCE_BYTES && base64url(payload)
+        }
+        Some(BusKeyPurpose::Tls) => payload
+            .strip_prefix(&[0x20; TLS_CERTIFICATE_VERIFY_PADDING_BYTES])
+            .and_then(|rest| rest.strip_prefix(TLS_SERVER_CERTIFICATE_VERIFY_CONTEXT))
+            .is_some_and(|hash| {
+                matches!(
+                    hash.len(),
+                    MIN_TLS_TRANSCRIPT_HASH_BYTES | MAX_TLS_TRANSCRIPT_HASH_BYTES
+                )
+            }),
+        Some(BusKeyPurpose::Jwt) => {
+            let mut segments = payload.split(|b| *b == b'.');
+            let header = segments.next().unwrap_or_default();
+            let claims = segments.next().unwrap_or_default();
+            payload.len() <= MAX_BUS_JWT_BYTES
+                && segments.next().is_none()
+                && base64url(header)
+                && base64url(claims)
+                && base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(claims)
+                    .is_ok()
+                && base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(header)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|header| {
+                        header.is_object()
+                            && header.get("alg").and_then(|v| v.as_str()) == Some("ed25519-nkey")
+                            && header.get("typ").and_then(|v| v.as_str()) == Some("JWT")
+                    })
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("signing input does not match the bus key purpose")
+    }
+}
+
 /// A signature plus the id of the key that produced it.
 #[derive(Debug, Clone)]
 pub struct Signature {
@@ -224,6 +311,31 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bus_signing_purposes_accept_only_protocol_inputs_at_boundaries() {
+        for id in super::BUS_SIGNING_KEY_IDS {
+            let (accepted, refused) = crate::test_support::bus_signing_inputs(id);
+            for generation in ["1", "2", "future"] {
+                let id = format!("{}:{generation}", id.rsplit_once(':').unwrap().0);
+                for payload in &accepted {
+                    assert!(
+                        super::validate_signing_input(&id, payload).is_ok(),
+                        "{id}: {} bytes",
+                        payload.len()
+                    );
+                }
+                for payload in &refused {
+                    assert!(
+                        super::validate_signing_input(&id, payload).is_err(),
+                        "{id}: {} bytes",
+                        payload.len()
+                    );
+                }
+            }
+        }
+        assert!(super::validate_signing_input("signing:ordinary:1", &[0, 0xff, b'.']).is_ok());
+    }
+
     use super::*;
 
     #[test]

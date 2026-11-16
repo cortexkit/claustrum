@@ -1180,7 +1180,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `remote_remove` | Remove a remote record and its local metadata. |
 | `federation_gate_set` | Change the live federation member-mapping setting. |
 | `federation_self_set` | Set the vault's own canonical member id. |
-| `fleet_key_create` | Vault bootstrap creates a missing record-signing, epoch-wrap or bus-seal key; target is the credential id, with no payload. |
+| `fleet_key_create` | Vault bootstrap creates a missing record-signing, epoch-wrap, bus-seal encryption or ck-bus signing key; target is the credential id, with no payload. |
 | `fleet_epoch_mint` | Create one pending epoch and return its member wraps; no target or payload. |
 | `fleet_epoch_commit` | Make a matching pending mint current, retiring the previous current epoch; no target or payload. |
 | `fleet_epoch_discard` | Delete a matching pending mint and retain its discard receipt; no target or payload. |
@@ -1517,6 +1517,33 @@ N"). Run the `--replace` above until `record_version` (see `ck auth status`) is 
 
 A key rotated to a new generation id instead (for example a bus account key
 `signing:<name>:<generation>`) needs its consumers re-granted on the new id.
+
+### ck-bus keys
+
+Every daemon start ensures four sealed Ed25519 keys exist:
+`signing:bus-leaf:1`, `signing:bus-hub-operator:1`,
+`signing:bus-hub-account:1`, and `signing:bus-hub-tls:1`.
+Every computer gets all four; unused hub keys need no ceremony. Startup never
+replaces an existing key, even a damaged one, and each initial creation has exactly
+one `fleet_key_create` audit row. Private keys stay in the vault: ck-bus asks
+`credential.sign` to sign NATS nonces, JWT inputs, or TLS CertificateVerify bytes.
+See the wire contract's purpose-bound ck-bus section for the exact input grammar.
+Malformed purpose inputs return `invalid_params` and produce no signature or write.
+
+Grant only exact `read` and `sign` on these ids to `reserved:ckbus`. The same fence
+applies to every generation. Other grants and bearer handles are refused with
+`bus_key_reserved`; category grants do not cover bus keys. `read` serves only the
+public half. Startup leaves per-signature auditing off to avoid a row for every TLS
+handshake. Startup also leaves operator-signing opt-in off; an explicitly opted-in
+operator signature remains audited and purpose-checked.
+
+Rotate a bus key in place with **`ck auth put --replace`**, retaining its credential
+id and increasing `record_version`. Never delete and re-mint it: that resets the
+version remembered by peers. Re-grant consumers if deliberately changing to a new
+generation id. Rotating `signing:bus-hub-tls:1` changes the hub's TLS
+SubjectPublicKeyInfo (SPKI), the public-key identity that callosum announces;
+coordinate the new announcement with the hub rollout. Rotating
+`signing:bus-leaf:1` requires a new leaf JWT issued by the hub for the new public key.
 
 The `gh` routing-manifest root follows its own ceremony: see
 [manifest signing](gh-manifest-signing.md).

@@ -183,10 +183,13 @@ impl EncryptedStore {
     /// replaced by startup. Each created credential has its own birth audit row.
     pub fn ensure_fleet_keys(&self, now_ms: i64) -> Result<(), FleetError> {
         self.fleet_write(|tx| {
-            for id in [RECORD_KEY_ID, WRAP_KEY_ID, BUS_KEY_ID] {
+            for id in [RECORD_KEY_ID, WRAP_KEY_ID, BUS_KEY_ID]
+                .into_iter()
+                .chain(crate::signing::BUS_SIGNING_KEY_IDS)
+            {
                 let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)", [id], |r| r.get(0))?;
                 if exists { continue; }
-                let (kind, pem) = if id == RECORD_KEY_ID {
+                let (kind, pem) = if id.starts_with("signing:") {
                     (CredentialKind::SigningKey, generate_record_key()?)
                 } else {
                     (CredentialKind::KemKey, crate::kem::generate_key().map_err(|_| FleetError::StoreError)?)
@@ -778,6 +781,19 @@ mod tests {
     fn fleet_startup_is_create_only_and_audited_once_per_key() {
         let (_root, store) = rig("fleet-startup", 1);
         let before = store.list_meta().unwrap();
+        let bus_before: Vec<_> = crate::signing::BUS_SIGNING_KEY_IDS
+            .into_iter()
+            .map(|id| {
+                let record = store.get(id).unwrap();
+                assert_eq!(record.kind, CredentialKind::SigningKey);
+                assert!(!record.audit_each_signature);
+                assert!(!record.operator_sign);
+                crate::signing::public_key_ed25519(
+                    std::str::from_utf8(record.payload.expose()).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
         let count = audit_len(&store);
         store.ensure_fleet_keys(2).unwrap();
         assert_eq!(store.list_meta().unwrap(), before);
@@ -785,8 +801,22 @@ mod tests {
         let audit = store.read_audit(None).unwrap();
         assert_eq!(
             audit.iter().filter(|a| a.op == "fleet_key_create").count(),
-            3
+            7
         );
+        for (id, public) in crate::signing::BUS_SIGNING_KEY_IDS
+            .into_iter()
+            .zip(bus_before)
+        {
+            let record = store.get(id).unwrap();
+            assert_eq!(
+                crate::signing::public_key_ed25519(
+                    std::str::from_utf8(record.payload.expose()).unwrap()
+                )
+                .unwrap(),
+                public
+            );
+            assert_eq!(audit.iter().filter(|a| a.op == "fleet_key_create" && a.credential_id.as_deref() == Some(id)).count(), 1);
+        }
         assert!(audit
             .iter()
             .filter(|a| a.op == "fleet_key_create")
@@ -1386,6 +1416,125 @@ mod tests {
             FleetPeer::new("invalid".into(), [9; 32]).unwrap_err(),
             FleetError::PeerKeysUnavailable
         );
+    }
+
+    #[test]
+    fn bus_grants_are_exact_ckbus_only_and_handles_are_reserved() {
+        let (_root, store) = rig("bus-grant-store", 1);
+        for base in crate::signing::BUS_SIGNING_KEY_IDS {
+            for generation in ["1", "2", "future"] {
+                let key = format!("{}:{generation}", base.rsplit_once(':').unwrap().0);
+                for (kind, principal) in [
+                    ("reserved", "ckbus"),
+                    ("reserved", "callosum"),
+                    ("reserved", "entorhinal"),
+                    ("reserved", "other"),
+                    ("enrolled", "ckbus"),
+                    ("direct", "ckbus"),
+                ] {
+                    for operation in [
+                        GrantOperation::Read,
+                        GrantOperation::Sign,
+                        GrantOperation::Open,
+                        GrantOperation::Seal,
+                        GrantOperation::List,
+                        GrantOperation::Deposit,
+                        GrantOperation::AccountToken,
+                    ] {
+                        let before = audit_len(&store);
+                        let result = store.create_read_grant_audited(
+                            kind,
+                            principal,
+                            SelectorKind::Exact,
+                            &key,
+                            operation,
+                            AuditCtx::admin(AuditOp::GrantCreate),
+                        );
+                        let allowed = kind == "reserved"
+                            && principal == "ckbus"
+                            && matches!(operation, GrantOperation::Read | GrantOperation::Sign);
+                        assert_eq!(
+                            result.is_ok(),
+                            allowed,
+                            "{key} {kind}:{principal} {operation:?}"
+                        );
+                        if !allowed {
+                            assert_eq!(result.unwrap_err().wire_code(), Some("bus_key_reserved"));
+                            assert_eq!(audit_len(&store), before);
+                        }
+                    }
+                }
+                for selector in [SelectorKind::Category, SelectorKind::Audience] {
+                    assert_eq!(
+                        store
+                            .create_read_grant_audited(
+                                "reserved",
+                                "ckbus",
+                                selector,
+                                &key,
+                                GrantOperation::Read,
+                                AuditCtx::admin(AuditOp::GrantCreate)
+                            )
+                            .unwrap_err()
+                            .wire_code(),
+                        Some("bus_key_reserved")
+                    );
+                }
+                assert_eq!(
+                    store
+                        .put_handle_hash("canary", &key, AuditCtx::admin(AuditOp::MintHandle))
+                        .unwrap_err()
+                        .wire_code(),
+                    Some("bus_key_reserved")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bus_category_grants_cannot_authorize_a_key() {
+        use crate::store::{DeclaredGrantSet, SetCategoryMode};
+        let (_root, store) = rig("bus-category-store", 1);
+        for key in crate::signing::BUS_SIGNING_KEY_IDS {
+            store
+                .set_categories_audited(
+                    key,
+                    SetCategoryMode::Add,
+                    &["bus-test".into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                )
+                .unwrap();
+        }
+        for op in [GrantOperation::Read, GrantOperation::Sign] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "ckbus",
+                    SelectorKind::Category,
+                    "bus-test",
+                    op,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            for key in crate::signing::BUS_SIGNING_KEY_IDS {
+                assert!(!store
+                    .read_grant_covers("reserved", "ckbus", key, op, &DeclaredGrantSet::default())
+                    .unwrap());
+                store
+                    .create_read_grant_audited(
+                        "reserved",
+                        "ckbus",
+                        SelectorKind::Exact,
+                        key,
+                        op,
+                        AuditCtx::admin(AuditOp::GrantCreate),
+                    )
+                    .unwrap();
+                assert!(store
+                    .read_grant_covers("reserved", "ckbus", key, op, &DeclaredGrantSet::default())
+                    .unwrap());
+            }
+        }
     }
 
     #[test]

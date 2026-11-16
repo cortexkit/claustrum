@@ -66,6 +66,7 @@ pub fn transfer_key_admits_grant(
     principal: &str,
     operation: GrantOperation,
 ) -> Result<(), String> {
+    bus_key_admits_grant(credential_id, principal, operation)?;
     fleet_key_admits_grant(credential_id, principal, operation)?;
     if !is_vault_transfer_id(credential_id) {
         return Ok(());
@@ -106,8 +107,30 @@ pub fn is_fleet_key_id(id: &str) -> bool {
     id.starts_with("kem:fleet-epoch-wrap:") || id.starts_with("signing:fleet-record:")
 }
 
+/// Bus signing keys belong only to ck-bus, including future key generations.
+pub fn bus_key_admits_grant(
+    credential_id: &str,
+    principal: &str,
+    operation: GrantOperation,
+) -> Result<(), String> {
+    if !is_bus_key_id(credential_id)
+        || (principal == "reserved:ckbus"
+            && matches!(operation, GrantOperation::Read | GrantOperation::Sign))
+    {
+        Ok(())
+    } else {
+        Err(format!("bus_key_reserved: {credential_id}"))
+    }
+}
+
+pub fn is_bus_key_id(id: &str) -> bool {
+    crate::signing::bus_key_purpose(id).is_some()
+}
+
 pub(crate) fn key_grant_refusal(id: &str) -> StoreOpError {
-    if is_fleet_key_id(id) {
+    if is_bus_key_id(id) {
+        StoreOpError::BusKeyReserved
+    } else if is_fleet_key_id(id) {
         StoreOpError::FleetKeyReserved
     } else {
         StoreOpError::TransferKeyReserved

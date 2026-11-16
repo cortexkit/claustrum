@@ -2141,9 +2141,20 @@ async fn handle_read_request(
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface.sign(connection_id, &caller, &p).await {
                     Ok(r) => wrap_result(r),
+                    Err(read_surface::SignError::InvalidParams) => {
+                        return invalid_params(
+                            writer,
+                            ver,
+                            channel,
+                            epoch,
+                            corr,
+                            "signing input does not match the bus key purpose",
+                        )
+                        .await
+                    }
                     // Keep the same { code, class } shape every other op uses: the class
                     // gives retry policy and the code names the request-specific remedy.
-                    Err(code) => wrap_result(json!({
+                    Err(read_surface::SignError::Credential(code)) => wrap_result(json!({
                         "error": read_surface::ErrorBody { code, class: code.class() }
                     })),
                 }
@@ -13613,7 +13624,9 @@ mod tests {
                 )
                 .await
                 .err(),
-            Some(read_surface::ReadError::NotFound),
+            Some(read_surface::SignError::Credential(
+                read_surface::ReadError::NotFound
+            )),
             "sign must refuse a list-only principal"
         );
         surface
@@ -14654,7 +14667,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err(),
-            read_surface::ReadError::NotFound
+            read_surface::SignError::Credential(read_surface::ReadError::NotFound)
         );
         for _ in 0..16 {
             assert_eq!(
@@ -15548,6 +15561,52 @@ mod tests {
             .remove(0);
         assert_eq!(event.kind, "scoped_read_refusal");
         assert_eq!(event.detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn bus_signing_purpose_errors_are_classless_only_after_authorization() {
+        use base64::Engine as _;
+        let (surface, admin, store) = scoped_rig(212);
+        store.ensure_fleet_keys(1).unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ckbus",
+                SelectorKind::Exact,
+                "signing:bus-leaf:1",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let malformed = base64::engine::general_purpose::STANDARD.encode(b"bad nonce");
+        admin.record_bind(
+            212,
+            subc_protocol::Principal::Reserved {
+                module_id: "other".into(),
+            },
+        );
+        let unauthorized =
+            scoped_sign_request(&surface, &admin, 212, "signing:bus-leaf:1", &malformed).await;
+        assert_eq!(
+            unauthorized["result"]["error"],
+            json!({"code":"not_found", "class":"permanent"})
+        );
+        assert!(unauthorized.get("code").is_none());
+        admin.record_bind(
+            212,
+            subc_protocol::Principal::Reserved {
+                module_id: "ckbus".into(),
+            },
+        );
+        let audit = store.read_audit(None).unwrap();
+        let events = store.recent_auth_events(1000).unwrap().len();
+        let refused =
+            scoped_sign_request(&surface, &admin, 212, "signing:bus-leaf:1", &malformed).await;
+        assert_eq!(refused["code"], "invalid_params");
+        assert!(refused.get("class").is_none());
+        assert!(refused.get("result").is_none());
+        assert_eq!(store.read_audit(None).unwrap(), audit);
+        assert_eq!(store.recent_auth_events(1000).unwrap().len(), events);
     }
 
     fn signature_audit_rig(
@@ -16583,6 +16642,9 @@ mod tests {
             )
             .await
             .expect_err("an ApiKey record must NOT sign even holding valid PEM");
+        let read_surface::SignError::Credential(err) = err else {
+            panic!("a wrong-kind refusal remains a classified credential error");
+        };
         assert_eq!(
             err,
             read_surface::ReadError::KindNotSignable,

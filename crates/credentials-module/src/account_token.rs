@@ -145,6 +145,7 @@ struct Machine {
 }
 struct Signer {
     machine: Machine,
+    credential_id: String,
     key_id: String,
     pem: credentials_core::secret::Secret<Vec<u8>>,
     identity: String,
@@ -214,6 +215,7 @@ fn signer(engine: &RefreshEngine, path: &std::path::Path) -> Result<Signer, Acco
     );
     Ok(Signer {
         machine,
+        credential_id: id,
         key_id,
         pem: record.payload,
         identity,
@@ -332,6 +334,8 @@ async fn mint(
             let transcript = worker_transcript(&signer.machine.account, &signer.key_id, challenge, audience)
                 .map_err(|e| (0, e))?;
             let pem = std::str::from_utf8(signer.pem.expose()).map_err(|_| (0, AccountTokenError::login()))?;
+            credentials_core::signing::validate_signing_input(&signer.credential_id, transcript.as_bytes())
+                .map_err(|_| (0, AccountTokenError::new("invalid_params", ErrorClass::Permanent)))?;
             let sig = credentials_core::signing::prepare_ed25519(pem, transcript.as_bytes())
                 .map_err(|_| (0, AccountTokenError::invalid()))?.sign();
             let raw = base64::engine::general_purpose::STANDARD.decode(sig.signature_b64)

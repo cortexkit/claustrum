@@ -1724,6 +1724,7 @@ pub enum StoreOpError {
     /// `credential.public_key`, and no handle may reach it.
     TransferKeyReserved,
     FleetKeyReserved,
+    BusKeyReserved,
     /// The vault transfer key is `Active`, so every operation that would change its
     /// state, payload, identity or kind is refused: the federation peers sealed to it
     /// could not open anything signed by a replacement. Recovery is an operator
@@ -1927,6 +1928,7 @@ impl std::fmt::Display for StoreOpError {
                 "transfer_key_reserved: the vault transfer key admits one grant only, read to reserved:callosum for the public-key announce; it cannot be opened, sealed, signed or listed, and no other credential may take its id",
             ),
             StoreOpError::FleetKeyReserved => f.write_str("fleet_key_reserved: fleet keys admit only their purpose-specific grants and no handles"),
+            StoreOpError::BusKeyReserved => f.write_str("bus_key_reserved: bus signing keys admit only exact read/sign grants to reserved:ckbus and no handles"),
             StoreOpError::TransferKeyProtected => f.write_str(
                 "transfer_key_protected: the vault transfer key is active, so its record cannot be replaced, re-identified, invalidated, retired, reactivated or removed",
             ),
@@ -1976,6 +1978,7 @@ impl StoreOpError {
             StoreOpError::RemoteRecordHomeWatch { .. } => Some("remote_record_home_watch"),
             StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
             StoreOpError::FleetKeyReserved => Some("fleet_key_reserved"),
+            StoreOpError::BusKeyReserved => Some("bus_key_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
         }
@@ -3923,6 +3926,15 @@ impl EncryptedStore {
         operation: GrantOperation,
         declared: &DeclaredGrantSet,
     ) -> Result<ScopedCoverage, StoreOpError> {
+        let bus_key = crate::federation::is_bus_key_id(credential_id);
+        if bus_key {
+            crate::federation::bus_key_admits_grant(
+                credential_id,
+                &format!("{principal_kind}:{principal_id}"),
+                operation,
+            )
+            .map_err(|_| StoreOpError::BusKeyReserved)?;
+        }
         if crate::agent_secret::is_deposit_key(credential_id) {
             return Err(StoreOpError::NotFound);
         }
@@ -3938,6 +3950,7 @@ impl EncryptedStore {
                 let grants: Vec<_> = grants
                     .into_iter()
                     .filter(|grant| grant.operation == operation)
+                    .filter(|grant| !bus_key || grant.selector_kind == SelectorKind::Exact)
                     .map(|grant| (grant.selector_kind.as_str().to_owned(), grant.selector))
                     .collect();
                 let caller_active_grants = grants.len() as u32;
@@ -7056,6 +7069,9 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        if crate::federation::is_bus_key_id(credential_id) {
+            return Err(StoreOpError::BusKeyReserved);
+        }
         if crate::federation::is_fleet_key_id(credential_id) {
             return Err(StoreOpError::FleetKeyReserved);
         }
@@ -8370,6 +8386,17 @@ fn validate_read_grant(
     selector: &str,
     operation: GrantOperation,
 ) -> Result<(), StoreOpError> {
+    if crate::federation::is_bus_key_id(selector) {
+        if selector_kind != SelectorKind::Exact {
+            return Err(StoreOpError::BusKeyReserved);
+        }
+        crate::federation::bus_key_admits_grant(
+            selector,
+            &format!("{principal_kind}:{principal_id}"),
+            operation,
+        )
+        .map_err(|_| StoreOpError::BusKeyReserved)?;
+    }
     selector_kind
         .validate_operation(operation)
         .map_err(StoreOpError::Store)?;

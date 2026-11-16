@@ -56,8 +56,17 @@ deliberately absent.
 ## Refusal framing and forwarded calls
 
 Each refusal pins the exact request bytes and the typed error from the real core
-parser/store. Permanent errors additionally pin the actual `SecretError::body()`
-bytes. There is intentionally no invented JSON body for `InvalidParams`: that
+parser/store. The `not_found` and setting-off cases additionally pin their actual
+`SecretError::body()` bytes. The `over-cap-command` case intentionally has no
+`reply`: the shared core `LimitExceeded` body uses `context_overflow`, but local
+over-limit wire bodies use class `permanent`. That local framing is documented
+in `docs/wire-contract-v1.md` under "Local programs and SSH userauth" and pinned
+for SSH by the module test
+`local_ops_ssh_decoded_size_boundary_and_trailing_packet_bytes` in
+`crates/credentials-module/src/secret_contract_tests.rs`. The producer rejects
+any local-use or SSH refusal sample that publishes a `context_overflow` body.
+
+There is also intentionally no invented JSON body for `InvalidParams`: that
 error uses the generic transport Error lane, without a class, described in
 `docs/wire-contract-v1.md` §1a and the §15 error-code table. The existing
 `secret_error_codes_are_golden_and_match_the_doc_table` test pins that distinction.

@@ -426,7 +426,9 @@ impl Rig {
 
 fn refusal(case: &str, op: &str, request: &Value, error: SecretError) -> Value {
     let mut result = json!({"case":case,"operation":op,"request":json_record(request),"validation_error":format!("{error:?}"),"code":error.code()});
-    if error != SecretError::InvalidParams {
+    let local_limit =
+        error == SecretError::LimitExceeded && matches!(op, "secret.use" | "secret.ssh_sign");
+    if error != SecretError::InvalidParams && !local_limit {
         result["reply"] = json_record(&error.body());
     }
     result
@@ -640,6 +642,19 @@ fn produce() -> Value {
         cases[index]["reply"] = json_record(&reply);
     }
     let refusals = refusal_vectors(&rig, &deposit, &deposit_sample);
+    for sample in &refusals {
+        if matches!(
+            sample["operation"].as_str(),
+            Some("secret.use" | "secret.ssh_sign")
+        ) {
+            // Local-use limits have permanent wire framing, unlike the shared core error.
+            assert_ne!(
+                sample["reply"]["json"]["error"]["class"], "context_overflow",
+                "local-use refusal {} must not publish shared core framing",
+                sample["case"]
+            );
+        }
+    }
     json!({"v":"secret-local-use-vectors-v1","approval_public_sec1_b64url":URL_SAFE_NO_PAD.encode(approval_key().verifying_key().to_encoded_point(false).as_bytes()),"ssh_public_blob_b64url":URL_SAFE_NO_PAD.encode(ssh_blob()),"userauth_data":bytes_record(&userauth("alice")),"deposit":deposit_sample,"cases":cases,"list":json_record(&listing),"sudo_hour_refused":sudo_hour,"refusals":refusals})
 }
 

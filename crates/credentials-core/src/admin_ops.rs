@@ -2292,6 +2292,7 @@ pub fn apply(
             let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
             let mut result = status_result(&metas, &grants, open_intents, store.is_fenced_out());
+            attach_remote_credentials(&mut result, &store.remote_inventory()?);
             if let Ok(plans) = store.detected_plans() {
                 attach_detected_plans(&mut result, &plans);
             }
@@ -2436,6 +2437,21 @@ pub fn attach_declared_grants(
     if listing.incomplete {
         result["declared_grants_incomplete"] = serde_json::json!(true);
     }
+}
+
+/// Add the member-local remote inventory used by scoped listing and category coverage.
+/// Keep it separate so local health totals and existing status fields are unchanged.
+pub fn attach_remote_credentials(
+    result: &mut serde_json::Value,
+    inventory: &[crate::federation::RemoteInventoryRow],
+) {
+    result["remote_credentials"] = serde_json::json!(inventory
+        .iter()
+        .map(|entry| serde_json::json!({
+            "id": entry.record.credential_id,
+            "categories": entry.categories,
+        }))
+        .collect::<Vec<_>>());
 }
 
 /// Build the status report shared by the authenticated route and lease-free CLI fallback.

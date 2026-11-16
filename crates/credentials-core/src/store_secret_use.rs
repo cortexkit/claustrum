@@ -294,6 +294,8 @@ impl EncryptedStore {
         if !ssh.key.starts_with("signing:") || validate_deposit_credential_id(&ssh.key).is_err() {
             return Err(SecretError::InvalidParams);
         }
+        crate::signing::validate_signing_input(&ssh.key, ssh.data.as_bytes())
+            .map_err(|_| SecretError::InvalidParams)?;
         self.validate_local_use(&call, &ssh.local_use, clock())?;
         if !ssh.local_use.is_ssh() || ssh.data.user() != ssh.local_use.user() {
             return Err(SecretError::InvalidParams);

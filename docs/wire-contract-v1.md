@@ -110,6 +110,9 @@ The second shape is the transport refusal: a malformed frame, an unknown operati
 ordinary read params that failed to decode (`invalid_params`). Enrollment operations
 are an exception: their typed-param decode failures are classified `Response` refusals
 (`invalid_params`/`permanent`), as described in § 2.1.
+Purpose-bound ck-bus signing input refusals use the classless transport `Error`
+shape with `invalid_params`, after authorizing the caller; ordinary request decoding
+is unchanged.
 The transport refusal is emitted by `send_route_error` in
 `main.rs` using `subc_protocol::ErrorBody`, whose fields are `code`, `message` and an
 optional `detail` — **there is no `class` field on that type**, so its absence is
@@ -341,6 +344,49 @@ installed by the most recent `put`/`overwrite` row for that credential id; the
 chain orders signatures around replacements. Normal rotation uses a new id.
 Older record decoders ignore the additive flag; rollback reads remain compatible,
 but older binaries do not enforce this policy and drop it when rewriting a record.
+
+### Purpose-bound ck-bus signing keys
+
+Daemon startup creates these Ed25519 keys on every computer, including computers
+that are not hubs:
+
+| credential id | purpose |
+|---|---|
+| `signing:bus-leaf:1` | sign the hub's NATS connect nonce |
+| `signing:bus-hub-operator:1` | sign NATS operator JWTs |
+| `signing:bus-hub-account:1` | sign NATS account/user JWTs |
+| `signing:bus-hub-tls:1` | sign the hub's TLS 1.3 server CertificateVerify |
+
+Creation is create-only: one `fleet_key_create` audit row per missing key, with
+actor `vault`, and no replacement or new row on a subsequent start. All generations
+under these four prefixes admit only exact `read` and `sign` grants to
+`reserved:ckbus`. Other principals, operations, non-exact selectors naming these
+keys, and bearer-handle minting receive `bus_key_reserved` / `permanent`. Category
+grants never cover these keys. `read` exposes the public half, not the private key;
+the NATS server never receives private material.
+
+Every vault-key signing entry point applies the same core purpose check to the
+decoded signing bytes, including `credential.sign` and operator `ck auth sign`:
+
+- **Leaf:** exactly 15 bytes, each in `A-Z a-z 0-9 - _`. This is the unpadded
+  base64url NATS nonce representing 11 random bytes, not its decoded random bytes.
+- **TLS:** exactly 64 bytes of `0x20`, the ASCII context
+  `TLS 1.3, server CertificateVerify`, one `0x00`, then exactly 32 or 48 transcript
+  hash bytes (RFC 8446 §4.4.3). No extra bytes or other context is accepted.
+- **Operator/account JWT:** at most 65,536 bytes total, exactly two nonempty,
+  unpadded base64url segments separated by one dot (`<header>.<claims>`). The
+  decoded header must be a JSON object with `alg: "ed25519-nkey"` and `typ: "JWT"`;
+  additional header members are allowed. This is the JWT signing input, without
+  the signature segment.
+
+An input outside its key's purpose receives a classless transport `invalid_params`
+Error, with no signature or write. Unauthorized callers still receive uniform
+`not_found` regardless of their input. Other signing keys continue to accept arbitrary bytes
+within their existing caps. These startup keys have `audit_each_signature = false`,
+so consumer TLS handshakes and other consumer signatures add no per-signature audit
+row. They are not opted into operator signing: `ck auth sign` requires a separate
+operator opt-in as for any other key. If opted in, operator signatures still require
+their normal durable audit row and still apply the purpose check.
 
 ### 2.1 Enrollment, for a consumer with no supervised identity
 
@@ -2361,10 +2407,13 @@ row on that `federation_setup_invalid` result, just as for a routed permanent re
 malformed federation params/member/aad and forbidden bearers. Master-key admin helpers
 can also return `invalid_params` / permanent in their separate admin refusal body; that
 does not turn the protocol Error into a classified read verdict.
+Purpose-bound ck-bus signing refusals likewise use a classless `invalid_params`
+Error, as described in § 2.
 
 | Additional refusal code | Class | Meaning |
 |---|---|---|
 | `transfer_key_reserved` | permanent | A forbidden grant or handle on a transfer-key id. |
+| `bus_key_reserved` | permanent | A forbidden grant or bearer handle on any ck-bus signing-key generation. |
 | `transfer_key_protected` | permanent | Mutation or replacement of an active transfer key. |
 | `remote_record` | permanent | A handle or local-only action requested for a remote record. |
 | `member_not_paired` | permanent | Member grant attempted without a current pairing. |

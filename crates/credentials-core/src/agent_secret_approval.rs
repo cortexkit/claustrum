@@ -28,6 +28,7 @@ pub const MAX_SSH_USERAUTH_BYTES: usize = 8192;
 enum LocalUseKind {
     Sudo {
         user: String,
+        purpose: String,
         expects: String,
         undoable: String,
     },
@@ -44,7 +45,6 @@ pub struct LocalUse {
     kind: LocalUseKind,
     command: String,
     workdir: String,
-    purpose: String,
 }
 
 impl LocalUse {
@@ -59,7 +59,6 @@ impl LocalUse {
         };
         let command = local_text(text("command")?, MAX_LOCAL_COMMAND_BYTES)?;
         let workdir = local_text(text("workdir")?, MAX_LOCAL_WORKDIR_BYTES)?;
-        let purpose = local_text(text("purpose")?, MAX_LOCAL_PURPOSE_BYTES)?;
         if !workdir.starts_with('/') {
             return Err(InvalidParams);
         }
@@ -77,6 +76,7 @@ impl LocalUse {
                 if object.len() != 8 || target.len() != 1 {
                     return Err(InvalidParams);
                 }
+                let purpose = local_text(text("purpose")?, MAX_LOCAL_PURPOSE_BYTES)?;
                 let expects = local_text(text("expects")?, MAX_LOCAL_EXPECTS_BYTES)?;
                 let undoable = text("undoable")?;
                 if !matches!(undoable, "yes" | "no" | "unknown") {
@@ -84,12 +84,13 @@ impl LocalUse {
                 }
                 LocalUseKind::Sudo {
                     user: user.into(),
+                    purpose,
                     expects,
                     undoable: undoable.into(),
                 }
             }
             ("ssh", "ssh_sign") => {
-                if object.len() != 6 || target.len() != 3 {
+                if object.len() != 5 || target.len() != 3 {
                     return Err(InvalidParams);
                 }
                 let host = target
@@ -120,7 +121,6 @@ impl LocalUse {
             kind,
             command,
             workdir,
-            purpose,
         })
     }
 
@@ -150,11 +150,14 @@ impl LocalUse {
         let mut value = self.triple();
         value["command"] = self.command.clone().into();
         value["workdir"] = self.workdir.clone().into();
-        value["purpose"] = self.purpose.clone().into();
         match &self.kind {
             LocalUseKind::Sudo {
-                expects, undoable, ..
+                purpose,
+                expects,
+                undoable,
+                ..
             } => {
+                value["purpose"] = purpose.clone().into();
                 value["expects"] = expects.clone().into();
                 value["undoable"] = undoable.clone().into();
             }
@@ -351,6 +354,39 @@ mod local_statement_tests {
         json!({"program":"sudo","use":"sudo_password","target":{"user":"root"},"command":"apt upgrade","workdir":"/home/u","purpose":"update","expects":"password prompt","undoable":"no"})
     }
 
+    fn ssh() -> serde_json::Value {
+        json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/"})
+    }
+
+    #[test]
+    fn ssh_local_use_accepts_no_purpose_and_stores_only_request_members() {
+        let value = ssh();
+        let local = LocalUse::from_value(&value).unwrap();
+        assert_eq!(local.members(), value);
+    }
+
+    #[test]
+    fn ssh_local_use_refuses_purpose_even_when_empty() {
+        for purpose in ["login", ""] {
+            let mut value = ssh();
+            value["purpose"] = json!(purpose);
+            assert_eq!(
+                LocalUse::from_value(&value),
+                Err(SecretError::InvalidParams)
+            );
+        }
+    }
+
+    #[test]
+    fn sudo_local_use_still_requires_purpose() {
+        let mut value = sudo();
+        value.as_object_mut().unwrap().remove("purpose");
+        assert_eq!(
+            LocalUse::from_value(&value),
+            Err(SecretError::InvalidParams)
+        );
+    }
+
     #[test]
     fn local_text_caps_count_utf8_bytes_and_refuse_controls() {
         for (field, cap) in [
@@ -481,10 +517,10 @@ mod local_statement_tests {
             json!({"user":"u","host":"host.test","port":65536}),
             json!({"user":"u","host":"host.test"}),
         ] {
-            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":target,"command":"ssh","workdir":"/","purpose":"login"})).is_err());
+            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":target,"command":"ssh","workdir":"/"})).is_err());
         }
         for port in [1, 65535] {
-            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":port},"command":"ssh","workdir":"/","purpose":"login"})).is_ok());
+            assert!(LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":port},"command":"ssh","workdir":"/"})).is_ok());
         }
     }
 
@@ -516,7 +552,7 @@ mod local_statement_tests {
         assert_eq!(serde_json::to_vec(&statement).unwrap(), expected);
         call.agent_id = None;
         call.name = "signing:ssh".into();
-        let ssh = LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/","purpose":"login"})).unwrap();
+        let ssh = LocalUse::from_value(&ssh()).unwrap();
         let statement =
             local_approval_statement("r", "m", "i", &call, &ssh, Some("SHA256:test"), 42, "asker")
                 .unwrap();
@@ -530,9 +566,10 @@ mod local_statement_tests {
             statement.get("secret").is_none()
                 && statement.get("expects").is_none()
                 && statement.get("undoable").is_none()
+                && statement.get("purpose").is_none()
         );
         assert_eq!(statement.get("agent_id"), Some(&serde_json::Value::Null));
-        assert_eq!(statement.as_object().unwrap().len(), 16);
+        assert_eq!(statement.as_object().unwrap().len(), 15);
         for id in [
             "signing:",
             "signing:a\u{2028}b",

@@ -1,0 +1,1104 @@
+{
+  "approval_public_sec1_b64url": "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM",
+  "cases": [
+    {
+      "approval": {
+        "envelope": {
+          "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6Im9uY2UiLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDAiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYTRlNGJmMjJjYWJhN2IzMWI3ZDFjMzUyYWFkODU0MGUzODYwMGIwYThlZTM0ZDllMDdkZWE0NDliNGIzM2EwZSJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+          "json": {
+            "decision": "allow",
+            "device_fingerprint": "11111111111111111111111111111111",
+            "duration": "once",
+            "grant_expires_at_ms": 1700000600000,
+            "issued_at_ms": 1700000000000,
+            "items": [
+              {
+                "request_id": "01HF7YAT000000000000000100",
+                "statement_sha256": "a4e4bf22caba7b31b7d1c352aad8540e38600b0a8ee34d9e07dea449b4b33a0e"
+              }
+            ],
+            "v": "ck-secret-use-envelope/v1"
+          },
+          "sha256": "b843654d81384eb70a7266c713bcb0c36a3281101987db8e265b35829bb1111d"
+        },
+        "reply": {
+          "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMCJ9XX0",
+          "json": {
+            "results": [
+              {
+                "outcome": "granted",
+                "request_id": "01HF7YAT000000000000000100"
+              }
+            ]
+          },
+          "sha256": "4864f64aaa5a5e3d7211f5150198b9c91452d9219e8ca8355c6b710f89635a0a"
+        },
+        "signature_der_b64url": "MEYCIQDkhf6rHhqfD_BY6uG_Ho-xbKExYJAQ91heITmMvhCH2gIhAOMhdCCWhaZU0Azqv0z-XHibvE-k7iO-40MultmZC7MQ"
+      },
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDAiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNkltRm5aVzUwTFVFaUxDSmpiMjF0WVc1a0lqb2lZWEIwSUhWd1ozSmhaR1VpTENKamIzWmxjbUZuWlNJNkluTmpiM0JsSWl3aVpIVnlZWFJwYjI1eklqcGJJbTl1WTJVaVhTd2laWGh3WldOMGN5STZJbkJoYzNOM2IzSmtJSEJ5YjIxd2RDSXNJbTFsYldKbGNsOXBaQ0k2SW1abFpDMWpiMjF3ZFhSbGNqb3lNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWlJc0luQnliMmR5WVcwaU9pSnpkV1J2SWl3aWNIVnljRzl6WlNJNkluVndaR0YwWlNCd1lXTnJZV2RsY3lJc0luSmxjWFZsYzNSZlpYaHdhWEpsYzE5aGRGOXRjeUk2TVRjd01EQXdNRFl3TURBd01Dd2ljbVZ4ZFdWemRGOXBaQ0k2SWpBeFNFWTNXVUZVTURBd01EQXdNREF3TURBd01EQXdNVEF3SWl3aWMyTnZjR1VpT25zaVpYQnZZMmdpT2pjc0ltdHBibVFpT2lKb1pXRmtJaXdpYjNkdVpYSWlPaUp5WlhObGNuWmxaRHB3Y21WbWNtOXVkR0ZzTFdOdmNtVWlMQ0p5WldZaU9pSklJbjBzSW5ObFkzSmxkQ0k2ZXlKcGJtTmhjbTVoZEdsdmJpSTZJakF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TUdGaUlpd2lhMmx1WkNJNklteHZZMkZzWDNCeWIyZHlZVzBpTENKdVlXMWxJam9pYzNWa2J5SjlMQ0owWVhKblpYUWlPbnNpZFhObGNpSTZJbkp2YjNRaWZTd2lkVzVrYjJGaWJHVWlPaUp1YnlJc0luVnpaU0k2SW5OMVpHOWZjR0Z6YzNkdmNtUWlMQ0oySWpvaVkyc3RjMlZqY21WMExXeHZZMkZzTFhWelpTMXpkR0YwWlcxbGJuUXZkakVpTENKM2IzSnJaR2x5SWpvaUwyaHZiV1V2WVd4cFkyVWlmUSIsInN0YXR1cyI6ImFwcHJvdmFsX3JlcXVpcmVkIn0",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiXSwiZXhwZWN0cyI6InBhc3N3b3JkIHByb21wdCIsIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzdWRvIiwicHVycG9zZSI6InVwZGF0ZSBwYWNrYWdlcyIsInJlcXVlc3RfZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMTAwIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsLWNvcmUiLCJyZWYiOiJIIn0sInNlY3JldCI6eyJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGFiIiwia2luZCI6ImxvY2FsX3Byb2dyYW0iLCJuYW1lIjoic3VkbyJ9LCJ0YXJnZXQiOnsidXNlciI6InJvb3QifSwidW5kb2FibGUiOiJubyIsInVzZSI6InN1ZG9fcGFzc3dvcmQiLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+          "status": "approval_required"
+        },
+        "sha256": "9fcfb749366392235c356581a9ede18b6551f8dacf1fcceb1c9575f0b2624445"
+      },
+      "case": "sudo_password-local",
+      "reply": {
+        "b64url": "eyJraW5kIjoibG9jYWxfcHJvZ3JhbSIsInN0YXR1cyI6InJlbGVhc2VkIiwidXNlIjoic3Vkb19wYXNzd29yZCIsInZhbHVlIjoixZ9pZnJl8J-UkSJ9",
+        "json": {
+          "kind": "local_program",
+          "status": "released",
+          "use": "sudo_password",
+          "value": "şifre🔑"
+        },
+        "sha256": "2b1b86d4ee99074cfde515f7a890e751afe0e6fb3b885a39c6ad69ed44b9357d"
+      },
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRlIHBhY2thZ2VzIiwidGFyZ2V0Ijp7InVzZXIiOiJyb290In0sInVuZG9hYmxlIjoibm8iLCJ1c2UiOiJzdWRvX3Bhc3N3b3JkIiwid29ya2RpciI6Ii9ob21lL2FsaWNlIn19",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt upgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "f364c532b437d3164322dd5b637407b3bfbf2afb2b7ada216a73605ba708636c"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiXSwiZXhwZWN0cyI6InBhc3N3b3JkIHByb21wdCIsIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzdWRvIiwicHVycG9zZSI6InVwZGF0ZSBwYWNrYWdlcyIsInJlcXVlc3RfZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMTAwIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsLWNvcmUiLCJyZWYiOiJIIn0sInNlY3JldCI6eyJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGFiIiwia2luZCI6ImxvY2FsX3Byb2dyYW0iLCJuYW1lIjoic3VkbyJ9LCJ0YXJnZXQiOnsidXNlciI6InJvb3QifSwidW5kb2FibGUiOiJubyIsInVzZSI6InN1ZG9fcGFzc3dvcmQiLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+        "json": {
+          "agent_id": "agent-A",
+          "command": "apt upgrade",
+          "coverage": "scope",
+          "durations": [
+            "once"
+          ],
+          "expects": "password prompt",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "program": "sudo",
+          "purpose": "update packages",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000100",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "secret": {
+            "incarnation": "000000000000000000000000000000ab",
+            "kind": "local_program",
+            "name": "sudo"
+          },
+          "target": {
+            "user": "root"
+          },
+          "undoable": "no",
+          "use": "sudo_password",
+          "v": "ck-secret-local-use-statement/v1",
+          "workdir": "/home/alice"
+        },
+        "sha256": "a4e4bf22caba7b31b7d1c352aad8540e38600b0a8ee34d9e07dea449b4b33a0e"
+      }
+    },
+    {
+      "approval": {
+        "envelope": {
+          "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6Im9uY2UiLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiMzY4MGIyNjk5NjlkNmRhYzlmMWQ4MTcxNTRlMDVkY2FkODEzNDk0OTZmMTMxNjJkZmQxMGM2MWYzYjBhMzFkYiJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+          "json": {
+            "decision": "allow",
+            "device_fingerprint": "11111111111111111111111111111111",
+            "duration": "once",
+            "grant_expires_at_ms": 1700000600000,
+            "issued_at_ms": 1700000000000,
+            "items": [
+              {
+                "request_id": "01HF7YAT000000000000000101",
+                "statement_sha256": "3680b269969d6dac9f1d817154e05dcad81349496f13162dfd10c61f3b0a31db"
+              }
+            ],
+            "v": "ck-secret-use-envelope/v1"
+          },
+          "sha256": "49968e442f866f121f61b6d8fc2050756e75af80f044cc8215a9a8fb328331f5"
+        },
+        "reply": {
+          "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMSJ9XX0",
+          "json": {
+            "results": [
+              {
+                "outcome": "granted",
+                "request_id": "01HF7YAT000000000000000101"
+              }
+            ]
+          },
+          "sha256": "6e343594d80a0c53f97db9dfecd06853c6d08884ff096be03ca47707b0450cbb"
+        },
+        "signature_der_b64url": "MEUCIQD2ELBAj2etJVTTBp8Y-Lfw5A01fOjWjdfDX6eVknC42wIgY8hzVjucDgPhkuttO4Eay8cNmhYRQI2hTtEe0UXw70s"
+      },
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDEiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNmJuVnNiQ3dpWVhOcmFXNW5YMjFsYldKbGNsOXBaQ0k2SW1abFpDMWpiMjF3ZFhSbGNqb3hNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVNJc0ltTnZiVzFoYm1RaU9pSmhjSFFnZFhCbmNtRmtaU0lzSW1OdmRtVnlZV2RsSWpvaWMyTnZjR1VpTENKa2RYSmhkR2x2Ym5NaU9sc2liMjVqWlNKZExDSmxlSEJsWTNSeklqb2ljR0Z6YzNkdmNtUWdjSEp2YlhCMElpd2liV1Z0WW1WeVgybGtJam9pWm1Wa0xXTnZiWEIxZEdWeU9qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5SWl3aWNISnZaM0poYlNJNkluTjFaRzhpTENKd2RYSndiM05sSWpvaWRYQmtZWFJsSUhCaFkydGhaMlZ6SWl3aWNtVnhkV1Z6ZEY5bGVIQnBjbVZ6WDJGMFgyMXpJam94TnpBd01EQXdOakF3TURBd0xDSnlaWEYxWlhOMFgybGtJam9pTURGSVJqZFpRVlF3TURBd01EQXdNREF3TURBd01EQXhNREVpTENKelkyOXdaU0k2ZXlKbGNHOWphQ0k2Tnl3aWEybHVaQ0k2SW1obFlXUWlMQ0p2ZDI1bGNpSTZJbkpsYzJWeWRtVmtPbkJ5WldaeWIyNTBZV3d0WTI5eVpTSXNJbkpsWmlJNklrZ2lmU3dpYzJWamNtVjBJanA3SW1sdVkyRnlibUYwYVc5dUlqb2lNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3WVdJaUxDSnJhVzVrSWpvaWJHOWpZV3hmY0hKdlozSmhiU0lzSW01aGJXVWlPaUp6ZFdSdkluMHNJblJoY21kbGRDSTZleUoxYzJWeUlqb2ljbTl2ZENKOUxDSjFibVJ2WVdKc1pTSTZJbTV2SWl3aWRYTmxJam9pYzNWa2IxOXdZWE56ZDI5eVpDSXNJbllpT2lKamF5MXpaV055WlhRdGJHOWpZV3d0ZFhObExYTjBZWFJsYldWdWRDOTJNU0lzSW5kdmNtdGthWElpT2lJdmFHOXRaUzloYkdsalpTSjkiLCJzdGF0dXMiOiJhcHByb3ZhbF9yZXF1aXJlZCJ9",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000101",
+          "statement_b64url": "eyJhZ2VudF9pZCI6bnVsbCwiYXNraW5nX21lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsImNvbW1hbmQiOiJhcHQgdXBncmFkZSIsImNvdmVyYWdlIjoic2NvcGUiLCJkdXJhdGlvbnMiOlsib25jZSJdLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRlIHBhY2thZ2VzIiwicmVxdWVzdF9leHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDEiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOnByZWZyb250YWwtY29yZSIsInJlZiI6IkgifSwic2VjcmV0Ijp7ImluY2FybmF0aW9uIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwYWIiLCJraW5kIjoibG9jYWxfcHJvZ3JhbSIsIm5hbWUiOiJzdWRvIn0sInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsInYiOiJjay1zZWNyZXQtbG9jYWwtdXNlLXN0YXRlbWVudC92MSIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+          "status": "approval_required"
+        },
+        "sha256": "94352272ac64411fc0d11276ef8fd1bee3f6f4484fdd17994cfa1c87fc087442"
+      },
+      "case": "sudo_password-forwarded",
+      "reply": {
+        "b64url": "eyJraW5kIjoibG9jYWxfcHJvZ3JhbSIsInN0YXR1cyI6InJlbGVhc2VkIiwidXNlIjoic3Vkb19wYXNzd29yZCIsInZhbHVlIjoixZ9pZnJl8J-UkSJ9",
+        "json": {
+          "kind": "local_program",
+          "status": "released",
+          "use": "sudo_password",
+          "value": "şifre🔑"
+        },
+        "sha256": "2b1b86d4ee99074cfde515f7a890e751afe0e6fb3b885a39c6ad69ed44b9357d"
+      },
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnt9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiY29tbWFuZCI6ImFwdCB1cGdyYWRlIiwiZXhwZWN0cyI6InBhc3N3b3JkIHByb21wdCIsInByb2dyYW0iOiJzdWRvIiwicHVycG9zZSI6InVwZGF0ZSBwYWNrYWdlcyIsInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9fQ",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt upgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "dd626accb14536dd3bab912824213ea69764626b601116efef4a33e1a8cc1708"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6bnVsbCwiYXNraW5nX21lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsImNvbW1hbmQiOiJhcHQgdXBncmFkZSIsImNvdmVyYWdlIjoic2NvcGUiLCJkdXJhdGlvbnMiOlsib25jZSJdLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRlIHBhY2thZ2VzIiwicmVxdWVzdF9leHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDEiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOnByZWZyb250YWwtY29yZSIsInJlZiI6IkgifSwic2VjcmV0Ijp7ImluY2FybmF0aW9uIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwYWIiLCJraW5kIjoibG9jYWxfcHJvZ3JhbSIsIm5hbWUiOiJzdWRvIn0sInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsInYiOiJjay1zZWNyZXQtbG9jYWwtdXNlLXN0YXRlbWVudC92MSIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+        "json": {
+          "agent_id": null,
+          "asking_member_id": "fed-computer:11111111111111111111111111111111",
+          "command": "apt upgrade",
+          "coverage": "scope",
+          "durations": [
+            "once"
+          ],
+          "expects": "password prompt",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "program": "sudo",
+          "purpose": "update packages",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000101",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "secret": {
+            "incarnation": "000000000000000000000000000000ab",
+            "kind": "local_program",
+            "name": "sudo"
+          },
+          "target": {
+            "user": "root"
+          },
+          "undoable": "no",
+          "use": "sudo_password",
+          "v": "ck-secret-local-use-statement/v1",
+          "workdir": "/home/alice"
+        },
+        "sha256": "3680b269969d6dac9f1d817154e05dcad81349496f13162dfd10c61f3b0a31db"
+      }
+    },
+    {
+      "approval": {
+        "envelope": {
+          "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6ImhvdXIiLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDAzNjAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDIiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYTUzNGU5OGJiYzA1ZjU4MzdlN2U2MDYxMWZlODQ5NGExMDBlYmJhMTY0OGZjZGQ0ZDFlZGQ5M2Y5MGYwZmRmOSJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+          "json": {
+            "decision": "allow",
+            "device_fingerprint": "11111111111111111111111111111111",
+            "duration": "hour",
+            "grant_expires_at_ms": 1700003600000,
+            "issued_at_ms": 1700000000000,
+            "items": [
+              {
+                "request_id": "01HF7YAT000000000000000102",
+                "statement_sha256": "a534e98bbc05f5837e7e60611fe8494a100ebba1648fcdd4d1edd93f90f0fdf9"
+              }
+            ],
+            "v": "ck-secret-use-envelope/v1"
+          },
+          "sha256": "a6689af90d306d176cd54b428f4065b842dc49ecfaa3014701c66d5aa7868953"
+        },
+        "reply": {
+          "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMiJ9XX0",
+          "json": {
+            "results": [
+              {
+                "outcome": "granted",
+                "request_id": "01HF7YAT000000000000000102"
+              }
+            ]
+          },
+          "sha256": "c31926cdd8cb4c057e7c4492896e34aaaf478a2b28385cb1e4c123d0829447a9"
+        },
+        "signature_der_b64url": "MEUCIB8TJ2tAunLrTVmMNYFd1oo1hv0jEVN0_6udM2Anq2iRAiEA64E7_Pp_Mz2ZGK4TIBTc1mN1sQ-33CtFfYk9mFPPY8w"
+      },
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDIiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNmJuVnNiQ3dpWTI5dGJXRnVaQ0k2SW5OemFDQmhiR2xqWlVBeE1qY3VNQzR3TGpFaUxDSmpiM1psY21GblpTSTZJbk5qYjNCbElpd2laSFZ5WVhScGIyNXpJanBiSW05dVkyVWlMQ0pvYjNWeUlpd2ljMlZ6YzJsdmJpSmRMQ0pyWlhraU9uc2lZM0psWkdWdWRHbGhiRjlwWkNJNkluTnBaMjVwYm1jNmJHOWpZV3d0ZFhObExYWmxZM1J2Y2lJc0ltWnBibWRsY25CeWFXNTBJam9pVTBoQk1qVTJPa0ZEY0Rkb1pYUXJOV0YwTUZCMVRVbDVUbWhvY1dVNFQxaEJTamx2WldoUFVsTklSWGw2ZDFGWlkyY2lMQ0pwYm1OaGNtNWhkR2x2YmlJNklqQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNR05rSW4wc0ltMWxiV0psY2w5cFpDSTZJbVpsWkMxamIyMXdkWFJsY2pveU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNaUlzSW5CeWIyZHlZVzBpT2lKemMyZ2lMQ0p5WlhGMVpYTjBYMlY0Y0dseVpYTmZZWFJmYlhNaU9qRTNNREF3TURBMk1EQXdNREFzSW5KbGNYVmxjM1JmYVdRaU9pSXdNVWhHTjFsQlZEQXdNREF3TURBd01EQXdNREF3TURFd01pSXNJbk5qYjNCbElqcDdJbVZ3YjJOb0lqbzNMQ0pyYVc1a0lqb2lhR1ZoWkNJc0ltOTNibVZ5SWpvaWNtVnpaWEoyWldRNmNISmxabkp2Ym5SaGJDMWpiM0psSWl3aWNtVm1Jam9pU0NKOUxDSjBZWEpuWlhRaU9uc2lhRzl6ZENJNklqRXlOeTR3TGpBdU1TSXNJbkJ2Y25RaU9qSXlMQ0oxYzJWeUlqb2lZV3hwWTJVaWZTd2lkWE5sSWpvaWMzTm9YM05wWjI0aUxDSjJJam9pWTJzdGMyVmpjbVYwTFd4dlkyRnNMWFZ6WlMxemRHRjBaVzFsYm5RdmRqRWlMQ0ozYjNKclpHbHlJam9pTDJodmJXVXZZV3hwWTJVaWZRIiwic3RhdHVzIjoiYXBwcm92YWxfcmVxdWlyZWQifQ",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000102",
+          "statement_b64url": "eyJhZ2VudF9pZCI6bnVsbCwiY29tbWFuZCI6InNzaCBhbGljZUAxMjcuMC4wLjEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiJdLCJrZXkiOnsiY3JlZGVudGlhbF9pZCI6InNpZ25pbmc6bG9jYWwtdXNlLXZlY3RvciIsImZpbmdlcnByaW50IjoiU0hBMjU2OkFDcDdoZXQrNWF0MFB1TUl5TmhocWU4T1hBSjlvZWhPUlNIRXl6d1FZY2ciLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGNkIn0sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzc2giLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMiIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwidXNlIjoic3NoX3NpZ24iLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+          "status": "approval_required"
+        },
+        "sha256": "d5e46f1e2031d4906b98a0c709ef718212f0caf3b3f484db20a729185f8d717d"
+      },
+      "case": "ssh_sign-local",
+      "reply": {
+        "b64url": "eyJzaWduYXR1cmVfYjY0dXJsIjoidi1NUUJrRFUyazkyRDQ2dnhVeXlSZlE0LXFYeEllQVF3OUVZaHRhUlV0Y0FUZVp3V3NVYzdkWEpSMVA5c0NGa0RXWm9qbFN5anNINWExSnY4Nm1VQUEiLCJzdGF0dXMiOiJzaWduZWQifQ",
+        "json": {
+          "signature_b64url": "v-MQBkDU2k92D46vxUyyRfQ4-qXxIeAQw9EYhtaRUtcATeZwWsUc7dXJR1P9sCFkDWZojlSyjsH5a1Jv86mUAA",
+          "status": "signed"
+        },
+        "sha256": "b91d4ee55045db00bcabd26592816b831e9e3609f797f648b26d69812d038a80"
+      },
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFWaGJHbGpaUUFBQUE1emMyZ3RZMjl1Ym1WamRHbHZiZ0FBQUFsd2RXSnNhV05yWlhrQkFBQUFDM056YUMxbFpESTFOVEU1QUFBQU13QUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQm12bjR6TEhwRk16SzluUXBfZmJCVjljWHZHZ2F0cG0yWXM1LTJnUXhIT2ciLCJrZXkiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7fSwia2luZCI6ImhlYWQiLCJvd25lciI6eyJraW5kIjoicmVzZXJ2ZWQiLCJtb2R1bGVfaWQiOiJwcmVmcm9udGFsLWNvcmUifSwib3duZXJfYXV0aG9yaXplZCI6dHJ1ZSwicmVmIjoiSCIsInNjb3BlX2Vwb2NoIjo3fSwidGFyZ2V0Ijp7Imhvc3QiOiIxMjcuMC4wLjEiLCJwb3J0IjoyMiwidXNlciI6ImFsaWNlIn0sIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "54b46e72c4c4e080dd1be91da8c6c07c4d8d9a655c271120d24ef3dbe4329f4d"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6bnVsbCwiY29tbWFuZCI6InNzaCBhbGljZUAxMjcuMC4wLjEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiJdLCJrZXkiOnsiY3JlZGVudGlhbF9pZCI6InNpZ25pbmc6bG9jYWwtdXNlLXZlY3RvciIsImZpbmdlcnByaW50IjoiU0hBMjU2OkFDcDdoZXQrNWF0MFB1TUl5TmhocWU4T1hBSjlvZWhPUlNIRXl6d1FZY2ciLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGNkIn0sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzc2giLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMiIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwidXNlIjoic3NoX3NpZ24iLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+        "json": {
+          "agent_id": null,
+          "command": "ssh alice@127.0.0.1",
+          "coverage": "scope",
+          "durations": [
+            "once",
+            "hour",
+            "session"
+          ],
+          "key": {
+            "credential_id": "signing:local-use-vector",
+            "fingerprint": "SHA256:ACp7het+5at0PuMIyNhhqe8OXAJ9oehORSHEyzwQYcg",
+            "incarnation": "000000000000000000000000000000cd"
+          },
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "program": "ssh",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000102",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "use": "ssh_sign",
+          "v": "ck-secret-local-use-statement/v1",
+          "workdir": "/home/alice"
+        },
+        "sha256": "a534e98bbc05f5837e7e60611fe8494a100ebba1648fcdd4d1edd93f90f0fdf9"
+      }
+    },
+    {
+      "approval": {
+        "envelope": {
+          "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6InNlc3Npb24iLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDg2NDAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDMiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiMmIzZmY2YmM1ODViYTlkMmFlNzA4NDE3YWEwODcyOTQ4ODE4MzY2ZjY0MDViNjQxYmRlZDAxMzc4MDc1MWQxMCJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+          "json": {
+            "decision": "allow",
+            "device_fingerprint": "11111111111111111111111111111111",
+            "duration": "session",
+            "grant_expires_at_ms": 1700086400000,
+            "issued_at_ms": 1700000000000,
+            "items": [
+              {
+                "request_id": "01HF7YAT000000000000000103",
+                "statement_sha256": "2b3ff6bc585ba9d2ae708417aa0872948818366f6405b641bded013780751d10"
+              }
+            ],
+            "v": "ck-secret-use-envelope/v1"
+          },
+          "sha256": "826071864633f2339501c9943a6a7f63687e78d611de1f50bd31a143a8ba9aac"
+        },
+        "reply": {
+          "b64url": "eyJyZXN1bHRzIjpbeyJvdXRjb21lIjoiZ3JhbnRlZCIsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMyJ9XX0",
+          "json": {
+            "results": [
+              {
+                "outcome": "granted",
+                "request_id": "01HF7YAT000000000000000103"
+              }
+            ]
+          },
+          "sha256": "f904c2712c93bd9279fd3e5d7320065f7ba613e9339195a924e318842dc06d5b"
+        },
+        "signature_der_b64url": "MEUCIQCex_zxOOJgo1uSCe6QhwkvtnWr-x8gUoRK3UPTahOJQAIgC3pRtI5sH4B29uSbb_1CxYe0_aZ9YP6Hgzx4rNPhA68"
+      },
+      "approval_required": {
+        "b64url": "eyJleHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDMiLCJzdGF0ZW1lbnRfYjY0dXJsIjoiZXlKaFoyVnVkRjlwWkNJNkltRm5aVzUwTFVFaUxDSmhjMnRwYm1kZmJXVnRZbVZ5WDJsa0lqb2labVZrTFdOdmJYQjFkR1Z5T2pFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhNVEV4TVRFeE1URXhJaXdpWTI5dGJXRnVaQ0k2SW5OemFDQmhiR2xqWlVBeE1qY3VNQzR3TGpFaUxDSmpiM1psY21GblpTSTZJbk5qYjNCbElpd2laSFZ5WVhScGIyNXpJanBiSW05dVkyVWlMQ0pvYjNWeUlpd2ljMlZ6YzJsdmJpSmRMQ0pyWlhraU9uc2lZM0psWkdWdWRHbGhiRjlwWkNJNkluTnBaMjVwYm1jNmJHOWpZV3d0ZFhObExYWmxZM1J2Y2lJc0ltWnBibWRsY25CeWFXNTBJam9pVTBoQk1qVTJPa0ZEY0Rkb1pYUXJOV0YwTUZCMVRVbDVUbWhvY1dVNFQxaEJTamx2WldoUFVsTklSWGw2ZDFGWlkyY2lMQ0pwYm1OaGNtNWhkR2x2YmlJNklqQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNR05rSW4wc0ltMWxiV0psY2w5cFpDSTZJbVpsWkMxamIyMXdkWFJsY2pveU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNakl5TWpJeU1qSXlNaUlzSW5CeWIyZHlZVzBpT2lKemMyZ2lMQ0p5WlhGMVpYTjBYMlY0Y0dseVpYTmZZWFJmYlhNaU9qRTNNREF3TURBMk1EQXdNREFzSW5KbGNYVmxjM1JmYVdRaU9pSXdNVWhHTjFsQlZEQXdNREF3TURBd01EQXdNREF3TURFd015SXNJbk5qYjNCbElqcDdJbVZ3YjJOb0lqbzNMQ0pyYVc1a0lqb2lhR1ZoWkNJc0ltOTNibVZ5SWpvaWNtVnpaWEoyWldRNmNISmxabkp2Ym5SaGJDMWpiM0psSWl3aWNtVm1Jam9pU0NKOUxDSjBZWEpuWlhRaU9uc2lhRzl6ZENJNklqRXlOeTR3TGpBdU1TSXNJbkJ2Y25RaU9qSXlMQ0oxYzJWeUlqb2lZV3hwWTJVaWZTd2lkWE5sSWpvaWMzTm9YM05wWjI0aUxDSjJJam9pWTJzdGMyVmpjbVYwTFd4dlkyRnNMWFZ6WlMxemRHRjBaVzFsYm5RdmRqRWlMQ0ozYjNKclpHbHlJam9pTDJodmJXVXZZV3hwWTJVaWZRIiwic3RhdHVzIjoiYXBwcm92YWxfcmVxdWlyZWQifQ",
+        "json": {
+          "expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000103",
+          "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJhc2tpbmdfbWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiY29tbWFuZCI6InNzaCBhbGljZUAxMjcuMC4wLjEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiJdLCJrZXkiOnsiY3JlZGVudGlhbF9pZCI6InNpZ25pbmc6bG9jYWwtdXNlLXZlY3RvciIsImZpbmdlcnByaW50IjoiU0hBMjU2OkFDcDdoZXQrNWF0MFB1TUl5TmhocWU4T1hBSjlvZWhPUlNIRXl6d1FZY2ciLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGNkIn0sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzc2giLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwidXNlIjoic3NoX3NpZ24iLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+          "status": "approval_required"
+        },
+        "sha256": "a7756c8f7067903fd4e2aa63debe9fca5f8262bea7632ab4ed7fb82d42e8027a"
+      },
+      "case": "ssh_sign-forwarded",
+      "reply": {
+        "b64url": "eyJzaWduYXR1cmVfYjY0dXJsIjoidi1NUUJrRFUyazkyRDQ2dnhVeXlSZlE0LXFYeEllQVF3OUVZaHRhUlV0Y0FUZVp3V3NVYzdkWEpSMVA5c0NGa0RXWm9qbFN5anNINWExSnY4Nm1VQUEiLCJzdGF0dXMiOiJzaWduZWQifQ",
+        "json": {
+          "signature_b64url": "v-MQBkDU2k92D46vxUyyRfQ4-qXxIeAQw9EYhtaRUtcATeZwWsUc7dXJR1P9sCFkDWZojlSyjsH5a1Jv86mUAA",
+          "status": "signed"
+        },
+        "sha256": "b91d4ee55045db00bcabd26592816b831e9e3609f797f648b26d69812d038a80"
+      },
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFWaGJHbGpaUUFBQUE1emMyZ3RZMjl1Ym1WamRHbHZiZ0FBQUFsd2RXSnNhV05yWlhrQkFBQUFDM056YUMxbFpESTFOVEU1QUFBQU13QUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQm12bjR6TEhwRk16SzluUXBfZmJCVjljWHZHZ2F0cG0yWXM1LTJnUXhIT2ciLCJrZXkiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7ImFnZW50X2lkIjoiYWdlbnQtQSJ9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwid29ya2RpciI6Ii9ob21lL2FsaWNlIn0",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "f5c97b743450c7b07271526242b33f4e734855fec75eab4ebb8ecb851c5d0afb"
+      },
+      "statement": {
+        "b64url": "eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJhc2tpbmdfbWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiY29tbWFuZCI6InNzaCBhbGljZUAxMjcuMC4wLjEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiJdLCJrZXkiOnsiY3JlZGVudGlhbF9pZCI6InNpZ25pbmc6bG9jYWwtdXNlLXZlY3RvciIsImZpbmdlcnByaW50IjoiU0hBMjU2OkFDcDdoZXQrNWF0MFB1TUl5TmhocWU4T1hBSjlvZWhPUlNIRXl6d1FZY2ciLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGNkIn0sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInByb2dyYW0iOiJzc2giLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDEwMyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwidXNlIjoic3NoX3NpZ24iLCJ2IjoiY2stc2VjcmV0LWxvY2FsLXVzZS1zdGF0ZW1lbnQvdjEiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifQ",
+        "json": {
+          "agent_id": "agent-A",
+          "asking_member_id": "fed-computer:11111111111111111111111111111111",
+          "command": "ssh alice@127.0.0.1",
+          "coverage": "scope",
+          "durations": [
+            "once",
+            "hour",
+            "session"
+          ],
+          "key": {
+            "credential_id": "signing:local-use-vector",
+            "fingerprint": "SHA256:ACp7het+5at0PuMIyNhhqe8OXAJ9oehORSHEyzwQYcg",
+            "incarnation": "000000000000000000000000000000cd"
+          },
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "program": "ssh",
+          "request_expires_at_ms": 1700000600000,
+          "request_id": "01HF7YAT000000000000000103",
+          "scope": {
+            "epoch": 7,
+            "kind": "head",
+            "owner": "reserved:prefrontal-core",
+            "ref": "H"
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "use": "ssh_sign",
+          "v": "ck-secret-local-use-statement/v1",
+          "workdir": "/home/alice"
+        },
+        "sha256": "2b3ff6bc585ba9d2ae708417aa0872948818366f6405b641bded013780751d10"
+      }
+    }
+  ],
+  "deposit": {
+    "aad": {
+      "b64url": "GAAAAAAAAABjay1zZWNyZXQtZGVwb3NpdC1hYWQvdjIaAAAAAAAAADAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxLQAAAAAAAABmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIEAAAAAAAAAHN1ZG8NAAAAAAAAAGxvY2FsX3Byb2dyYW0EAAAAAAAAAHN1ZG8NAAAAAAAAAHN1ZG9fcGFzc3dvcmQBAAAAAAAAADIEAAAAAAAAAHJvb3QFAAAAAAAAAGFkbWlu",
+      "sha256": "37e0e7faba9799be4bc4b2948c27b279d8ad54898f5c705bb46294eb4ca18855"
+    },
+    "phone_public_b64url": "Xf7dO2vUf2-ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI",
+    "plaintext": {
+      "b64url": "HgAAAAAAAABjay1zZWNyZXQtZGVwb3NpdC1wbGFpbnRleHQvdjEKAAAAAAAAAMWfaWZyZfCflJE",
+      "sha256": "000a28f817a6fc88d75a3e4b51f0bec5f0ea9d8f5178b124afb628e2d1be0e8d"
+    },
+    "recipient_public_b64url": "V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE",
+    "request": {
+      "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazd0NFJqN0dCUnNlUmFXczZHOTZKV3VhbHRNZ0YyX3JIajNRLWdCYXJGNUE4YiIsImRlcG9zaXRfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsImVuY19iNjR1cmwiOiJBSTFQMXNBR1k1VmI5ejNCVXY1RHZQRThsMFU1Sklja1dLSXA5R3lBZ0JJIiwia2luZCI6ImxvY2FsX3Byb2dyYW0iLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJuYW1lIjoic3VkbyIsInByb2dyYW0iOiJzdWRvIiwidGFyZ2V0cyI6W3sidXNlciI6InJvb3QifSx7InVzZXIiOiJhZG1pbiJ9XSwidXNlIjoic3Vkb19wYXNzd29yZCJ9",
+      "json": {
+        "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k7t4Rj7GBRseRaWs6G96JWualtMgF2_rHj3Q-gBarF5A8b",
+        "deposit_id": "01HF7YAT000000000000000001",
+        "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+        "kind": "local_program",
+        "member_id": "fed-computer:22222222222222222222222222222222",
+        "name": "sudo",
+        "program": "sudo",
+        "targets": [
+          {
+            "user": "root"
+          },
+          {
+            "user": "admin"
+          }
+        ],
+        "use": "sudo_password"
+      },
+      "sha256": "f21824be9836acdabae3db4c011d2719779fe7abac6b8b941b1f7a49948f5cc4"
+    },
+    "sealed_body": {
+      "b64url": "GAAAAAAAAABjay1zZWNyZXQtc2VhbGVkLWJvZHkvdjINAAAAAAAAAGxvY2FsX3Byb2dyYW0EAAAAAAAAAHN1ZG8NAAAAAAAAAHN1ZG9fcGFzc3dvcmQBAAAAAAAAADIFAAAAAAAAAGFkbWluBAAAAAAAAAByb290CgAAAAAAAADFn2lmcmXwn5SR",
+      "sha256": "9496f20ab890da77921397fb4152a6f4513e80be99a0d5201402cab6d095fa5b"
+    },
+    "stored_scope_json": "{\"program\":\"sudo\",\"targets\":[{\"user\":\"admin\"},{\"user\":\"root\"}],\"use\":\"sudo_password\"}"
+  },
+  "list": {
+    "b64url": "eyJzZWNyZXRzIjpbeyJmbG93X2dyYW50cyI6W10sImdyYW50cyI6W3siYWdlbnRfaWQiOiJhZ2VudC1BIiwiY292ZXJhZ2UiOiJzY29wZSIsImR1cmF0aW9uIjoib25jZSIsImV4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsImdyYW50X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAyMDAiLCJsb2NhbF91c2UiOnsicHJvZ3JhbSI6InN1ZG8iLCJ0YXJnZXQiOnsidXNlciI6InJvb3QifSwidXNlIjoic3Vkb19wYXNzd29yZCJ9LCJzY29wZSI6eyJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9fSx7ImFnZW50X2lkIjpudWxsLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb24iOiJvbmNlIiwiZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwiZ3JhbnRfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDIwMSIsImxvY2FsX3VzZSI6eyJwcm9ncmFtIjoic3VkbyIsInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1c2UiOiJzdWRvX3Bhc3N3b3JkIn0sInNjb3BlIjp7ImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsLWNvcmUiLCJyZWYiOiJIIn19XSwiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDBhYiIsImtpbmQiOiJsb2NhbF9wcm9ncmFtIiwibmFtZSI6InN1ZG8iLCJwcm9ncmFtIjoic3VkbyIsInN0YXRlIjoiYWN0aXZlIiwidGFyZ2V0cyI6W3sidXNlciI6ImFkbWluIn0seyJ1c2VyIjoicm9vdCJ9XSwidXNlIjoic3Vkb19wYXNzd29yZCJ9XSwic3NoX2tleXMiOlt7ImNyZWRlbnRpYWxfaWQiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJmaW5nZXJwcmludCI6IlNIQTI1NjpBQ3A3aGV0KzVhdDBQdU1JeU5oaHFlOE9YQUo5b2VoT1JTSEV5endRWWNnIiwiZ3JhbnRzIjpbeyJhZ2VudF9pZCI6bnVsbCwiY292ZXJhZ2UiOiJzY29wZSIsImR1cmF0aW9uIjoiaG91ciIsImV4cGlyZXNfYXRfbXMiOjE3MDAwMDM2MDAwMDAsImdyYW50X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAyMDIiLCJsb2NhbF91c2UiOnsicHJvZ3JhbSI6InNzaCIsInRhcmdldCI6eyJob3N0IjoiMTI3LjAuMC4xIiwicG9ydCI6MjIsInVzZXIiOiJhbGljZSJ9LCJ1c2UiOiJzc2hfc2lnbiJ9LCJzY29wZSI6eyJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9fSx7ImFnZW50X2lkIjoiYWdlbnQtQSIsImNvdmVyYWdlIjoic2NvcGUiLCJkdXJhdGlvbiI6InNlc3Npb24iLCJleHBpcmVzX2F0X21zIjoxNzAwMDg2NDAwMDAwLCJncmFudF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMjAzIiwibG9jYWxfdXNlIjp7InByb2dyYW0iOiJzc2giLCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwidXNlIjoic3NoX3NpZ24ifSwic2NvcGUiOnsia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOnByZWZyb250YWwtY29yZSIsInJlZiI6IkgifX1dLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMGNkIn1dfQ",
+    "json": {
+      "secrets": [
+        {
+          "flow_grants": [],
+          "grants": [
+            {
+              "agent_id": "agent-A",
+              "coverage": "scope",
+              "duration": "once",
+              "expires_at_ms": 1700000600000,
+              "grant_id": "01HF7YAT000000000000000200",
+              "local_use": {
+                "program": "sudo",
+                "target": {
+                  "user": "root"
+                },
+                "use": "sudo_password"
+              },
+              "scope": {
+                "kind": "head",
+                "owner": "reserved:prefrontal-core",
+                "ref": "H"
+              }
+            },
+            {
+              "agent_id": null,
+              "coverage": "scope",
+              "duration": "once",
+              "expires_at_ms": 1700000600000,
+              "grant_id": "01HF7YAT000000000000000201",
+              "local_use": {
+                "program": "sudo",
+                "target": {
+                  "user": "root"
+                },
+                "use": "sudo_password"
+              },
+              "scope": {
+                "kind": "head",
+                "owner": "reserved:prefrontal-core",
+                "ref": "H"
+              }
+            }
+          ],
+          "incarnation": "000000000000000000000000000000ab",
+          "kind": "local_program",
+          "name": "sudo",
+          "program": "sudo",
+          "state": "active",
+          "targets": [
+            {
+              "user": "admin"
+            },
+            {
+              "user": "root"
+            }
+          ],
+          "use": "sudo_password"
+        }
+      ],
+      "ssh_keys": [
+        {
+          "credential_id": "signing:local-use-vector",
+          "fingerprint": "SHA256:ACp7het+5at0PuMIyNhhqe8OXAJ9oehORSHEyzwQYcg",
+          "grants": [
+            {
+              "agent_id": null,
+              "coverage": "scope",
+              "duration": "hour",
+              "expires_at_ms": 1700003600000,
+              "grant_id": "01HF7YAT000000000000000202",
+              "local_use": {
+                "program": "ssh",
+                "target": {
+                  "host": "127.0.0.1",
+                  "port": 22,
+                  "user": "alice"
+                },
+                "use": "ssh_sign"
+              },
+              "scope": {
+                "kind": "head",
+                "owner": "reserved:prefrontal-core",
+                "ref": "H"
+              }
+            },
+            {
+              "agent_id": "agent-A",
+              "coverage": "scope",
+              "duration": "session",
+              "expires_at_ms": 1700086400000,
+              "grant_id": "01HF7YAT000000000000000203",
+              "local_use": {
+                "program": "ssh",
+                "target": {
+                  "host": "127.0.0.1",
+                  "port": 22,
+                  "user": "alice"
+                },
+                "use": "ssh_sign"
+              },
+              "scope": {
+                "kind": "head",
+                "owner": "reserved:prefrontal-core",
+                "ref": "H"
+              }
+            }
+          ],
+          "incarnation": "000000000000000000000000000000cd"
+        }
+      ]
+    },
+    "sha256": "0a8678d16afa493d8f40b5cf49e04903f442dcb3f383ec38d34d274fe4cc1212"
+  },
+  "refusals": [
+    {
+      "case": "off-grammar-sudo-target",
+      "code": "invalid_params",
+      "operation": "secret.use",
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRlIHBhY2thZ2VzIiwidGFyZ2V0Ijp7InVzZXIiOiItcm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9fQ",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt upgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "-root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "c08898f651217efad8880266dffed21ddf4ef0e4fc757858afda9e101dba4701"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "cc-command",
+      "code": "invalid_params",
+      "operation": "secret.use",
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoiYXB0XG51cGdyYWRlIiwiZXhwZWN0cyI6InBhc3N3b3JkIHByb21wdCIsInByb2dyYW0iOiJzdWRvIiwicHVycG9zZSI6InVwZGF0ZSBwYWNrYWdlcyIsInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9fQ",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt\nupgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "9cccf31492f1862bd72edd1d5ff568cc4a9854157c35cad883c61a5895d04a5a"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "cf-purpose",
+      "code": "invalid_params",
+      "operation": "secret.use",
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRl4oCOcGFja2FnZXMiLCJ0YXJnZXQiOnsidXNlciI6InJvb3QifSwidW5kb2FibGUiOiJubyIsInVzZSI6InN1ZG9fcGFzc3dvcmQiLCJ3b3JrZGlyIjoiL2hvbWUvYWxpY2UifX0",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt upgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update‎packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "db1ef65d5baf93c1b20678dcabb92dc497d99c225b32e80004b1fad701436fe5"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "over-cap-command",
+      "code": "limit_exceeded",
+      "operation": "secret.use",
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoieHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4IiwiZXhwZWN0cyI6InBhc3N3b3JkIHByb21wdCIsInByb2dyYW0iOiJzdWRvIiwicHVycG9zZSI6InVwZGF0ZSBwYWNrYWdlcyIsInRhcmdldCI6eyJ1c2VyIjoicm9vdCJ9LCJ1bmRvYWJsZSI6Im5vIiwidXNlIjoic3Vkb19wYXNzd29yZCIsIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9fQ",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "a91897184c2b7960899e18d15fe4bffd5c59a85aa4f6aa01dd4f813be77420f7"
+      },
+      "validation_error": "LimitExceeded"
+    },
+    {
+      "case": "off-grammar-ssh-target",
+      "code": "invalid_params",
+      "operation": "secret.ssh_sign",
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFWaGJHbGpaUUFBQUE1emMyZ3RZMjl1Ym1WamRHbHZiZ0FBQUFsd2RXSnNhV05yWlhrQkFBQUFDM056YUMxbFpESTFOVEU1QUFBQU13QUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQm12bjR6TEhwRk16SzluUXBfZmJCVjljWHZHZ2F0cG0yWXM1LTJnUXhIT2ciLCJrZXkiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7fSwia2luZCI6ImhlYWQiLCJvd25lciI6eyJraW5kIjoicmVzZXJ2ZWQiLCJtb2R1bGVfaWQiOiJwcmVmcm9udGFsLWNvcmUifSwib3duZXJfYXV0aG9yaXplZCI6dHJ1ZSwicmVmIjoiSCIsInNjb3BlX2Vwb2NoIjo3fSwidGFyZ2V0Ijp7Imhvc3QiOiJMT0NBTEhPU1QiLCJwb3J0IjoyMiwidXNlciI6ImFsaWNlIn0sIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "LOCALHOST",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "61db99c40d4fa87bbad1bb7d74690bc67b8552c249e13a3018a216f12dad521c"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "non-userauth-data",
+      "code": "invalid_params",
+      "operation": "secret.ssh_sign",
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJVMU5JVTBsSCIsImtleSI6InNpZ25pbmc6bG9jYWwtdXNlLXZlY3RvciIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnt9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwid29ya2RpciI6Ii9ob21lL2FsaWNlIn0",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "U1NIU0lH",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "fc030f529368818e1edfec010033d48af17ef3c7691cd76609fcb5d4156004d8"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "wrong-user",
+      "code": "invalid_params",
+      "operation": "secret.ssh_sign",
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFOaWIySUFBQUFPYzNOb0xXTnZibTVsWTNScGIyNEFBQUFKY0hWaWJHbGphMlY1QVFBQUFBdHpjMmd0WldReU5UVXhPUUFBQURNQUFBQUxjM05vTFdWa01qVTFNVGtBQUFBZ1pyNS1NeXg2UlRNeXZaMEtmMzJ3VmZYRjd4b0dyYVp0bUxPZnRvRU1Sem8iLCJrZXkiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7fSwia2luZCI6ImhlYWQiLCJvd25lciI6eyJraW5kIjoicmVzZXJ2ZWQiLCJtb2R1bGVfaWQiOiJwcmVmcm9udGFsLWNvcmUifSwib3duZXJfYXV0aG9yaXplZCI6dHJ1ZSwicmVmIjoiSCIsInNjb3BlX2Vwb2NoIjo3fSwidGFyZ2V0Ijp7Imhvc3QiOiIxMjcuMC4wLjEiLCJwb3J0IjoyMiwidXNlciI6ImFsaWNlIn0sIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAANib2IAAAAOc3NoLWNvbm5lY3Rpb24AAAAJcHVibGlja2V5AQAAAAtzc2gtZWQyNTUxOQAAADMAAAALc3NoLWVkMjU1MTkAAAAgZr5-Myx6RTMyvZ0Kf32wVfXF7xoGraZtmLOftoEMRzo",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "ab5e620fa88fcf826d08938644939e5d33ba7cb0cfd72d2b98540594cd5c74e7"
+      },
+      "validation_error": "InvalidParams"
+    },
+    {
+      "case": "unmarked-key",
+      "code": "not_found",
+      "operation": "secret.ssh_sign",
+      "reply": {
+        "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJub3RfZm91bmQifX0",
+        "json": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        },
+        "sha256": "b1cb9a811b3cd08b18be6eee05d40a6082465c96fb914b87438a1fb595526b0c"
+      },
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFWaGJHbGpaUUFBQUE1emMyZ3RZMjl1Ym1WamRHbHZiZ0FBQUFsd2RXSnNhV05yWlhrQkFBQUFDM056YUMxbFpESTFOVEU1QUFBQU13QUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQm12bjR6TEhwRk16SzluUXBfZmJCVjljWHZHZ2F0cG0yWXM1LTJnUXhIT2ciLCJrZXkiOiJzaWduaW5nOnVubWFya2VkLXZlY3RvciIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnt9LCJraW5kIjoiaGVhZCIsIm93bmVyIjp7ImtpbmQiOiJyZXNlcnZlZCIsIm1vZHVsZV9pZCI6InByZWZyb250YWwtY29yZSJ9LCJvd25lcl9hdXRob3JpemVkIjp0cnVlLCJyZWYiOiJIIiwic2NvcGVfZXBvY2giOjd9LCJ0YXJnZXQiOnsiaG9zdCI6IjEyNy4wLjAuMSIsInBvcnQiOjIyLCJ1c2VyIjoiYWxpY2UifSwid29ya2RpciI6Ii9ob21lL2FsaWNlIn0",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+          "key": "signing:unmarked-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "18d265407dc71ee53cf9ae02f7e327f8990ee7748db6bd85cf7e12c74b64df59"
+      },
+      "validation_error": "NotFound"
+    },
+    {
+      "case": "setting-off-sudo",
+      "code": "secret_local_programs_disabled",
+      "operation": "secret.use",
+      "reply": {
+        "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJzZWNyZXRfbG9jYWxfcHJvZ3JhbXNfZGlzYWJsZWQifX0",
+        "json": {
+          "error": {
+            "class": "permanent",
+            "code": "secret_local_programs_disabled"
+          }
+        },
+        "sha256": "3923005979fbecd0a1627d7a626e57570e349625ddcf0bbc842d168aea7db1a0"
+      },
+      "request": {
+        "b64url": "eyJuYW1lIjoic3VkbyIsInN0YW1wIjp7ImF0dHJpYnV0ZXMiOnsiYWdlbnRfaWQiOiJhZ2VudC1BIn0sImtpbmQiOiJoZWFkIiwib3duZXIiOnsia2luZCI6InJlc2VydmVkIiwibW9kdWxlX2lkIjoicHJlZnJvbnRhbC1jb3JlIn0sIm93bmVyX2F1dGhvcml6ZWQiOnRydWUsInJlZiI6IkgiLCJzY29wZV9lcG9jaCI6N30sInRhcmdldCI6eyJjb21tYW5kIjoiYXB0IHVwZ3JhZGUiLCJleHBlY3RzIjoicGFzc3dvcmQgcHJvbXB0IiwicHJvZ3JhbSI6InN1ZG8iLCJwdXJwb3NlIjoidXBkYXRlIHBhY2thZ2VzIiwidGFyZ2V0Ijp7InVzZXIiOiJyb290In0sInVuZG9hYmxlIjoibm8iLCJ1c2UiOiJzdWRvX3Bhc3N3b3JkIiwid29ya2RpciI6Ii9ob21lL2FsaWNlIn19",
+        "json": {
+          "name": "sudo",
+          "stamp": {
+            "attributes": {
+              "agent_id": "agent-A"
+            },
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "command": "apt upgrade",
+            "expects": "password prompt",
+            "program": "sudo",
+            "purpose": "update packages",
+            "target": {
+              "user": "root"
+            },
+            "undoable": "no",
+            "use": "sudo_password",
+            "workdir": "/home/alice"
+          }
+        },
+        "sha256": "f364c532b437d3164322dd5b637407b3bfbf2afb2b7ada216a73605ba708636c"
+      },
+      "validation_error": "SecretLocalProgramsDisabled"
+    },
+    {
+      "case": "setting-off-ssh",
+      "code": "secret_local_programs_disabled",
+      "operation": "secret.ssh_sign",
+      "reply": {
+        "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJzZWNyZXRfbG9jYWxfcHJvZ3JhbXNfZGlzYWJsZWQifX0",
+        "json": {
+          "error": {
+            "class": "permanent",
+            "code": "secret_local_programs_disabled"
+          }
+        },
+        "sha256": "3923005979fbecd0a1627d7a626e57570e349625ddcf0bbc842d168aea7db1a0"
+      },
+      "request": {
+        "b64url": "eyJjb21tYW5kIjoic3NoIGFsaWNlQDEyNy4wLjAuMSIsImRhdGEiOiJBQUFBSUVKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNRa0pDUWtKQ1FrSkNNZ0FBQUFWaGJHbGpaUUFBQUE1emMyZ3RZMjl1Ym1WamRHbHZiZ0FBQUFsd2RXSnNhV05yWlhrQkFBQUFDM056YUMxbFpESTFOVEU1QUFBQU13QUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQm12bjR6TEhwRk16SzluUXBfZmJCVjljWHZHZ2F0cG0yWXM1LTJnUXhIT2ciLCJrZXkiOiJzaWduaW5nOmxvY2FsLXVzZS12ZWN0b3IiLCJzdGFtcCI6eyJhdHRyaWJ1dGVzIjp7fSwia2luZCI6ImhlYWQiLCJvd25lciI6eyJraW5kIjoicmVzZXJ2ZWQiLCJtb2R1bGVfaWQiOiJwcmVmcm9udGFsLWNvcmUifSwib3duZXJfYXV0aG9yaXplZCI6dHJ1ZSwicmVmIjoiSCIsInNjb3BlX2Vwb2NoIjo3fSwidGFyZ2V0Ijp7Imhvc3QiOiIxMjcuMC4wLjEiLCJwb3J0IjoyMiwidXNlciI6ImFsaWNlIn0sIndvcmtkaXIiOiIvaG9tZS9hbGljZSJ9",
+        "json": {
+          "command": "ssh alice@127.0.0.1",
+          "data": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+          "key": "signing:local-use-vector",
+          "stamp": {
+            "attributes": {},
+            "kind": "head",
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal-core"
+            },
+            "owner_authorized": true,
+            "ref": "H",
+            "scope_epoch": 7
+          },
+          "target": {
+            "host": "127.0.0.1",
+            "port": 22,
+            "user": "alice"
+          },
+          "workdir": "/home/alice"
+        },
+        "sha256": "54b46e72c4c4e080dd1be91da8c6c07c4d8d9a655c271120d24ef3dbe4329f4d"
+      },
+      "validation_error": "SecretLocalProgramsDisabled"
+    },
+    {
+      "case": "setting-off-deposit-replay",
+      "code": "secret_local_programs_disabled",
+      "operation": "secret.deposit",
+      "reply": {
+        "b64url": "eyJlcnJvciI6eyJjbGFzcyI6InBlcm1hbmVudCIsImNvZGUiOiJzZWNyZXRfbG9jYWxfcHJvZ3JhbXNfZGlzYWJsZWQifX0",
+        "json": {
+          "error": {
+            "class": "permanent",
+            "code": "secret_local_programs_disabled"
+          }
+        },
+        "sha256": "3923005979fbecd0a1627d7a626e57570e349625ddcf0bbc842d168aea7db1a0"
+      },
+      "request": {
+        "b64url": "eyJjaXBoZXJ0ZXh0X2I2NHVybCI6IlVEYk5pN3NKeElQTkxyTGF3OUY3RkVNQ3RzQlp1dU9BbzFqZGRFWVp6QTNzU1pSTFBfazd0NFJqN0dCUnNlUmFXczZHOTZKV3VhbHRNZ0YyX3JIajNRLWdCYXJGNUE4YiIsImRlcG9zaXRfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsImVuY19iNjR1cmwiOiJBSTFQMXNBR1k1VmI5ejNCVXY1RHZQRThsMFU1Sklja1dLSXA5R3lBZ0JJIiwia2luZCI6ImxvY2FsX3Byb2dyYW0iLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJuYW1lIjoic3VkbyIsInByb2dyYW0iOiJzdWRvIiwidGFyZ2V0cyI6W3sidXNlciI6InJvb3QifSx7InVzZXIiOiJhZG1pbiJ9XSwidXNlIjoic3Vkb19wYXNzd29yZCJ9",
+        "json": {
+          "ciphertext_b64url": "UDbNi7sJxIPNLrLaw9F7FEMCtsBZuuOAo1jddEYZzA3sSZRLP_k7t4Rj7GBRseRaWs6G96JWualtMgF2_rHj3Q-gBarF5A8b",
+          "deposit_id": "01HF7YAT000000000000000001",
+          "enc_b64url": "AI1P1sAGY5Vb9z3BUv5DvPE8l0U5JIckWKIp9GyAgBI",
+          "kind": "local_program",
+          "member_id": "fed-computer:22222222222222222222222222222222",
+          "name": "sudo",
+          "program": "sudo",
+          "targets": [
+            {
+              "user": "root"
+            },
+            {
+              "user": "admin"
+            }
+          ],
+          "use": "sudo_password"
+        },
+        "sha256": "f21824be9836acdabae3db4c011d2719779fe7abac6b8b941b1f7a49948f5cc4"
+      },
+      "validation_error": "SecretLocalProgramsDisabled"
+    }
+  ],
+  "ssh_public_blob_b64url": "AAAAC3NzaC1lZDI1NTE5AAAAIGa-fjMsekUzMr2dCn99sFX1xe8aBq2mbZizn7aBDEc6",
+  "sudo_hour_refused": {
+    "envelope": {
+      "b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6ImhvdXIiLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDAzNjAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAxMDAiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYTRlNGJmMjJjYWJhN2IzMWI3ZDFjMzUyYWFkODU0MGUzODYwMGIwYThlZTM0ZDllMDdkZWE0NDliNGIzM2EwZSJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ",
+      "json": {
+        "decision": "allow",
+        "device_fingerprint": "11111111111111111111111111111111",
+        "duration": "hour",
+        "grant_expires_at_ms": 1700003600000,
+        "issued_at_ms": 1700000000000,
+        "items": [
+          {
+            "request_id": "01HF7YAT000000000000000100",
+            "statement_sha256": "a4e4bf22caba7b31b7d1c352aad8540e38600b0a8ee34d9e07dea449b4b33a0e"
+          }
+        ],
+        "v": "ck-secret-use-envelope/v1"
+      },
+      "sha256": "27a35e0f744c61a3fffc247bb67c2776c8041df85116b4454ab0174d382a38a5"
+    },
+    "reply": {
+      "b64url": "eyJyZXN1bHRzIjpbeyJjb2RlIjoiYXBwcm92YWxfaW52YWxpZCIsIm91dGNvbWUiOiJyZWZ1c2VkIiwicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMTAwIn1dfQ",
+      "json": {
+        "results": [
+          {
+            "code": "approval_invalid",
+            "outcome": "refused",
+            "request_id": "01HF7YAT000000000000000100"
+          }
+        ]
+      },
+      "sha256": "c5ed050dd5cd2cca40cc89461f09a74835fd72a9ac1d32f9d23a413a76c53b35"
+    },
+    "signature_der_b64url": "MEUCIAFLfToiiziKEvP4f-krnn_wXAMYPLPO_S3RtflQXJT5AiEAu_yRo2gze0xQMx2RpGmoxw6hrOhmjXtpXPzEJf1tHSA"
+  },
+  "userauth_data": {
+    "b64url": "AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACBmvn4zLHpFMzK9nQp_fbBV9cXvGgatpm2Ys5-2gQxHOg",
+    "sha256": "9dc32ef597109789b25f3bba7b0817f26b401a5bea2cf398a673540528867884"
+  },
+  "v": "secret-local-use-vectors-v1"
+}

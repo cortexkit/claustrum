@@ -318,7 +318,7 @@ fn local_params() -> Value {
 fn ssh_params() -> Value {
     json!({"key":"signing:ssh:1","stamp":stamp(ScopeKind::Head),
         "target":{"user":"alice","host":params()["target"]["host"],"port":22},
-        "command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":""})
+        "command":"ssh server","workdir":"/home/alice","data":""})
 }
 
 fn programs_on(store: &EncryptedStore) {

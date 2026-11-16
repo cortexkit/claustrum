@@ -115,7 +115,6 @@ struct SshParams {
     target: Value,
     command: String,
     workdir: String,
-    purpose: String,
     data: String,
 }
 
@@ -259,7 +258,7 @@ pub(crate) fn parse_ssh_sign(
     local_enabled(store)?;
     let (scope, worker_parent, agent_id) =
         local_scope(store, &params.key, params.stamp, &params.coverage)?;
-    let local_use = LocalUse::from_value(&serde_json::json!({"program":"ssh","use":"ssh_sign","target":params.target,"command":params.command,"workdir":params.workdir,"purpose":params.purpose}))
+    let local_use = LocalUse::from_value(&serde_json::json!({"program":"ssh","use":"ssh_sign","target":params.target,"command":params.command,"workdir":params.workdir}))
         .map_err(|e| local_error(store, &params.key, e))?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&params.data)

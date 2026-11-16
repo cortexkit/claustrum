@@ -4045,8 +4045,8 @@ be available to the phone reader before the creation setting is enabled.
 
 The local-program feature switch is off by default. Only AFT may use the local
 `secret.use` target or call the mutating `secret.ssh_sign` operation. Local targets
-are closed objects; sudo requires both `expects` and `undoable` and offers only
-`once`. The password is UTF-8, not base64:
+are closed objects; sudo requires a nonempty `purpose`, both `expects` and
+`undoable`, and offers only `once`. The password is UTF-8, not base64:
 
 <!-- golden:use.request.local_program -->
 ```json
@@ -4061,11 +4061,14 @@ are closed objects; sudo requires both `expects` and `undoable` and offers only
 SSH signs only a strict RFC 4252 publickey userauth packet for an enrolled
 Ed25519 key. The sample packet contains a public-key blob, not private material;
 the vault also requires that blob to match the enrolled key. Requests and targets
-are closed, and the target's user must equal the packet's user.
+are closed, and the target's user must equal the packet's user. SSH local-use
+members are exactly `program`, `use`, `target`, `command`, and `workdir`.
+Neither `secret.ssh_sign` params nor SSH local-use members accept `purpose`,
+even an empty string.
 
 <!-- golden:ssh_sign.request -->
 ```json
-{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}
+{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}
 ```
 
 <!-- golden:ssh_sign.result.signed -->
@@ -4082,9 +4085,11 @@ Every `ck-secret-local-use-statement/v1` statement carries `agent_id`: a string
 when the scope names an agent, or `null` otherwise. Sudo statements carry
 `secret: {name, kind: "local_program", incarnation}`; SSH statements instead carry
 `key: {credential_id, incarnation, fingerprint}`. These identities are supplied by
-the vault, not the asking program.
+the vault, not the asking program. SSH statements and stored local-use members
+omit `purpose`; sudo statement bytes are unchanged. The statement tag remains
+`ck-secret-local-use-statement/v1`.
 
-Agent-supplied card text (`command`, `workdir`, `purpose`, and sudo `expects`)
+Card text (`command`, `workdir`, and sudo-only `purpose` and `expects`)
 must be nonempty and contain no Cc, Cf, Zl or Zp characters. UTF-8 byte caps are
 2048 for `command`, 1024 for `workdir`, and 512 each for `purpose` and `expects`;
 `workdir` must start with `/`. Text is never normalized.
@@ -4114,7 +4119,7 @@ member grant before parsing, then repeats all local checks before receipt replay
 
 <!-- golden:federation.secret_ssh_sign.request -->
 ```json
-{"aad":"{\"secret_name\":\"signing:agent:ssh\",\"requester\":\"fed-computer:11111111111111111111111111111111\",\"home\":\"fed-computer:22222222222222222222222222222222\",\"nonce\":\"0123456789abcdef0123456789abcdef\",\"recipient_key_id\":\"0123456789abcdef\",\"call_sha256\":\"696dfd73eeebeadcb35e29769bbdf69cfeb7163046b1b2614038a3f0c08285d9\"}","sender":"aft","call":{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","purpose":"administer server","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}}
+{"aad":"{\"secret_name\":\"signing:agent:ssh\",\"requester\":\"fed-computer:11111111111111111111111111111111\",\"home\":\"fed-computer:22222222222222222222222222222222\",\"nonce\":\"0123456789abcdef0123456789abcdef\",\"recipient_key_id\":\"0123456789abcdef\",\"call_sha256\":\"f5423b5d919b1bc5cc8536adaaa4dcdfd7bc5d3651bfbfd3b7c71bdc132cf285\"}","sender":"aft","call":{"key":"signing:agent:ssh","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"user":"alice","host":"x.test","port":22},"command":"ssh server","workdir":"/home/alice","data":"AAAAIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHMgAAAAVhbGljZQAAAA5zc2gtY29ubmVjdGlvbgAAAAlwdWJsaWNrZXkBAAAAC3NzaC1lZDI1NTE5AAAAMwAAAAtzc2gtZWQyNTUxOQAAACAREREREREREREREREREREREREREREREREREREREREREQ"}}
 ```
 
 <!-- golden:federation.secret_ssh_sign.result.sealed -->

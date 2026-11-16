@@ -9028,7 +9028,7 @@ fn local_use_listing_cli_orders_secret_ssh_and_phone_rows_without_a_key() {
             "b-grant",
             "signing:a",
             "once",
-            r#"{"command":"command-canary","key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","purpose":"login","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign","workdir":"/private"}"#,
+            r#"{"command":"command-canary","key":{"credential_id":"signing:a","fingerprint":"SHA256:signing:a"},"program":"ssh","target":{"host":"localhost","port":22,"user":"u"},"use":"ssh_sign","workdir":"/private"}"#,
         ),
         (
             "a-grant",

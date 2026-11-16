@@ -992,7 +992,7 @@ mod v2_approval_tests {
             push(&mut data, b"ssh-ed25519");
             push(&mut data, &blob);
             let call = v2_call();
-            SecretSshSign { key:KEY.into(), sender:agent_secret::SecretSender::Aft, scope:call.scope, worker_parent:None, coverage:"scope".into(), agent_id:call.agent_id, local_use:LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":user,"host":host,"port":port},"command":command,"workdir":"/home/u","purpose":"login"})).unwrap(), data:SshUserauth::parse(data).unwrap() }
+            SecretSshSign { key:KEY.into(), sender:agent_secret::SecretSender::Aft, scope:call.scope, worker_parent:None, coverage:"scope".into(), agent_id:call.agent_id, local_use:LocalUse::from_value(&json!({"program":"ssh","use":"ssh_sign","target":{"user":user,"host":host,"port":port},"command":command,"workdir":"/home/u"})).unwrap(), data:SshUserauth::parse(data).unwrap() }
         }
 
         fn count(store: &EncryptedStore, query: &str) -> i64 {
@@ -1225,6 +1225,88 @@ mod v2_approval_tests {
             assert_eq!(
                 store.secret_permissions_list(None, V2_NOW).unwrap()["grants"],
                 json!([])
+            );
+        }
+
+        #[test]
+        fn ssh_once_grant_stores_no_purpose_and_matches_identical_retry() {
+            let (_root, store) = setup("local-ssh-once-no-purpose");
+            let call = ssh(&store, "ssh first", "u", "ssh.test", 22);
+            let pending = request(&store, &call);
+            let statement: Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(pending["statement_b64url"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(statement.get("purpose").is_none());
+            let expected = json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"ssh.test","port":22},"command":"ssh first","workdir":"/home/u","key":{"credential_id":KEY,"fingerprint":statement["key"]["fingerprint"]}});
+            let saved = |table: &str| -> Value {
+                let raw: String = store
+                    .store
+                    .with_conn(|c| {
+                        c.query_row(
+                            &format!("SELECT local_use FROM {table} WHERE secret_name=?1"),
+                            [KEY],
+                            |r| r.get(0),
+                        )
+                    })
+                    .unwrap();
+                serde_json::from_str(&raw).unwrap()
+            };
+            assert_eq!(saved("secret_pending_requests"), expected);
+            assert_eq!(request(&store, &call), pending);
+            assert_eq!(
+                v2_approve(&store, &pending, "once")["results"][0]["outcome"],
+                "granted"
+            );
+            assert_eq!(saved("secret_grants"), expected);
+            assert_eq!(request(&store, &call)["status"], "signed");
+            assert_eq!(count(&store, "SELECT count(*) FROM secret_grants"), 0);
+            assert_eq!(request(&store, &call)["status"], "approval_required");
+        }
+
+        #[test]
+        fn ssh_approval_refuses_v11_statement_with_purpose() {
+            let (_root, store) = setup("local-ssh-old-purpose");
+            let call = ssh(&store, "ssh first", "u", "ssh.test", 22);
+            let mut pending = request(&store, &call);
+            let mut statement: Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(pending["statement_b64url"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            statement["purpose"] = json!("login");
+            let bytes = serde_json::to_vec(&statement).unwrap();
+            let digest = phone::hex(&payload_hash(&bytes));
+            // Persist the purpose-bearing statement and digest too, so the signed
+            // envelope passes the stored-byte check and must be refused by
+            // local-use statement reconstruction.
+            store.store.with_conn(|c| c.execute(
+                "UPDATE secret_pending_requests SET statement_bytes=?1,statement_sha256=?2 WHERE request_id=?3",
+                rusqlite::params![bytes, digest, pending["request_id"].as_str().unwrap()],
+            )).unwrap();
+            pending["statement_b64url"] = json!(URL_SAFE_NO_PAD.encode(&bytes));
+            pending["statement_sha256"] = json!(digest);
+            let (bytes, signature) = signed_envelope(&[pending], "once");
+            let reply = submit(&store, bytes, signature);
+            assert_eq!(reply["results"][0]["outcome"], "refused");
+            assert_eq!(reply["results"][0]["code"], "approval_invalid");
+            assert_eq!(count(&store, "SELECT count(*) FROM secret_grants"), 0);
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM secret_pending_requests WHERE consumed!=0"
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM audit_log WHERE op='secret_grant_create'"
+                ),
+                0
             );
         }
 

@@ -99,7 +99,7 @@ fn userauth(user: &str) -> Vec<u8> {
 
 fn members(ssh: bool) -> Value {
     if ssh {
-        json!({"program":"ssh","use":"ssh_sign","target":{"user":"alice","host":std::net::Ipv4Addr::LOCALHOST.to_string(),"port":22},"command":"ssh alice@127.0.0.1","workdir":"/home/alice","purpose":"administer server"})
+        json!({"program":"ssh","use":"ssh_sign","target":{"user":"alice","host":std::net::Ipv4Addr::LOCALHOST.to_string(),"port":22},"command":"ssh alice@127.0.0.1","workdir":"/home/alice"})
     } else {
         json!({"program":"sudo","use":"sudo_password","target":{"user":"root"},"command":"apt upgrade","workdir":"/home/alice","purpose":"update packages","expects":"password prompt","undoable":"no"})
     }
@@ -143,7 +143,7 @@ fn request(ssh: bool, agent: bool) -> Value {
     }
     if ssh {
         let local = members(true);
-        json!({"key":KEY,"stamp":stamp,"target":local["target"],"command":local["command"],"workdir":local["workdir"],"purpose":local["purpose"],"data":URL_SAFE_NO_PAD.encode(userauth("alice"))})
+        json!({"key":KEY,"stamp":stamp,"target":local["target"],"command":local["command"],"workdir":local["workdir"],"data":URL_SAFE_NO_PAD.encode(userauth("alice"))})
     } else {
         json!({"name":"sudo","stamp":stamp,"target":members(false)})
     }
@@ -683,12 +683,58 @@ fn produce() -> Value {
 
 fn pinned_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/vectors/secret-local-use-vectors-v1/vectors.json")
+        .join("tests/vectors/secret-local-use-vectors-v1.2/vectors.json")
 }
 
 #[test]
 fn secret_local_use_vectors_are_producer_generated_and_pinned() {
     let sample = produce();
+    let previous: Value = serde_json::from_slice(include_bytes!(
+        "vectors/secret-local-use-vectors-v1/vectors.json"
+    ))
+    .unwrap();
+    for (case, prior) in sample["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(previous["cases"].as_array().unwrap())
+    {
+        if case["statement"]["json"]["program"] == "sudo" {
+            assert_eq!(case, prior, "sudo sample bytes must stay identical to v1.1");
+        } else {
+            assert!(case["request"]["json"].get("purpose").is_none());
+            assert!(case["statement"]["json"].get("purpose").is_none());
+            assert_eq!(
+                case["statement"]["json"]["v"],
+                "ck-secret-local-use-statement/v1"
+            );
+        }
+    }
+    for key in [
+        "deposit",
+        "sudo_hour_refused",
+        "list",
+        "userauth_data",
+        "ssh_public_blob_b64url",
+        "approval_public_sec1_b64url",
+    ] {
+        assert_eq!(sample[key], previous[key], "unchanged sample {key}");
+    }
+    for (case, prior) in sample["refusals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(previous["refusals"].as_array().unwrap())
+    {
+        if case["operation"] != "secret.ssh_sign" {
+            assert_eq!(
+                case, prior,
+                "non-SSH refusal bytes must stay identical to v1.1"
+            );
+        } else {
+            assert!(case["request"]["json"].get("purpose").is_none());
+        }
+    }
     for approval in sample["cases"]
         .as_array()
         .unwrap()

@@ -2318,7 +2318,7 @@ async fn local_ops_goldens_match_closed_requests_and_real_replies() {
     let flow = SecretFlow::new(201).await;
     sc_programs(&flow.store, true);
     let sudo = assert_secret_golden_shape("use.request.local_program", "name stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref stamp.scope_epoch stamp.kind stamp.attributes stamp.attributes.agent_id stamp.owner_authorized target target.program target.use target.target target.target.user target.command target.workdir target.purpose target.expects target.undoable");
-    let ssh = assert_secret_golden_shape("ssh_sign.request", "key stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref stamp.scope_epoch stamp.kind stamp.attributes stamp.attributes.agent_id stamp.owner_authorized target target.user target.host target.port command workdir purpose data");
+    let ssh = assert_secret_golden_shape("ssh_sign.request", "key stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref stamp.scope_epoch stamp.kind stamp.attributes stamp.attributes.agent_id stamp.owner_authorized target target.user target.host target.port command workdir data");
     for (call, is_ssh) in [(&sudo, false), (&ssh, true)] {
         let run = |p: &serde_json::Value| {
             if is_ssh {
@@ -2368,6 +2368,22 @@ async fn local_ops_goldens_match_closed_requests_and_real_replies() {
         "approval_required",
         "once consumed"
     );
+}
+
+#[tokio::test]
+async fn ssh_sign_refuses_purpose_before_writing_pending_request() {
+    let flow = SecretFlow::new(212).await;
+    sc_programs(&flow.store, true);
+    let public = sc_ssh_seed(&flow.store);
+    let mut call = sc_ssh_call(&public);
+    let before = sc_local_counts(&flow);
+    for purpose in ["administer server", ""] {
+        call["purpose"] = json!(purpose);
+        assert_eq!(sc_ssh_local(&flow, &call), json!({"transport":"invalid_params"}));
+        assert_eq!(sc_local_counts(&flow), before);
+    }
+    call.as_object_mut().unwrap().remove("purpose");
+    assert_eq!(sc_ssh_local(&flow, &call)["status"], "approval_required");
 }
 
 #[tokio::test]
@@ -2674,7 +2690,7 @@ async fn local_ops_forwarded_ssh_once_lost_reply_replays_one_signature_without_c
 
 #[tokio::test]
 async fn local_ops_federation_ssh_golden_binding_closed_params_and_member_gate() {
-    let golden = assert_secret_golden_shape("federation.secret_ssh_sign.request", "aad sender call call.key call.stamp call.stamp.owner call.stamp.owner.kind call.stamp.owner.module_id call.stamp.ref call.stamp.scope_epoch call.stamp.kind call.stamp.attributes call.stamp.attributes.agent_id call.stamp.owner_authorized call.target call.target.user call.target.host call.target.port call.command call.workdir call.purpose call.data");
+    let golden = assert_secret_golden_shape("federation.secret_ssh_sign.request", "aad sender call call.key call.stamp call.stamp.owner call.stamp.owner.kind call.stamp.owner.module_id call.stamp.ref call.stamp.scope_epoch call.stamp.kind call.stamp.attributes call.stamp.attributes.agent_id call.stamp.owner_authorized call.target call.target.user call.target.host call.target.port call.command call.workdir call.data");
     assert_eq!(golden["call"], secret_golden("ssh_sign.request"));
     let aad: serde_json::Value = serde_json::from_str(golden["aad"].as_str().unwrap()).unwrap();
     assert_eq!(aad["secret_name"], SC_SSH_KEY);

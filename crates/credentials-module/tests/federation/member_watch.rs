@@ -42,6 +42,7 @@ fn seed(rig: &Rig, home: &str, pairing: &str, id: &str) {
                 refresh_adapter: Some("openai".into()),
                 identity: Default::default(),
                 categories: vec!["llm-provider".into()],
+                provider_ids: None,
                 detected_plan: None,
                 home_version: 1,
             }],
@@ -97,6 +98,37 @@ impl Rig {
         drop(self.pairings);
         wait_for_signal(self.join).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn member_watch_invalid_provider_set_rejects_only_that_row() {
+    let mut initial = login("oauth:x");
+    initial["provider_ids"] = json!(["anthropic"]);
+    let rig = Rig::new(
+        "member-provider-rejection",
+        Reply::Watch(notice(vec![initial])),
+    )
+    .await;
+    rig.pairings.send_replace(paired());
+    rig.row("oauth:x").await;
+    let mut invalid = login("oauth:x");
+    invalid["provider_ids"] = json!(["openai", "openai"]);
+    let mut valid = login("oauth:new");
+    valid["provider_ids"] = json!(["openai"]);
+    rig.vaults
+        .callosum
+        .watch_snapshot(Some(notice(vec![invalid, valid])))
+        .await;
+    rig.row("oauth:new").await;
+    assert_eq!(
+        rig.home.store.provider_ids("oauth:x").unwrap(),
+        ["anthropic"]
+    );
+    assert_eq!(
+        rig.home.store.provider_ids("oauth:new").unwrap(),
+        ["openai"]
+    );
+    rig.stop().await;
 }
 
 #[tokio::test]

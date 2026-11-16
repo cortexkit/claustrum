@@ -316,6 +316,59 @@ mod scoped_watch {
     }
 
     #[tokio::test]
+    async fn watch_scoped_home_watch_provider_ids_reach_listing_and_move_view() {
+        use credentials_core::federation::{RemoteHomeState, RemoteWatchApplyMode, RemoteWatchRow};
+        let mut rig = Rig::new();
+        let home = "fed-computer:aa11bb22cc33dd44ee55ff6600112233";
+        let mut row = RemoteWatchRow {
+            credential_id: "oauth:shared".into(),
+            state: RemoteHomeState::Active,
+            refresh_adapter: Some("anthropic".into()),
+            identity: Default::default(),
+            categories: vec!["llm-provider".into()],
+            provider_ids: Some(vec!["anthropic".into()]),
+            detected_plan: None,
+            home_version: 1,
+        };
+        assert_eq!(
+            rig.store
+                .remote_watch_apply_audited(
+                    home, "pair", std::slice::from_ref(&row), RemoteWatchApplyMode::Full, &[],
+                )
+                .unwrap()
+                .inserted,
+            1
+        );
+        rig.grant("watcher", &row.credential_id);
+        rig.bind(1, reserved("watcher"));
+        rig.open(1, 11, json!({})).await;
+        let initial = rig.notice(1, 11, 1).await;
+        let listing =
+            scoped_route_request(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(
+            listing["result"]["credentials"][0]["provider_ids"], json!(["anthropic"])
+        );
+        assert_eq!(listing["result"]["view"], initial["view"]);
+        let writes = rig.store.subscribe_writes();
+        row.provider_ids = Some(vec!["openai".into()]);
+        assert_eq!(
+            rig.store
+                .remote_watch_apply_audited(home, "pair", &[row], RemoteWatchApplyMode::Full, &[])
+                .unwrap()
+                .updated,
+            1
+        );
+        assert!(writes.has_changed().unwrap());
+        let changed = rig.notice(1, 11, 2).await;
+        assert_ne!(changed["view"], initial["view"]);
+        assert_eq!(changed["keys"], initial["keys"]);
+        let listing =
+            scoped_route_request(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(listing["result"]["credentials"][0]["provider_ids"], json!(["openai"]));
+        assert_eq!(listing["result"]["view"], changed["view"]);
+    }
+
+    #[tokio::test]
     async fn watch_scoped_metadata_changes_each_emit_once() {
         let mut rig = Rig::new();
         rig.bind(1, reserved("watcher"));

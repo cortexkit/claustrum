@@ -1235,6 +1235,7 @@ fn seed_home_watch(b: &Vault, home: &str, state: RemoteHomeState) -> RemoteRecor
                 refresh_adapter: Some("anthropic".into()),
                 identity: Default::default(),
                 categories: vec![CATEGORY.into()],
+                provider_ids: None,
                 detected_plan: None,
                 home_version: 17,
             }],

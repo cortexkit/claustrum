@@ -1885,7 +1885,7 @@ migration cannot read a store that holds a `seal` grant's operation name.
 A rotating OAuth login stays on one **home** vault A. Vault B keeps a remote record and
 fetches only an access token; it never stores the token in its database or receives an
 OAuth struct or refresh token. Static credentials instead use an explicitly accepted sealed
-transfer. There is no automatic credential synchronization and no remote-record chaining.
+transfer. There is no automatic static-credential synchronization or remote-record chaining.
 
 ### Callosum vault-sharing switches and member grants
 
@@ -1916,6 +1916,35 @@ its exact announce `read` for `reserved:callosum` through the same path as
 switch row with `member_grant_sharing_switch` and directs the operator to
 `ck callosum share <device> claustrum/vault off`; manual revocation would be undone
 by the next snapshot. Operator rows remain manually revocable.
+
+### `federation.remote_watch` login snapshots
+
+The home streams full non-secret login snapshots to paired members with matching
+`remote_read` grants. Each `snapshot` notice has `home`, `epoch`, `seq`, and `logins`.
+Each login row contains:
+
+| Field | Meaning |
+|---|---|
+| `credential_id` | The login's id on the home. |
+| `state` | `active` or `needs_reauth`. |
+| `refresh_adapter` | The home's refresh adapter. |
+| `identity` | The same identity object as the token reply. |
+| `categories` | The home's category set. |
+| `provider_ids` | The home's stored provider ids, sorted and deduplicated; always present, `[]` when unset. |
+| `detected_plan` | The same detected-plan object as the token reply, or null. |
+| `home_version` | The home's record version. |
+
+Members ignore unknown login-row fields. Older homes omit `provider_ids`: members
+keep an existing copy's ids in that case, and seed an empty set for a new copy.
+When present, the set replaces the ids of a `home_watch` copy in the same transaction
+as its other metadata. Invalid provider-id syntax, duplicates, or a set exceeding
+the existing per-credential cap reject only that row, retaining any existing copy;
+other valid rows still apply. These updates move the member's `credential.list_scoped`
+view and `auth.watch_scoped` view just as category changes do.
+
+Snapshots never change hand-added (`operator`) remote copies. The token reply used
+by `ck auth remote add` does not carry provider ids, so a hand-added copy starts
+without them and keeps its member-local set.
 
 ### Computer-local login sharing opt-out
 

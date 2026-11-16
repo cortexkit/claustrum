@@ -4356,7 +4356,7 @@ impl EncryptedStore {
     }
 
     /// One credential's provider ids in ascending byte order.
-    /// For a remote record these are this vault's own ids for it.
+    /// Home-watch copies follow the home's ids; operator copies use this vault's ids.
     pub fn provider_ids(&self, credential_id: &str) -> Result<Vec<String>, StoreOpError> {
         self.store
             .with_conn(|conn| {

@@ -6,6 +6,7 @@ brief.
 
 ## Building and testing
 
+- Hand-written source files must stay below 5,000 lines (excluding Rust in-file test modules); `python3 scripts/check-file-size.py` checks the limit and existing exceptions.
 - Build and test on the build server: use the bash tool with `runon: "linux,8c"`. Don't
   run cargo on the Mac. Keep the normal build directory; a separate `CARGO_TARGET_DIR`
   forces a cold build every run. If a job is refused for capacity (`runner_full`), nothing

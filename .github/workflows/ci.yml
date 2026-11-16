@@ -186,6 +186,11 @@ jobs:
         shell: bash
         run: python3 scripts/endpoint-hosts.py
 
+      - name: File size
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/check-file-size.py
+
       - name: Path rendering
         if: runner.os != 'Windows'
         # The scripts compare paths against posix literals in manifests. str(Path)

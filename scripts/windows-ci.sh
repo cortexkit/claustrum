@@ -42,6 +42,7 @@ windows_ci() {
   run_check "Inbound contract check" bash scripts/check-inbound-contracts.sh \
     "${CRED_SUBCONSCIOUS_ROOT:-../subconscious}/docs/push-sealed-payload.md"
   run_check "Endpoint hosts" python3 scripts/endpoint-hosts.py
+  windows_git_check "File size" python3 scripts/check-file-size.py
   run_check "Path rendering" python3 scripts/check-path-rendering.py
   run_check "Outside path deps" python3 scripts/check-outside-path-deps.py
   run_check "Check development binary execution names" python3 scripts/check-ckdev-execution.py

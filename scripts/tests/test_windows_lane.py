@@ -99,13 +99,13 @@ windows_ci
         labels = [row[2] if row[0] == "expect" else row[1] for row in rows]
         self.assertEqual(labels, [
             "Windows setup", "Bun install", "Bun build", "Bun typecheck", "Bun test packages",
-            "Inbound contract check", "Endpoint hosts", "Path rendering", "Outside path deps",
+            "Inbound contract check", "Endpoint hosts", "File size", "Path rendering", "Outside path deps",
             "Check development binary execution names", "Design doc status claims",
             "Windows Credential Manager round trips", "Fixture line endings", "Threshold boundary controls",
             "Format check", "Clippy", "Clippy (conformance seams)", "Test", "Client without transport",
             "Windows operator filesystem workflows", "Security-conformance suite (crash-safety seams)"])
         commands = {label: row[3:] if row[0] == "expect" else row[2:] for label, row in zip(labels, rows)}
-        self.assertEqual([row[1] for row in rows if row[0] == "git-check"], ["Fixture line endings"])
+        self.assertEqual([row[1] for row in rows if row[0] == "git-check"], ["File size", "Fixture line endings"])
         self.assertEqual(commands["Bun install"], ["bun", "install", "--frozen-lockfile", "--offline"])
         self.assertEqual(commands["Inbound contract check"], [
             "bash", "scripts/check-inbound-contracts.sh",

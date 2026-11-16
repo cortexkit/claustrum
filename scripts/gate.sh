@@ -106,6 +106,7 @@ SUBCONSCIOUS_ROOT="${CRED_SUBCONSCIOUS_ROOT-../subconscious}"
 [[ -d "$SUBCONSCIOUS_ROOT" ]] || fail "supervisor checkout not found: $SUBCONSCIOUS_ROOT"
 run_check "inbound contracts" bash scripts/check-inbound-contracts.sh "$SUBCONSCIOUS_ROOT/docs/push-sealed-payload.md"
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
+run_check "file size" python3 scripts/check-file-size.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
 run_check "fixture line endings" python3 scripts/check-fixture-line-endings.py

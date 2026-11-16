@@ -1,4 +1,7 @@
 # One line per THRESHOLD constant: <constant> <file> <boundary test>
+MAX_BYTES crates/credentials-core/src/fleet.rs fleet_byte_caps_and_auth_join_boundaries
+MAX_HOLDERS crates/credentials-core/src/fleet.rs fleet_holder_cap_checks_unions_and_wraps_before_writing
+MAX_EPOCHS crates/credentials-core/src/fleet.rs fleet_history_cap_and_full_join_round_trip
 #
 # Hand-maintained, and checked by scripts/threshold-controls.py. Unlike the
 # endpoint and domain-separator manifests this one is NOT derived: the mapping

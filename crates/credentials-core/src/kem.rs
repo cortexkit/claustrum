@@ -229,6 +229,56 @@ fn seal_auth_with_rng<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
     rng: &mut R,
 ) -> Result<(Vec<u8>, Vec<u8>), SealError> {
     check_seal_inputs(recipient_public_key, plaintext, info, aad)?;
+    seal_auth_inner(sender_pem, recipient_public_key, plaintext, info, aad, rng)
+}
+
+/// Fleet joins carry retained history, not a single credential payload. Only this
+/// entry point admits a plaintext up to 1 MiB; ordinary credential caps stay fixed.
+pub fn seal_fleet_auth(
+    sender_pem: &str,
+    recipient_public_key: &[u8],
+    plaintext: &[u8],
+    info: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), SealError> {
+    if plaintext.len() > crate::fleet::MAX_BYTES || info.len() > MAX_SEAL_INFO {
+        return Err(SealError::TooLarge);
+    }
+    if recipient_public_key.len() != X25519_PUBLIC_KEY_LEN {
+        return Err(SealError::InvalidRecipient);
+    }
+    seal_auth_inner(
+        sender_pem,
+        recipient_public_key,
+        plaintext,
+        info,
+        b"",
+        &mut SystemRng,
+    )
+}
+
+/// Check X25519 contributory behaviour, including noncanonical encodings of
+/// low-order points, using the same DH implementation used by HPKE.
+pub fn valid_recipient_public_key(public_key: &[u8; 32]) -> bool {
+    let Ok(public) = <<K as hpke::Kem>::PublicKey as Deserializable>::from_bytes(public_key) else {
+        return false;
+    };
+    hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, K, _>(
+        &OpModeS::Base,
+        &public,
+        b"",
+        &mut SystemRng,
+    )
+    .is_ok()
+}
+
+fn seal_auth_inner<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
+    sender_pem: &str,
+    recipient_public_key: &[u8],
+    plaintext: &[u8],
+    info: &[u8],
+    aad: &[u8],
+    rng: &mut R,
+) -> Result<(Vec<u8>, Vec<u8>), SealError> {
     let recipient =
         <<K as hpke::Kem>::PublicKey as Deserializable>::from_bytes(recipient_public_key)
             .map_err(|_| SealError::InvalidRecipient)?;

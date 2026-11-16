@@ -176,6 +176,28 @@ impl ScopedCaller {
     }
 }
 
+/// A phone's identity and build mark captured from the same route bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneCaller {
+    pub fingerprint: String,
+    pub peer_build: Option<String>,
+}
+
+impl From<String> for PhoneCaller {
+    fn from(fingerprint: String) -> Self {
+        Self {
+            fingerprint,
+            peer_build: None,
+        }
+    }
+}
+
+impl From<&str> for PhoneCaller {
+    fn from(fingerprint: &str) -> Self {
+        fingerprint.to_owned().into()
+    }
+}
+
 /// Who one route bind speaks for, with its captured scoped authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteCaller {
@@ -187,7 +209,7 @@ pub enum RouteCaller {
     /// federation ops answer, and only with the member's own grants.
     Member(String),
     /// A callosum-authenticated phone, isolated from credential and federation reads.
-    Phone(String),
+    Phone(PhoneCaller),
     /// A refused channel: every op, handle reads included, answers the uniform
     /// `not_found`.
     Refused,
@@ -239,7 +261,7 @@ pub fn map_route_caller_with_phone(
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
-                return RouteCaller::Phone(fp.to_owned());
+                return RouteCaller::Phone(fp.into());
             }
         }
     }

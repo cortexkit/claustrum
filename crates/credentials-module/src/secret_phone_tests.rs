@@ -114,6 +114,7 @@ async fn phone_allowlist_and_bearers_fail_before_lookup() {
         let result = serve_with_lookup(
             Arc::clone(&store),
             FP,
+            Some("production"),
             method,
             &json!({}),
             tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -135,6 +136,7 @@ async fn phone_allowlist_and_bearers_fail_before_lookup() {
             let result = serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                Some("production"),
                 method,
                 &params,
                 tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -191,6 +193,7 @@ async fn phone_grammar_and_size_errors_precede_pairing() {
         let result = serve_with_lookup(
             Arc::clone(&store),
             FP,
+            Some("production"),
             method,
             &params,
             tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -235,6 +238,7 @@ async fn phone_pairing_is_uncached_and_observation_survives_deadline() {
             serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                Some("production"),
                 "secret.list",
                 &json!({}),
                 far(),
@@ -255,7 +259,7 @@ async fn phone_pairing_is_uncached_and_observation_survives_deadline() {
         "pair-A"
     );
     let expired = tokio::time::Instant::now() - std::time::Duration::from_millis(1);
-    assert_eq!(code(serve_with_lookup(Arc::clone(&store),FP,"secret.list",&json!({}),expired,async {Some(json!({"devices":[{"class":"phone","fingerprint":FP,"pairing_id":"pair-B"}]}))}).await),"pairing_unavailable");
+    assert_eq!(code(serve_with_lookup(Arc::clone(&store),FP,None,"secret.list",&json!({}),expired,async {Some(json!({"devices":[{"class":"phone","fingerprint":FP,"pairing_id":"pair-B"}]}))}).await),"pairing_unavailable");
     assert_eq!(
         conn.query_row(
             "SELECT pairing_id FROM secret_phone_observations WHERE fingerprint=?1",
@@ -271,6 +275,7 @@ async fn phone_pairing_is_uncached_and_observation_survives_deadline() {
             serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                Some("production"),
                 "secret.list",
                 &json!({}),
                 expired,
@@ -292,6 +297,7 @@ async fn phone_pairing_is_uncached_and_observation_survives_deadline() {
             serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                Some("production"),
                 "secret.list",
                 &json!({}),
                 far(),
@@ -314,6 +320,7 @@ async fn phone_pairing_is_uncached_and_observation_survives_deadline() {
             serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                Some("production"),
                 "secret.list",
                 &json!({}),
                 far(),
@@ -334,6 +341,7 @@ async fn phone_deposit_keys_skips_pairing_and_requires_setup() {
             serve_with_lookup(
                 Arc::clone(&store),
                 FP,
+                None,
                 "secret.deposit_keys",
                 &json!({}),
                 tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -359,6 +367,7 @@ async fn phone_deposit_keys_skips_pairing_and_requires_setup() {
     let response = serve_with_lookup(
         Arc::clone(&store),
         FP,
+        Some("production"),
         "secret.deposit_keys",
         &json!({}),
         tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -522,6 +531,7 @@ async fn manifest_phone(store: &Arc<EncryptedStore>, method: &str, params: &Valu
     match serve_with_lookup(
         Arc::clone(store),
         FP,
+        Some("production"),
         method,
         params,
         tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -560,6 +570,7 @@ async fn manifest_approve_params_are_exact_and_fail_before_pairing() {
         let result = serve_with_lookup(
             Arc::clone(&store),
             FP,
+            Some("production"),
             "manifest.approve",
             &params,
             tokio::time::Instant::now() + PHONE_OP_DEADLINE,
@@ -768,6 +779,46 @@ async fn manifest_approve_phone_commits_verifiable_bytes_and_resends_across_rest
         "status":"approved", "proposal_id":proposal.proposal_id,
         "version":29, "manifest_sha256":manifest_hash(&proposal.manifest_bytes),
     });
+    for build in [None, Some("development"), Some("Production"), Some("")] {
+        let before = manifest_snapshot(&root);
+        let observations = rusqlite::Connection::open(root.join("store.db"))
+            .unwrap()
+            .query_row(
+                "SELECT observed_at_ms FROM secret_phone_observations WHERE fingerprint=?1",
+                [FP],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        for request in [
+            &params,
+            &json!({"envelope_b64url":"not base64", "signature_b64url":null}),
+            &json!(null),
+        ] {
+            let reply = serve_with_lookup(
+                Arc::clone(&store),
+                FP,
+                build,
+                "manifest.approve",
+                request,
+                tokio::time::Instant::now() + PHONE_OP_DEADLINE,
+                async { panic!("unattested manifest approval must not look up pairing") },
+            )
+            .await;
+            assert_eq!(code(reply), "phone_not_attested");
+            assert_eq!(manifest_snapshot(&root), before);
+            assert_eq!(
+                rusqlite::Connection::open(root.join("store.db"))
+                    .unwrap()
+                    .query_row(
+                        "SELECT observed_at_ms FROM secret_phone_observations WHERE fingerprint=?1",
+                        [FP],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                observations
+            );
+        }
+    }
     assert_eq!(
         manifest_phone(&store, "manifest.approve", &params).await,
         expected
@@ -898,6 +949,7 @@ async fn basic_auth_phone_location_grammar_preserves_transport_refusals() {
         let answer = serve_with_lookup(
             Arc::clone(&store),
             FP,
+            Some("production"),
             "secret.deposit",
             &params,
             tokio::time::Instant::now() + PHONE_OP_DEADLINE,

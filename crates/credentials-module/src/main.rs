@@ -1428,8 +1428,18 @@ async fn handle_control_request(
             // `fed-` harness marks a call forwarded from another computer, which the bind
             // registry then serves with no principal (see `AdminSurface::principal`).
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            let peer: subc_protocol::peer::RouteBindPeer =
+            let mut peer_body: serde_json::Value =
                 serde_json::from_slice(&frame.body).map_err(ModuleError::Json)?;
+            // Normalize before typed decoding so even null or a non-string mark
+            // fails closed without preventing the rest of the bind from working.
+            if let Some(build) = peer_body.get("peer_build") {
+                if build.as_str() != Some("production") {
+                    tracing::warn!(target: "routes", route_channel, "ignored invalid peer_build on route bind");
+                    peer_body.as_object_mut().unwrap().remove("peer_build");
+                }
+            }
+            let peer: subc_protocol::peer::RouteBindPeer =
+                serde_json::from_value(peer_body).map_err(ModuleError::Json)?;
             admin.record_connector_bind(
                 route_channel,
                 epoch,
@@ -1438,6 +1448,7 @@ async fn handle_control_request(
                 peer.operator_app.map(|app| app.app),
                 scope.as_ref(),
                 peer.caller.as_ref(),
+                peer.peer_build,
             );
             ModuleControlResponse::RouteBindAck {}
         }
@@ -1761,7 +1772,7 @@ async fn dispatch_route_request(
                 }
             }
         }
-        federation::RouteCaller::Phone(fingerprint) => {
+        federation::RouteCaller::Phone(phone) => {
             let Some(request) = method else {
                 return invalid_params(
                     writer,
@@ -1774,7 +1785,7 @@ async fn dispatch_route_request(
                 .await;
             };
             match admin
-                .serve_phone(&fingerprint, &request.method, &request.params)
+                .serve_phone(&phone, &request.method, &request.params)
                 .await
             {
                 secret_phone::PhoneAnswer::Reply(reply) => {
@@ -2604,6 +2615,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         provides: vec![
             "permissions/v1".to_owned(),
             subc_protocol::peer::OPERATOR_APP_CAPABILITY.to_owned(),
+            subc_protocol::peer::PEER_BUILD_CAPABILITY.to_owned(),
             subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
             subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
         ],
@@ -3145,9 +3157,25 @@ mod tests {
             vec![
                 "permissions/v1",
                 "operator-app/v1",
+                "peer-build/v1",
                 "flow-identity-scopes/v1",
                 "bind-no-project/v1"
             ]
+        );
+    }
+
+    #[test]
+    fn the_manifest_declares_peer_build_attestation() {
+        assert_eq!(subc_protocol::peer::PEER_BUILD_CAPABILITY, "peer-build/v1");
+        let m = manifest("claustrum", None);
+        assert_eq!(
+            m.capabilities
+                .unwrap()
+                .provides
+                .iter()
+                .filter(|capability| capability.as_str() == "peer-build/v1")
+                .count(),
+            1
         );
     }
 
@@ -6085,14 +6113,15 @@ mod tests {
     async fn phone_dispatch_isolated_from_bearers_and_requires_both_live_gates() {
         let (surface, admin, store) = scoped_rig(93);
         let fp = "11111111111111111111111111111111";
-        admin.record_bind_at(
+        phone_attestation_bind(
+            &surface,
+            &admin,
+            &Arc::new(RouteEpochs::default()),
             90,
             1,
-            subc_protocol::Principal::Reserved {
-                module_id: "callosum".into(),
-            },
-            &format!("fed-phone:{fp}"),
-        );
+            Some(json!("production")),
+        )
+        .await;
         admin.record_bind_at(
             91,
             1,
@@ -6132,7 +6161,10 @@ mod tests {
                 if member && phone {
                     assert_eq!(
                         admin.route_caller(90),
-                        federation::RouteCaller::Phone(fp.into())
+                        federation::RouteCaller::Phone(federation::ingress::PhoneCaller {
+                            fingerprint: fp.into(),
+                            peer_build: Some("production".into()),
+                        })
                     );
                     for op in [
                         OP_GET,
@@ -6456,6 +6488,7 @@ mod tests {
             secret_phone::serve_with_lookup(
                 Arc::clone(store),
                 fp,
+                Some("production"),
                 method,
                 &params,
                 tokio::time::Instant::now() + secret_phone::PHONE_OP_DEADLINE,
@@ -19475,6 +19508,8 @@ mod tests {
     ///   warn!     undecodable channel-0 request: fixed text only, no body or decode error
     ///   warn!     route bind refused under a flow scope: fixed text and the daemon-chosen
     ///             route channel number, never the stamp, its flow id, or the principal
+    ///   warn!     invalid peer build on route bind: fixed text and route channel only,
+    ///             once per bind, never the supplied build value or phone fingerprint
     ///   warn!     engram-catalog.json could not be written: fixed text and the io error
     ///             KIND only (never its message, which can carry a path)
     ///   warn!     permanent account exchange failure: fixed text only, never the JWT,
@@ -19546,7 +19581,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 22, 0),
+            (1, 2, 23, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

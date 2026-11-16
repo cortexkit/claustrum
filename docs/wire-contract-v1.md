@@ -2492,16 +2492,16 @@ with the caller, the gates or the stored state.
 * **POR**: an `Error` frame, no class, with exactly
   `{"code":"permissions_operator_required","message":"permissions operations need reserved:cingulate or the local operator's direct route"}`.
 
-The seven phone operations are `secret.phone_keys_register`, `secret.deposit_keys`,
-`secret.deposit`, `secret.approve`, `secret.list`, `secret.delete` and
-`secret.revoke_grant`. "Credential get" is `credential.get` with a valid `handle`;
+The eight phone operations are `secret.phone_keys_register`, `secret.deposit_keys`,
+`secret.deposit`, `secret.approve`, `manifest.approve`, `secret.list`, `secret.delete`
+and `secret.revoke_grant`. "Credential get" is `credential.get` with a valid `handle`;
 "scoped get" is `credential.get_scoped` without `enrollment_token`.
 
 Rows name the route principal and, for `reserved:callosum`, the opener harness. Member gate
 is `federation.member_mapping`; phone setting is `secret.phone_mapping`. Each is On, Off or
 Unreadable (a store read that fails), so every row below covers all nine combinations.
 
-| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get | `connectors.list`, `connectors.watch` |
+| Caller | Gates | Eight phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get | `connectors.list`, `connectors.watch` |
 |---|---|---|---|---|---|---|---|
 | callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) | POR |
 | callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF | served, unless federated scope (POR) |
@@ -2721,6 +2721,31 @@ fixed pairing answer and through the real route dispatch for the non-phone refus
 `CK_EMIT_SECRET_VECTORS=1` rewrites the file.
 
 ### Ordered phone preflight and transaction admission
+
+The vault declares `peer-build/v1`. On `route.bind`, the daemon stamps
+`peer_build: "production"` only for Callosum sessions whose production app build
+passed Apple App Attest. The vault records this fact per route, never per phone
+fingerprint. An absent mark, `null`, or any value other than exactly `"production"`
+is unmarked; an invalid present value also produces one warning at bind.
+
+Before request grammar, pairing lookup or signed-envelope parsing, an unmarked
+phone route receives permanent `phone_not_attested` for
+`secret.phone_keys_register`, `secret.approve` (agent and flow),
+`secret.delete` (both the statement request and signed commit), and
+`manifest.approve`. These refusals write nothing, including pairing observations,
+diagnostics and audit rows. A valid signature from an already registered key does
+not replace the route mark, and a second route from the same fingerprint needs
+its own mark.
+
+`secret.list`, `secret.home` and `secret.deposit_keys` remain available without the
+mark because they read inventory, home location or public deposit keys rather
+than grant authority. `secret.deposit` is unchanged: its authenticated Hybrid
+Public Key Encryption (HPKE) deposit creates a secret but grants no access.
+`secret.revoke_grant` is also
+unchanged: it is unsigned and only removes access. Their existing pairing,
+registration, home-role and feature gates still apply.
+The phone's `connectors.list` and `connectors.watch` queries are also unchanged:
+they expose connector inventory, not signing authority or approvals.
 
 1. Check exact request keys, grammar and sizes. Grammar faults use `invalid_params`
    Error frames with no class, fixed content-free messages. Other exceeded limits use
@@ -3495,6 +3520,11 @@ body is `{"result":{"error":{"code":"…","class":"…"}}}`, for example:
 {"error":{"code":"approval_invalid","class":"permanent"}}
 ```
 
+<!-- golden:error.phone_not_attested -->
+```json
+{"error":{"code":"phone_not_attested","class":"permanent"}}
+```
+
 Transport errors are an `Error` frame `{"code":"…","message":"…"}` with no class (§1a);
 the message is fixed text and never echoes the request.
 
@@ -3506,6 +3536,7 @@ the message is fixed text and never echoes the request.
 | `limit_exceeded` | `context_overflow` | result error | a length or size over its limit |
 | `approval_invalid` | `permanent` | result error, or the `code` of a refused `results` item | an envelope or item failed a check; never says which |
 | `phone_not_registered` | `permanent` | result error | the phone is absent from callosum, or has no keys under its current pairing |
+| `phone_not_attested` | `permanent` | result error | a key registration, secret approval/delete or manifest approval arrived without the route's production build mark |
 | `phone_key_conflict` | `permanent` | result error | different keys for an already registered (fingerprint, pairing) |
 | `deposit_conflict` | `permanent` | result error | a used deposit id with different bytes, member id or a deleted record |
 | `name_exists` | `permanent` | result error | a new deposit for a name that already has a record, corrupt included |
@@ -4267,6 +4298,10 @@ form over those bytes. The envelope is JCS with fields **exactly**
 `{v, proposal_id, statement_sha256, decision, device_fingerprint, issued_at_ms}`.
 `v` is `ck-manifest-binding-envelope/v1`; `decision` is `allow` only. A decline
 sends nothing to the vault. `statement_sha256` commits the exact statement bytes.
+
+The phone route must carry the recorded `peer_build: "production"` mark. Otherwise
+`phone_not_attested` is returned before parsing the envelope, with no store or
+audit changes, even for a valid signature from a registered phone.
 
 Domain separation runs both ways. `manifest.approve` refuses a non-manifest `v`
 with `approval_invalid` **before signature verification**, writing no rows.

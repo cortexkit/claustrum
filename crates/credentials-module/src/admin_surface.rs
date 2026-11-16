@@ -104,6 +104,7 @@ struct BindState {
     /// or drops both together.
     harness: String,
     operator_app: Option<String>,
+    peer_build: Option<String>,
     scope_present: bool,
     federated_scope: bool,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
@@ -224,14 +225,15 @@ impl AdminSurface {
     }
     pub async fn serve_phone(
         &self,
-        fingerprint: &str,
+        phone: &crate::federation::ingress::PhoneCaller,
         method: &str,
         params: &serde_json::Value,
     ) -> crate::secret_phone::PhoneAnswer {
         crate::secret_phone::serve(
             Arc::clone(self.engine.store()),
             self.home.outbound(),
-            fingerprint,
+            &phone.fingerprint,
+            phone.peer_build.as_deref(),
             method,
             params,
         )
@@ -261,7 +263,7 @@ impl AdminSurface {
     /// in-flight request prove it still belongs to this binding before claiming a nonce.
     #[allow(dead_code)] // The test-only library's route harness binds without peer metadata.
     pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal, harness: &str) {
-        self.record_connector_bind(channel, epoch, principal, harness, None, None, None);
+        self.record_connector_bind(channel, epoch, principal, harness, None, None, None, None);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -274,6 +276,7 @@ impl AdminSurface {
         operator_app: Option<String>,
         scope: Option<&subc_protocol::scope::ScopeStamp>,
         caller: Option<&subc_protocol::peer::CallerAttestation>,
+        peer_build: Option<String>,
     ) {
         let declared = Arc::new(self.admit_declaration(&principal, harness, caller));
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
@@ -291,6 +294,7 @@ impl AdminSurface {
                 declared,
                 harness: harness.to_string(),
                 operator_app,
+                peer_build,
                 scope_present: scope.is_some(),
                 federated_scope: scope
                     .is_some_and(|stamp| stamp.kind == subc_protocol::scope::ScopeKind::Federated),
@@ -435,15 +439,19 @@ impl AdminSurface {
                     state.principal.clone(),
                     state.harness.clone(),
                     Arc::clone(&state.declared),
+                    state.peer_build.clone(),
                 )
             })
         };
-        let Some((principal, harness, declared)) = bound else {
+        let Some((principal, harness, declared, peer_build)) = bound else {
             return crate::federation::RouteCaller::Principal(
                 crate::federation::ingress::ScopedCaller::hand_only(None),
             );
         };
         let mut mapped = self.map_caller(&principal, &harness);
+        if let crate::federation::RouteCaller::Phone(phone) = &mut mapped {
+            phone.peer_build = peer_build;
+        }
         if let crate::federation::RouteCaller::Principal(caller) = &mut mapped {
             if caller.as_ref() == Some(&principal) {
                 caller.declared = declared;

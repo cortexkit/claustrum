@@ -579,6 +579,7 @@ async fn a_remote_role_phone_is_sent_home_without_creating_secret_state() {
             Arc::clone(&rig._b.store),
             Some(&rig.vaults.b.outbound),
             PHONE_FP,
+            Some("production"),
             method,
             &golden(id),
         )
@@ -597,6 +598,7 @@ async fn a_remote_role_phone_is_sent_home_without_creating_secret_state() {
         Arc::clone(&rig._b.store),
         Some(&rig.vaults.b.outbound),
         PHONE_FP,
+        None,
         "secret.home",
         &json!({}),
     )

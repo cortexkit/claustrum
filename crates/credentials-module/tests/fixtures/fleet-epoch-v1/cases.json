@@ -1,0 +1,378 @@
+{
+  "fixture_keys": {
+    "recipient_private_key": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+    "recipient_public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+    "sender_private_key": "ERERERERERERERERERERERERERERERERERERERERERE",
+    "sender_public_key": "e06Qm75__kTEZaIgA31gjuNYl9Me-XLwf3SJLLD3PxM"
+  },
+  "import_responses": {
+    "multi_key_join": {
+      "already_held": false,
+      "epochs": [
+        2
+      ]
+    },
+    "one_key_join": {
+      "already_held": true,
+      "epochs": []
+    },
+    "rotation": {
+      "already_held": false,
+      "epochs": [
+        1
+      ]
+    }
+  },
+  "refusals": [
+    {
+      "method": "fleet.epoch_seal",
+      "params": {
+        "aad": "cmVjb3JkOmlkZW50aXR5Ojc",
+        "plaintext": "ZmxlZXQgc2FtcGxlIHBsYWludGV4dA"
+      },
+      "response": {
+        "error": {
+          "class": "transient",
+          "code": "fleet_epoch_unavailable"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_mint",
+      "params": {
+        "members": [
+          "fed-computer:00000000000000000000000000000001"
+        ]
+      },
+      "response": {
+        "error": {
+          "class": "transient",
+          "code": "fleet_peer_keys_unavailable"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_mint",
+      "params": {
+        "members": []
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_members_mismatch"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_commit",
+      "params": {
+        "epoch": 1,
+        "mint_id": "VVVVVVVVVVVVVVVVVVVVVQ"
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_epoch_not_pending"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_open",
+      "params": {
+        "aad": "",
+        "ciphertext": "AAAAAAAAAAAAAAAAAAAAAA",
+        "epoch": 1,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_epoch_open_failed"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_mint",
+      "params": {
+        "members": [
+          "fed-computer:00000000000000000000000000000001",
+          "fed-computer:00000000000000000000000000000002",
+          "fed-computer:00000000000000000000000000000003",
+          "fed-computer:00000000000000000000000000000004",
+          "fed-computer:00000000000000000000000000000005",
+          "fed-computer:00000000000000000000000000000006",
+          "fed-computer:00000000000000000000000000000007",
+          "fed-computer:00000000000000000000000000000008",
+          "fed-computer:00000000000000000000000000000009",
+          "fed-computer:0000000000000000000000000000000a",
+          "fed-computer:0000000000000000000000000000000b",
+          "fed-computer:0000000000000000000000000000000c",
+          "fed-computer:0000000000000000000000000000000d",
+          "fed-computer:0000000000000000000000000000000e",
+          "fed-computer:0000000000000000000000000000000f",
+          "fed-computer:00000000000000000000000000000010",
+          "fed-computer:00000000000000000000000000000011",
+          "fed-computer:00000000000000000000000000000012",
+          "fed-computer:00000000000000000000000000000013",
+          "fed-computer:00000000000000000000000000000014",
+          "fed-computer:00000000000000000000000000000015",
+          "fed-computer:00000000000000000000000000000016",
+          "fed-computer:00000000000000000000000000000017",
+          "fed-computer:00000000000000000000000000000018",
+          "fed-computer:00000000000000000000000000000019",
+          "fed-computer:0000000000000000000000000000001a",
+          "fed-computer:0000000000000000000000000000001b",
+          "fed-computer:0000000000000000000000000000001c",
+          "fed-computer:0000000000000000000000000000001d",
+          "fed-computer:0000000000000000000000000000001e",
+          "fed-computer:0000000000000000000000000000001f",
+          "fed-computer:00000000000000000000000000000020",
+          "fed-computer:00000000000000000000000000000021",
+          "fed-computer:00000000000000000000000000000022",
+          "fed-computer:00000000000000000000000000000023",
+          "fed-computer:00000000000000000000000000000024",
+          "fed-computer:00000000000000000000000000000025",
+          "fed-computer:00000000000000000000000000000026",
+          "fed-computer:00000000000000000000000000000027",
+          "fed-computer:00000000000000000000000000000028",
+          "fed-computer:00000000000000000000000000000029",
+          "fed-computer:0000000000000000000000000000002a",
+          "fed-computer:0000000000000000000000000000002b",
+          "fed-computer:0000000000000000000000000000002c",
+          "fed-computer:0000000000000000000000000000002d",
+          "fed-computer:0000000000000000000000000000002e",
+          "fed-computer:0000000000000000000000000000002f",
+          "fed-computer:00000000000000000000000000000030",
+          "fed-computer:00000000000000000000000000000031",
+          "fed-computer:00000000000000000000000000000032",
+          "fed-computer:00000000000000000000000000000033",
+          "fed-computer:00000000000000000000000000000034",
+          "fed-computer:00000000000000000000000000000035",
+          "fed-computer:00000000000000000000000000000036",
+          "fed-computer:00000000000000000000000000000037",
+          "fed-computer:00000000000000000000000000000038",
+          "fed-computer:00000000000000000000000000000039",
+          "fed-computer:0000000000000000000000000000003a",
+          "fed-computer:0000000000000000000000000000003b",
+          "fed-computer:0000000000000000000000000000003c",
+          "fed-computer:0000000000000000000000000000003d",
+          "fed-computer:0000000000000000000000000000003e",
+          "fed-computer:0000000000000000000000000000003f",
+          "fed-computer:00000000000000000000000000000040",
+          "fed-computer:00000000000000000000000000000041"
+        ]
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_epoch_capacity"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_status",
+      "params": {},
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "not_found"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_status",
+      "params": {
+        "unknown": true
+      },
+      "response": {
+        "transport_error": {
+          "code": "invalid_params",
+          "message": "params not decodable: invalid fleet parameters"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_import",
+      "params": {
+        "wrap": {
+          "ct": "9gYBZwnoMtd2d-1ELYNAyRpP7UnMU_lvBLVrQOGl3V0bAQO7UY3OTtJaEXMfZ8bfzOcf4CD1X1dPTwb9gl2fd6ufI2zztng7fdac3RofXdjdX8pHA74Ipjy4-jUklF-8UjuK4wmHRzC4whm9EOHjPy7lSI9KaSy_zA_MkfkD-xnHLqvOLj6gnYH6GnM2xA_gU8cUQPqJitXvVG2LtkW6jcy26Ies-mggLQOhCTGUF4a8lFyMknj2Y1p4fYWlCtcZ66xJpDB5DJNNx9O-Hdg_ErQZm8wTtPDlGBkny8xULPMDqxOCjlMeM_Xkt2OZCfZsZKSD6Mc4GAElbIPhVxG4xep1Dnu5v5Ldh0xjZ8DE5FPMfDWSOYclwgh0qqBXpnVeYIGmRxwmWtu3Q7JjuA4",
+          "enc": "_SxN0cimuI_h_FnORBOY9eqDqSluIQmXrGO-2XC4YCg",
+          "from": "fed-computer:00000000000000000000000000000001",
+          "to": "fed-computer:00000000000000000000000000000002",
+          "v": "ck-fleet-epoch-wrap/v1"
+        }
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_wrap_refused"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_mint",
+      "params": {
+        "members": [
+          "fed-computer:00000000000000000000000000000001",
+          "fed-computer:00000000000000000000000000000002"
+        ]
+      },
+      "response": {
+        "error": {
+          "class": "transient",
+          "code": "fleet_epoch_pending"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_seal",
+      "params": {
+        "aad": "",
+        "plaintext": ""
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "corrupt"
+        }
+      }
+    },
+    {
+      "method": "fleet.epoch_status",
+      "params": {},
+      "response": {
+        "error": {
+          "class": "transient",
+          "code": "store_error"
+        }
+      }
+    }
+  ],
+  "seal_open": {
+    "epoch_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE",
+    "open_request": {
+      "aad": "cmVjb3JkOmlkZW50aXR5Ojc",
+      "ciphertext": "SE_5Sjamf8Gf7w6OFP65Ue---EIPRps5oQPt0EscLBNzB-47Sww",
+      "epoch": 1,
+      "nonce": "63-10RwCM-PbIM3o9PqroTlLsdPsNBP_"
+    },
+    "open_response": {
+      "plaintext": "ZmxlZXQgc2FtcGxlIHBsYWludGV4dA"
+    },
+    "record_aad_utf8": "{\"aad\":\"cmVjb3JkOmlkZW50aXR5Ojc\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/v1\"}",
+    "request": {
+      "aad": "cmVjb3JkOmlkZW50aXR5Ojc",
+      "plaintext": "ZmxlZXQgc2FtcGxlIHBsYWludGV4dA"
+    },
+    "response": {
+      "ciphertext": "SE_5Sjamf8Gf7w6OFP65Ue---EIPRps5oQPt0EscLBNzB-47Sww",
+      "epoch": 1,
+      "nonce": "63-10RwCM-PbIM3o9PqroTlLsdPsNBP_"
+    }
+  },
+  "statuses": [
+    {
+      "name": "empty",
+      "response": {
+        "current": null,
+        "held": [],
+        "pending": null,
+        "sealing_blocked_by": []
+      }
+    },
+    {
+      "name": "one_held",
+      "response": {
+        "current": 1,
+        "held": [
+          1
+        ],
+        "pending": null,
+        "sealing_blocked_by": []
+      }
+    },
+    {
+      "name": "two_held",
+      "response": {
+        "current": 2,
+        "held": [
+          1,
+          2
+        ],
+        "pending": null,
+        "sealing_blocked_by": []
+      }
+    },
+    {
+      "name": "pending",
+      "response": {
+        "current": 2,
+        "held": [
+          1,
+          2
+        ],
+        "pending": {
+          "epoch": 3,
+          "mint_id": "VVVVVVVVVVVVVVVVVVVVVQ"
+        },
+        "sealing_blocked_by": []
+      }
+    },
+    {
+      "name": "blocked",
+      "response": {
+        "current": 2,
+        "held": [
+          1,
+          2
+        ],
+        "pending": null,
+        "sealing_blocked_by": [
+          "fed-computer:00000000000000000000000000000002"
+        ]
+      }
+    }
+  ],
+  "version": "fleet-epoch-vectors-v1",
+  "wraps": [
+    {
+      "ephemeral_ikm": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE",
+      "info_utf8": "{\"from\":\"fed-computer:00000000000000000000000000000001\",\"to\":\"fed-computer:00000000000000000000000000000002\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "name": "rotation",
+      "plaintext_utf8": "{\"keys\":[{\"epoch\":1,\"key\":\"MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE\",\"members\":[\"fed-computer:00000000000000000000000000000001\",\"fed-computer:00000000000000000000000000000002\"],\"minter\":\"fed-computer:00000000000000000000000000000001\"}],\"kind\":\"rotation\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "wrap": {
+        "ct": "9wYBZwnoMtd2d-1ELYNAyRpP7UnMU_lvBLVrQOGl3V0bAQO7UY3OTtJaEXMfZ8bfzOcf4CD1X1dPTwb9gl2fd6ufI2zztng7fdac3RofXdjdX8pHA74Ipjy4-jUklF-8UjuK4wmHRzC4whm9EOHjPy7lSI9KaSy_zA_MkfkD-xnHLqvOLj6gnYH6GnM2xA_gU8cUQPqJitXvVG2LtkW6jcy26Ies-mggLQOhCTGUF4a8lFyMknj2Y1p4fYWlCtcZ66xJpDB5DJNNx9O-Hdg_ErQZm8wTtPDlGBkny8xULPMDqxOCjlMeM_Xkt2OZCfZsZKSD6Mc4GAElbIPhVxG4xep1Dnu5v5Ldh0xjZ8DE5FPMfDWSOYclwgh0qqBXpnVeYIGmRxwmWtu3Q7JjuA4",
+        "enc": "_SxN0cimuI_h_FnORBOY9eqDqSluIQmXrGO-2XC4YCg",
+        "from": "fed-computer:00000000000000000000000000000001",
+        "to": "fed-computer:00000000000000000000000000000002",
+        "v": "ck-fleet-epoch-wrap/v1"
+      }
+    },
+    {
+      "ephemeral_ikm": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+      "info_utf8": "{\"from\":\"fed-computer:00000000000000000000000000000001\",\"to\":\"fed-computer:00000000000000000000000000000002\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "name": "one-key-join",
+      "plaintext_utf8": "{\"keys\":[{\"epoch\":1,\"key\":\"MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE\",\"members\":[\"fed-computer:00000000000000000000000000000001\",\"fed-computer:00000000000000000000000000000002\"],\"minter\":\"fed-computer:00000000000000000000000000000001\"}],\"kind\":\"join\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "wrap": {
+        "ct": "e854fLlDZR_yPL5pu_oIaY9ct2rXCbd4AsBXGNDlbx9DvKsYG3cEW6lJ_4Icn8lkMpfJlxI5BwYSRxXEbO8WulL2PngeX_zBY8xmB3eQo_3p2ZvqMeKABsGeVJdObWOmmuogTs39wxhAmcnkiEZkNXLyrqKF2EuAYe7BgRxjDrypL8ss-EQiUJMxR67vlBIFJUMQEelNjE8Ebjxe_MHkymVEDOJGNWV4895wWZOWP7LTcd554UFjiyuRiPhbX82hjPOEU9dFa7YAnd2u1FfwFMLRsv0GpLXzuD0yxqer4mCEmRGq7NlfEulnWll3RzB4Zev8NR7bPDfZbOUgc1iVtjrPjUDL0jOdyThX3wdSlUtBXMGSJjuT3ssC8n5I4CG-nqtMdf8A9vqlIQ",
+        "enc": "rjvxzYfC0u0lr0oaI57tBKmQ8A50A-TIBlkn3gEP0Xo",
+        "from": "fed-computer:00000000000000000000000000000001",
+        "to": "fed-computer:00000000000000000000000000000002",
+        "v": "ck-fleet-epoch-wrap/v1"
+      }
+    },
+    {
+      "ephemeral_ikm": "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M",
+      "info_utf8": "{\"from\":\"fed-computer:00000000000000000000000000000001\",\"to\":\"fed-computer:00000000000000000000000000000002\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "name": "multi-key-join",
+      "plaintext_utf8": "{\"keys\":[{\"epoch\":1,\"key\":\"MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE\",\"members\":[\"fed-computer:00000000000000000000000000000001\",\"fed-computer:00000000000000000000000000000002\"],\"minter\":\"fed-computer:00000000000000000000000000000001\"},{\"epoch\":2,\"key\":\"MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI\",\"members\":[\"fed-computer:00000000000000000000000000000001\",\"fed-computer:00000000000000000000000000000002\"],\"minter\":\"fed-computer:00000000000000000000000000000001\"}],\"kind\":\"join\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+      "wrap": {
+        "ct": "YF45s-RtKG_GelnPRAkhlQOJu1JvmXdMC8jVqynINM8SRpc557FmN9nqf_8Vt8o-TkTsI9Wgpwydy3LOwjF-_NpMu24wxlWuffXeAznnYnDRUv4f2rVZZI8hTt7VCL0aUGcHU60b6lr5UiykIEgGhRIIS0FMxTKQFQWsbrlsl_vylMk5Xl7XNqQTdu-bhjIysBipSDK5NkFYFgGmRGEGgImXV7a1LeNHCjeHX0M0pCk5G967gPlYiQ8WPEMXLxZBW2ihbUI4Z0nvNN6IZ33hJRO4wPz8tDqZuxAGI9gGb8qZMzyF14DLmpVwAYL5o_KnAqVFy7zcW6--x_APP3QZWMqCwoHqCn8BDUJwVelj34XBcdtTBVP6CaJSuZOBbaurIvrBqX92pC7i3RxYAnxmLyvbBEqNEowNHhWPbnUDi7xc2PzGl7fUTLcGvvLZU65UH4SMd21BGr13la0DB2IzmcGV0QJbcWDbRUZ7g7SoC_-f1ynrNHaGDjraIvnkOCOai7qgMEx_XfAP49bGqER7zfe-Nb1aozDs-QQxmqpY-xCUkaogeKDPR7OOH4DdotpNc7WBkjcy3oZ0cvIdV6na5FwACx97rvyP3tVJ6avUDTdY-UXIuMXo2rJ6sAji2rSAzXXyHeuv5vp-hkeR4ltY4GwDPxBvEapRPWIj4FDD4A1GAgOJDRXowmlfLCBs2wY",
+        "enc": "z45ppnNQs1qv6a8I_9J7Q5Cf0KfFhmbzzC7PGd5vzxY",
+        "from": "fed-computer:00000000000000000000000000000001",
+        "to": "fed-computer:00000000000000000000000000000002",
+        "v": "ck-fleet-epoch-wrap/v1"
+      }
+    }
+  ]
+}

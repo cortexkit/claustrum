@@ -460,6 +460,27 @@ Phone operations require both `ck auth federation mapping on` and
 `ck auth secret phone-gate on`; enable them only after the authenticated peer setup in
 [Federation setup and recovery](#federation-setup-and-recovery).
 
+Phone key registration, secret approvals (agent and flow), secret deletion and
+manifest approvals require a verified production iPhone build. A simulator or
+development build receives `phone_not_attested` (permanent), even if the phone's
+key was registered before. Nothing is written and no audit row is added. Listing,
+home discovery and deposits keep their existing behavior; they cannot grant access.
+Use the production app through Callosum with Apple App Attest and daemon 0.49.0 or
+newer, then open a new phone route. The vault advertises `peer-build/v1` so the
+daemon can stamp `peer_build: "production"` on that route. A route opened before
+the verified session must be reopened; registering a key or editing a permissions
+file cannot supply the mark. If the production app still gets this refusal,
+check Callosum's attestation and daemon version rather than retrying the signature.
+An invalid present `peer_build` value produces a warning at bind and is treated
+as unmarked.
+
+Immediately after deploy, open the real iPhone's route and check the vault log
+for `phone route bound` with `production_build=true`. The info line includes only
+the route channel and production-build boolean, never the phone fingerprint. A
+simulator, development build or route without the daemon's production-build
+attestation logs `production_build=false`. This lets the operator confirm
+production-build attestation before trying an approval.
+
 ```sh
 ck auth secret put ops-github --kind api-key --host api.github.com \
   --path-prefix /repos --location header:X-Api-Key --material-file ~/.config/gh.key

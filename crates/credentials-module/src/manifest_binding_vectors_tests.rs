@@ -624,6 +624,7 @@ async fn samples() -> BTreeMap<String, Value> {
     let unavailable = crate::secret_phone::serve_with_lookup(
         Arc::clone(&rig.store),
         FP,
+        Some("production"),
         "manifest.approve",
         &approve["params"],
         Instant::now() + PROPOSE_DEADLINE,

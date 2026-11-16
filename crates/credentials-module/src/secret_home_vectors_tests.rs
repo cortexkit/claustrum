@@ -57,6 +57,7 @@ mod secret_home_vectors {
         let answer = secret_phone::serve_with_lookup(
             Arc::clone(store),
             fingerprint,
+            Some("production"),
             method,
             &json!({}),
             tokio::time::Instant::now() + secret_phone::PHONE_OP_DEADLINE,
@@ -193,7 +194,7 @@ mod secret_home_vectors {
             let federation::RouteCaller::Phone(fingerprint) = &caller else {
                 panic!("channel {PHONE_CHANNEL} is the phone's route: {caller:?}");
             };
-            let body = phone_bytes(&self.store, fingerprint, method, lookup).await;
+            let body = phone_bytes(&self.store, &fingerprint.fingerprint, method, lookup).await;
             let (kind, served) =
                 sc_dispatch(&self.surface, &self.admin, caller, method, json!({})).await;
             if kind == FrameType::Response {

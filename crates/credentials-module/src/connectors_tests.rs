@@ -1711,6 +1711,7 @@ mod connectors_contract {
                             app.map(str::to_owned),
                             stamp.as_ref(),
                             None,
+                            None,
                         );
                     }
                     for op in ["connectors.list", "connectors.watch"] {

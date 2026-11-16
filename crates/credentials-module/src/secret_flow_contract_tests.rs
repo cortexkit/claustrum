@@ -1,6 +1,389 @@
 // Flow boundary tests share the registered-phone and deposit harness with the
 // agent contract tests, without changing the existing agent golden requests.
 
+fn phone_attestation_snapshot(root: &TestTempDir) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let conn = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    let tables = conn
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    tables
+        .iter()
+        .map(|table| {
+            let mut query = conn
+                .prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))
+                .unwrap();
+            let columns = query.column_count();
+            query
+                .query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn phone_attestation_guards_registration_agent_flow_and_both_delete_stages_without_writes() {
+    let flow = SecretFlow::new(231).await;
+    let key = MasterKey::from_bytes([231; MASTER_KEY_LEN]);
+    let admin = Arc::new(admin_surface::AdminSurface::new(
+        Arc::new(RefreshEngine::new(
+            Arc::clone(&flow.store),
+            Vec::new(),
+            Arc::new(crate::test_support::NoHttp),
+        )),
+        credentials_core::admin_auth::AdminMacKey::derive(&key),
+        credentials_core::vault_id_for(flow._root.join("store.db").parent().unwrap()).unwrap(),
+        key.key_id(),
+    ));
+    set_member_mapping(&flow.store, true);
+    flow.store
+        .set_secret_phone_mapping_audited(true, AuditCtx::admin(AuditOp::SecretPhoneGateSet))
+        .unwrap();
+    let routes = Arc::new(RouteEpochs::default());
+    phone_attestation_bind(
+        &flow.surface,
+        &admin,
+        &routes,
+        17,
+        1,
+        Some(json!("production")),
+    )
+    .await;
+    phone_attestation_bind(&flow.surface, &admin, &routes, 18, 1, None).await;
+    let federation::RouteCaller::Phone(production) = admin.route_caller(17) else {
+        panic!("not a phone")
+    };
+    flow.deposit_both().await;
+    let agent = flow.use_secret("aft", &secret_golden("use.request.api_key"));
+    let install = sf_request(&flow, &sf_install(true));
+    let delete = flow.phone("secret.delete", json!({"name":"key"})).await;
+    let signed = |statement: &serde_json::Value, duration: &str| {
+        flow.signed(
+            if duration == "none" { "delete.request.signed" } else { "approve.request" },
+            json!([{"request_id":statement["request_id"], "statement_sha256":sc_sha256_hex(&sc_unb64(statement["statement_b64url"].as_str().unwrap()))}]),
+            duration, if duration == "none" { statement["expires_at_ms"].as_i64().unwrap() } else { 0 }, sc_now_ms(),
+        )
+    };
+    let cases = [
+        (
+            "secret.phone_keys_register",
+            flow.register_request(),
+            "already_stored",
+        ),
+        ("secret.approve", signed(&agent, "permanent"), "granted"),
+        ("secret.approve", signed(&install, "version"), "granted"),
+        ("secret.delete", json!({"name":"key"}), "approval_required"),
+        ("secret.delete", signed(&delete, "none"), "granted"),
+    ];
+    for (method, params, expected) in cases {
+        let before = phone_attestation_snapshot(&flow._root);
+        let (ty, bytes) = sc_dispatch(
+            &flow.surface,
+            &admin,
+            admin.route_caller(18),
+            method,
+            params.clone(),
+        )
+        .await;
+        assert_eq!(ty, FrameType::Response);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            json!({"result":{"error":{"code":"phone_not_attested","class":"permanent"}}})
+        );
+        assert_eq!(phone_attestation_snapshot(&flow._root), before);
+        for build in [None, Some("development"), Some("Production"), Some("")] {
+            let before = phone_attestation_snapshot(&flow._root);
+            for request in [
+                &params,
+                &json!({"envelope_b64url":"not base64", "signature_b64url":null}),
+                &json!(null),
+            ] {
+                let reply = crate::secret_phone::serve_with_lookup(
+                    Arc::clone(&flow.store),
+                    SC_FP,
+                    build,
+                    method,
+                    request,
+                    tokio::time::Instant::now() + crate::secret_phone::PHONE_OP_DEADLINE,
+                    async { panic!("unattested requests must not look up pairing") },
+                )
+                .await;
+                assert_eq!(
+                    sc_answer(reply),
+                    json!({"error":{"code":"phone_not_attested","class":"permanent"}}),
+                    "{method} {build:?}"
+                );
+                assert_eq!(
+                    phone_attestation_snapshot(&flow._root),
+                    before,
+                    "{method} wrote state"
+                );
+            }
+        }
+        // Use the real bind's captured mark with the normal phone pipeline; only
+        // Callosum's pairing lookup is injected, as in the other phone contract tests.
+        let reply = flow
+            .phone_on_build(method, params, production.peer_build.as_deref())
+            .await;
+        let outcome = reply["status"]
+            .as_str()
+            .or_else(|| reply["results"][0]["outcome"].as_str());
+        assert_eq!(outcome, Some(expected), "{method}: {reply}");
+    }
+}
+
+#[tokio::test]
+async fn phone_attestation_leaves_unmarked_reads_deposit_and_revocation_available() {
+    let flow = SecretFlow::new(232).await;
+    assert_eq!(
+        flow.phone_on_build("secret.home", json!({}), None).await,
+        json!({"home":true,"home_member_id":null})
+    );
+    assert_eq!(
+        flow.phone_on_build("secret.deposit_keys", json!({}), None)
+            .await,
+        flow.deposit_keys_reply
+    );
+    let request = flow.deposit_request(
+        "deposit.request.api_key",
+        &credentials_core::agent_secret::SecretMaterial::ApiKey(
+            credentials_core::secret::Secret::new(b"test-only-key".to_vec()),
+        ),
+    );
+    assert_eq!(
+        flow.phone_on_build("secret.deposit", request, None).await["status"],
+        "stored"
+    );
+    let listed = flow.phone_on_build("secret.list", json!({}), None).await;
+    assert_eq!(listed["secrets"][0]["name"], "key");
+    assert_eq!(
+        flow.phone_on_build(
+            "secret.revoke_grant",
+            secret_golden("revoke_grant.request"),
+            None
+        )
+        .await,
+        json!({"outcome":"not_found"})
+    );
+}
+
+async fn phone_attestation_bind(
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    routes: &Arc<RouteEpochs>,
+    channel: u16,
+    epoch: u32,
+    peer_build: Option<serde_json::Value>,
+) {
+    let mut body = serde_json::to_value(ModuleControlRequest::RouteBind {
+        route_channel: channel,
+        epoch,
+        target: subc_protocol::RouteTarget::ToolProvider {
+            module_id: "claustrum".into(),
+        },
+        identity: subc_protocol::BindIdentity::new(format!("fed-phone:{SC_FP}"), "s"),
+        principal: Some(reserved("callosum")),
+        consumer_capabilities: None,
+        role_versions: None,
+        admission_facts: None,
+        scope: None,
+        call_mode: None,
+    })
+    .unwrap();
+    if let Some(build) = peer_build {
+        body["peer_build"] = build;
+    }
+    let frame = Frame::build_with_version(
+        PROTOCOL_VERSION,
+        FrameType::Request,
+        control_flags(),
+        0,
+        0,
+        1,
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    handle_control_request(frame, &tx, surface, admin, routes)
+        .await
+        .unwrap();
+    assert_eq!(rx.try_recv().unwrap().header.ty, FrameType::Response);
+}
+
+#[tokio::test]
+async fn phone_attestation_is_normalized_per_route_and_captured_before_rebind() {
+    #[derive(Clone, Default)]
+    struct BindEvents(
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+    );
+    impl tracing::Subscriber for BindEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() == "routes" {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    assert_eq!(*event.metadata().level(), tracing::Level::INFO);
+                    struct Fields(std::collections::BTreeMap<String, String>);
+                    impl tracing::field::Visit for Fields {
+                        fn record_debug(
+                            &mut self,
+                            field: &tracing::field::Field,
+                            value: &dyn std::fmt::Debug,
+                        ) {
+                            self.0.insert(field.name().into(), format!("{value:?}"));
+                        }
+                        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                            self.0.insert(field.name().into(), value.into());
+                        }
+                    }
+                    let mut fields = Fields(std::collections::BTreeMap::new());
+                    event.record(&mut fields);
+                    assert!(
+                        !format!("{:?}", fields.0).contains(SC_FP),
+                        "bind logs must not contain the phone fingerprint"
+                    );
+                    self.1.lock().unwrap().push(fields.0);
+                }
+            }
+        }
+    }
+    let (surface, admin, store) = scoped_rig(233);
+    set_member_mapping(&store, true);
+    store
+        .set_secret_phone_mapping_audited(true, AuditCtx::admin(AuditOp::SecretPhoneGateSet))
+        .unwrap();
+    let routes = Arc::new(RouteEpochs::default());
+    let warnings = BindEvents::default();
+    let _capture = tracing::subscriber::set_default(warnings.clone());
+    phone_attestation_bind(&surface, &admin, &routes, 17, 1, Some(json!("production"))).await;
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let bind_line = |channel: &str, production: &str| {
+        std::collections::BTreeMap::from([
+            ("message".into(), "phone route bound".into()),
+            ("production_build".into(), production.into()),
+            ("route_channel".into(), channel.into()),
+        ])
+    };
+    assert_eq!(*warnings.1.lock().unwrap(), vec![bind_line("17", "true")]);
+    let captured = admin.route_caller(17);
+    let federation::RouteCaller::Phone(phone) = &captured else {
+        panic!("not a phone route")
+    };
+    assert_eq!(phone.fingerprint, SC_FP);
+    assert_eq!(phone.peer_build.as_deref(), Some("production"));
+    for build in [
+        None,
+        Some(json!(null)),
+        Some(json!("development")),
+        Some(json!("Production")),
+        Some(json!("")),
+        Some(json!(false)),
+        Some(json!(17)),
+        Some(json!({"build":"production"})),
+    ] {
+        let before = warnings.0.load(std::sync::atomic::Ordering::SeqCst);
+        let bind_lines_before = warnings.1.lock().unwrap().len();
+        phone_attestation_bind(&surface, &admin, &routes, 18, 1, build.clone()).await;
+        assert_eq!(warnings.1.lock().unwrap().len(), bind_lines_before + 1);
+        assert_eq!(
+            warnings.1.lock().unwrap().last(),
+            Some(&bind_line("18", "false"))
+        );
+        assert_eq!(
+            warnings.0.load(std::sync::atomic::Ordering::SeqCst),
+            before + usize::from(build.is_some()),
+            "each invalid present mark warns once"
+        );
+        let caller = admin.route_caller(18);
+        let federation::RouteCaller::Phone(phone) = &caller else {
+            panic!("not a phone route")
+        };
+        assert_eq!(phone.fingerprint, SC_FP);
+        assert_eq!(phone.peer_build, None, "{build:?}");
+        assert_eq!(admin.route_caller(17), captured);
+        for method in [
+            "secret.phone_keys_register",
+            "secret.approve",
+            "secret.delete",
+            "manifest.approve",
+        ] {
+            let (ty, bytes) =
+                sc_dispatch(&surface, &admin, caller.clone(), method, json!(null)).await;
+            assert_eq!(ty, FrameType::Response);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                json!({"result":{"error":{"code":"phone_not_attested","class":"permanent"}}})
+            );
+            let (ty, bytes) =
+                sc_dispatch(&surface, &admin, captured.clone(), method, json!(null)).await;
+            assert_eq!(ty, FrameType::Error);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["code"],
+                "invalid_params"
+            );
+        }
+        assert_eq!(
+            warnings.0.load(std::sync::atomic::Ordering::SeqCst),
+            before + usize::from(build.is_some()),
+            "requests do not repeat bind warnings"
+        );
+        assert_eq!(
+            warnings.1.lock().unwrap().len(),
+            bind_lines_before + 1,
+            "requests do not repeat bind info lines"
+        );
+    }
+    phone_attestation_bind(&surface, &admin, &routes, 17, 2, None).await;
+    assert_eq!(
+        warnings.1.lock().unwrap().last(),
+        Some(&bind_line("17", "false"))
+    );
+    assert_ne!(admin.route_caller(17), captured);
+    let (ty, _) = sc_dispatch(&surface, &admin, captured, "secret.approve", json!(null)).await;
+    assert_eq!(
+        ty,
+        FrameType::Error,
+        "rebind must not change already captured authority"
+    );
+    admin.drop_bind(17);
+    assert!(matches!(
+        admin.route_caller(17),
+        federation::RouteCaller::Principal(_)
+    ));
+    let before = warnings.1.lock().unwrap().len();
+    bind_reserved_route(
+        &surface,
+        &admin,
+        &routes,
+        19,
+        1,
+        "callosum",
+        "callosum-self",
+    )
+    .await;
+    assert_eq!(
+        warnings.1.lock().unwrap().len(),
+        before,
+        "non-phone binds do not emit phone bind info lines"
+    );
+}
+
 fn sf_identity() -> serde_json::Value {
     json!({"flow_id":"daily-fetch", "version":7, "code_hash":"0123456789abcdef".repeat(4), "install_id":"install-A"})
 }

@@ -31,6 +31,15 @@ pub fn is_phone_op(method: &str) -> bool {
     PHONE_OPS.contains(&method)
 }
 
+/// These operations establish phone signing authority or act on it. Delete's
+/// statement request is gated too, so an untrusted build cannot create pending work.
+pub const ATTESTED_PHONE_OPS: [&str; 4] = [
+    "secret.phone_keys_register",
+    "secret.approve",
+    "secret.delete",
+    "manifest.approve",
+];
+
 /// The phone-callable query that says where this account's agent secrets live. It is
 /// kept apart from [`PHONE_OPS`], the ops a vault refuses when the secrets live
 /// elsewhere, because this one answers on every vault: it is how the phone finds the
@@ -73,6 +82,7 @@ pub async fn serve(
     store: Arc<EncryptedStore>,
     client: Option<&OutboundClient>,
     fingerprint: &str,
+    peer_build: Option<&str>,
     method: &str,
     params: &Value,
 ) -> PhoneAnswer {
@@ -80,6 +90,7 @@ pub async fn serve(
     serve_with_lookup(
         store,
         fingerprint,
+        peer_build,
         method,
         params,
         deadline,
@@ -88,14 +99,19 @@ pub async fn serve(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_with_lookup(
     store: Arc<EncryptedStore>,
     fingerprint: &str,
+    peer_build: Option<&str>,
     method: &str,
     params: &Value,
     deadline: tokio::time::Instant,
     lookup: impl std::future::Future<Output = Option<Value>>,
 ) -> PhoneAnswer {
+    if ATTESTED_PHONE_OPS.contains(&method) && peer_build != Some("production") {
+        return answer(Err(SecretError::PhoneNotAttested));
+    }
     if federation::carries_bearer(params) {
         return answer(Err(SecretError::InvalidParams));
     }

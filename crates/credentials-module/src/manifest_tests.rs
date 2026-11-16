@@ -346,7 +346,7 @@ async fn manifest_principals_are_uniformly_hidden_before_parameter_preflight() {
                 crate::federation::ingress::ScopedCaller::hand_only(None),
             ),
             crate::federation::RouteCaller::Refused,
-            crate::federation::RouteCaller::Phone("a".repeat(32)),
+            crate::federation::RouteCaller::Phone("a".repeat(32).into()),
             crate::federation::RouteCaller::Member(OTHER.into()),
         ] {
             let before = rig.snapshot();

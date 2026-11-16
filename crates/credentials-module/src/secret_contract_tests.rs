@@ -101,6 +101,7 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "envelope.flow",
     "envelope.flow.bytes",
     "error.result",
+    "error.phone_not_attested",
     "home.request",
     "home.result.single",
     "home.result.home",
@@ -282,6 +283,7 @@ fn sc_use_answer(answer: crate::secret_use::UseAnswer) -> serde_json::Value {
 /// injected pairing lookup.
 struct SecretFlow {
     _root: TestTempDir,
+    surface: Arc<ReadSurface>,
     store: Arc<EncryptedStore>,
     signer: p256::ecdsa::SigningKey,
     phone_pem: String,
@@ -292,7 +294,7 @@ struct SecretFlow {
 
 impl SecretFlow {
     async fn new(seed: u8) -> Self {
-        let (_surface, store, _db, root) = tmp_surface_with_store(seed);
+        let (surface, store, _db, root) = tmp_surface_with_store(seed);
         store.ensure_secret_deposit_key().expect("deposit key");
         store
             .set_federation_self_member_audited(
@@ -304,6 +306,7 @@ impl SecretFlow {
         let phone_pem = credentials_core::kem::pem_from_scalar(&[3; 32]);
         let mut flow = SecretFlow {
             _root: root,
+            surface,
             store,
             signer,
             phone_pem,
@@ -340,10 +343,21 @@ impl SecretFlow {
     }
 
     async fn phone(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.phone_on_build(method, params, Some("production"))
+            .await
+    }
+
+    async fn phone_on_build(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer_build: Option<&str>,
+    ) -> serde_json::Value {
         sc_answer(
             crate::secret_phone::serve_with_lookup(
                 Arc::clone(&self.store),
                 SC_FP,
+                peer_build,
                 method,
                 &params,
                 tokio::time::Instant::now() + crate::secret_phone::PHONE_OP_DEADLINE,
@@ -1710,6 +1724,7 @@ secret_error_golden! {
     NotFound => "not_found", "permanent", "result error";
     Ambiguous => "ambiguous", "permanent", "result error";
     PairingUnavailable => "pairing_unavailable", "transient", "result error";
+    PhoneNotAttested => "phone_not_attested", "permanent", "result error";
     PhoneNotRegistered => "phone_not_registered", "permanent", "result error";
     PhoneKeyConflict => "phone_key_conflict", "permanent", "result error";
     DepositConflict => "deposit_conflict", "permanent", "result error";
@@ -1783,6 +1798,10 @@ async fn secret_error_codes_are_golden_and_match_the_doc_table() {
         credentials_core::agent_secret::SecretError::ApprovalInvalid.body(),
         secret_golden("error.result")
     );
+    assert_eq!(
+        credentials_core::agent_secret::SecretError::PhoneNotAttested.body(),
+        secret_golden("error.phone_not_attested")
+    );
     // The transport rows really leave the vault as transport errors: grammar on the
     // phone channel, and the provider refusal on a non-Cingulate route.
     let (_root, store) = {
@@ -1793,6 +1812,7 @@ async fn secret_error_codes_are_golden_and_match_the_doc_table() {
         crate::secret_phone::serve_with_lookup(
             store,
             SC_FP,
+            None,
             "secret.list",
             &json!({"unexpected":true}),
             tokio::time::Instant::now() + crate::secret_phone::PHONE_OP_DEADLINE,
@@ -2271,7 +2291,12 @@ fn local_ops_preserve_every_legacy_golden_byte() {
     let mut count = 0;
     for part in SECRET_CONTRACT_DOC.split("<!-- golden:").skip(1) {
         let (id, rest) = part.split_once(" -->\n```json\n").expect("golden fence");
-        if SC_LOCAL_GOLDENS.contains(&id) || SC_BASIC_AUTH_GOLDENS.contains(&id) {
+        // The attestation refusal was added after the legacy byte pin; its own
+        // golden is checked by secret_error_codes_are_golden_and_match_the_doc_table.
+        if SC_LOCAL_GOLDENS.contains(&id)
+            || SC_BASIC_AUTH_GOLDENS.contains(&id)
+            || id == "error.phone_not_attested"
+        {
             continue;
         }
         let (text, _) = rest.split_once("\n```").unwrap();

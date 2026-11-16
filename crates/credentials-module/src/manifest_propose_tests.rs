@@ -993,7 +993,7 @@ async fn manifest_propose_dispatch_pins_uniform_principals_and_transport_shape_e
             },
         ))),
         RouteCaller::Refused,
-        RouteCaller::Phone("a".repeat(64)),
+        RouteCaller::Phone("a".repeat(64).into()),
     ] {
         assert_eq!(
             wire(&rig, caller, OP_PROPOSE_BINDING, json!({"bad":"shape"})).await,

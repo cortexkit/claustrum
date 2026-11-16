@@ -32,6 +32,7 @@
 # threshold that is already covered.
 
 MIN_SEALED_LEN crates/credentials-core/src/apns_submit.rs a_blob_too_short_to_decrypt_is_refused
+MAX_SSH_DNS_LABEL_BYTES crates/credentials-core/src/record.rs agent_ssh_host_and_user_boundaries
 GET_MANY_MAX crates/credentials-module/src/limiter.rs get_many_serves_at_the_cap_and_refuses_whole_past_it
 MAX_WATCHES crates/credentials-module/src/watch_scoped.rs watch_scoped_cap_cancel_and_route_close
 REPORT_REASON_LIMIT crates/credentials-module/src/manifest_active_report.rs manifest_report_reason_accepts_512_characters_and_refuses_513

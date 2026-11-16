@@ -20,7 +20,7 @@ pub(super) fn multi_host_enabled(conn: &rusqlite::Connection) -> bool {
     setting_enabled(conn, MULTI_HOST_SETTING)
 }
 
-pub(super) fn local_programs_enabled(conn: &rusqlite::Connection) -> bool {
+pub(in crate::store) fn local_programs_enabled(conn: &rusqlite::Connection) -> bool {
     setting_enabled(conn, LOCAL_PROGRAMS_SETTING)
 }
 

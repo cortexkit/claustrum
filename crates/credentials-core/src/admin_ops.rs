@@ -89,6 +89,14 @@ pub enum AdminOpBody {
         id: String,
         payload_b64: String,
     },
+    #[serde(rename = "admin.ssh_key_agent_allow")]
+    SshKeyAgentAllow {
+        v: u32,
+        id: String,
+        targets: Vec<crate::record::AgentSshTarget>,
+    },
+    #[serde(rename = "admin.ssh_key_agent_deny")]
+    SshKeyAgentDeny { v: u32, id: String },
     #[serde(rename = "admin.manifest_import")]
     ManifestImport {
         v: u32,
@@ -523,6 +531,17 @@ pub enum AdminOpBody {
 impl std::fmt::Debug for AdminOpBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AdminOpBody::SshKeyAgentAllow { v, id, targets } => f
+                .debug_struct("SshKeyAgentAllow")
+                .field("v", v)
+                .field("id", id)
+                .field("targets", targets)
+                .finish(),
+            AdminOpBody::SshKeyAgentDeny { v, id } => f
+                .debug_struct("SshKeyAgentDeny")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
             AdminOpBody::ProviderSet {
                 v,
                 service,
@@ -1000,6 +1019,7 @@ impl AdminOpBody {
     /// The schema version this op declares.
     pub fn schema_version(&self) -> u32 {
         match self {
+            AdminOpBody::SshKeyAgentAllow { v, .. } | AdminOpBody::SshKeyAgentDeny { v, .. } => *v,
             AdminOpBody::Store { v, .. }
             | AdminOpBody::GatewayCreate { v, .. }
             | AdminOpBody::ProviderSet { v, .. }
@@ -1066,6 +1086,9 @@ impl AdminOpBody {
     /// which clears the descriptor rather than preserving it as a legacy v2 set does.
     pub const fn required_schema_version(&self) -> u32 {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } | AdminOpBody::SshKeyAgentDeny { .. } => {
+                ADMIN_OP_SCHEMA_V2
+            }
             AdminOpBody::ProviderSet {
                 hosts,
                 auth_header,
@@ -1158,6 +1181,7 @@ impl AdminOpBody {
     /// which therefore takes no per-id lock.
     pub fn lock_id(&self) -> Option<&str> {
         match self {
+            AdminOpBody::SshKeyAgentAllow { id, .. } | AdminOpBody::SshKeyAgentDeny { id, .. } => Some(id),
             // An approval takes the signing credential's lock: it is the record whose
             // window is about to open, so an approval racing an admin mutation of that
             // same key should serialize rather than interleave.
@@ -1263,6 +1287,8 @@ impl AdminOpBody {
     /// refused without nesting the whole body).
     pub fn op_name(&self) -> &'static str {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } => "admin.ssh_key_agent_allow",
+            AdminOpBody::SshKeyAgentDeny { .. } => "admin.ssh_key_agent_deny",
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
             AdminOpBody::ManifestImport { .. } => "admin.manifest_import",
             AdminOpBody::ManifestSign { .. } => "admin.manifest_sign",
@@ -1335,6 +1361,7 @@ impl AdminOpBody {
     /// half-implementation.
     pub const fn requires_daemon(&self) -> bool {
         match self {
+            AdminOpBody::SshKeyAgentAllow { .. } | AdminOpBody::SshKeyAgentDeny { .. } => false,
             AdminOpBody::Store { .. }
             | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderSet { .. }
@@ -1500,6 +1527,18 @@ pub fn apply(
         return Err(requires_daemon_refusal(&op));
     }
     match op {
+        AdminOpBody::SshKeyAgentAllow { id, targets, .. } => {
+            let enrollment = store.set_agent_ssh_audited(
+                &id,
+                Some(crate::record::AgentSsh { targets }),
+                actor,
+            )?;
+            Ok(serde_json::json!({"targets": enrollment.map(|e| e.targets).unwrap_or_default()}))
+        }
+        AdminOpBody::SshKeyAgentDeny { id, .. } => {
+            store.set_agent_ssh_audited(&id, None, actor)?;
+            Ok(serde_json::json!({"targets": []}))
+        }
         AdminOpBody::ManifestImport { envelope, .. } => {
             store.import_gh_manifest_admin(&envelope, actor)
         }
@@ -2850,6 +2889,25 @@ mod admin_schema_v2_tests {
         let v1 = ADMIN_OP_SCHEMA_V1;
         let v2 = ADMIN_OP_SCHEMA_V2;
         let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
+            (
+                "SshKeyAgentAllow",
+                AdminOpBody::SshKeyAgentAllow {
+                    v: v2,
+                    id: "signing:ssh".into(),
+                    targets: vec![],
+                },
+                v2,
+                Some("signing:ssh"),
+            ),
+            (
+                "SshKeyAgentDeny",
+                AdminOpBody::SshKeyAgentDeny {
+                    v: v2,
+                    id: "signing:ssh".into(),
+                },
+                v2,
+                Some("signing:ssh"),
+            ),
             (
                 "ManifestImport",
                 AdminOpBody::ManifestImport {

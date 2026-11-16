@@ -3481,6 +3481,8 @@ material or its digest. Vault-global rows have no target.
 | `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_multi_host_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
 | `secret_local_programs_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `ssh_key_agent_allow` | offline-cli or route-admin | signing credential id | keyed fingerprint of the resulting enrollment JSON |
+| `ssh_key_agent_deny` | offline-cli or route-admin | signing credential id | keyed fingerprint of JSON `null` |
 | `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
 | `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
 | `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |
@@ -4846,3 +4848,31 @@ The writer also updates `tests/vectors/manifest-binding-v1.json` and its
 }
 ```
 <!-- manifest-binding-generated:end -->
+
+### Agent SSH enrollment admin operations
+
+`admin.ssh_key_agent_allow` takes `{v: 2, id, targets}`; `id` names a local
+`signing:` Ed25519 credential. Each target contains only `{host, user?, port?}`:
+canonical lowercase DNS, IPv4 or canonical unbracketed IPv6 host, optional ASCII
+login name, and optional integer port 1–65535. There must be 1–16 unique targets.
+The operation replaces, never unions, the complete set inside the sealed record's
+additive `agent_ssh: {targets}` member. `admin.ssh_key_agent_deny` takes
+`{v: 2, id}` and removes that member. Both return `{targets: [...]}`; deny returns
+an empty array. An identical repeat changes nothing and writes no audit row.
+Allow requires `secret.local_programs` on (`secret_local_programs_disabled` when
+off or unreadable); deny works in either state. Both use the existing online
+admin authentication or offline writer lease. Online, the credential's lock
+serializes enrollment changes with other operations on the same key.
+
+CLI forms are `ck auth ssh-key allow <id> --target [user@]host[:port]...` (repeat
+the target flag) and `ck auth ssh-key deny <id>`. IPv6 must be bracketed on the
+CLI even without a port: `[2001:db8::1]`, `root@[2001:db8::1]:22`. Brackets are
+not stored. Both print the resulting target object as JSON.
+
+Generic create and overwrite operations refuse incoming `agent_ssh` with
+`invalid_params`. Every successful `signing:` overwrite stores an unenrolled key.
+Enrollment changes, signing-key replacement and removal atomically delete grants
+and pending requests addressed to the credential id, regardless of whether the old
+envelope can be decoded. Receipts for its incarnation remain until expiry with
+`aad_sha256 = "invalidated"` and empty `enc` and `ciphertext`, keeping the old
+requester/nonce occupied. Re-enrollment never restores old authority.

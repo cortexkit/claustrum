@@ -2090,6 +2090,9 @@ impl EncryptedStore {
         &self,
         acceptance: &TransferAcceptance,
     ) -> Result<TransferAcceptOutcome, StoreOpError> {
+        // Signing keys are not transferable today. Reject enrollment metadata
+        // independently as defense in depth: it is a receiving vault's decision.
+        refuse_incoming_agent_ssh(&acceptance.record)?;
         let id = acceptance.credential_id.as_str();
         if id.is_empty() {
             return Err(StoreOpError::InvalidCredentialId);

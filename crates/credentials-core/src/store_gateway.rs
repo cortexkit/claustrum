@@ -102,6 +102,7 @@ impl EncryptedStore {
         provider_ids: &[String],
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        refuse_incoming_agent_ssh(record)?;
         validate_gateway_settings(credential_id, settings, provider_ids)?;
         if record.kind != CredentialKind::ApiKey || record.refresh_adapter.is_some() {
             return Err(StoreOpError::InvalidGatewaySettings {

@@ -1310,6 +1310,8 @@ impl Transfers {
             .map_err(|_| TransferRefusal::store_error())?;
         Ok(TransferBody {
             version: TRANSFER_BODY_VERSION,
+            // This explicit field allowlist deliberately omits agent_ssh: SSH
+            // enrollment belongs to the receiving vault, never to the sender.
             credential_id: credential_id.to_string(),
             kind: record.kind,
             payload: base64::engine::general_purpose::STANDARD.encode(record.payload.expose()),

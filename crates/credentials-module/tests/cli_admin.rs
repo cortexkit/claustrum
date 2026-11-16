@@ -1630,6 +1630,19 @@ fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
 }
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
+    if verb == "ssh-key" {
+        return include_str!("../src/bin/credentials_cli.rs")
+            .split_once("fn parse_ssh_key_op(")
+            .unwrap()
+            .1
+            .split_once("fn parse_ssh_key_target(")
+            .unwrap()
+            .0
+            .split('"')
+            .filter(|token| token.starts_with("--"))
+            .map(str::to_string)
+            .collect();
+    }
     if verb == "manifest" {
         let source = include_str!("../src/bin/cli_support/manifest_cli.rs");
         let table = source
@@ -2324,6 +2337,178 @@ fn bootstrap_put_mint_audit_end_to_end() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ssh_enrollment_cli_replaces_targets_denies_while_off_and_mint_replace_unmarks() {
+    let root = tmp_root("ssh-enrollment");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    write_operator_master_key(&key_path, &"11".repeat(32));
+    let run = |args: &[&str]| {
+        cli()
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--key-path",
+                key_path.to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let success = |args: &[&str]| {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let id = "signing:cli-ssh";
+    success(&["mint-signing-key", "--id", id]);
+    let off = run(&["ssh-key", "allow", id, "--target", "root@[::1]:22"]);
+    assert!(!off.status.success());
+    assert!(String::from_utf8_lossy(&off.stderr).contains("secret_local_programs_disabled"));
+    success(&["secret", "local-programs", "on"]);
+    let first = success(&[
+        "ssh-key",
+        "allow",
+        id,
+        "--target",
+        "root@[::1]:22",
+        "--target",
+        "[2001:db8::1]",
+    ]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap(),
+        serde_json::json!({"targets":[{"host":"2001:db8::1"},{"host":"::1","port":22,"user":"root"}]})
+    );
+    let second = success(&["ssh-key", "allow", id, "--target", "192.0.2.1"]);
+    assert_eq!(second, "{\"targets\":[{\"host\":\"192.0.2.1\"}]}\n");
+    success(&["secret", "local-programs", "off"]);
+    assert_eq!(success(&["ssh-key", "deny", id]), "{\"targets\":[]}\n");
+    success(&["secret", "local-programs", "on"]);
+    success(&["ssh-key", "allow", id, "--target", "[::1]"]);
+    let db = data_dir.join("store.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let incarnation: String = conn
+        .query_row(
+            "SELECT incarnation FROM credentials WHERE credential_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES ('ssh-grant',?1,?2,'aft','session','scope','scope','hour',9999999999999,1,'hash')", rusqlite::params![id,incarnation]).unwrap();
+    drop(conn);
+    success(&["mint-signing-key", "--id", id, "--replace"]);
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = open_sqlite(&descriptor).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x11; 32])).unwrap();
+    assert!(store.get(id).unwrap().agent_ssh.is_none());
+    assert_eq!(store.credential_incarnation(id).unwrap(), incarnation);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM secret_grants WHERE secret_name=?1",
+            [id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let audit = store.read_audit(None).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|r| r.op == "ssh_key_agent_allow")
+            .count(),
+        3
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|r| r.op == "ssh_key_agent_deny")
+            .count(),
+        1
+    );
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
+fn ssh_enrollment_cli_rejects_unbracketed_ipv6_and_malformed_targets_before_access() {
+    for target in [
+        "::1",
+        "2001:db8::1:22",
+        "root@::1",
+        "root@2001:db8::1:22",
+        "[::1",
+        "[::1]tail",
+        "[::1]:0",
+        "[::1]:65536",
+        "[::1]:",
+        "[::1]:+22",
+        "-root@[::1]",
+        "root@@[::1]",
+        "EXAMPLE.COM",
+        "example.com.",
+    ] {
+        let out = cli()
+            .args(["ssh-key", "allow", "signing:ssh", "--target", target])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{target}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("SSH target"),
+            "{target}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for args in [
+        vec!["ssh-key", "deny", "signing:ssh", "--target", "[::1]"],
+        vec!["ssh-key", "allow", "signing:ssh"],
+        vec![
+            "ssh-key",
+            "allow",
+            "signing:ssh",
+            "--target",
+            "[::1]",
+            "--target",
+            "[::1]",
+        ],
+    ] {
+        let out = cli().args(&args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("ssh-key"));
+    }
+}
+
+#[test]
+fn ssh_enrollment_cli_help_explains_replacement_brackets_and_the_setting() {
+    for args in [["help", "ssh-key"], ["ssh-key", "--help"]] {
+        let out = cli().args(args).output().unwrap();
+        assert!(out.status.success());
+        let help = String::from_utf8(out.stdout).unwrap();
+        for text in [
+            "ssh-key allow",
+            "ssh-key deny",
+            "--target",
+            "replaces",
+            "Bracket IPv6",
+            "local-programs on",
+        ] {
+            assert!(help.contains(text), "{text}: {help}");
+        }
+        assert!(help.lines().all(|line| line.chars().count() <= 80));
+    }
 }
 
 /// A minted signing key is stored under the signing kind, can sign, and publishes the
@@ -5798,8 +5983,8 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // and provider-report.
     assert_eq!(
         verbs.len(),
-        41,
-        "the rendered verb-table scan narrowed; manifest is a public verb"
+        42,
+        "the rendered verb-table scan narrowed; ssh-key is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

@@ -50,6 +50,8 @@ pub enum AuditOp {
     SecretPhoneGateSet,
     SecretMultiHostSet,
     SecretLocalProgramsSet,
+    SshKeyAgentAllow,
+    SshKeyAgentDeny,
     /// The operator set or cleared `secrets.home_member`, the vault that holds agent secrets.
     SecretHomeSet,
     SecretPhoneRegister,
@@ -227,6 +229,8 @@ impl AuditOp {
             AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
             AuditOp::SecretMultiHostSet => "secret_multi_host_set",
             AuditOp::SecretLocalProgramsSet => "secret_local_programs_set",
+            AuditOp::SshKeyAgentAllow => "ssh_key_agent_allow",
+            AuditOp::SshKeyAgentDeny => "ssh_key_agent_deny",
             AuditOp::SecretHomeSet => "secret_home_set",
             AuditOp::SecretPhoneRegister => "secret_phone_register",
             AuditOp::SecretStore => "secret_store",
@@ -912,6 +916,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
                 AuditOp::SecretMultiHostSet => AuditOp::SecretMultiHostSet.as_str(),
                 AuditOp::SecretLocalProgramsSet => AuditOp::SecretLocalProgramsSet.as_str(),
+                AuditOp::SshKeyAgentAllow => AuditOp::SshKeyAgentAllow.as_str(),
+                AuditOp::SshKeyAgentDeny => AuditOp::SshKeyAgentDeny.as_str(),
                 AuditOp::SecretHomeSet => AuditOp::SecretHomeSet.as_str(),
                 AuditOp::SecretPhoneRegister => AuditOp::SecretPhoneRegister.as_str(),
                 AuditOp::SecretStore => AuditOp::SecretStore.as_str(),
@@ -1022,6 +1028,10 @@ mod vocabulary_documentation_tests {
             assert_documented(section, "audit_log.op", value(op));
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
+        for op in [AuditOp::SshKeyAgentAllow, AuditOp::SshKeyAgentDeny] {
+            assert_documented(section, "audit_log.op", value(op));
+            assert!(WIRE_CONTRACT.contains(value(op)));
+        }
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::LoginSharingSet)));
         for op in [

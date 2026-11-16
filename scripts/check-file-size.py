@@ -15,9 +15,6 @@ CHAR_LITERAL = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\
 
 # Oversized files may shrink, but must not grow before they are split by area.
 EXCEPTIONS = {
-    "crates/credentials-module/src/main.rs": (
-        3140, "daemon dispatch and per-operation handlers; split by area (admin, federation, secrets, health) when next worked in"
-    ),
     "crates/credentials-core/src/store.rs": (
         10025, "EncryptedStore core and migrations; continue moving areas into store_*.rs when next worked in"
     ),

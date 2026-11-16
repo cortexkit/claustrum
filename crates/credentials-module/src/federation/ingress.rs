@@ -741,6 +741,7 @@ pub fn remote_watch_logins_wire(rows: &[RemoteWatchRow]) -> Vec<Value> {
                 "refresh_adapter": row.refresh_adapter,
                 "identity": row.identity,
                 "categories": row.categories,
+                "provider_ids": row.provider_ids.as_deref().unwrap_or_default(),
                 "detected_plan": row.detected_plan,
                 "home_version": row.home_version,
             })
@@ -758,6 +759,7 @@ pub fn remote_watch_lists_equal(left: &[RemoteWatchRow], right: &[RemoteWatchRow
                 && left.refresh_adapter == right.refresh_adapter
                 && left.identity == right.identity
                 && left.categories == right.categories
+                && left.provider_ids == right.provider_ids
                 && left
                     .detected_plan
                     .as_ref()
@@ -1821,12 +1823,14 @@ impl HomeVault {
                 continue;
             }
             let categories = store.categories(&candidate.credential_id)?;
+            let provider_ids = Some(store.provider_ids(&candidate.credential_id)?);
             rows.push(RemoteWatchRow {
                 credential_id: candidate.credential_id,
                 state,
                 refresh_adapter: candidate.refresh_adapter,
                 identity: candidate.identity,
                 categories,
+                provider_ids,
                 detected_plan: candidate.detected_plan,
                 home_version: candidate.record_version,
             });

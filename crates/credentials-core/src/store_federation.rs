@@ -239,7 +239,7 @@ fn check_pairing_id(pairing_id: &str) -> Result<(), StoreOpError> {
 #[derive(Default)]
 struct RemoteWatchDiff<'a> {
     inserts: Vec<&'a RemoteWatchRow>,
-    updates: Vec<(RemoteRecord, &'a RemoteWatchRow, bool)>,
+    updates: Vec<(RemoteRecord, &'a RemoteWatchRow, bool, bool)>,
     removals: Vec<RemoteRecord>,
     skipped: Vec<String>,
 }
@@ -281,6 +281,16 @@ fn remote_categories_conn(
     rows
 }
 
+fn remote_provider_ids_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<BTreeSet<String>> {
+    let mut stmt = conn
+        .prepare("SELECT provider_id FROM remote_record_provider_ids WHERE credential_id = ?1")?;
+    let rows = stmt.query_map([id], |row| row.get(0))?.collect();
+    rows
+}
+
 fn remote_watch_diff_conn<'a>(
     conn: &rusqlite::Connection,
     home: &str,
@@ -313,15 +323,23 @@ fn remote_watch_diff_conn<'a>(
                 }
                 let categories_changed =
                     remote_categories_conn(conn, id)? != row.categories.iter().cloned().collect();
+                let provider_ids_changed = match &row.provider_ids {
+                    Some(ids) => {
+                        remote_provider_ids_conn(conn, id)? != ids.iter().cloned().collect()
+                    }
+                    None => false,
+                };
                 let same_plan = current.detected_plan.as_ref().map(|p| (&p.tier, &p.raw))
                     == row.detected_plan.as_ref().map(|p| (&p.tier, &p.raw));
                 if categories_changed
+                    || provider_ids_changed
                     || !same_plan
                     || current.refresh_adapter != row.refresh_adapter
                     || current.identity != row.identity
                     || current.last_home_state != row.state
                 {
-                    diff.updates.push((current, row, categories_changed));
+                    diff.updates
+                        .push((current, row, categories_changed, provider_ids_changed));
                 }
             }
             Some(_) => diff.skipped.push(id.clone()),
@@ -620,6 +638,7 @@ impl EncryptedStore {
                 refresh_adapter: new.refresh_adapter.clone(),
                 identity: new.identity.clone(),
                 categories: new.categories.clone(),
+                provider_ids: None,
                 detected_plan: new.detected_plan.clone(),
                 home_version: new.home_version,
             },
@@ -887,13 +906,17 @@ impl EncryptedStore {
                     tx.execute("INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
                         rusqlite::params![row.credential_id, category])?;
                 }
+                for provider_id in row.provider_ids.iter().flatten() {
+                    tx.execute("INSERT INTO remote_record_provider_ids (credential_id, provider_id) VALUES (?1, ?2)",
+                        rusqlite::params![row.credential_id, provider_id])?;
+                }
                 if !categories.is_empty() {
                     bump_grants_generation_tx(tx)?;
                 }
                 audit_remote_watch_tx(tx, &self.audit_key, home_member, &row.credential_id,
                     &incarnation, AuditOp::RemoteAdd)?;
             }
-            for (current, row, categories_changed) in diff.updates {
+            for (current, row, categories_changed, provider_ids_changed) in diff.updates {
                 let plan = row.detected_plan.as_ref().map(serde_json::to_string).transpose()
                     .map_err(|e| bad_column(e.to_string()))?;
                 let observed_at = row.detected_plan.as_ref().and_then(|plan| {
@@ -930,6 +953,18 @@ impl EncryptedStore {
                             rusqlite::params![row.credential_id, category])?;
                     }
                     bump_grants_generation_tx(tx)?;
+                }
+                if provider_ids_changed {
+                    tx.execute(
+                        "DELETE FROM remote_record_provider_ids WHERE credential_id = ?1 AND EXISTS (\
+                         SELECT 1 FROM remote_records WHERE credential_id = ?1 AND source = 'home_watch' \
+                         AND home_member = ?2 AND home_pairing_id = ?3)",
+                        rusqlite::params![row.credential_id, home_member, pairing_id],
+                    )?;
+                    for provider_id in row.provider_ids.iter().flatten() {
+                        tx.execute("INSERT INTO remote_record_provider_ids (credential_id, provider_id) VALUES (?1, ?2)",
+                            rusqlite::params![row.credential_id, provider_id])?;
+                    }
                 }
                 audit_remote_watch_tx(tx, &self.audit_key, home_member, &row.credential_id,
                     &current.incarnation, AuditOp::RemoteUpdate)?;

@@ -81,6 +81,7 @@ impl Rig {
                     refresh_adapter: Some("openai".into()),
                     identity: Default::default(),
                     categories: vec![],
+                    provider_ids: None,
                     detected_plan: None,
                     home_version: 1,
                 }],

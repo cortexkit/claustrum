@@ -30,6 +30,7 @@ mod remote_watch {
             refresh_adapter: new.refresh_adapter,
             identity: new.identity,
             categories: new.categories,
+            provider_ids: None,
             detected_plan: new.detected_plan,
             home_version: new.home_version,
         }
@@ -43,6 +44,111 @@ mod remote_watch {
 
     fn get(store: &EncryptedStore, id: &str) -> crate::federation::RemoteRecord {
         store.remote_record(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn provider_ids_seed_on_insert() {
+        let (_root, store) = rig("watch-provider-insert", 240);
+        let mut input = row("oauth:watch");
+        input.provider_ids = Some(vec!["openai".into(), "anthropic".into()]);
+        assert_eq!(full(&store, &[input, row("oauth:older-home")]).inserted, 2);
+        assert_eq!(
+            store.provider_ids("oauth:watch").unwrap(),
+            ["anthropic", "openai"]
+        );
+        assert_eq!(
+            store.remote_inventory().unwrap()[1].provider_ids,
+            ["anthropic", "openai"]
+        );
+        assert!(store.provider_ids("oauth:older-home").unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_ids_replace_atomically_and_absent_keeps_existing_set() {
+        let (_root, store) = rig("watch-provider-update", 240);
+        let mut input = row("oauth:watch");
+        input.provider_ids = Some(vec!["anthropic".into()]);
+        full(&store, std::slice::from_ref(&input));
+        input.provider_ids = Some(vec!["openai".into()]);
+        let before = get(&store, "oauth:watch");
+        let audits = store.read_audit(None).unwrap();
+        let writes = store.subscribe_writes();
+        store.with_raw_conn(|conn| conn.execute_batch("CREATE TRIGGER reject_watch_update BEFORE INSERT ON audit_log WHEN NEW.op='remote_update' BEGIN SELECT RAISE(ABORT,'watch audit failed'); END;")).unwrap();
+        assert!(store
+            .remote_watch_apply_audited(
+                HOME,
+                "pair",
+                std::slice::from_ref(&input),
+                RemoteWatchApplyMode::Full,
+                &[]
+            )
+            .is_err());
+        assert_eq!(store.provider_ids("oauth:watch").unwrap(), ["anthropic"]);
+        assert_eq!(get(&store, "oauth:watch"), before);
+        assert_eq!(store.read_audit(None).unwrap(), audits);
+        assert!(!writes.has_changed().unwrap());
+        store
+            .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER reject_watch_update"))
+            .unwrap();
+        assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 1);
+        assert!(writes.has_changed().unwrap());
+        assert_eq!(store.provider_ids("oauth:watch").unwrap(), ["openai"]);
+        input.provider_ids = None;
+        input.identity.email = Some("updated@example.com".into());
+        assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 1);
+        assert_eq!(store.provider_ids("oauth:watch").unwrap(), ["openai"]);
+        assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 0);
+        input.provider_ids = Some(vec![]);
+        assert_eq!(full(&store, std::slice::from_ref(&input)).updated, 1);
+        assert!(store.provider_ids("oauth:watch").unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_ids_snapshot_does_not_change_manual_copy() {
+        let (_root, store) = rig("watch-provider-manual", 240);
+        add_remote(&store, "oauth:operator");
+        store
+            .set_providers_audited(
+                "oauth:operator",
+                SetProvidersMode::Set,
+                &["openai".into()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .unwrap();
+        let before = store.remote_inventory().unwrap();
+        let mut input = row("oauth:operator");
+        input.provider_ids = Some(vec!["anthropic".into()]);
+        assert_eq!(full(&store, &[input]).skipped, ["oauth:operator"]);
+        assert_eq!(store.remote_inventory().unwrap(), before);
+    }
+
+    #[test]
+    fn provider_ids_validate_shape_duplicates_and_existing_count_boundary() {
+        use crate::provider_ids::{ProviderIdRule, MAX_PROVIDER_IDS_PER_CREDENTIAL};
+        let mut input = row("oauth:watch");
+        for (ids, rule) in [
+            (vec!["Not valid".into()], ProviderIdRule::Charset),
+            (vec!["a".into()], ProviderIdRule::Length),
+            (
+                vec!["anthropic".into(), "anthropic".into()],
+                ProviderIdRule::Duplicate,
+            ),
+        ] {
+            input.provider_ids = Some(ids);
+            assert!(
+                matches!(validate_remote_watch_row(HOME, &input), Err(StoreOpError::InvalidProviderId { rule: actual, .. }) if actual == rule)
+            );
+        }
+        let mut ids: Vec<_> = (0..MAX_PROVIDER_IDS_PER_CREDENTIAL)
+            .map(|i| format!("provider-{i}"))
+            .collect();
+        input.provider_ids = Some(ids.clone());
+        assert!(validate_remote_watch_row(HOME, &input).is_ok());
+        ids.push("one-too-many".into());
+        input.provider_ids = Some(ids);
+        assert!(
+            matches!(validate_remote_watch_row(HOME, &input), Err(StoreOpError::InvalidProviderId { rule: ProviderIdRule::Count, value }) if value == "one-too-many")
+        );
     }
 
     #[test]

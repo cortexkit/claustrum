@@ -467,6 +467,77 @@ fn two_vault_lifecycle_relay_matches_callosum_error_and_completion_contract() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn two_vault_lifecycle_provider_ids_follow_home_but_manual_copy_stays_local() {
+    use credentials_core::store::SetProvidersMode;
+    let mut rig = Rig::new("two-vault-provider-ids", true).await;
+    rig.login(LOGIN, &oauth("anthropic"));
+    for id in [LOGIN, OPERATOR] {
+        rig.a
+            .store
+            .set_providers_audited(
+                id,
+                SetProvidersMode::Set,
+                &["openai".into(), "anthropic".into()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .unwrap();
+    }
+    rig.b
+        .store
+        .set_providers_audited(
+            OPERATOR,
+            SetProvidersMode::Set,
+            &["member-local".into()],
+            AuditCtx::admin(AuditOp::SetProviders),
+        )
+        .unwrap();
+    rig.start_b();
+    rig.installed(LOGIN).await;
+    assert_eq!(
+        rig.b.store.provider_ids(LOGIN).unwrap(),
+        ["anthropic", "openai"]
+    );
+    let original = rig.row(LOGIN);
+    let first = rig.snapshots();
+    assert_eq!(first.len(), 1);
+    for row in first[0]["logins"].as_array().unwrap() {
+        assert_eq!(row["provider_ids"], json!(["anthropic", "openai"]));
+    }
+    for (index, ids) in [vec!["anthropic".to_string()], vec![]]
+        .into_iter()
+        .enumerate()
+    {
+        rig.a
+            .store
+            .set_providers_audited(
+                LOGIN,
+                SetProvidersMode::Set,
+                &ids,
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .unwrap();
+        rig.cycle().await;
+        wait_until(|| rig.b.store.provider_ids(LOGIN).unwrap() == ids).await;
+        assert_eq!(rig.row(LOGIN).incarnation, original.incarnation);
+        assert_eq!(rig.row(LOGIN).last_home_version, original.last_home_version);
+        assert_eq!(
+            rig.b.store.provider_ids(OPERATOR).unwrap(),
+            ["member-local"]
+        );
+        let snapshots = rig.snapshots();
+        assert_eq!(snapshots.len(), index + 2);
+        let row = snapshots.last().unwrap()["logins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["credential_id"] == LOGIN)
+            .unwrap();
+        assert_eq!(row["provider_ids"], json!(ids));
+    }
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn two_vault_lifecycle_automatic_login_token_metadata_and_eligibility() {
     let mut rig = Rig::new("two-vault-metadata", true).await;
     rig.login(LOGIN, &oauth("anthropic"));
@@ -1007,6 +1078,7 @@ async fn login_sharing_home_off_relays_not_found_and_on_restores_live_state() {
                 refresh_adapter: Some("anthropic".into()),
                 identity: Default::default(),
                 categories: vec!["llm-provider".into()],
+                provider_ids: None,
                 detected_plan: None,
                 home_version: 1,
             }],

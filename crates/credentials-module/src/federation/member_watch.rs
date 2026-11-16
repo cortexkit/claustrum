@@ -332,6 +332,7 @@ struct Login {
     refresh_adapter: Option<String>,
     identity: RecordIdentity,
     categories: Vec<String>,
+    provider_ids: Option<Vec<String>>,
     detected_plan: Option<DetectedPlan>,
     home_version: u64,
 }
@@ -364,6 +365,7 @@ fn decode_notice(home: &str, body: Value, logged: &Logged) -> Option<Snapshot> {
             refresh_adapter: login.refresh_adapter,
             identity: login.identity,
             categories: login.categories,
+            provider_ids: login.provider_ids,
             detected_plan: login.detected_plan,
             home_version: login.home_version,
         };
@@ -833,6 +835,14 @@ mod tests {
             ("credential_id", json!("category:reserved")),
             ("identity", json!({"account_id": " "})),
             ("categories", json!(["not a category"])),
+            ("provider_ids", json!(["not a provider"])),
+            ("provider_ids", json!(["anthropic", "anthropic"])),
+            (
+                "provider_ids",
+                json!((0..=credentials_core::MAX_PROVIDER_IDS_PER_CREDENTIAL)
+                    .map(|i| format!("provider-{i}"))
+                    .collect::<Vec<_>>()),
+            ),
             (
                 "detected_plan",
                 json!({"tier": "invalid tier", "raw": null, "observed_at_ms": 1}),
@@ -856,6 +866,24 @@ mod tests {
         assert!(!logged.first(HOME, "oauth:bad"));
         assert!(logged.first("another-home", "oauth:bad"));
         assert!(!logged.first("another-home", "oauth:bad"));
+    }
+
+    #[test]
+    fn member_notice_distinguishes_absent_and_empty_provider_ids() {
+        let logged = Logged::default();
+        assert_eq!(
+            decode_notice(HOME, notice(), &logged).unwrap().rows[0].provider_ids,
+            None
+        );
+        for ids in [json!([]), json!(["anthropic"])] {
+            let mut body = notice();
+            body["logins"][0]["provider_ids"] = ids.clone();
+            let snapshot = decode_notice(HOME, body, &logged).unwrap();
+            assert_eq!(
+                serde_json::to_value(&snapshot.rows[0].provider_ids).unwrap(),
+                ids
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

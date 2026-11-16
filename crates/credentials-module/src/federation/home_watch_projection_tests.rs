@@ -188,6 +188,14 @@ fn projection_lists_granted_needs_reauth_and_active_logins_without_writes() {
         MemberGrantSelector::Exact("oauth:no-adapter".into()),
     );
     store.create("oauth:exact", &record).unwrap();
+    store
+        .set_providers_audited(
+            "oauth:exact",
+            credentials_core::store::SetProvidersMode::Set,
+            &["openai".into(), "anthropic".into()],
+            AuditCtx::admin(AuditOp::SetProviders),
+        )
+        .unwrap();
     category(store, "oauth:exact", "exact-only");
     grant(
         store,
@@ -222,6 +230,14 @@ fn projection_lists_granted_needs_reauth_and_active_logins_without_writes() {
     }
     assert_eq!(rows[0].categories, ["llm-provider"]);
     assert_eq!(rows[1].categories, ["exact-only"]);
+    assert_eq!(rows[0].provider_ids, Some(vec![]));
+    assert_eq!(
+        rows[1].provider_ids,
+        Some(vec!["anthropic".into(), "openai".into()])
+    );
+    let wire = remote_watch_logins_wire(&rows);
+    assert_eq!(wire[0]["provider_ids"], json!([]));
+    assert_eq!(wire[1]["provider_ids"], json!(["anthropic", "openai"]));
     assert_eq!(home.remote_watch_projection(MEMBER, PAIRING).unwrap(), rows);
     assert_eq!(data_version(&conn), version);
     assert_eq!(store.audit_tip().unwrap(), audit);
@@ -273,6 +289,7 @@ fn watch_row() -> RemoteWatchRow {
         refresh_adapter: record.refresh_adapter,
         identity: record.identity,
         categories: vec!["llm-provider".into()],
+        provider_ids: Some(vec!["anthropic".into()]),
         detected_plan: record.detected_plan,
         home_version: 7,
     }
@@ -289,17 +306,20 @@ fn projection_wire_has_only_inventory_fields_with_token_identity_and_plan_shapes
             "refresh_adapter": "anthropic",
             "identity": {"account_id":"account", "org_name":"workspace"},
             "categories": ["llm-provider"],
+            "provider_ids": ["anthropic"],
             "detected_plan": {"tier":"pro", "raw":"provider-pro", "observed_at_ms":42},
             "home_version": 7,
         })]
     );
     let mut unknown = row;
     unknown.detected_plan = None;
+    unknown.provider_ids = Some(vec![]);
     unknown.state = RemoteHomeState::NeedsReauth;
     let wire = remote_watch_logins_wire(&[unknown]);
     assert!(wire[0].as_object().unwrap().contains_key("detected_plan"));
     assert!(wire[0]["detected_plan"].is_null());
     assert_eq!(wire[0]["state"], "needs_reauth");
+    assert_eq!(wire[0]["provider_ids"], json!([]));
 }
 
 #[test]
@@ -325,6 +345,8 @@ fn projection_comparison_ignores_refresh_version_and_plan_observation_time_only(
     raw[0].detected_plan.as_mut().unwrap().raw = Some("provider-max".into());
     let mut category = refreshed.clone();
     category[0].categories = vec!["other".into()];
+    let mut providers = refreshed.clone();
+    providers[0].provider_ids = Some(vec!["openai".into()]);
     let mut adapter = refreshed.clone();
     adapter[0].refresh_adapter = Some("openai".into());
     let mut identity = refreshed.clone();
@@ -335,7 +357,9 @@ fn projection_comparison_ignores_refresh_version_and_plan_observation_time_only(
     id[0].credential_id = "oauth:other".into();
     let mut unknown = refreshed.clone();
     unknown[0].detected_plan = None;
-    for changed in [tier, raw, category, adapter, identity, state, id, unknown] {
+    for changed in [
+        tier, raw, category, providers, adapter, identity, state, id, unknown,
+    ] {
         assert!(!remote_watch_lists_equal(&original, &changed));
     }
 }

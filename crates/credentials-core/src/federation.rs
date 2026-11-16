@@ -280,6 +280,8 @@ pub struct RemoteWatchRow {
     pub refresh_adapter: Option<String>,
     pub identity: RecordIdentity,
     pub categories: Vec<String>,
+    /// Older homes omit this field; keep the copy's existing set in that case.
+    pub provider_ids: Option<Vec<String>>,
     pub detected_plan: Option<DetectedPlan>,
     pub home_version: u64,
 }
@@ -311,6 +313,16 @@ pub fn validate_remote_watch_row(
         .any(|c| !crate::catalog::valid_category_name(c))
     {
         return Err(StoreOpError::InvalidCategoryName);
+    }
+    if let Some(provider_ids) = &row.provider_ids {
+        crate::provider_ids::check_provider_ids(provider_ids)?;
+        if let Some(value) = provider_ids.get(crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL)
+        {
+            return Err(StoreOpError::InvalidProviderId {
+                rule: crate::provider_ids::ProviderIdRule::Count,
+                value: value.clone(),
+            });
+        }
     }
     if row.state == RemoteHomeState::Corrupt {
         return Err(StoreOpError::Encode(

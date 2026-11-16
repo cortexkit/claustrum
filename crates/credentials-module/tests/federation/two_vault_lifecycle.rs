@@ -28,8 +28,8 @@ use subc_protocol::FrameType;
 use tokio::sync::watch;
 
 use crate::support::{
-    temp_root, wait_for_signal, wait_until, wall_ms, HomeStore, HomeWatchRelay, Reply, Responder,
-    SharedCallosumStandIn, TwoVaults, VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
+    temp_root, wait_for_signal, wait_until, wall_ms, Held, HomeStore, HomeWatchRelay, Reply,
+    Responder, SharedCallosumStandIn, TwoVaults, VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
 };
 
 const READ: &str = "callosum.paired_devices_read";
@@ -1064,29 +1064,76 @@ async fn login_sharing_home_off_relays_not_found_and_on_restores_live_state() {
             "pair-1",
         )
         .unwrap();
+    let other_home = "fed-computer:00000000000000000000000000000001";
+    rig.b_callosum.set_pairing(other_home, Some("other-pair"));
+    // The stand-in uses A's watch responder for every route. Leave this paired
+    // home's open unanswered: an unavailable home must retain its copies.
+    rig.b_callosum
+        .hold_open(&crate::support::fed_provider_name(other_home), Held::new());
+    let mut b_inventory = inventory(&rig.vaults.a, Some("pair-1"), false);
+    b_inventory["devices"].as_array_mut().unwrap().push(json!({
+        "class":"computer",
+        "fingerprint":other_home.strip_prefix("fed-computer:").unwrap(),
+        "pairing_id":"other-pair",
+        "shares":[{"share":"vault", "enabled":false}],
+    }));
+    rig.b_callosum
+        .answer(TARGET_MODULE, READ, Reply::Ok(b_inventory.clone()));
+    rig.b_callosum
+        .answer(TARGET_MODULE, WATCH, Reply::Watch(b_inventory.clone()));
     rig.start_b();
     rig.installed(LOGIN).await;
-    let other_home = "fed-computer:00000000000000000000000000000001";
-    rig.b
-        .store
-        .remote_watch_apply_audited(
-            other_home,
-            "other-pair",
-            &[credentials_core::federation::RemoteWatchRow {
-                credential_id: "oauth:other-home".into(),
-                state: RemoteHomeState::Active,
-                refresh_adapter: Some("anthropic".into()),
-                identity: Default::default(),
-                categories: vec!["llm-provider".into()],
-                provider_ids: None,
-                detected_plan: None,
-                home_version: 1,
-            }],
-            credentials_core::federation::RemoteWatchApplyMode::Full,
-            &[],
-        )
-        .unwrap();
+    wait_until(|| rig.b_callosum.saw_method(WATCH)).await;
+    for (home, pairing, id) in [
+        (other_home, "other-pair", "oauth:other-home"),
+        (
+            "fed-computer:00000000000000000000000000000002",
+            "unpaired-pair",
+            "oauth:unpaired-home",
+        ),
+    ] {
+        rig.b
+            .store
+            .remote_watch_apply_audited(
+                home,
+                pairing,
+                &[credentials_core::federation::RemoteWatchRow {
+                    credential_id: id.into(),
+                    state: RemoteHomeState::Active,
+                    refresh_adapter: Some("anthropic".into()),
+                    identity: Default::default(),
+                    categories: vec!["llm-provider".into()],
+                    provider_ids: None,
+                    detected_plan: None,
+                    home_version: 1,
+                }],
+                credentials_core::federation::RemoteWatchApplyMode::Full,
+                &[],
+            )
+            .unwrap();
+    }
     let other_copy = rig.row("oauth:other-home");
+    // Removing the deliberately unpaired copy proves B processed the inventory,
+    // rather than merely receiving its frame, before we check the paired copy.
+    assert_eq!(
+        rig.b_callosum
+            .watch_frame("callosum", FrameType::StreamData, b_inventory)
+            .await,
+        1
+    );
+    wait_until(|| {
+        rig.b
+            .store
+            .remote_record("oauth:unpaired-home")
+            .unwrap()
+            .is_none()
+    })
+    .await;
+    assert_eq!(
+        rig.row("oauth:other-home"),
+        other_copy,
+        "a paired home's automatic copy survives inventory redelivery"
+    );
     let mut writes = rig.a.store.subscribe_writes();
     let store = Arc::clone(&rig.a.store);
     wait_for_signal(tokio::task::spawn_blocking(move || {

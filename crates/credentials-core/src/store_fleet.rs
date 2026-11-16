@@ -471,7 +471,6 @@ impl EncryptedStore {
             return Err(FleetError::InvalidParams);
         }
         self.fleet_write(|tx| {
-            self_member(tx)?;
             removals(tx)?;
             let mut count = 0;
             for item in observations {
@@ -791,6 +790,46 @@ mod tests {
             .iter()
             .filter(|a| a.op == "fleet_key_create")
             .all(|a| a.actor == "vault" && a.payload_hash.is_none()));
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn fleet_removal_without_self_is_durable_and_still_blocks_later_use() {
+        let (_root, store) = taxonomy_tests::rig("fleet-removal-no-self", 1);
+        store.ensure_fleet_keys(1).unwrap();
+        let observations = [FleetRemoval {
+            member_id: id(2),
+            removal_id: "opaque-removal".into(),
+        }];
+        let before = audit_len(&store);
+        assert_eq!(store.fleet_record_removals(&observations, 1).unwrap(), 1);
+        assert_eq!(store.fleet_record_removals(&observations, 2).unwrap(), 0);
+        assert_eq!(audit_len(&store), before + 1);
+        assert_eq!(
+            store.fleet_epoch_seal(b"", b"x").unwrap_err(),
+            FleetError::EpochUnavailable
+        );
+        assert_eq!(
+            store.fleet_epoch_mint(&[id(1)], &[]).unwrap_err(),
+            FleetError::EpochUnavailable
+        );
+        set_self(&store, 1);
+        seed(&store, 1, &[id(1), id(2)]);
+        assert_eq!(
+            store.fleet_epoch_status().unwrap().sealing_blocked_by,
+            vec![id(2)]
+        );
+        assert_eq!(
+            store.fleet_epoch_seal(b"", b"x").unwrap_err(),
+            FleetError::EpochUnavailable
+        );
+        let (_other_root, other) = rig("fleet-removal-no-self-peer", 2);
+        assert_eq!(
+            store
+                .fleet_epoch_mint(&[id(1), id(2)], &[peer(&other, 2)])
+                .unwrap_err(),
+            FleetError::MembersMismatch
+        );
         assert_eq!(store.verify_audit_chain().unwrap(), None);
     }
 

@@ -2190,8 +2190,10 @@ fn meets_min_ttl(record: &credentials_core::record::VaultRecord, min_ttl_ms: i64
 /// cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferKeyUse {
-    /// Every op except the announce.
+    /// Operations with no fleet-key or transfer-key exception.
     Ordinary,
+    /// `credential.sign`: only Entorhinal may exercise the fleet record key.
+    Sign,
     /// `credential.public_key`: the read callosum makes to announce the key's public
     /// half.
     PublicKeyAnnounce,
@@ -2235,6 +2237,9 @@ fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bo
     if credentials_core::agent_secret::is_deposit_key(credential_id) {
         return true;
     }
+    if fleet_key_fenced(credential_id, access) {
+        return true;
+    }
     if !credentials_core::federation::is_vault_transfer_id(credential_id) {
         return false;
     }
@@ -2246,6 +2251,37 @@ fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bo
             usage: TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::AnnounceVersion,
         }
     )
+}
+
+/// Fleet purpose keys expose only the routes used to announce or sign records.
+/// Existing handles and category grants must not bypass the purpose restriction.
+fn fleet_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
+    let allowed = match access {
+        TransferKeyAccess::Scoped {
+            kind: "reserved",
+            id: "callosum",
+            usage,
+        } => {
+            matches!(
+                usage,
+                TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::AnnounceVersion
+            )
+        }
+        TransferKeyAccess::Scoped {
+            kind: "reserved",
+            id: "entorhinal",
+            usage,
+        } if credential_id.starts_with("signing:fleet-record:") => {
+            matches!(
+                usage,
+                TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::Sign
+            )
+        }
+        _ => false,
+    };
+    (credential_id.starts_with("kem:fleet-epoch-wrap:")
+        || credential_id.starts_with("signing:fleet-record:"))
+        && !allowed
 }
 
 fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusal> {
@@ -2449,7 +2485,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Sign,
-                TransferKeyUse::Ordinary,
+                TransferKeyUse::Sign,
             )
             .await?;
 

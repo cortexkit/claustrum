@@ -4955,3 +4955,134 @@ and pending requests addressed to the credential id, regardless of whether the o
 envelope can be decoded. Receipts for its incarnation remain until expiry with
 `aad_sha256 = "invalidated"` and empty `enc` and `ciphertext`, keeping the old
 requester/nonce occupied. Re-enrollment never restores old authority.
+
+## 18. Fleet epoch operations
+
+These eight management operations admit only caller identity `reserved:entorhinal`.
+Every other caller receives the body `{"error":{"code":"not_found","class":"permanent"}}`,
+even for malformed parameters. No credential grant admits another identity.
+`fleet.epoch_seal`, `fleet.epoch_open` and `fleet.epoch_status` are queries; the
+other five operations mutate state. Epoch secrets never leave the vault in plaintext.
+
+All objects below reject unknown fields. Epochs are JSON integers in
+`1..=4294967295`. Bytes are canonical unpadded base64url. `mint_id` is exactly 16
+bytes (22 characters). Member ids are `fed-computer:<32 lowercase hex>`.
+Malformed values and decoded byte-cap overflows use the existing `invalid_params`
+error frame, not the domain-refusal body. Member-count overflow uses the domain
+refusal stated below, not `invalid_params`.
+
+| Operation | Parameters | Successful body |
+|---|---|---|
+| `fleet.epoch_seal` | `{aad, plaintext}` | `{epoch, nonce, ciphertext}` |
+| `fleet.epoch_open` | `{epoch, nonce, ciphertext, aad}` | `{plaintext}` |
+| `fleet.epoch_status` | `{}` | `{current, held, pending, sealing_blocked_by}` |
+| `fleet.epoch_mint` | `{members:[member_id,...]}` | `{epoch, mint_id, wraps:[{member_id, wrap},...]}` |
+| `fleet.epoch_commit` | `{epoch, mint_id}` | `{epoch, state:"current"}` |
+| `fleet.epoch_discard` | `{epoch, mint_id}` | `{epoch, state:"discarded"}` |
+| `fleet.epoch_import` | `{wrap}` | `{epochs:[epoch,...], already_held}` |
+| `fleet.epoch_wrap_for` | `{member_id}` | `{wrap}` |
+
+`seal` uses XChaCha20-Poly1305 under the current epoch with a random 24-byte nonce.
+`aad` is required but may be empty; it and `plaintext` each decode to at most 1 MiB.
+AEAD associated data is RFC 8785 JSON
+`{"aad":<caller aad base64url>,"epoch":e,"v":"ck-fleet-epoch-aad/v1"}`.
+`open` accepts any held epoch (current or retired), a 24-byte nonce, ciphertext
+of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. Unknown epochs and bad
+tags both refuse `fleet_epoch_open_failed`, without distinguishing them.
+Pending epochs are never used to seal, open or export history.
+
+`status` returns `current: int|null`, ascending `held` including current,
+`pending: {epoch,mint_id}|null`, and ascending unique `sealing_blocked_by` member
+ids (empty when current is null). A lost mint response is recovered by reading
+status after restart, discarding its pending mint, then minting again.
+
+`mint` requires the supplied set to equal Self plus every currently paired fleet
+peer, minus permanently removed members. Duplicate or malformed ids are invalid
+parameters; an unequal set refuses `fleet_members_mismatch`. The new pending epoch
+is one above the highest held epoch, or 1. It returns a rotation wrap for each
+other member, none for Self. An existing pending epoch refuses
+`fleet_epoch_pending`; 256 held epochs or more than 64 live/supplied members
+refuses `fleet_epoch_capacity`.
+
+`commit` matches both epoch and mint id. It makes that pending row current and
+retires the previous current, but refuses `fleet_members_mismatch` if its holders
+lack the current Self or contain a removed member. An already committed matching
+mint remains an idempotent success, including after retirement. `discard` deletes
+only a matching pending row and records its mint id and epoch; an exact repeat
+is an idempotent success. Other commit/discard mismatches refuse
+`fleet_epoch_not_pending`. Delayed retries cannot act on a later mint of the same
+number.
+
+`wrap_for` exports every held epoch in a join wrap to a currently paired fleet
+peer other than Self, not removed; an invalid recipient refuses
+`fleet_members_mismatch`. It adds the recipient to each exported holder set and
+always writes one audit row, including retries. Holder sets never shrink. Adding
+a 65th holder to any retained epoch refuses `fleet_epoch_capacity` without writes.
+
+A wrap is exactly
+`{"ct":<base64url>,"enc":<base64url>,"from":<member_id>,"to":<member_id>,"v":"ck-fleet-epoch-wrap/v1"}`.
+`enc` is 32 bytes; `ct` is at most 1 MiB + 16 bytes. HPKE auth mode uses
+DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and ChaCha20-Poly1305, empty HPKE aad,
+and RFC 8785 info `{"from":..,"to":..,"v":"ck-fleet-epoch-wrap/v1"}`. Only the
+paired sender's vault-held wrap key authenticates it. The canonical plaintext,
+at most 1 MiB, is
+`{"keys":[{"epoch":k,"key":<32 bytes base64url>,"members":[ids],"minter":<id>},...],"kind":"rotation"|"join","v":"ck-fleet-epoch-wrap/v1"}`.
+It has 1–256 strictly increasing epochs and 1–64 sorted unique holders per key.
+A rotation has one key, with minter equal to from and named among the holders.
+A join carries all sender-held epochs with their stored holders plus to.
+
+`import` refuses `fleet_epoch_pending` while a local mint is pending. Otherwise
+all failed wrap conditions are the uniform `fleet_wrap_refused`: the recipient
+must be Self; the authenticated sender must be a nonremoved fleet peer; all keys
+must name Self; the highest key must name no removed member; rotation must be
+newer than every held epoch or already held byte-identically; any already-held
+join key must be byte-identical; and the resulting store must fit 256 held epochs
+and 64 holders per key. Stored holders union with carried holders. Historical
+join keys may name removed members. Newly stored epochs are returned ascending;
+`already_held` is true exactly when no epoch is new. The highest imported epoch
+becomes current only when newer than every held epoch. An import with no new key
+or holder writes nothing; ciphertext randomization does not change key identity.
+
+Every operation except status refuses `fleet_epoch_unavailable` while Self is
+unset. Seal and wrap-for also refuse it without a current epoch, while its
+holders lack Self, or while any current holder is removed. Opening history is
+unaffected by removals or a changed Self. Self may change without rewriting
+holder sets: recover by discarding a stale pending mint, then mint and commit for
+the new Self. Retired history is exported with its stored holders plus recipient,
+not with Self silently added.
+
+Removal follows account tombstones on the existing Callosum
+`paired_devices_watch`, never local unpair. Tombstones are optional for older
+Callosum versions; when present they contain unique lowercase fingerprints and
+nonempty opaque removal ids. Invalid snapshots record nothing. New
+`(member_id, removal_id)` observations are durable and audited; replays write
+nothing, and later absence never deletes a removal. A holder not yet aware of a
+join can keep sealing until it imports the enlarged holder set or learns a
+relevant removal. A computer exporting before observing a tombstone can export
+the then-held keys. With no history-dropping operation, 256 retained epochs
+prevent rotation and a retained 64-holder epoch prevents further joins.
+
+Domain refusals are bodies `{"error":{"code":code,"class":class}}`:
+
+| Class | Codes |
+|---|---|
+| `transient` | `fleet_epoch_unavailable`, `fleet_epoch_pending`, `fleet_peer_keys_unavailable`, `store_error` |
+| `permanent` | `not_found`, `fleet_members_mismatch`, `fleet_epoch_not_pending`, `fleet_epoch_open_failed`, `fleet_wrap_refused`, `fleet_epoch_capacity`, `corrupt` |
+
+A refused, malformed or duplicate-fingerprint peer read refuses
+`fleet_peer_keys_unavailable` and writes nothing. Only computer entries with a
+valid, non-low-order 32-byte lowercase-hex `fleet_epoch_wrap_x25519.pub` supply a
+fleet peer. `corrupt` means a stored epoch envelope will not open. No error
+contains epoch keys, wraps or plaintext.
+
+At startup the vault creates missing `signing:fleet-record:1`,
+`kem:fleet-epoch-wrap:1` and `kem:bus-seal:1`, each with one `fleet_key_create`
+audit row; existing keys are never replaced. Private halves are never returned
+by get. Fleet wrap-key public reads and held-version status/watch announcements
+are restricted to `reserved:callosum`. Fleet record-key public reads admit
+Callosum and Entorhinal; held-version announcements admit only Callosum, and
+signing admits only Entorhinal. Other accesses, including handles, are
+`not_found`. Operator grants are required: wrap-key read to Callosum; record-key
+read to Callosum and Entorhinal and sign to Entorhinal. Other grants refuse
+`fleet_key_reserved`. Bus-seal grants remain operator steps (Callosum read,
+ckbus open); rotations use new numbered keys alongside existing ones.

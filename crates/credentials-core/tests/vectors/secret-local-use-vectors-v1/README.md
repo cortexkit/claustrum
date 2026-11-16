@@ -6,6 +6,16 @@
 `crates/credentials-core/tests/vectors/** -text` rule in `.gitattributes` disables
 line-ending translation for this pack.
 
+## Changes from v1
+
+The `secret-local-use-vectors-v1.1` tag keeps this directory name. Approval
+envelopes now use the 32-hex phone fingerprint
+`11111111111111111111111111111111`. Every local-use statement carries `agent_id`,
+with `null` when no agent is attributed; the statement format remains
+`ck-secret-local-use-statement/v1`. A new `SHA256SUMS` pins `vectors.json` in
+`sha256sum -c` format, excluding itself and this README. The original v1 tag stays
+unchanged.
+
 ## Contents and byte encoding
 
 Every byte record has unpadded base64url `b64url` and a lowercase SHA-256 `sha256`.
@@ -15,8 +25,9 @@ compact RFC 8785 JSON, not the indented representation in the pack. Compare deco
 
 - `cases`: four local/forwarded statement, approval-required, approval-envelope,
   approval-result and release/signature cases. Statements come from real store
-  requests and are checked against the production statement builder. Optional
-  `agent_id` is both present and absent across the samples; `asking_member_id` is
+  requests and are checked against the production statement builder. Nullable
+  `agent_id` is always present, with both string and `null` values across the
+  samples; `asking_member_id` is
   present only on the forwarded statements. Sudo approvals choose `once`; SSH
   approvals demonstrate `hour` and `session`. The offered SSH durations also
   include `once`.
@@ -88,7 +99,16 @@ Run on the Linux build server, returning the generated JSON to the checkout:
 ```sh
 CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-core --features test-support --test secret_local_use_vectors secret_local_use_vectors_are_producer_generated_and_pinned -- --exact --nocapture
 cargo test --locked -p credentials-core --features test-support --test secret_local_use_vectors
+(cd crates/credentials-core/tests/vectors/secret-local-use-vectors-v1 && sha256sum -c SHA256SUMS)
 ```
+
+Fixed inputs include:
+
+- Clock: 1,700,000,000,000 ms.
+- Home: `fed-computer:22222222222222222222222222222222`.
+- Forwarded asker: `fed-computer:11111111111111111111111111111111`.
+- Phone fingerprint: `11111111111111111111111111111111` (32 lowercase hex
+  characters).
 
 The generator fixes the clock, keys and fixture identities. After a real deposit
 it reseals the already-verified material with a fixed incarnation; after real

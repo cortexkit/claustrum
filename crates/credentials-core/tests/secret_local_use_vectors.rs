@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const NOW: i64 = 1_700_000_000_000;
 const HOME: &str = "fed-computer:22222222222222222222222222222222";
 const ASKER: &str = "fed-computer:11111111111111111111111111111111";
-const PHONE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PHONE: &str = "11111111111111111111111111111111";
 const KEY: &str = "signing:local-use-vector";
 const UNMARKED: &str = "signing:unmarked-vector";
 const INCARNATION: &str = "000000000000000000000000000000ab";
@@ -665,18 +665,48 @@ fn pinned_path() -> PathBuf {
 
 #[test]
 fn secret_local_use_vectors_are_producer_generated_and_pinned() {
-    let generated = serde_json::to_vec_pretty(&produce()).unwrap();
+    let sample = produce();
+    for approval in sample["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|case| &case["approval"])
+        .chain(std::iter::once(&sample["sudo_hour_refused"]))
+    {
+        let fingerprint = approval["envelope"]["json"]["device_fingerprint"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            fingerprint.len(),
+            32,
+            "phone fingerprint must be 32 hex digits"
+        );
+        assert!(fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+    let generated = serde_json::to_vec_pretty(&sample).unwrap();
     let path = pinned_path();
+    let sums_path = path.with_file_name("SHA256SUMS");
+    let sums = format!("{}  vectors.json\n", hex(&payload_hash(&generated)));
     if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &generated).unwrap();
+        std::fs::write(&sums_path, &sums).unwrap();
         println!("emitted 4 local/forwarded statements and approvals, 1 deposit, 1 listing, 4 replies, sudo-hour refusal and 11 request refusals");
     }
     assert_eq!(
-        std::fs::read(path).expect("generate the pinned local-use vectors"),
+        std::fs::read(&path).expect("generate the pinned local-use vectors"),
         generated,
         "production-generated local-use vector bytes changed"
     );
+    assert_eq!(std::fs::read(&sums_path).unwrap(), sums.as_bytes());
+    let checked = std::process::Command::new("sha256sum")
+        .args(["-c", "SHA256SUMS"])
+        .current_dir(path.parent().unwrap())
+        .output()
+        .expect("sha256sum is required to verify the pack's checksum format");
+    assert!(checked.status.success(), "{checked:?}");
 }
 
 #[test]

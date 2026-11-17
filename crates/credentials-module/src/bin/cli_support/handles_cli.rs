@@ -34,9 +34,9 @@ pub(super) fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<()
 ///
 /// After this returns, nothing holds the predecessor. A consumer config keyed on
 /// credential id loses it on the next save; the audit chain records that a handle was
-/// minted and (only since 2026-09-19) which one. That asymmetry is how this vault reached
-/// 16 live handles on four credentials with 12 unattributable to any holder -- resolved
-/// by canvassing three seats, which is an hour of work this advisory would have saved.
+/// minted and, in newer entries only, which one. Without this advisory, live handles
+/// pile up that no record attributes to any holder, and sorting them out means asking
+/// every consumer in turn.
 ///
 /// FAILS OPEN AND SILENT. The mint already succeeded and its handle is on stdout; an
 /// advisory that turned a completed mint into a visible error would teach operators that

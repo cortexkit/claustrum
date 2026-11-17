@@ -2600,8 +2600,8 @@ fn the_first_mutation_after_the_migration_bumps_the_generation_through_the_fence
 fn every_credential_is_dated_from_its_own_chain_deposit_entry() {
     let (_root, store) = sqlite("backfill", 107);
     migrate_through_for_test(&store, 9).expect("migrate through version 9");
-    // Sixty rows, the size of the store this rule was measured against, each with a
-    // distinct deposit instant except for one deliberate same-millisecond pair.
+    // Sixty rows, a realistic store size, each with a distinct deposit instant except
+    // for one deliberate same-millisecond pair.
     let expected: Vec<(String, i64)> = (0..60)
         .map(|index: i64| {
             let birth = if index == 59 {

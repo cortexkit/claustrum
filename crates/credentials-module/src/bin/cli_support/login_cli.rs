@@ -1024,8 +1024,8 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
         return Ok(());
     }
 
-    // Each provider's auth-code wire gets its own grounded research before it is
-    // added to login_provider().
+    // Each provider's auth-code wire is checked against that provider's own
+    // documentation before it is added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
             "unknown --provider '{provider}'; run `ck auth login` with no flags \
@@ -1081,13 +1081,13 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
         ),
     )?;
 
-    // Generate the PKCE pair and the CSPRNG state (state is independent of the
-    // verifier), pick the wire, build the authorize URL, and present it to the
-    // operator.
+    // Generate the PKCE pair and the random state from the operating system's secure
+    // random generator (state is independent of the verifier), pick the wire, build the
+    // authorize URL, and present it to the operator.
     let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     // An OIDC provider (xAI) requires a fresh per-flow nonce in the authorize request;
-    // it is CSPRNG per login and appended as an extra authorize param. The vault does
+    // it is freshly random per login and appended as an extra authorize param. The vault does
     // not consume the id_token, so the nonce is not verified — it only satisfies the
     // provider's authorize contract.
     let nonce = if wire.needs_oidc_nonce {

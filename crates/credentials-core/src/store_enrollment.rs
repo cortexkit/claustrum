@@ -362,8 +362,6 @@ impl EncryptedStore {
                 // Returns the ORIGINAL row rather than re-minting: a second id for one
                 // pending enrollment would leave the first unreachable and still holding the
                 // name, turning a resume into a second leak of the thing it was fixing.
-                //
-                // Reported by the openai-auth seat reading the ceremony before building it.
                 let resumable: Option<String> = tx
                     .query_row(
                         "SELECT request_id FROM pending_enrollments \
@@ -792,8 +790,9 @@ impl EncryptedStore {
         outcome.map_err(EnrollmentError::Refused)
     }
 
-    /// Approve a pending request without minting its token. Gate-2 callers provide the
-    /// actor; the first successful poll remains the only consumer token-delivery path.
+    /// Approve a pending request without minting its token. Callers that passed the admin
+    /// plane's MAC check over the exact operation bytes provide the actor; the first
+    /// successful poll remains the only consumer token-delivery path.
     pub fn approve_enrollment(
         &self,
         request_id: &str,
@@ -1157,7 +1156,8 @@ impl EncryptedStore {
         .ok_or(StoreOpError::NotFound)
     }
 
-    /// Gate-2 repair for a lost poll response. It has no expected-generation argument.
+    /// Repair for a lost poll response, for callers that passed the admin plane's MAC
+    /// check over the exact operation bytes. It has no expected-generation argument.
     pub fn reissue_enrollment(
         &self,
         name: &str,

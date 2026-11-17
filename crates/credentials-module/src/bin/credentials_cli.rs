@@ -15,7 +15,8 @@
 //!
 //! Every write goes through the epoch-fenced path and appends an audit-chain entry
 //! (flagged as an admin write) atomically with the mutation. Bootstrap (first run)
-//! mints a CSPRNG master key into the configured store.
+//! mints a master key from the operating system's secure random generator into the
+//! configured store.
 //!
 //! Commands:
 //!
@@ -178,19 +179,15 @@ fn finish(result: Result<(), CliError>) -> ExitCode {
             // and a reader seeing only the tail cannot tell a refusal from a successful
             // run followed by a hint.
             //
-            // Measured 2026-08-25: the supervisor seat ran two wrong flag shapes during a
-            // deploy probe (`logout <id>` positionally, and `remove --id <id> --yes` with
-            // a flag that does not exist). Both correctly exited 1 with the error on
-            // stderr and nothing on stdout -- the CLI fails closed and that part is
-            // right. What caught them was asserting on the EFFECT (list state, serving
-            // count) rather than the command output, and they said plainly they could not
-            // tell from their transcript whether the commands had run.
+            // The exit code alone does not settle it: a wrong flag shape exits 1 with the
+            // error on stderr and nothing on stdout, so the CLI fails closed, but a reader
+            // of a tailed transcript sees only the help footer and cannot tell whether the
+            // command ran.
             //
             // So the exit code was always honest and the rendering was not. One line at
             // the end costs nothing and makes a tailed transcript self-describing.
-            // ONLY WHEN SOMETHING CAME BETWEEN, measured 2026-09-17. The restatement was
-            // unconditional, so a one-line refusal printed the same sentence twice with a
-            // blank line between:
+            // ONLY WHEN SOMETHING CAME BETWEEN. An unconditional restatement would print
+            // a one-line refusal twice with a blank line between:
             //
             //     error: --id is required
             //
@@ -199,8 +196,8 @@ fn finish(result: Result<(), CliError>) -> ExitCode {
             // The reasoning above is about a refusal BURIED by a help page. When the error
             // body is a single line there is nothing to bury it, the reader has the first
             // line in view, and the echo reads as a second, different failure. Every verb
-            // with a required flag renders this way, so the noise is the common case and
-            // the case the restatement was written for is the rare one.
+            // with a required flag renders this way, so the noise would be the common case
+            // and the case the restatement is for is the rare one.
             if let CliError::Usage(m) = &e {
                 let mut lines = m.lines();
                 let first = lines.next().unwrap_or("invalid usage");
@@ -345,9 +342,9 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // THE `ck` DISPATCHER'S OPT-IN PROBE. Until this answers, `ck auth …` refuses as
     // "not a command" and this binary is absent from `ck --help`.
     //
-    // The dispatcher used to exec ANY `ck-*` on PATH, which broke once `ck setup` began
-    // placing module programs into the same directory: `ck aft` exec'd the AFT module
-    // itself, which started in stdio mode and waited on a pipe. Opting in is the right
+    // Opting in is needed because `ck setup` places module programs in the same PATH
+    // directory: a dispatcher that exec'd ANY `ck-*` would run, say, a module program
+    // that starts in stdio mode and waits on a pipe. Opting in is the right
     // shape — a binary that happens to be named `ck-something` is not thereby a command.
     //
     // CONTRACT, and every clause is load-bearing because the dispatcher enforces it:
@@ -385,8 +382,8 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
 
     // A `--help`/`-h` ANYWHERE prints help and exits WITHOUT running the command.
     // This is load-bearing safety, not a convenience: the arg parser pulls the flags
-    // it knows and (before this) silently ignored the rest, so `bootstrap --help`
-    // ignored `--help` and RAN bootstrap — provisioning stray key material on a typo.
+    // it knows and silently ignores the rest, so without this `bootstrap --help` would
+    // ignore `--help` and RUN bootstrap — provisioning stray key material on a typo.
     // Intercepting here, before parse_global / any open-for-admin, makes help a no-op.
     // `ck auth help [<verb>]` and `ck auth <verb> --help` both land here: with a verb
     // we print that verb's detail page, otherwise the short table.
@@ -681,10 +678,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         // VERBS WITH POSITIONAL SUBCOMMANDS must name them here, or this check eats the
         // subcommand before dispatch and the verb is unusable.
         //
-        // `enroll` shipped that way and the whole suite stayed green: every help and
-        // flag test drives FLAGS, and no test invoked `ck auth enroll list`. It failed
-        // on the live daemon at the first probe, during a migration window, which is the
-        // most expensive place to find it. Keep subcommands in one table so a new
+        // Help and flag tests drive FLAGS, so a verb missing from this table still
+        // passes them and fails only when someone runs a subcommand such as
+        // `ck auth enroll list` against a live daemon. Keep subcommands in one table so a new
         // verb can declare its positional actions alongside the existing ones.
         let subcommands: &[&str] = match command {
             "enroll" => &["list", "approve", "label", "deny", "revoke", "reissue"],
@@ -1690,7 +1686,8 @@ fn help_verb(verb: &str) -> String {
 /// Commit one admin op, choosing the backend by `--subc`:
 ///
 /// - `--subc <connection-file>` present: commit through the RUNNING module over the
-///   route plane (admin.challenge → master-key MAC → admin.op). Zero downtime; the
+///   route plane (admin.challenge → master-key message authentication code (MAC) →
+///   admin.op). Zero downtime; the
 ///   module is the single writer, serializing the op against live refreshes. If no
 ///   live module is reachable, fall back to the offline lease path (nothing was
 ///   dispatched, so the fallback cannot double-execute).
@@ -2269,13 +2266,6 @@ fn no_covering_grant_note(id: &str) -> String {
 /// already reachable. Hence the name says CREATED, and the create-only precondition is
 /// stated rather than implied by where it happens to be called from today.
 ///
-/// Found by applying a peer's refinement to this file (2026-09-03): reading a remedy
-/// string is not "is the remedy wrong" but "can it be reached from a state where
-/// following it changes nothing", which requires enumerating the paths that REACH the
-/// refusal rather than reading its text. Doing that here showed the doc comment claimed
-/// a general answer the body does not compute. One call site today; the claim was the
-/// defect, not the behaviour.
-///
 /// FAILS OPEN, DELIBERATELY: every uncertain path returns `true` ("assume reachable"),
 /// so the caller stays silent. This function exists only to decide whether to print an
 /// advisory line, and the two errors are not symmetric — a missing hint costs an
@@ -2357,18 +2347,16 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
 /// derived vault directory is exactly the one the supervised daemon serves:
 /// `$XDG_DATA_HOME`, else the Windows roaming profile, else `~/.local/share`.
 ///
-/// THAT BYTE-FOR-BYTE CLAIM IS NOW FENCED, and it was not before. It spans two
-/// repositories, so no test's natural scope reached it -- the exact shape that
-/// survives review because it reads as reasoning rather than as a property. The
+/// THAT BYTE-FOR-BYTE CLAIM IS TESTED. It spans two repositories, so no test's
+/// natural scope reaches it -- the exact shape that survives review because it reads
+/// as reasoning rather than as a property. The
 /// daemon publishes a golden fixture for its own rule; this repo vendors it and
 /// asserts against it (see `tests/fixtures/data_home` and the test below).
 ///
 /// Why a duplicate at all, rather than calling a shared crate: `cortexkit-store-types`
-/// offers `resolve_data_home()`, and on 2026-08-21 its rules DIFFERED from the
-/// daemon's -- no Windows branch, and relative `XDG_DATA_HOME` rejected. Adopting the
-/// shared implementation would have broken a correct alignment. It has since been
-/// corrected to mirror the daemon, but the lesson stands: THE SHARED IMPLEMENTATION
-/// IS NOT AUTOMATICALLY THE AUTHORITATIVE ONE. What matters is tracking whoever
+/// offers `resolve_data_home()`, but THE SHARED IMPLEMENTATION IS NOT AUTOMATICALLY
+/// THE AUTHORITATIVE ONE, and its rules have differed from the daemon's (no Windows
+/// branch, relative `XDG_DATA_HOME` rejected). What matters is tracking whoever
 /// actually builds the storage descriptor, which is the daemon.
 fn default_data_home() -> PathBuf {
     resolve_data_home_from(
@@ -2438,8 +2426,8 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
     const CONNECTION_FILE_NAME: &str = "subc-connection.json";
 
     // SUBC_CONNECTION_FILE NAMES THE DAEMON THE CALLER MEANS, SO IT IS EXCLUSIVE RATHER
-    // THAN FIRST-IN-A-LIST -- matching `ck`'s own reader, re-derived at source
-    // 2026-09-05 from subc-core's `connection_file_candidates_with` in bin/ck.rs.
+    // THAN FIRST-IN-A-LIST -- matching `ck`'s own reader, subc-core's
+    // `connection_file_candidates_with` in bin/ck.rs.
     //
     // This ladder is a COPY of that one and cannot be a call: subc-core exposes the
     // WRITER's helper, which resolves to the temp fallback rather than searching, so
@@ -2447,9 +2435,9 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
     // wrote. A copied ladder diverges SILENTLY -- nothing links the two, no test can
     // compare them, and the failure is that this CLI looks where `ck` does not.
     //
-    // IT HAD ALREADY DIVERGED. This arm was absent until 2026-09-05: an operator who set
-    // SUBC_CONNECTION_FILE to name a rig fell through to discovery and reached whichever
-    // daemon was found -- in practice production. For a read verb that is a true answer
+    // WITHOUT THIS ARM, an operator who sets SUBC_CONNECTION_FILE to name a rig falls
+    // through to discovery and reaches whichever daemon is found -- in practice
+    // production. For a read verb that is a true answer
     // about the wrong machine; for `put`, `login` or `invalidate` it is a credential
     // written into the wrong vault, with both stores looking healthy afterwards.
     //
@@ -2478,14 +2466,14 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
     //                         matching subc-core's PROD_CONNECTION_RELATIVE_PATH
     //
     // `ck`'s reader consults HOME and does NOT consult XDG_DATA_HOME for this rung
-    // (bin/ck.rs, `connection_file_candidates_with`, re-derived at source 2026-09-05).
+    // (bin/ck.rs, `connection_file_candidates_with`).
     // So routing this through `default_data_home()` would make the CLI look somewhere
     // `ck` never looks the moment an operator sets XDG_DATA_HOME -- reintroducing the
     // looks-where-ck-does-not class that the SUBC_CONNECTION_FILE rung above was added
     // to close, in the same function, by way of tidying.
     //
-    // Recorded because a duplicate-value audit REPORTS THIS PAIR, and the obvious
-    // remedy is the defect. A reported duplicate is a candidate until it is resolved
+    // A tool that flags duplicated values will flag this pair, and the obvious remedy is
+    // the defect. A flagged duplicate is a candidate until it is resolved
     // against the other side's authority; these two have different authorities.
     if let Some(home) = non_empty_env("HOME") {
         let p = PathBuf::from(home)
@@ -2508,9 +2496,8 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
 /// concludes no daemon is running, takes the offline path, hits the single-writer
 /// lease, and tells the operator to STOP THE DAEMON. The remedy it names is the one
 /// thing they should not do, and the `--subc` route that would have worked is never
-/// mentioned. Reported from a real box, and STOCK MACOS sets no `XDG_RUNTIME_DIR`,
-/// so it is the default there rather than an edge case; this machine only avoids it
-/// because something sets that variable explicitly.
+/// mentioned. STOCK MACOS sets no `XDG_RUNTIME_DIR`, so this is the default there
+/// rather than an edge case.
 ///
 /// It GLOBS rather than recomputing the name. The token comes from
 /// `user_connection_token()`, whose unix arm derives a uid by WRITING A PROBE FILE --
@@ -2528,23 +2515,23 @@ fn temp_dir_connection_file() -> Option<PathBuf> {
 
 /// The rule itself, with the directory passed in.
 ///
-/// SPLIT OUT BECAUSE DRIVING IT THROUGH `TMPDIR` RACES EVERY OTHER TEST IN THE BINARY,
-/// and that is not theoretical -- it cost two gate runs before I traced it. The old test
-/// set TMPDIR/TMP/TEMP to a scratch root and restored them; the Rust harness runs tests as
-/// threads in ONE process, so during that window any concurrent test calling
-/// `env::temp_dir()` read the scratch root, created a directory inside it, and then had it
-/// deleted underneath by this test's own cleanup.
+/// SPLIT OUT BECAUSE DRIVING IT THROUGH `TMPDIR` RACES EVERY OTHER TEST IN THE BINARY.
+/// The Rust harness runs tests as threads in ONE process, so while one test points
+/// TMPDIR/TMP/TEMP at a scratch root, any concurrent test calling `env::temp_dir()`
+/// reads that root, creates a directory inside it, and then has it deleted underneath
+/// by the first test's cleanup.
 ///
-/// THE VICTIMS WERE THE MANIFEST-LOCK TESTS, which touch no environment variable at all
-/// and had no way to know. That is why a mutex over the MUTATORS -- which is how I fixed
-/// the `SUBC_CONNECTION_FILE` race this morning -- does not solve this one: it protects
-/// mutators from each other and leaves every innocent reader exposed. The only fix that
-/// covers a reader that does not participate is not to mutate the variable.
+/// THE VICTIMS touch no environment variable at all (the manifest-lock tests, for
+/// example) and have no way to know. That is why a mutex over the MUTATORS -- which
+/// is how the `SUBC_CONNECTION_FILE` tests are serialised -- does not solve this one: it
+/// protects mutators from each other and leaves every innocent reader exposed. The only
+/// fix that covers a reader that does not participate is not to mutate the variable.
 ///
-/// Both observed error codes fall out of one cause, which is what made it hard to read:
-/// ENOENT when the scratch root was already deleted, and EINVAL from a torn `getenv`
-/// during a concurrent `setenv` (the reason `set_var` is unsafe in edition 2024). Two
-/// different-looking failures, two different tests, one race.
+/// Both error codes such a race produces fall out of one cause, which makes it hard to
+/// read: ENOENT (no such file) when the scratch root was already deleted, and EINVAL
+/// (invalid argument) from a torn `getenv` during a concurrent `setenv` (the reason
+/// `set_var` is unsafe in edition 2024). Two different-looking failures, two different
+/// tests, one race.
 ///
 /// The pattern is already in this file: `resolve_data_home_from` takes its inputs as
 /// parameters for exactly this reason, two hundred lines away.
@@ -2565,9 +2552,9 @@ fn temp_dir_connection_file_in(dir: PathBuf) -> Option<PathBuf> {
 
     // THE GLOB STAYS AS A FALLBACK, AND IT IS NOT REDUNDANT. It exists for the states
     // an exact lookup cannot describe: an unreadable temp directory, and MORE THAN ONE
-    // connection file, where guessing picks a daemon at random. Those were built for a
-    // real report -- a CLI that concluded "no daemon" from an I/O error took the offline
-    // path and told the operator to stop a daemon that was serving. An exact miss is
+    // connection file, where guessing picks a daemon at random. Without it, a CLI that
+    // concludes "no daemon" from an I/O error takes the offline path and tells the
+    // operator to stop a daemon that is serving. An exact miss is
     // silent by construction, so dropping this would trade a diagnostic for a shrug.
     match connection_file_in(&dir) {
         ConnectionSearch::Found(p) => Some(p),
@@ -2603,10 +2590,8 @@ fn temp_dir_connection_file_in(dir: PathBuf) -> Option<PathBuf> {
 /// candidates" both mean a running daemon may be reachable and the offline path is
 /// about to give bad advice.
 ///
-/// The distinction lives in the TYPE, not in an eprintln, for a reason measured on
-/// this very function: with both arms returning `None`, a test asserting `None`
-/// passes whether the error is reported or discarded -- I wrote exactly that test,
-/// claimed it was mutation-proof in its own comment, and the mutation survived.
+/// The distinction lives in the TYPE, not in an eprintln: with both arms returning
+/// `None`, a test asserting `None` passes whether the error is reported or discarded.
 /// A difference only visible on stderr is a difference no test can hold.
 #[derive(Debug, PartialEq)]
 enum ConnectionSearch {
@@ -2628,7 +2613,6 @@ enum ConnectionSearch {
 /// Driving this through the CLI cannot reach it: auto-discovery is gated on
 /// `--data-dir` being defaulted, so any invocation that pins a data dir -- which a
 /// test must, to avoid touching the operator's vault -- skips discovery entirely.
-/// Three probes read as clean before I noticed the gate was mine.
 fn connection_file_in(dir: &std::path::Path) -> ConnectionSearch {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -2665,10 +2649,8 @@ mod discovery_tests {
     /// what the function did and FALSE about why, which is what makes it expensive --
     /// it reads as a defect in the exclusivity rung rather than as a racing neighbour.
     ///
-    /// *** OBSERVED, NOT ANTICIPATED. *** The same commit passed on its train branch and
-    /// failed on master minutes later -- identical sha, opposite outcomes, which is the
-    /// signature of a race rather than a platform difference. The duplicate master run I
-    /// had just called "buying nothing" is what surfaced it.
+    /// A race like this can make one commit pass on one run and fail on the next, which
+    /// is the signature of a race rather than a platform difference.
     ///
     /// A mutex rather than `--test-threads=1`: the flag is invisible at the call site and
     /// a future runner without it silently reintroduces the race.
@@ -2690,14 +2672,14 @@ mod discovery_tests {
 
     /// An unreadable directory must not read as "no daemon is running".
     ///
-    /// The arm this covers was `.ok()?` -- a real I/O error discarded and returned as
-    /// the same `None` an empty directory produces, so the caller took the offline
-    /// path, hit the single-writer lease, and told the operator to STOP THE DAEMON.
+    /// The failure this guards against: a real I/O error discarded (`.ok()?`) and
+    /// returned as the same `None` an empty directory produces, so the caller takes the
+    /// offline path, hits the single-writer lease, and tells the operator to STOP THE
+    /// DAEMON.
     ///
-    /// This assertion discriminates because the outcomes are different VARIANTS.
-    /// Mutation-verified: collapsing the error arm back to a not-present result reds
-    /// this by name. The earlier `Option`-returning version of this same test survived
-    /// that mutation, which is why the enum exists.
+    /// This assertion discriminates because the outcomes are different VARIANTS:
+    /// collapsing the error arm back to a not-present result reds this by name, which
+    /// an `Option`-returning version of this test could not do.
     #[test]
     fn an_unreadable_search_dir_is_not_reported_as_absent() {
         let missing = std::path::Path::new("/definitely/not/a/real/dir/ckcred-probe");
@@ -2714,11 +2696,10 @@ mod discovery_tests {
     /// The temp rung names the daemon's file rather than searching for its shape.
     ///
     /// TWO matching files, deliberately. With one file this test PASSES WITH THE EXACT
-    /// RUNG DELETED, because the glob below finds the same path -- I wrote that version
-    /// first and mutation caught it, which is the silent-success the rung exists to
-    /// avoid, pointed at its own test. With two, the glob refuses as Ambiguous rather
-    /// than guessing a daemon, so only subc's own derivation can answer and the
-    /// assertion is about the CALL.
+    /// RUNG DELETED, because the glob below finds the same path -- the silent success
+    /// the rung exists to avoid, pointed at its own test. With two, the glob refuses as
+    /// Ambiguous rather than guessing a daemon, so only subc's own derivation can answer
+    /// and the assertion is about the CALL.
     #[test]
     fn the_temp_rung_finds_subcs_derived_name_where_the_glob_cannot() {
         let _env = env_guard();
@@ -2741,22 +2722,22 @@ mod discovery_tests {
 
         // THE DIRECTORY IS PASSED IN, NOT SET IN THE ENVIRONMENT.
         //
-        // This test used to set TMPDIR/TMP/TEMP to `root` and restore them afterwards. It
-        // asserted the right thing and it BROKE OTHER TESTS: the harness runs tests as
-        // threads in one process, so during that window any concurrent test calling
-        // `env::temp_dir()` -- the manifest-lock suite, which touches no environment
-        // variable and had no way to know -- read this scratch root, created a directory
-        // in it, and had it deleted underneath by the cleanup below.
+        // Setting TMPDIR/TMP/TEMP to `root` and restoring them afterwards would BREAK
+        // OTHER TESTS: the harness runs tests as threads in one process, so during that
+        // window any concurrent test calling `env::temp_dir()` -- such as the
+        // manifest-lock suite, which touches no environment variable and has no way to
+        // know -- would read this scratch root, create a directory in it, and have it
+        // deleted underneath by the cleanup below.
         //
-        // It cost two gate runs and presented as two unrelated flakes with different
-        // error codes: ENOENT where the root was already gone, EINVAL from a torn
-        // `getenv` racing a `setenv`. One cause, two symptoms, neither in this file.
+        // That presents as two unrelated flakes with different error codes: ENOENT
+        // where the root was already gone, EINVAL from a torn `getenv` racing a
+        // `setenv`. One cause, two symptoms, neither in this file.
         //
-        // A mutex over the mutators would NOT have fixed it, which is the part worth
-        // keeping: that is how I fixed the `SUBC_CONNECTION_FILE` race this morning, and
-        // it protects mutators from each other while leaving every innocent reader
-        // exposed. The only fix that reaches a victim who does not participate is to stop
-        // mutating the variable.
+        // A mutex over the mutators would NOT fix it, which is the part worth keeping:
+        // it protects mutators from each other (that is how the `SUBC_CONNECTION_FILE`
+        // tests are serialised) while leaving every innocent reader exposed. The only
+        // fix that reaches a victim who does not participate is to stop mutating the
+        // variable.
         let got = temp_dir_connection_file_in(root.clone());
         let _ = std::fs::remove_dir_all(&root);
 
@@ -3015,11 +2996,10 @@ mod tests {
 
     /// A client-side failure must not speak in the module's voice.
     ///
-    /// DRIVES THE PRODUCTION DECISION, not a hand-built variant. The first version of
-    /// this test constructed `CliError::LocalFailure` itself and asserted its Display --
-    /// which verifies the test's own copy of the classification. Mutation proved it
-    /// worthless: putting the key-resolution failure back on `RouteCommit::Refused`, the
-    /// exact defect, left all 26 tests green.
+    /// DRIVES THE PRODUCTION DECISION, not a hand-built variant. A test that constructed
+    /// `CliError::LocalFailure` itself and asserted its Display would verify only the
+    /// test's own copy of the classification, and would stay green with the
+    /// key-resolution failure put back on `RouteCommit::Refused`, the exact defect.
     ///
     /// So it calls `resolve_signing_key` with a key path that cannot resolve, which is
     /// the real arm an operator hits when the login keychain is locked.
@@ -3074,10 +3054,10 @@ mod tests {
 
     /// This CLI's data-home rule conforms to the daemon's own golden fixture.
     ///
-    /// The doc comment on `default_data_home` has always claimed byte-for-byte
-    /// equivalence with subc's resolver. Nothing tested it: the claim spans two
-    /// repositories, so no test's natural scope contained it, and it would have gone
-    /// on reading as true for as long as nobody re-derived it. If it were ever false
+    /// The doc comment on `default_data_home` claims byte-for-byte equivalence with
+    /// subc's resolver. The claim spans two repositories, so no test's natural scope
+    /// contains it, and untested it would go on reading as true for as long as nobody
+    /// re-derived it. If it were ever false
     /// the CLI would compute a different vault directory than the daemon serves --
     /// and because that directory derives the keychain service name and the admin
     /// transcript id, the visible symptom is `vault_locked` on an intact store, not
@@ -3085,8 +3065,8 @@ mod tests {
     ///
     /// The fixture is AUTHORED BY THE DAEMON and vendored here (see
     /// `tests/fixtures/data_home/VENDORED.md`). A conformance fixture written on this
-    /// side would agree with whatever this side expects, which is the failure this
-    /// repo has already paid for three times in key-container parsing.
+    /// side would agree with whatever this side expects, so it could never catch a
+    /// mismatch.
     ///
     /// Platform rows are split by `cfg` rather than parameterised: that keeps the test
     /// on the REAL production path with real `PathBuf` join semantics, and CI runs

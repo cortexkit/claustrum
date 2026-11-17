@@ -578,10 +578,9 @@ pub fn count_refresh_intents_read_only(
 
 /// Count what a whole-file placement of `store_path` would resurrect.
 ///
-/// WHY THIS EXISTS AS CODE RATHER THAN AS A DOCUMENTED RULE: the scrub list it reports on
-/// was agreed with the backup owner and pinned in their restore contract while being, on
-/// this side, a design claim with no implementation and nothing that would notice if the
-/// reasoning were wrong.
+/// WHY THIS EXISTS AS CODE RATHER THAN AS A DOCUMENTED RULE: backup restores depend on
+/// the scrub list it reports on, and as a written rule alone that list would have no
+/// implementation and nothing that would notice if the reasoning were wrong.
 ///
 /// Drilled against a real captured generation it found ZERO re-armed handles -- not
 /// because the hazard is absent, but because that 24-hour window happened to contain no

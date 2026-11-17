@@ -283,19 +283,16 @@ impl EncryptedStore {
             // reconciliation from undoing a legitimate re-login).
             //
             // THIS TAIL REPEATS IN THE REPLACE AND OVERWRITE PATHS AND IS NOT WORTH
-            // EXTRACTING. A duplicate scan reports the three as one group, which is why
-            // the reason is here rather than in a commit message nobody reads at the
-            // moment they are tidying.
+            // EXTRACTING.
             //
             // The three sit under different write contracts -- unconditional insert,
             // version-guarded replace, unconditional overwrite -- each with its own SQL
             // and its own definition of what `n > 0` means. A shared helper would have
             // to decide, on its callers' behalf, when the intent may be cleared and
-            // which audit op to append. That is the shape that has bitten twice in this
-            // codebase and once in a sibling: a helper enforcing an invariant on the way
-            // in while some caller writes around it, and a fix constraining a type no
-            // reachable writer goes through. Three visible copies under three contracts
-            // beat one helper hiding which contract it is serving.
+            // which audit op to append. Such a helper invites two failures: it enforces
+            // an invariant on the way in while some caller writes around it, or a fix
+            // constrains a type no reachable writer goes through. Three visible copies
+            // under three contracts beat one helper hiding which contract it is serving.
             if n > 0 {
                 for category in registered_providers::category_defaults(tx, credential_id)? {
                     tx.execute(
@@ -1506,10 +1503,10 @@ impl EncryptedStore {
     /// becomes a fresh operator ceremony rather than one command. Replace repairs in
     /// place; remove escalates a fixable state into a ceremony.
     ///
-    /// So the three shapes of a missing inverse each need their own note: DECLINED (handle
-    /// revocation -- implementable, refused, arguable), IMPOSSIBLE (`remove` -- the bytes
-    /// are gone), and RENAMED (this one -- it exists, under a name that does not look like
-    /// an inverse).
+    /// So the three shapes of a missing inverse each need their own note: DECLINED (an
+    /// inverse that could be built but is refused on purpose, like the absent un-revoke
+    /// for handles), IMPOSSIBLE (`remove` -- the bytes are gone), and RENAMED (this one
+    /// -- it exists, under a name that does not look like an inverse).
     pub fn quarantine(&self, credential_id: &str) -> Result<(), StoreOpError> {
         self.set_state(credential_id, RecordState::Corrupt, false, None)
     }

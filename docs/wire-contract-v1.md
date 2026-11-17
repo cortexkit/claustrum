@@ -662,7 +662,7 @@ Offline mode reads the table read-only; a step-44 store has no declared output o
 
 #### Approval wording
 
-The code in `crates/credentials-core/src/store_declared_grants.rs` is the source of the wording, pinned in `crates/credentials-core/tests/vectors/declared-grants-v1.json`.
+The code in `crates/credentials-core/src/store_declared_grants.rs` is the source of the wording, pinned with the live category table in `crates/credentials-core/tests/vectors/declared-grants-v2.json` and its companion `declared-grants-v2.SHA256SUMS`. The published `declared-grants-v1.json` remains byte-identical; its parser cases and approval wording are still checked against live code, but its category table is a historical snapshot. Regenerate v2 with `CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-core --features test-support --lib declared_grants_v2_vectors_are_emitted_by_parser_and_wording_code_and_pinned`.
 
 The following is **the vault's approval text** for desktop daemon-approval screens.
 Substitute the category's plain name from the table below and the literal audience;
@@ -689,6 +689,7 @@ For a category not in the table, show the raw category name unchanged.
 | `cloud-infrastructure` | cloud infrastructure |
 | `web-search` | web search |
 | `media-provider` | speech and media |
+| `embedding-provider` | embedding models |
 | `browser-session` | browser sign-in |
 | `antigravity-native` | Antigravity |
 | `anthropic-native` | Anthropic |
@@ -2674,6 +2675,7 @@ uses the credential id, and an audience selector uses
 | `llm-gateway` | Company AI gateway keys |
 | `web-search` | Web search keys |
 | `media-provider` | Speech and media keys |
+| `embedding-provider` | Embedding model keys |
 | `browser-session` | Browser sign-ins |
 | `github-app-native` | GitHub App keys |
 | `anthropic-native` | Claude logins |
@@ -4194,7 +4196,7 @@ and the vault's health counts.
 | `id`, `incarnation` | The credential id and its current incarnation. |
 | `kind` | `account` or `api_key`. |
 | `name` | Catalog display name using the existing boundary-aware id matcher, otherwise the credential id; capped at 80 characters. |
-| `category?` | `llm-provider` or `media-provider` → `ai_models`; otherwise `web-search` → `search`; otherwise `cloud-infrastructure` → `infrastructure`. Otherwise the optional login catalog category (Gmail: `communication`, model logins: `ai_models`). Unknown is absent. |
+| `category?` | `llm-provider`, `media-provider` or `embedding-provider` → `ai_models`; otherwise `web-search` → `search`; otherwise `cloud-infrastructure` → `infrastructure`. Otherwise the optional login catalog category (Gmail: `communication`, model logins: `ai_models`). Unknown is absent. |
 | `status` | `{state, reason?}` as below. |
 | `setup` | Computer-only steps as below. |
 | `permissions` | Sorted `cg_…` ids of the visible permissions/v1 credential grants that reach the row by exact id or group; audience grants never reach credentials. |

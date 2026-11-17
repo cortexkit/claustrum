@@ -715,6 +715,11 @@ fn ordinary_deposit_login_legacy_registered_gateway_default_refuses_before_store
             assert!(screen.contains(reason), "{screen}");
         }
         assert!(!screen.contains("Groups for this provider"), "{screen}");
+        assert!(
+            !screen.contains("Choose none to keep it private:"),
+            "{screen}"
+        );
+        assert!(!screen.contains("No groups chosen."), "{screen}");
         if let Some(peer) = &peer {
             assert!(peer
                 .observed

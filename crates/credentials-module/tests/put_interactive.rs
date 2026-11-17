@@ -440,9 +440,37 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
         ],
     );
     assert!(
-        screen.contains("keys reach only modules granted"),
+        screen.contains(
+            "Provider customvendor is unknown. Choose the groups whose modules may read its keys."
+        ),
         "{screen}"
     );
+    assert!(
+        screen.contains(
+            "Choose none to keep it private: only a module you grant this key by name can read it."
+        ),
+        "{screen}"
+    );
+    assert!(
+        screen
+            .contains("Groups for this provider (space to select, enter to finish; none is fine)"),
+        "{screen}"
+    );
+    for label in [
+        "llm-provider: model provider",
+        "data-warehouse: data warehouse",
+        "cloud-infrastructure: cloud infrastructure",
+        "web-search: web search",
+        "media-provider: speech and media",
+        "embedding-provider: embedding models",
+    ] {
+        assert!(
+            screen.contains(label),
+            "missing group label {label}: {screen}"
+        );
+    }
+    assert!(!screen.contains("llm-gateway"), "{screen}");
+    assert!(!screen.contains("No groups chosen."), "{screen}");
     assert!(screen.contains("empty is the safe answer"), "{screen}");
     let answer = fixture.store().registered_providers().unwrap();
     assert_eq!(answer.len(), 1);
@@ -465,6 +493,75 @@ fn registered_provider_prompt_saves_groups_routes_and_a_second_key_reuses_them()
         );
         assert_eq!(store.provider_ids(id).unwrap(), ["custom-route"]);
     }
+}
+
+#[test]
+fn registered_provider_no_groups_prints_exact_grant_hint_for_real_credential_id() {
+    let fixture = Fixture::new();
+    let id = "apikey:voyage:private-work";
+    let screen = fixture.terminal(
+        &["put", "--id", id],
+        &[
+            ("Groups for this provider", b"\r", false),
+            (MODELS, b"\r", false),
+            (ADDRESSES, b"\r", false),
+            (
+                "Which provider is this in Fusiform's list? Leave empty if unsure.",
+                b"\r",
+                false,
+            ),
+            ("Save these provider settings and continue?", b"y\r", false),
+            ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
+        ],
+    );
+    let hint = format!("No groups chosen. To let one module read this key, run ck auth grant --principal reserved:<module> --selector-kind exact --selector {id} --operation read");
+    assert!(screen.contains(&hint), "{screen}");
+    let picker = screen.find("Groups for this provider").unwrap();
+    let hint_position = screen.find(&hint).unwrap();
+    let models = screen.find(MODELS).unwrap();
+    assert!(picker < hint_position && hint_position < models, "{screen}");
+    let store = fixture.store();
+    assert!(store.categories(id).unwrap().is_empty());
+    assert!(store.registered_providers().unwrap()[0]
+        .categories
+        .is_empty());
+    assert_eq!(store.get(id).unwrap().payload.expose(), VALUE.as_bytes());
+}
+
+#[test]
+fn registered_provider_embedding_group_stores_raw_category_name() {
+    let fixture = Fixture::new();
+    let id = "apikey:voyage:embeddings";
+    let screen = fixture.terminal(
+        &["put", "--id", id],
+        &[
+            (
+                "Groups for this provider",
+                b"\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B \r",
+                false,
+            ),
+            (MODELS, b"\r", false),
+            (ADDRESSES, b"\r", false),
+            (
+                "Which provider is this in Fusiform's list? Leave empty if unsure.",
+                b"\r",
+                false,
+            ),
+            ("Save these provider settings and continue?", b"y\r", false),
+            ("Value (hidden)", format!("{VALUE}\r").as_bytes(), true),
+        ],
+    );
+    assert!(
+        screen.contains("embedding-provider: embedding models"),
+        "{screen}"
+    );
+    assert!(!screen.contains("No groups chosen."), "{screen}");
+    let store = fixture.store();
+    assert_eq!(store.categories(id).unwrap(), ["embedding-provider"]);
+    assert_eq!(
+        store.registered_providers().unwrap()[0].categories,
+        ["embedding-provider"]
+    );
 }
 
 #[test]

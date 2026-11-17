@@ -20,6 +20,7 @@ pub enum CredentialCategory {
     /// all of them.
     WebSearch,
     MediaProvider,
+    EmbeddingProvider,
 }
 
 impl CredentialCategory {
@@ -30,6 +31,7 @@ impl CredentialCategory {
         Self::CloudInfrastructure,
         Self::WebSearch,
         Self::MediaProvider,
+        Self::EmbeddingProvider,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -40,6 +42,7 @@ impl CredentialCategory {
             Self::CloudInfrastructure => "cloud-infrastructure",
             Self::WebSearch => "web-search",
             Self::MediaProvider => "media-provider",
+            Self::EmbeddingProvider => "embedding-provider",
         }
     }
 }
@@ -2584,7 +2587,8 @@ mod tests {
                 "data-warehouse",
                 "cloud-infrastructure",
                 "web-search",
-                "media-provider"
+                "media-provider",
+                "embedding-provider"
             ]
         );
         assert_eq!(
@@ -3121,6 +3125,20 @@ mod tests {
     }
 
     #[test]
+    fn embedding_provider_round_trips_through_catalog_vocabulary() {
+        assert_eq!(
+            CredentialCategory::EmbeddingProvider.as_str(),
+            "embedding-provider"
+        );
+        assert_eq!(
+            CredentialCategory::ALL
+                .iter()
+                .find(|category| category.as_str() == "embedding-provider"),
+            Some(&CredentialCategory::EmbeddingProvider),
+        );
+    }
+
+    #[test]
     fn closed_vocabularies_pin_every_variant_and_wire_spelling() {
         assert_eq!(
             CredentialCategory::ALL
@@ -3133,7 +3151,8 @@ mod tests {
                 "data-warehouse",
                 "cloud-infrastructure",
                 "web-search",
-                "media-provider"
+                "media-provider",
+                "embedding-provider"
             ]
         );
         assert_eq!(

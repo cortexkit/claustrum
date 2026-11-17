@@ -207,8 +207,10 @@ fn credential_subject_label(selector_kind: &str, selector: &str) -> String {
     match selector_kind {
         "category" => match selector {
             "llm-provider" => "Model provider logins and keys".into(),
+            "llm-gateway" => "Company AI gateway keys".into(),
             "web-search" => "Web search keys".into(),
             "media-provider" => "Speech and media keys".into(),
+            "embedding-provider" => "Embedding model keys".into(),
             "browser-session" => "Browser sign-ins".into(),
             "github-app-native" => "GitHub App keys".into(),
             "anthropic-native" => "Claude logins".into(),
@@ -283,11 +285,40 @@ mod tests {
     }
 
     #[test]
+    fn credential_permission_subject_labels_cover_every_catalog_category() {
+        let labels = [
+            ("llm-provider", "Model provider logins and keys"),
+            ("llm-gateway", "Company AI gateway keys"),
+            ("data-warehouse", "Credentials in the data-warehouse group"),
+            (
+                "cloud-infrastructure",
+                "Credentials in the cloud-infrastructure group",
+            ),
+            ("web-search", "Web search keys"),
+            ("media-provider", "Speech and media keys"),
+            ("embedding-provider", "Embedding model keys"),
+        ];
+        assert_eq!(labels.len(), crate::catalog::CredentialCategory::ALL.len());
+        for category in crate::catalog::CredentialCategory::ALL {
+            let (_, expected) = labels
+                .iter()
+                .find(|(name, _)| *name == category.as_str())
+                .expect("every catalog category has a pinned subject label");
+            assert_eq!(
+                credential_subject_label("category", category.as_str()),
+                *expected
+            );
+        }
+    }
+
+    #[test]
     fn credential_permission_labels_cover_groups_and_operations() {
         for (category, expected) in [
             ("llm-provider", "Model provider logins and keys"),
+            ("llm-gateway", "Company AI gateway keys"),
             ("web-search", "Web search keys"),
             ("media-provider", "Speech and media keys"),
+            ("embedding-provider", "Embedding model keys"),
             ("browser-session", "Browser sign-ins"),
             ("github-app-native", "GitHub App keys"),
             ("anthropic-native", "Claude logins"),

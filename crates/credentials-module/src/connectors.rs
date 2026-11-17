@@ -172,7 +172,10 @@ async fn answer_admission(
 
 fn category(groups: &[String], catalog: Option<&str>) -> Option<String> {
     for (names, category) in [
-        (&["llm-provider", "media-provider"][..], "ai_models"),
+        (
+            &["llm-provider", "media-provider", "embedding-provider"][..],
+            "ai_models",
+        ),
         (&["web-search"][..], "search"),
         (&["cloud-infrastructure"][..], "infrastructure"),
     ] {

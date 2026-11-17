@@ -1389,6 +1389,11 @@ mod connectors_contract {
                 vec!["cloud-infrastructure", "web-search", "media-provider"],
                 "ai_models",
             ),
+            (vec!["embedding-provider"], "ai_models"),
+            (
+                vec!["cloud-infrastructure", "web-search", "embedding-provider"],
+                "ai_models",
+            ),
             (vec!["llm-provider"], "ai_models"),
         ] {
             conn.execute(

@@ -48,6 +48,7 @@ pub const DECLARED_GRANT_CATEGORY_NAMES: &[(&str, &str)] = &[
     ("cloud-infrastructure", "cloud infrastructure"),
     ("web-search", "web search"),
     ("media-provider", "speech and media"),
+    ("embedding-provider", "embedding models"),
     ("browser-session", "browser sign-in"),
     ("antigravity-native", "Antigravity"),
     ("anthropic-native", "Anthropic"),

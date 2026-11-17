@@ -39,7 +39,7 @@ async fn call(
 }
 
 fn refusal(error: ModuleSecretError) -> serde_json::Value {
-    wrap_result(error.reply())
+    wrap_result(wire::reply(error))
 }
 
 #[test]
@@ -178,7 +178,7 @@ async fn module_secret_wire_boundaries_accept_at_and_refuse_past() {
         assert_eq!(call(&surface, &admin, &owner, wire::PUT, json!({"name":format!("item-{i:02}"),"value":"AQ=="})).await["result"]["created"], true);
     }
     assert_eq!(call(&surface, &admin, &owner, wire::LIST, json!({})).await["result"]["items"].as_array().unwrap().len(), 64);
-    assert_eq!(call(&surface, &admin, &owner, wire::PUT, json!({"name":"overflow","value":"AQ=="})).await, refusal(ModuleSecretError::ModuleSecretLimit));
+    assert_eq!(call(&surface, &admin, &owner, wire::PUT, json!({"name":"overflow","value":"AQ=="})).await, refusal(ModuleSecretError::Limit));
     assert_eq!(call(&surface, &admin, &owner, wire::PUT, json!({"name":name,"value":"AQ==","expected_version":1})).await,
         json!({"result":{"name":name,"version":2,"created":false}}));
 }
@@ -228,21 +228,21 @@ async fn module_secret_wire_fixture_and_refusal_table_are_exact() {
     assert_eq!(call(&surface, &admin, "fixture", wire::GET, json!({"name":"rolled-back"})).await, errors["not_found"]);
 
     let all = [
-        ModuleSecretError::InvalidParams, ModuleSecretError::NotFound, ModuleSecretError::ModuleSecretProtected,
-        ModuleSecretError::ModuleSecretVersionConflict, ModuleSecretError::ModuleSecretLimit,
-        ModuleSecretError::Corrupt, ModuleSecretError::VaultLocked, ModuleSecretError::StoreError,
+        ModuleSecretError::InvalidParams, ModuleSecretError::NotFound, ModuleSecretError::Protected,
+        ModuleSecretError::VersionConflict, ModuleSecretError::Limit,
+        ModuleSecretError::Corrupt, ModuleSecretError::VaultLocked, ModuleSecretError::Store,
     ];
     let mut codes = BTreeSet::new();
     for error in all {
         let code = match error {
             ModuleSecretError::InvalidParams => "invalid_params",
             ModuleSecretError::NotFound => "not_found",
-            ModuleSecretError::ModuleSecretProtected => "module_secret_protected",
-            ModuleSecretError::ModuleSecretVersionConflict => "module_secret_version_conflict",
-            ModuleSecretError::ModuleSecretLimit => "module_secret_limit",
+            ModuleSecretError::Protected => "module_secret_protected",
+            ModuleSecretError::VersionConflict => "module_secret_version_conflict",
+            ModuleSecretError::Limit => "module_secret_limit",
             ModuleSecretError::Corrupt => "corrupt",
             ModuleSecretError::VaultLocked => "vault_locked",
-            ModuleSecretError::StoreError => "store_error",
+            ModuleSecretError::Store => "store_error",
         };
         assert_eq!(errors[code], refusal(error), "{code}");
         assert!(codes.insert((code.to_string(), error.class().to_string())));

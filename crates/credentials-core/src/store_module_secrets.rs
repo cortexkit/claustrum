@@ -59,6 +59,35 @@ pub enum ModuleSecretError {
     Store,
 }
 
+impl ModuleSecretError {
+    /// The wire code, shared by the module route and the operator admin plane.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Protected => "module_secret_protected",
+            Self::VersionConflict => "module_secret_version_conflict",
+            Self::Limit => "module_secret_limit",
+            Self::InvalidParams => "invalid_params",
+            Self::NotFound => "not_found",
+            Self::Corrupt => "corrupt",
+            Self::VaultLocked => "vault_locked",
+            Self::Store => "store_error",
+        }
+    }
+
+    /// A locked vault or a store failure may pass on retry; every other refusal won't.
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::VaultLocked | Self::Store => "transient",
+            Self::Protected
+            | Self::VersionConflict
+            | Self::Limit
+            | Self::InvalidParams
+            | Self::NotFound
+            | Self::Corrupt => "permanent",
+        }
+    }
+}
+
 impl std::fmt::Display for ModuleSecretError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

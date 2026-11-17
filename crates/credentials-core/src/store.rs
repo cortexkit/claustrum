@@ -872,7 +872,7 @@ enum IdentityPolicyOverwriteOutcome {
 impl std::fmt::Display for StoreOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreOpError::ModuleSecret(error) => write!(f, "{}: {error}", self.wire_code().expect("module-secret code")),
+            StoreOpError::ModuleSecret(error) => write!(f, "{}: {error}", error.code()),
             StoreOpError::InvalidAgentSsh => f.write_str("invalid_params: invalid SSH enrollment"),
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
             StoreOpError::SecretBasicAuthDisabled => f.write_str("secret_basic_auth_disabled: secret.basic_auth is off or unreadable; enable it with ck auth secret basic-auth on"),
@@ -1018,18 +1018,7 @@ impl StoreOpError {
     /// Stable refusal code for typed operator refusals.
     pub fn wire_code(&self) -> Option<&'static str> {
         match self {
-            StoreOpError::ModuleSecret(error) => Some(match error {
-                module_secrets::ModuleSecretError::Protected => "module_secret_protected",
-                module_secrets::ModuleSecretError::VersionConflict => {
-                    "module_secret_version_conflict"
-                }
-                module_secrets::ModuleSecretError::Limit => "module_secret_limit",
-                module_secrets::ModuleSecretError::InvalidParams => "invalid_params",
-                module_secrets::ModuleSecretError::NotFound => "not_found",
-                module_secrets::ModuleSecretError::Corrupt => "corrupt",
-                module_secrets::ModuleSecretError::VaultLocked => "vault_locked",
-                module_secrets::ModuleSecretError::Store => "store_error",
-            }),
+            StoreOpError::ModuleSecret(error) => Some(error.code()),
             StoreOpError::InvalidAgentSsh => Some("invalid_params"),
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
@@ -1065,10 +1054,7 @@ impl StoreOpError {
     /// Stable class paired with [`Self::wire_code`].
     pub fn wire_class(&self) -> Option<&'static str> {
         match self {
-            Self::ModuleSecret(
-                module_secrets::ModuleSecretError::VaultLocked
-                | module_secrets::ModuleSecretError::Store,
-            ) => Some("transient"),
+            Self::ModuleSecret(error) => Some(error.class()),
             _ => self.wire_code().map(|_| "permanent"),
         }
     }

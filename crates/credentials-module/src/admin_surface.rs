@@ -1529,9 +1529,8 @@ mod tests {
             let wrapped = StoreOpError::ModuleSecret(error);
             assert_eq!(wrapped.wire_code(), Some(code));
             assert_eq!(wrapped.wire_class(), Some(class));
-            let route: crate::module_secret::ModuleSecretError = error.into();
             assert_eq!(
-                route.reply(),
+                crate::module_secret::reply(error),
                 serde_json::json!({"error":{"code":code,"class":class}})
             );
             assert!(

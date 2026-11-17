@@ -6,7 +6,7 @@ use credentials_core::store::{module_secrets, EncryptedStore};
 use module_secrets::{
     validate_module_secret_name, ModuleSecretOwner, MODULE_SECRET_MAX_VALUE_BYTES,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_protocol::{peer::CallerClaim, Principal};
 
@@ -34,51 +34,12 @@ pub fn admit(caller: &RouteCaller, params: &Value) -> Option<ModuleSecretOwner> 
     ModuleSecretOwner::new(module_id).ok()
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModuleSecretError {
-    InvalidParams,
-    NotFound,
-    ModuleSecretProtected,
-    ModuleSecretVersionConflict,
-    ModuleSecretLimit,
-    Corrupt,
-    VaultLocked,
-    StoreError,
-}
+pub use module_secrets::ModuleSecretError;
 
-impl ModuleSecretError {
-    pub fn class(self) -> &'static str {
-        match self {
-            Self::VaultLocked | Self::StoreError => "transient",
-            Self::InvalidParams
-            | Self::NotFound
-            | Self::ModuleSecretProtected
-            | Self::ModuleSecretVersionConflict
-            | Self::ModuleSecretLimit
-            | Self::Corrupt => "permanent",
-        }
-    }
-
-    pub fn reply(self) -> Value {
-        json!({"error": {"code": self, "class": self.class()}})
-    }
-}
-
-impl From<module_secrets::ModuleSecretError> for ModuleSecretError {
-    fn from(error: module_secrets::ModuleSecretError) -> Self {
-        use module_secrets::ModuleSecretError as StoreError;
-        match error {
-            StoreError::Protected => Self::ModuleSecretProtected,
-            StoreError::VersionConflict => Self::ModuleSecretVersionConflict,
-            StoreError::Limit => Self::ModuleSecretLimit,
-            StoreError::InvalidParams => Self::InvalidParams,
-            StoreError::NotFound => Self::NotFound,
-            StoreError::Corrupt => Self::Corrupt,
-            StoreError::VaultLocked => Self::VaultLocked,
-            StoreError::Store => Self::StoreError,
-        }
-    }
+/// The refusal body, with the code and class the store defines for both this route and
+/// the operator's admin plane.
+pub fn reply(error: ModuleSecretError) -> Value {
+    json!({"error": {"code": error.code(), "class": error.class()}})
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +91,7 @@ pub fn serve(
 ) -> Value {
     match execute(store, owner, method, params) {
         Ok(reply) => reply,
-        Err(error) => error.reply(),
+        Err(error) => reply(error),
     }
 }
 

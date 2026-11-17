@@ -13,11 +13,17 @@ requires_core = "0.20.154"
 #
 # How the parts fit together: docs/architecture.md. Threat model: SECURITY.md.
 #
-# Two-crate split (the standard module shape, template = ai-provider-quota):
-#   credentials-core   = pure custody logic (typed VaultRecord, canonical
-#                        OAuthCredential, value-level encryption envelope,
-#                        bounded refresh adapters, crash-safe refresh state
-#                        machine, master-key resolution). No subc dep.
+# Three custody layers, with compatibility re-exports from credentials-core:
+#   claustrum-model     = record and key types, OAuth credentials, encryption
+#                         envelope, credential ids, and pure validation. No
+#                         storage, network, or workspace dependencies.
+#   claustrum-providers = provider catalog, refresh adapters, login flows, plan
+#                         fetches, APNs, and Bedrock. Depends on claustrum-model.
+#   credentials-core    = store, refresh engine, admin ops, audit, federation,
+#                         fleet, enrollment, grants, and master-key resolution.
+#                         Depends on both leaf crates. No subc dep.
+#
+# Module boundary and consumer:
 #   credentials-module = the thin subc-wire binary: read surface + admin surface,
 #                        capability handles, fault isolation, audit.
 #   claustrum-client   = publishable Rust consumer for supervised modules.

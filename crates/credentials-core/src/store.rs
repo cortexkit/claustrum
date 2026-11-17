@@ -1292,7 +1292,7 @@ pub struct RestoreResurrection {
     /// The lease counter is a LOCAL file keyed on (module_id, backend, namespace) and
     /// starts fresh. A restored epoch that outruns it refuses every write while the
     /// health detail says "fenced out by a newer writer" -- with no newer writer
-    /// anywhere. Diagnosing that once cost a maintenance window.
+    /// anywhere.
     pub fence_epoch: Option<i64>,
     /// Principal-scoped grants: reported for completeness rather than as a hazard.
     ///
@@ -1429,9 +1429,6 @@ pub enum AuthEventPrincipal<'a> {
     /// what the bus carries: a host-launched consumer binds as Direct and proves who it
     /// is with the token, not with the socket. An operator reading `auth_events` after a
     /// credential went stale would see the transport and not the reporter.
-    ///
-    /// Reported by the anthropic-auth seat while auditing the live acceptance, where a
-    /// report authorized by `enrolled:acc-probe-consumer` recorded `direct:-`.
     Enrolled(&'a str),
     /// Another member's vault, named by its member id (`fed-computer:<fp>`), on a
     /// federation channel. The channel itself is opened by callosum, so without this
@@ -1626,11 +1623,12 @@ impl EncryptedStore {
     /// Wrap an already-open, migrated [`SqliteStore`] with a master key, loading (or
     /// creating, on a brand-new vault) the sealed audit-chain key.
     ///
-    /// The audit key is a CSPRNG secret created ONCE — when the vault is brand-new
-    /// (no credentials, no audit entries, no existing audit_key row) — and SEALED
-    /// under the master key. On every later open it is LOADED and decrypted; a wrong
-    /// master key fails that decrypt the same way it fails a record decrypt
-    /// (fail-closed, not a panic). It is NEVER regenerated for an existing vault: a
+    /// The audit key is a secret from the operating system's secure random generator,
+    /// created ONCE — when the vault is brand-new (no credentials, no audit entries, no
+    /// existing audit_key row) — and SEALED under the master key. On every later open
+    /// it is LOADED and decrypted; a wrong master key fails that decrypt the same way
+    /// it fails a record decrypt (fail-closed, not a panic). It is NEVER regenerated
+    /// for an existing vault: a
     /// missing audit_key row on a non-empty vault is [`StoreOpError::CorruptVault`]
     /// (regenerating would silently make every existing audit entry unverifiable).
     /// The store must have had [`EncryptedStore::migrate`] applied first.
@@ -1830,7 +1828,8 @@ impl EncryptedStore {
                             continue;
                         }
                     };
-                    // Re-seal under the new key (same id + version => same AAD).
+                    // Re-seal under the new key. The same id and version give the same
+                    // additional authenticated data (AAD), so the binding is unchanged.
                     let new_blob = envelope::seal(&new_key, &plaintext, &binding)
                         .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
                     tx.execute(
@@ -1948,7 +1947,7 @@ impl EncryptedStore {
         // after a 401, and gates nothing. insula holds the mirror of this rule at its
         // consumption site: `quota-core/src/grok.rs::expiry_never_overrides_a_successful_fetch`
         // asserts that a successful fetch keeps its result even when the stated expiry has
-        // passed (verified there 2026-09-02; originally agreed with QTA 2026-08-28).
+        // passed.
         //
         // THE SYMBOL AND NOT A LINE NUMBER, deliberately. A line in a repository this one
         // does not control slides on any edit above it -- theirs, a formatter's, anyone's --
@@ -1957,21 +1956,16 @@ impl EncryptedStore {
         // who greps for it and finds nothing knows the citation is stale, which is the
         // signal a wrong line number denies them. Same rule as preferring a version anchor
         // over a date: choose the reference whose failure the reader can detect.
-        // (QTA's correction; my first version cited a line, and it was one edit from lying.)
         //
-        // THE CITATION REPLACED AN AGREEMENT, and the difference is not politeness. An
-        // agreed claim about another repository reads exactly the same whether it is true
-        // or false -- its truth value is unknown to the person holding it, and stays
-        // unknown until someone opens the other tree. This one was true; a clause of mine
-        // that another seat committed as load-bearing justification the same week was
-        // false for as long as it sat there. Same provenance, same confidence, opposite
-        // truth value. A file and a symbol are openable by anyone with both checkouts; an
-        // agreement is not.
+        // A CITATION, NOT AN AGREEMENT. A claim that another repository behaves some way
+        // reads exactly the same whether it is true or false, and stays unverifiable until
+        // someone opens the other tree. A file and a symbol are openable by anyone with
+        // both checkouts; an agreement is not.
         //
         // The drift is a WELL-MEANING one, which is why it is written here rather than
-        // left as an understanding between two seats: an implementer sees a stored expiry
-        // and a request about to go out with an apparently-dead cookie, and adds the check
-        // as an obvious improvement. Nothing fails. The operator quietly loses sessions
+        // left as an unwritten understanding between the two repositories: an implementer
+        // sees a stored expiry and a request about to go out with an apparently-dead
+        // cookie, and adds the check as an obvious improvement. Nothing fails. The operator quietly loses sessions
         // that were still working.
         if record.kind == CredentialKind::Cookie && record.expires_at_ms.is_some() {
             return Err(StoreOpError::Encode(

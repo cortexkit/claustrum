@@ -325,9 +325,9 @@ fn creation_defaults_and_set_category_transitions_have_exact_audit_targets() {
 
 /// `--force` MUST NOT STRIP A CATEGORY AN ACTIVE GRANT SELECTS ON.
 ///
-/// The live instance this was written for: `forge-identity` reaches 22 GitHub App
-/// credentials for a consumer that mints tokens hourly, and it exists ONLY as a
-/// migration-10 assignment list -- not in the registry. `--force` deletes each set and
+/// The case this guards: `forge-identity`, a category only migration 10 assigns and the
+/// registry does not list, is what a grant reaching 22 GitHub App credentials selects
+/// on, for a consumer that mints tokens hourly. `--force` deletes each set and
 /// reinserts the registry's, so it would have taken that grant to zero reach, with the
 /// symptom arriving as `not_found` on credentials that plainly exist.
 ///
@@ -341,7 +341,8 @@ fn force_refuses_to_strip_a_category_an_active_grant_selects_on() {
     store
         .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
         .expect("seed");
-    // A category the registry does not know, exactly like forge-identity.
+    // A category the registry does not know, like `forge-identity`, which only
+    // migration 10 assigns.
     store
         .set_categories_audited(
             id,

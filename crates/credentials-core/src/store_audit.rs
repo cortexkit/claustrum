@@ -5,11 +5,13 @@ use super::*;
 /// Load the vault's sealed audit key, or create it on a brand-new vault.
 ///
 /// The audit key lives in `vault_secrets` under [`AUDIT_KEY_SECRET_NAME`], sealed
-/// with the master key (AAD bound to that pseudo-id + version 0). On an existing
-/// row: decrypt it (a wrong master key fails closed here). On no row: only create a
-/// fresh CSPRNG key if the vault is genuinely EMPTY (no credentials, no audit
-/// entries); otherwise the row's absence is corruption and we fail closed rather
-/// than regenerate (which would orphan every existing audit entry).
+/// with the master key; that fixed name stands in for a credential id and, with
+/// version 0, is the additional authenticated data (AAD) the seal is bound to. On an
+/// existing row: decrypt it (a wrong master key fails closed here). On no row: only
+/// create a fresh key from the operating system's secure random generator if the vault
+/// is genuinely EMPTY (no credentials, no audit entries); otherwise the row's absence
+/// is corruption and we fail closed rather than regenerate (which would orphan every
+/// existing audit entry).
 pub(super) fn load_or_create_audit_key(
     store: &SqliteStore,
     key: &MasterKey,

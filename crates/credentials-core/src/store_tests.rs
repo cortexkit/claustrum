@@ -3,11 +3,10 @@
 use crate::test_support::TestTempDir;
 /// AFTER EXPIRY THE SAME SECRET STARTS A FRESH REQUEST, WITH A NEW ID.
 ///
-/// The openai-auth seat asked for this to be ruled either way and pinned. Fresh
-/// request is the answer, and it falls out of the mechanism rather than being chosen:
-/// the sweep moves the row to `expired`, the resume lookup matches only `state =
-/// 'pending'`, and the name check counts only `pending`/`approved` -- so an expired
-/// row blocks nothing and hides nothing.
+/// A fresh request falls out of the mechanism rather than being chosen: the sweep
+/// moves the row to `expired`, the resume lookup matches only `state = 'pending'`, and
+/// the name check counts only `pending`/`approved` -- so an expired row blocks nothing
+/// and hides nothing.
 ///
 /// It is also the behaviour a consumer wants. Expiry means the operator never
 /// approved; a terminal outcome would tell a consumer to stop asking for something
@@ -183,7 +182,8 @@ fn a_scoped_first_use_is_recorded_once_however_many_times_it_is_exercised() {
 ///
 /// WHAT THIS TEST DOES NOT COVER: a real daemon opening a scrubbed store at the
 /// canonical data dir. The master key is scoped to that path, so a scratch placement
-/// refuses by name before any of this runs -- the two-artifact property, working. This
+/// refuses by name before any of this runs: the master key and the store are separate
+/// files, and the key is tied to the store's path, so neither works alone. This
 /// exercises the store layer only, and the placement remains an operator action.
 #[test]
 fn a_fence_scrubbed_store_still_commits_writes() {

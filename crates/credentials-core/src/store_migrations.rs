@@ -162,8 +162,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     // `auth_events`: why a credential stopped working, which the audit chain cannot say.
     //
     // The chain records mutations, and that is the wrong shape for this question in two
-    // specific ways, both measured after an incident where two OAuth credentials were
-    // marked `needs_reauth` and nothing on disk could say why:
+    // specific ways, so without this table a credential marked `needs_reauth` leaves no
+    // record of the cause:
     //
     //   - It records only what CHANGED. A consumer's report naming a superseded
     //     `record_version` is a deliberate no-op, so it writes nothing at all -- the
@@ -743,8 +743,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
                      ALTER TABLE secret_pending_requests ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT '';",
     },
     // One row per secret release sealed for a paired computer, keyed by that computer's
-    // member id and the nonce from the request's AAD. A retry of the same request (same
-    // nonce, same AAD bytes) gets the stored `enc` and `ciphertext` back unchanged, so a
+    // member id and the nonce from the request's additional authenticated data (AAD). A
+    // retry of the same request (same nonce, same AAD bytes) gets the stored `enc` and `ciphertext` back unchanged, so a
     // reply lost in transit neither consumes a `once` grant twice nor writes a second
     // release audit. The row records the secret's incarnation and the grant used: a retry
     // is refused once the incarnation changes or the grant is no longer live (a `once`
@@ -956,11 +956,9 @@ pub(super) const MIGRATIONS: &[Migration] = &[
 /// monotone by construction, and the supervisor contract already treats it as a
 /// fleet-visible value that modules are asked to state.
 ///
-/// DERIVED FROM THE LIST, NEVER HAND-TYPED. A literal here would decay exactly the way
-/// every other written-down count in this repo has: the issue asking for this accessor
-/// cited 6 while the list already held 7, and the manifest comment beside the field
-/// said 6 as well. Both were true when written. Deriving makes the drift impossible
-/// rather than merely discouraged.
+/// DERIVED FROM THE LIST, NEVER HAND-TYPED. A literal here would fall behind the list
+/// the first time a migration is added without updating it, and nothing would fail.
+/// Deriving makes the drift impossible rather than merely discouraged.
 ///
 /// WHAT DECLARING IT BUYS, precisely, because it is easy to overstate: a binary older
 /// than the store it opens already REFUSES to open it. [`EncryptedStore::migrate`]

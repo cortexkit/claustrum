@@ -1635,10 +1635,12 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
-    if method.as_ref().is_some_and(|r| fleet_ops::is_op(&r.method))
-        && !matches!(&caller, federation::RouteCaller::Principal(context) if fleet_ops::admitted(context.as_ref()))
-    {
-        return send_route_result(writer, header, uniform_not_found()).await;
+    if let Some(request) = &method {
+        if fleet_ops::is_op(&request.method)
+            && !matches!(&caller, federation::RouteCaller::Principal(context) if fleet_ops::admitted(context.as_ref(), &request.method))
+        {
+            return send_route_result(writer, header, uniform_not_found()).await;
+        }
     }
     if let Some(request) = method.as_ref().filter(|r| module_secret::is_op(&r.method)) {
         if module_secret::admit(&caller, &request.params).is_none() {
@@ -2989,12 +2991,22 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             },
             ManagementOperation {
                 name: "fleet.epoch_seal".into(),
-                description: Some("Seal shared records under the current fleet epoch; Entorhinal only.".into()),
+                description: Some("Seal under the current fleet epoch in the attested Entorhinal or Prefrontal domain.".into()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
                 name: "fleet.epoch_open".into(),
-                description: Some("Open shared records under a held fleet epoch; Entorhinal only.".into()),
+                description: Some("Open under a held fleet epoch in the attested Entorhinal or Prefrontal domain.".into()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_seal_batch".into(),
+                description: Some("Seal an ordered batch under one current fleet epoch in the attested caller domain.".into()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: "fleet.epoch_open_batch".into(),
+                description: Some("Open an ordered fleet batch with per-item results in the attested caller domain.".into()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -19908,7 +19920,7 @@ mod tests {
                 "secret_use.rs",
                 "//! The trusted sender boundary for secret release.",
             ),
-            (14, "fleet_ops.rs", "//! Entorhinal's fleet boundary:"),
+            (14, "fleet_ops.rs", "//! Fleet boundary:"),
             (
                 16,
                 "module_secret.rs",

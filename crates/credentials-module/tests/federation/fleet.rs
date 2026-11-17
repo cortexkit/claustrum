@@ -65,11 +65,14 @@ impl Vault {
         Self { fixture, store, n }
     }
     async fn call(&self, method: &str, params: Value) -> Value {
+        self.call_as("entorhinal", method, params).await
+    }
+    async fn call_as(&self, module: &str, method: &str, params: Value) -> Value {
         match fleet_ops::serve(
             Arc::clone(&self.store),
             Some(&self.fixture.outbound),
             Some(&Principal::Reserved {
-                module_id: "entorhinal".into(),
+                module_id: module.into(),
             }),
             method,
             &params,
@@ -130,6 +133,478 @@ impl Vault {
                 2,
             )
             .unwrap();
+    }
+}
+
+async fn shared_epoch(a: &Vault, b: &Vault, callosum: &SharedCallosumStandIn) {
+    peers(callosum, &[a, b]);
+    let mint = a.mint(&[a.n, b.n]).await;
+    a.commit(&mint).await;
+    b.ok("fleet.epoch_import", json!({"wrap":rotation(&mint,b.n)}))
+        .await;
+}
+
+fn open_params(sealed: &Value, aad: &str) -> Value {
+    json!({"epoch":sealed["epoch"],"nonce":sealed["nonce"],
+        "ciphertext":sealed["ciphertext"],"aad":aad})
+}
+
+#[tokio::test]
+async fn fleet_prefrontal_round_trips_across_two_stores_and_retained_epochs_without_audit() {
+    let root = temp_root("fleet-prefrontal-round-trip");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let params = json!({"aad":URL_SAFE_NO_PAD.encode(b"room:one"),"plaintext":URL_SAFE_NO_PAD.encode(b"room event")});
+    let before = a.store.read_audit(None).unwrap();
+    let sealed = a
+        .call_as("prefrontal", "fleet.epoch_seal", params.clone())
+        .await;
+    assert_eq!(sealed["epoch"], 1);
+    for vault in [&a, &b] {
+        assert_eq!(
+            vault
+                .call_as(
+                    "prefrontal",
+                    "fleet.epoch_open",
+                    open_params(&sealed, params["aad"].as_str().unwrap())
+                )
+                .await,
+            json!({"plaintext":params["plaintext"]})
+        );
+    }
+    assert_eq!(a.store.read_audit(None).unwrap(), before);
+    let next = a.mint(&[1, 2]).await;
+    a.commit(&next).await;
+    a.remove(2);
+    let before = a.store.read_audit(None).unwrap();
+    refused(
+        a.call_as("prefrontal", "fleet.epoch_seal", params.clone())
+            .await,
+        "fleet_epoch_unavailable",
+        "transient",
+    );
+    assert_eq!(
+        a.call_as(
+            "prefrontal",
+            "fleet.epoch_open",
+            open_params(&sealed, params["aad"].as_str().unwrap())
+        )
+        .await,
+        json!({"plaintext":params["plaintext"]})
+    );
+    assert_eq!(a.store.read_audit(None).unwrap(), before);
+}
+
+#[tokio::test]
+async fn fleet_prefrontal_and_entorhinal_cannot_open_each_others_ciphertexts() {
+    let root = temp_root("fleet-prefrontal-domain");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let aad = URL_SAFE_NO_PAD.encode(b"same caller aad");
+    for (sealer, other) in [("entorhinal", "prefrontal"), ("prefrontal", "entorhinal")] {
+        let sealed = a
+            .call_as(
+                sealer,
+                "fleet.epoch_seal",
+                json!({"aad":aad,"plaintext":URL_SAFE_NO_PAD.encode(b"same plaintext")}),
+            )
+            .await;
+        assert_eq!(sealed["epoch"], 1);
+        let params = open_params(&sealed, &aad);
+        assert_eq!(
+            b.call_as(sealer, "fleet.epoch_open", params.clone()).await,
+            json!({"plaintext":URL_SAFE_NO_PAD.encode(b"same plaintext")})
+        );
+        refused(
+            b.call_as(other, "fleet.epoch_open", params).await,
+            "fleet_epoch_open_failed",
+            "permanent",
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_prefrontal_adapter_hides_all_unadmitted_methods_before_parsing() {
+    let root = temp_root("fleet-prefrontal-adapter-admission");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    for method in [
+        "fleet.epoch_status",
+        "fleet.epoch_mint",
+        "fleet.epoch_commit",
+        "fleet.epoch_discard",
+        "fleet.epoch_import",
+        "fleet.epoch_wrap_for",
+    ] {
+        let unknown = a.call_as("unknown", method, Value::Null).await;
+        refused(unknown.clone(), "not_found", "permanent");
+        assert_eq!(a.call_as("prefrontal", method, Value::Null).await, unknown);
+    }
+    for method in [
+        "fleet.epoch_seal",
+        "fleet.epoch_open",
+        "fleet.epoch_seal_batch",
+        "fleet.epoch_open_batch",
+    ] {
+        assert_eq!(
+            a.call_as("prefrontal-core", method, Value::Null).await,
+            a.call_as("unknown", method, Value::Null).await
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_batch_single_interoperate_and_mixed_opens_keep_order_and_domains() {
+    let root = temp_root("fleet-batch-mixed");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let aad = URL_SAFE_NO_PAD.encode(b"room");
+    for (sealer, other) in [("prefrontal", "entorhinal"), ("entorhinal", "prefrontal")] {
+        let before = a.store.read_audit(None).unwrap();
+        let requests: Vec<_> = [b"one".as_slice(), b"two".as_slice()]
+            .into_iter()
+            .map(|plaintext| json!({"aad":aad,"plaintext":URL_SAFE_NO_PAD.encode(plaintext)}))
+            .collect();
+        let sealed = a
+            .call_as(sealer, "fleet.epoch_seal_batch", json!({"items":requests}))
+            .await;
+        let items = sealed["items"].as_array().expect("batch seal items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["epoch"], 1);
+        assert_eq!(items[1]["epoch"], 1);
+        assert_ne!(items[0]["nonce"], items[1]["nonce"]);
+        for (item, request) in items.iter().zip(&requests) {
+            let params = open_params(item, &aad);
+            assert_eq!(
+                b.call_as(sealer, "fleet.epoch_open", params.clone()).await,
+                json!({"plaintext":request["plaintext"]})
+            );
+            refused(
+                b.call_as(other, "fleet.epoch_open", params).await,
+                "fleet_epoch_open_failed",
+                "permanent",
+            );
+        }
+        let single = a
+            .call_as(sealer, "fleet.epoch_seal", requests[0].clone())
+            .await;
+        let wrong_domain = a
+            .call_as(other, "fleet.epoch_seal", requests[1].clone())
+            .await;
+        let mut tampered = open_params(&items[0], &aad);
+        let mut ct = URL_SAFE_NO_PAD
+            .decode(tampered["ciphertext"].as_str().unwrap())
+            .unwrap();
+        ct[0] ^= 1;
+        tampered["ciphertext"] = json!(URL_SAFE_NO_PAD.encode(ct));
+        let mut unknown = open_params(&items[0], &aad);
+        unknown["epoch"] = json!(999);
+        let pending = a.mint(&[1, 2]).await;
+        let mut pending_open = open_params(&items[0], &aad);
+        pending_open["epoch"] = pending["epoch"].clone();
+        let good = json!({"plaintext":requests[0]["plaintext"]});
+        let failed = json!({"error":{"code":"fleet_epoch_open_failed","class":"permanent"}});
+        let response = a.call_as(sealer, "fleet.epoch_open_batch", json!({"items":[
+            open_params(&single,&aad), tampered, unknown, open_params(&wrong_domain,&aad), pending_open, open_params(&items[1],&aad)
+        ]})).await;
+        assert_eq!(
+            response,
+            json!({"items":[good,failed,failed,failed,failed,{"plaintext":requests[1]["plaintext"]}]})
+        );
+        a.ok(
+            "fleet.epoch_discard",
+            json!({"epoch":pending["epoch"],"mint_id":pending["mint_id"]}),
+        )
+        .await;
+        // Mint/discard are audited; the read-only crypto calls are not.
+        let after = a.store.read_audit(None).unwrap();
+        assert_eq!(after.len(), before.len() + 2);
+    }
+}
+
+#[tokio::test]
+async fn fleet_batch_item_count_accepts_256_refuses_257_and_empty_before_store_access() {
+    let root = temp_root("fleet-batch-count");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    for (method, item, code) in [
+        (
+            "fleet.epoch_seal_batch",
+            json!({"aad":"","plaintext":""}),
+            "fleet_epoch_unavailable",
+        ),
+        (
+            "fleet.epoch_open_batch",
+            json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode([0;16]),"aad":""}),
+            "fleet_epoch_open_failed",
+        ),
+    ] {
+        for count in [1, 256] {
+            refused(
+                a.call_as(
+                    "prefrontal",
+                    method,
+                    json!({"items":vec![item.clone();count]}),
+                )
+                .await,
+                code,
+                if method.contains("seal") {
+                    "transient"
+                } else {
+                    "permanent"
+                },
+            );
+        }
+        for count in [0, 257] {
+            assert!(
+                matches!(
+                    fleet_ops::serve(
+                        Arc::clone(&a.store),
+                        None,
+                        Some(&Principal::Reserved {
+                            module_id: "prefrontal".into()
+                        }),
+                        method,
+                        &json!({"items":vec![item.clone();count]})
+                    )
+                    .await,
+                    Answer::InvalidParams
+                ),
+                "{method} {count}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn fleet_batch_bytes_accept_eight_mib_refuse_one_byte_more_before_store_access() {
+    let root = temp_root("fleet-batch-bytes");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let mib = 1024 * 1024;
+    for (method, item, code) in [
+        (
+            "fleet.epoch_seal_batch",
+            json!({"aad":URL_SAFE_NO_PAD.encode(vec![0;mib]),"plaintext":URL_SAFE_NO_PAD.encode(vec![0;mib])}),
+            "fleet_epoch_unavailable",
+        ),
+        (
+            "fleet.epoch_open_batch",
+            json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode(vec![0;mib]),"aad":URL_SAFE_NO_PAD.encode(vec![0;mib])}),
+            "fleet_epoch_open_failed",
+        ),
+    ] {
+        let mut items = vec![item; 4];
+        refused(
+            a.call_as("prefrontal", method, json!({"items":items}))
+                .await,
+            code,
+            if method.contains("seal") {
+                "transient"
+            } else {
+                "permanent"
+            },
+        );
+        items.push(if method.contains("seal") {json!({"aad":"AA","plaintext":""})} else {json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode([0;16]),"aad":""})});
+        if method.contains("open") {
+            items[0]["ciphertext"] = json!(URL_SAFE_NO_PAD.encode(vec![0; mib - 15]));
+        }
+        assert!(
+            matches!(
+                fleet_ops::serve(
+                    Arc::clone(&a.store),
+                    None,
+                    Some(&Principal::Reserved {
+                        module_id: "prefrontal".into()
+                    }),
+                    method,
+                    &json!({"items":items})
+                )
+                .await,
+                Answer::InvalidParams
+            ),
+            "{method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_batch_shared_store_failures_return_no_partial_items() {
+    let root = temp_root("fleet-batch-shared-failure");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let request = json!({"aad":"","plaintext":""});
+    let sealed = a
+        .call_as("prefrontal", "fleet.epoch_seal", request.clone())
+        .await;
+    let open = open_params(&sealed, "");
+    a.remove(2);
+    assert_eq!(
+        a.call_as(
+            "prefrontal",
+            "fleet.epoch_seal_batch",
+            json!({"items":[request.clone(),request.clone()]})
+        )
+        .await,
+        a.call_as("prefrontal", "fleet.epoch_seal", request.clone())
+            .await
+    );
+    assert_eq!(
+        a.call_as(
+            "prefrontal",
+            "fleet.epoch_open_batch",
+            json!({"items":[open.clone(),open.clone()]})
+        )
+        .await,
+        json!({"items":[{"plaintext":""},{"plaintext":""}]})
+    );
+    let conn = rusqlite::Connection::open(a.fixture.store_path()).unwrap();
+    conn.execute("DROP TABLE fleet_epochs", []).unwrap();
+    for (batch, single, item) in [
+        ("fleet.epoch_seal_batch", "fleet.epoch_seal", request),
+        ("fleet.epoch_open_batch", "fleet.epoch_open", open),
+    ] {
+        let failure = a.call_as("prefrontal", single, item.clone()).await;
+        refused(failure.clone(), "store_error", "transient");
+        assert_eq!(
+            a.call_as(
+                "prefrontal",
+                batch,
+                json!({"items":[item.clone(),item.clone()]})
+            )
+            .await,
+            failure
+        );
+        let mut malformed = item;
+        malformed["aad"] = json!("not canonical=");
+        assert!(matches!(
+            fleet_ops::serve(
+                Arc::clone(&a.store),
+                None,
+                Some(&Principal::Reserved {
+                    module_id: "prefrontal".into()
+                }),
+                batch,
+                &json!({"items":[malformed]})
+            )
+            .await,
+            Answer::InvalidParams
+        ));
+    }
+    let conn = rusqlite::Connection::open(b.fixture.store_path()).unwrap();
+    conn.execute(
+        "DELETE FROM settings WHERE name = ?1",
+        [credentials_core::federation::SELF_MEMBER_SETTING],
+    )
+    .unwrap();
+    for (batch, single, item) in [
+        (
+            "fleet.epoch_seal_batch",
+            "fleet.epoch_seal",
+            json!({"aad":"","plaintext":""}),
+        ),
+        (
+            "fleet.epoch_open_batch",
+            "fleet.epoch_open",
+            open_params(&sealed, ""),
+        ),
+    ] {
+        let expected = b.call_as("prefrontal", single, item.clone()).await;
+        refused(expected.clone(), "fleet_epoch_unavailable", "transient");
+        assert_eq!(
+            b.call_as("prefrontal", batch, json!({"items":[item.clone(),item]}))
+                .await,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_batch_grammar_and_each_item_caps_refuse_whole_call_before_store_access() {
+    let root = temp_root("fleet-batch-grammar");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let conn = rusqlite::Connection::open(a.fixture.store_path()).unwrap();
+    conn.execute("DROP TABLE fleet_epochs", []).unwrap();
+    let cap = 1024 * 1024;
+    for (method, valid) in [
+        ("fleet.epoch_seal_batch", json!({"aad":"","plaintext":""})),
+        (
+            "fleet.epoch_open_batch",
+            json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode([0;16]),"aad":""}),
+        ),
+    ] {
+        let mut invalid = vec![
+            Value::Null,
+            json!({}),
+            json!({"items":null}),
+            json!({"items":[],"domain":"prefrontal"}),
+        ];
+        for (field, value) in [
+            ("aad", json!("Zg==")),
+            ("aad", json!("+w")),
+            ("aad", json!("Zh")),
+            ("aad", json!(URL_SAFE_NO_PAD.encode(vec![0; cap + 1]))),
+            ("domain", json!("ck-fleet-epoch-aad/v1")),
+            ("caller", json!("entorhinal")),
+        ]
+        .into_iter()
+        .chain(if method.contains("seal") {
+            vec![
+                ("plaintext", json!(URL_SAFE_NO_PAD.encode(vec![0; cap + 1]))),
+                ("plaintext", Value::Null),
+            ]
+        } else {
+            vec![
+                ("epoch", json!(0)),
+                ("epoch", json!(4294967296u64)),
+                ("epoch", json!(-1)),
+                ("epoch", json!(1.5)),
+                ("epoch", json!("1")),
+                ("nonce", json!(URL_SAFE_NO_PAD.encode([0; 23]))),
+                ("nonce", json!(URL_SAFE_NO_PAD.encode([0; 25]))),
+                ("ciphertext", json!(URL_SAFE_NO_PAD.encode([0; 15]))),
+                (
+                    "ciphertext",
+                    json!(URL_SAFE_NO_PAD.encode(vec![0; cap + 17])),
+                ),
+            ]
+        }) {
+            let mut bad = valid.clone();
+            bad[field] = value;
+            invalid.push(json!({"items":[valid.clone(),bad]}));
+        }
+        for field in valid.as_object().unwrap().keys() {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            invalid.push(json!({"items":[valid.clone(),missing]}));
+        }
+        for params in invalid {
+            assert!(
+                matches!(
+                    fleet_ops::serve(
+                        Arc::clone(&a.store),
+                        None,
+                        Some(&Principal::Reserved {
+                            module_id: "prefrontal".into()
+                        }),
+                        method,
+                        &params
+                    )
+                    .await,
+                    Answer::InvalidParams
+                ),
+                "{method}"
+            );
+        }
     }
 }
 fn peers(callosum: &SharedCallosumStandIn, vaults: &[&Vault]) {

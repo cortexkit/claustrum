@@ -5236,11 +5236,21 @@ requester/nonce occupied. Re-enrollment never restores old authority.
 
 ## 18. Fleet epoch operations
 
-These eight management operations admit only caller identity `reserved:entorhinal`.
-Every other caller receives the body `{"error":{"code":"not_found","class":"permanent"}}`,
-even for malformed parameters. No credential grant admits another identity.
-`fleet.epoch_seal`, `fleet.epoch_open` and `fleet.epoch_status` are queries; the
-other five operations mutate state. Epoch secrets never leave the vault in plaintext.
+These ten management operations use the attested caller identity, never a caller
+name from parameters or a credential grant:
+
+| Caller | Admitted operations |
+|---|---|
+| `reserved:entorhinal` | All ten operations below |
+| `reserved:prefrontal` | `fleet.epoch_seal`, `fleet.epoch_open`, `fleet.epoch_seal_batch`, `fleet.epoch_open_batch` only |
+| Every other caller, including `reserved:prefrontal-core` | None |
+
+An unadmitted caller receives exactly
+`{"error":{"code":"not_found","class":"permanent"}}`, even for malformed
+parameters. Admission is method-specific and precedes parameter decoding.
+The four seal/open operations and `fleet.epoch_status` are queries; the other
+five operations mutate state. Epoch secrets never leave the vault in plaintext.
+Self below means the vault's local fleet-member identity.
 
 All objects below reject unknown fields. Epochs are JSON integers in
 `1..=4294967295`. Bytes are canonical unpadded base64url. `mint_id` is exactly 16
@@ -5253,6 +5263,8 @@ refusal stated below, not `invalid_params`.
 |---|---|---|
 | `fleet.epoch_seal` | `{aad, plaintext}` | `{epoch, nonce, ciphertext}` |
 | `fleet.epoch_open` | `{epoch, nonce, ciphertext, aad}` | `{plaintext}` |
+| `fleet.epoch_seal_batch` | `{items:[{aad, plaintext},...]}` | `{items:[{epoch, nonce, ciphertext},...]}` |
+| `fleet.epoch_open_batch` | `{items:[{epoch, nonce, ciphertext, aad},...]}` | `{items:[{plaintext}\|{error:{code,class}},...]}` |
 | `fleet.epoch_status` | `{}` | `{current, held, pending, sealing_blocked_by}` |
 | `fleet.epoch_mint` | `{members:[member_id,...]}` | `{epoch, mint_id, wraps:[{member_id, wrap},...]}` |
 | `fleet.epoch_commit` | `{epoch, mint_id}` | `{epoch, state:"current"}` |
@@ -5263,11 +5275,38 @@ refusal stated below, not `invalid_params`.
 `seal` uses XChaCha20-Poly1305 under the current epoch with a random 24-byte nonce.
 `aad` is required but may be empty; it and `plaintext` each decode to at most 1 MiB.
 AEAD associated data is RFC 8785 JSON
-`{"aad":<caller aad base64url>,"epoch":e,"v":"ck-fleet-epoch-aad/v1"}`.
+`{"aad":<caller aad base64url>,"epoch":e,"v":<caller domain>}`. The vault
+chooses the domain solely from the attested caller:
+
+| Caller | Domain (`v`) |
+|---|---|
+| `reserved:entorhinal` | `ck-fleet-epoch-aad/v1` (unchanged bytes) |
+| `reserved:prefrontal` | `ck-fleet-epoch-aad/prefrontal/v1` |
+
+There is no domain parameter. Under the same epoch key, nonce, ciphertext and
+caller aad, opening in the other caller's domain refuses `fleet_epoch_open_failed`.
 `open` accepts any held epoch (current or retired), a 24-byte nonce, ciphertext
 of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. Unknown epochs and bad
 tags both refuse `fleet_epoch_open_failed`, without distinguishing them.
 Pending epochs are never used to seal, open or export history.
+
+Both batch operations require 1 through 256 items. Each item obeys the single
+operation's closed grammar and decoded field caps. In addition, the sum of decoded
+aad plus plaintext bytes (seal batch), or aad plus ciphertext bytes (open batch,
+including authentication tags but excluding nonces), must be at most 8 MiB.
+Any malformed item, unknown field or limit violation refuses the whole call with
+the existing `invalid_params` error frame before any store access. Results preserve
+input order. The same caller-domain rule applies to every item in a batch.
+
+`seal_batch` uses one store read and the same usable current epoch for every item,
+with a separate fresh random 24-byte nonce per item. A missing usable epoch, pending
+removal or store failure refuses the whole call with the same body as single seal;
+no items are returned. `open_batch` returns a plaintext or the single open's exact
+error code and class for each item. Tampering, a wrong domain or an unknown/pending
+epoch affects only that item. A shared failure (missing Self, no fleet state, a
+failed store read, or a store error even after processing has begun) refuses the
+whole call with the corresponding single open body, never a partial list.
+Single and batch seal/open write no audit rows.
 
 `status` returns `current: int|null`, ascending `held` including current,
 `pending: {epoch,mint_id}|null`, and ascending unique `sealing_blocked_by` member

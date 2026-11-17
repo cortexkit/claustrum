@@ -1,11 +1,14 @@
-//! Entorhinal's fleet boundary: closed wire grammar and validated Callosum peers.
+//! Fleet boundary: attested caller domains, closed grammar and checked Callosum peers.
 //! All epoch transitions and membership decisions belong to the encrypted store.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use credentials_core::fleet::{FleetError, FleetPeer, FleetWrap, MAX_BYTES};
+use credentials_core::fleet::{
+    validate_batch, FleetError, FleetOpenInput, FleetPeer, FleetSealInput, FleetSealer, FleetWrap,
+    MAX_BATCH_ITEMS, MAX_BYTES,
+};
 use credentials_core::secret::Secret;
 use credentials_core::EncryptedStore;
 use serde::Deserialize;
@@ -15,9 +18,11 @@ use subc_protocol::Principal;
 use crate::federation::ingress::callosum_lookup;
 use crate::federation::outbound::{OutboundClient, ADMIN_OP_BUDGET};
 
-pub const OPS: [&str; 8] = [
+pub const OPS: [&str; 10] = [
     "fleet.epoch_seal",
     "fleet.epoch_open",
+    "fleet.epoch_seal_batch",
+    "fleet.epoch_open_batch",
     "fleet.epoch_status",
     "fleet.epoch_mint",
     "fleet.epoch_commit",
@@ -30,8 +35,30 @@ pub fn is_op(method: &str) -> bool {
     OPS.contains(&method)
 }
 
-pub fn admitted(principal: Option<&Principal>) -> bool {
-    matches!(principal, Some(Principal::Reserved { module_id }) if module_id == "entorhinal")
+fn sealer(principal: Option<&Principal>) -> Option<FleetSealer> {
+    match principal {
+        Some(Principal::Reserved { module_id }) if module_id == "entorhinal" => {
+            Some(FleetSealer::Entorhinal)
+        }
+        Some(Principal::Reserved { module_id }) if module_id == "prefrontal" => {
+            Some(FleetSealer::Prefrontal)
+        }
+        _ => None,
+    }
+}
+
+pub fn admitted(principal: Option<&Principal>, method: &str) -> bool {
+    match sealer(principal) {
+        Some(FleetSealer::Entorhinal) => is_op(method),
+        Some(FleetSealer::Prefrontal) => matches!(
+            method,
+            "fleet.epoch_seal"
+                | "fleet.epoch_open"
+                | "fleet.epoch_seal_batch"
+                | "fleet.epoch_open_batch"
+        ),
+        None => false,
+    }
 }
 
 pub enum Answer {
@@ -56,6 +83,57 @@ struct Open {
     nonce: String,
     ciphertext: String,
     aad: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Batch<T> {
+    items: Vec<T>,
+}
+
+struct SealItem {
+    aad: Secret<Vec<u8>>,
+    plaintext: Secret<Vec<u8>>,
+}
+impl SealItem {
+    fn input(&self) -> FleetSealInput<'_> {
+        FleetSealInput {
+            aad: self.aad.expose(),
+            plaintext: self.plaintext.expose(),
+        }
+    }
+}
+struct OpenItem {
+    epoch: u32,
+    nonce: Secret<Vec<u8>>,
+    ciphertext: Secret<Vec<u8>>,
+    aad: Secret<Vec<u8>>,
+}
+impl OpenItem {
+    fn input(&self) -> FleetOpenInput<'_> {
+        FleetOpenInput {
+            epoch: self.epoch,
+            nonce: self.nonce.expose(),
+            ciphertext: self.ciphertext.expose(),
+            aad: self.aad.expose(),
+        }
+    }
+}
+
+fn seal_item(p: Seal) -> Result<SealItem, FleetError> {
+    Ok(SealItem {
+        aad: decode(&p.aad, MAX_BYTES)?,
+        plaintext: decode(&p.plaintext, MAX_BYTES)?,
+    })
+}
+fn open_item(p: Open) -> Result<OpenItem, FleetError> {
+    let item = OpenItem {
+        epoch: p.epoch,
+        nonce: decode(&p.nonce, 24)?,
+        ciphertext: decode(&p.ciphertext, MAX_BYTES + 16)?,
+        aad: decode(&p.aad, MAX_BYTES)?,
+    };
+    item.input().validate()?;
+    Ok(item)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,8 +245,10 @@ async fn peers(client: Option<&OutboundClient>) -> Result<Vec<FleetPeer>, FleetE
 
 // No Debug implementation: requests contain plaintext, ciphertext or wraps.
 enum Command {
-    Seal(Secret<Vec<u8>>, Secret<Vec<u8>>),
-    Open(u32, Secret<Vec<u8>>, Secret<Vec<u8>>, Secret<Vec<u8>>),
+    Seal(SealItem),
+    Open(OpenItem),
+    SealBatch(Vec<SealItem>),
+    OpenBatch(Vec<OpenItem>),
     Status,
     Mint(Vec<String>),
     Commit(Transition),
@@ -179,18 +259,39 @@ enum Command {
 
 fn command(method: &str, params: &Value) -> Result<Command, FleetError> {
     Ok(match method {
-        "fleet.epoch_seal" => {
-            let p: Seal = parse(params)?;
-            Command::Seal(decode(&p.aad, MAX_BYTES)?, decode(&p.plaintext, MAX_BYTES)?)
-        }
-        "fleet.epoch_open" => {
-            let p: Open = parse(params)?;
-            let nonce = decode(&p.nonce, 24)?;
-            let ct = decode(&p.ciphertext, MAX_BYTES + 16)?;
-            if p.epoch == 0 || nonce.expose().len() != 24 || ct.expose().len() < 16 {
+        "fleet.epoch_seal" => Command::Seal(seal_item(parse(params)?)?),
+        "fleet.epoch_open" => Command::Open(open_item(parse(params)?)?),
+        "fleet.epoch_seal_batch" => {
+            let p: Batch<Seal> = parse(params)?;
+            if !(1..=MAX_BATCH_ITEMS).contains(&p.items.len()) {
                 return Err(FleetError::InvalidParams);
             }
-            Command::Open(p.epoch, nonce, ct, decode(&p.aad, MAX_BYTES)?)
+            let items = p
+                .items
+                .into_iter()
+                .map(seal_item)
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_batch(
+                items.len(),
+                items.iter().map(|item| item.input().validate()),
+            )?;
+            Command::SealBatch(items)
+        }
+        "fleet.epoch_open_batch" => {
+            let p: Batch<Open> = parse(params)?;
+            if !(1..=MAX_BATCH_ITEMS).contains(&p.items.len()) {
+                return Err(FleetError::InvalidParams);
+            }
+            let items = p
+                .items
+                .into_iter()
+                .map(open_item)
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_batch(
+                items.len(),
+                items.iter().map(|item| item.input().validate()),
+            )?;
+            Command::OpenBatch(items)
         }
         "fleet.epoch_status" => {
             let _: Empty = parse(params)?;
@@ -244,9 +345,10 @@ pub async fn serve(
     method: &str,
     params: &Value,
 ) -> Answer {
-    if !admitted(principal) {
+    if !admitted(principal, method) {
         return Answer::Reply(body(FleetError::NotFound));
     }
+    let sealer = sealer(principal).expect("admission requires an attested fleet sealer");
     let result = async {
         let command = command(method, params)?;
         let peers = if matches!(
@@ -258,7 +360,7 @@ pub async fn serve(
             Vec::new()
         };
         // The store re-reads Self and removals in its transaction after the peer read.
-        tokio::task::spawn_blocking(move || execute(&store, command, &peers))
+        tokio::task::spawn_blocking(move || execute(&store, sealer, command, &peers))
             .await
             .map_err(|_| FleetError::StoreError)?
     }
@@ -272,6 +374,7 @@ pub async fn serve(
 
 fn execute(
     store: &EncryptedStore,
+    sealer: FleetSealer,
     command: Command,
     peers: &[FleetPeer],
 ) -> Result<Value, FleetError> {
@@ -279,13 +382,36 @@ fn execute(
         serde_json::to_value(value).map_err(|_| FleetError::StoreError)
     }
     match command {
-        Command::Seal(aad, plaintext) => {
-            wire(store.fleet_epoch_seal(aad.expose(), plaintext.expose())?)
+        Command::Seal(item) => {
+            wire(store.fleet_epoch_seal(sealer, item.aad.expose(), item.plaintext.expose())?)
         }
-        Command::Open(epoch, nonce, ct, aad) => {
-            let plaintext =
-                store.fleet_epoch_open(epoch, nonce.expose(), ct.expose(), aad.expose())?;
+        Command::Open(item) => {
+            let plaintext = store.fleet_epoch_open(
+                sealer,
+                item.epoch,
+                item.nonce.expose(),
+                item.ciphertext.expose(),
+                item.aad.expose(),
+            )?;
             Ok(json!({"plaintext": URL_SAFE_NO_PAD.encode(plaintext.expose())}))
+        }
+        Command::SealBatch(items) => {
+            let inputs: Vec<_> = items.iter().map(SealItem::input).collect();
+            Ok(json!({"items":store.fleet_epoch_seal_batch(sealer, &inputs)?}))
+        }
+        Command::OpenBatch(items) => {
+            let inputs: Vec<_> = items.iter().map(OpenItem::input).collect();
+            let replies: Vec<_> = store
+                .fleet_epoch_open_batch(sealer, &inputs)?
+                .into_iter()
+                .map(|result| match result {
+                    Ok(plaintext) => {
+                        json!({"plaintext": URL_SAFE_NO_PAD.encode(plaintext.expose())})
+                    }
+                    Err(error) => body(error),
+                })
+                .collect();
+            Ok(json!({"items":replies}))
         }
         Command::Status => wire(store.fleet_epoch_status()?),
         Command::Mint(members) => wire(store.fleet_epoch_mint(&members, peers)?),

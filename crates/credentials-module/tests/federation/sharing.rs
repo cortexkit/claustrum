@@ -541,7 +541,11 @@ async fn fleet_tombstones_persist_from_the_existing_watch_but_local_unpair_does_
     assert_eq!(rig.home.store.fleet_epoch_status().unwrap(), status);
     rig.home
         .store
-        .fleet_epoch_seal(b"", b"still paired at account level")
+        .fleet_epoch_seal(
+            credentials_core::fleet::FleetSealer::Entorhinal,
+            b"",
+            b"still paired at account level",
+        )
         .unwrap();
     let tombstone = json!([{"fingerprint":&MEMBER[13..],"removal_id":"opaque:account-removal"}]);
     let mut removed = snapshot("all_classes");
@@ -560,7 +564,11 @@ async fn fleet_tombstones_persist_from_the_existing_watch_but_local_unpair_does_
     assert_eq!(
         rig.home
             .store
-            .fleet_epoch_seal(b"", b"blocked")
+            .fleet_epoch_seal(
+                credentials_core::fleet::FleetSealer::Entorhinal,
+                b"",
+                b"blocked"
+            )
             .unwrap_err(),
         credentials_core::fleet::FleetError::EpochUnavailable
     );

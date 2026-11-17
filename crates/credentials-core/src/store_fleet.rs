@@ -115,6 +115,30 @@ fn open_epoch(key: &MasterKey, row: &EpochRow) -> Result<Zeroizing<Vec<u8>>, Fle
     Ok(Zeroizing::new(bytes.to_vec()))
 }
 
+fn open_record(
+    master_key: &MasterKey,
+    rows: &[EpochRow],
+    sealer: FleetSealer,
+    item: &FleetOpenInput<'_>,
+) -> FleetOpenResult {
+    let row = rows
+        .iter()
+        .find(|r| r.epoch == item.epoch && r.state != "pending")
+        .ok_or(FleetError::EpochOpenFailed)?;
+    let key = open_epoch(master_key, row)?;
+    XChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|_| FleetError::StoreError)?
+        .decrypt(
+            XNonce::from_slice(item.nonce),
+            Payload {
+                msg: item.ciphertext,
+                aad: &record_aad(sealer, item.epoch, item.aad),
+            },
+        )
+        .map(crate::secret::Secret::new)
+        .map_err(|_| FleetError::EpochOpenFailed)
+}
+
 fn audit_fleet(
     tx: &rusqlite::Transaction<'_>,
     key: &[u8; 32],
@@ -264,72 +288,101 @@ impl EncryptedStore {
 
     pub fn fleet_epoch_seal(
         &self,
+        sealer: FleetSealer,
         aad: &[u8],
         plaintext: &[u8],
     ) -> Result<FleetSealed, FleetError> {
-        if aad.len() > MAX_BYTES || plaintext.len() > MAX_BYTES {
-            return Err(FleetError::InvalidParams);
-        }
+        self.fleet_epoch_seal_batch(sealer, &[FleetSealInput { aad, plaintext }])?
+            .pop()
+            .ok_or(FleetError::StoreError)
+    }
+
+    /// One read snapshot fixes the current epoch and removal state for every item.
+    /// No result escapes if any encryption or store operation refuses the batch.
+    pub fn fleet_epoch_seal_batch(
+        &self,
+        sealer: FleetSealer,
+        items: &[FleetSealInput<'_>],
+    ) -> Result<Vec<FleetSealed>, FleetError> {
+        validate_batch(items.len(), items.iter().map(FleetSealInput::validate))?;
         self.fleet_read(|conn| {
             let myself = self_member(conn)?;
             let removed = removals(conn)?;
             let rows = rows(conn)?;
             let row = usable_current(&rows, &myself, &removed)?;
             let key = open_epoch(&self.key, row)?;
-            let mut nonce = [0u8; 24];
-            getrandom::getrandom(&mut nonce).map_err(|_| FleetError::StoreError)?;
-            let ciphertext = XChaCha20Poly1305::new_from_slice(&key)
-                .map_err(|_| FleetError::StoreError)?
-                .encrypt(
-                    XNonce::from_slice(&nonce),
-                    Payload {
-                        msg: plaintext,
-                        aad: &record_aad(row.epoch, aad),
-                    },
-                )
-                .map_err(|_| FleetError::StoreError)?;
-            Ok(FleetSealed {
-                epoch: row.epoch,
-                nonce: encode(&nonce),
-                ciphertext: encode(&ciphertext),
-            })
+            let cipher =
+                XChaCha20Poly1305::new_from_slice(&key).map_err(|_| FleetError::StoreError)?;
+            items
+                .iter()
+                .map(|item| {
+                    let mut nonce = [0u8; 24];
+                    getrandom::getrandom(&mut nonce).map_err(|_| FleetError::StoreError)?;
+                    let ciphertext = cipher
+                        .encrypt(
+                            XNonce::from_slice(&nonce),
+                            Payload {
+                                msg: item.plaintext,
+                                aad: &record_aad(sealer, row.epoch, item.aad),
+                            },
+                        )
+                        .map_err(|_| FleetError::StoreError)?;
+                    Ok(FleetSealed {
+                        epoch: row.epoch,
+                        nonce: encode(&nonce),
+                        ciphertext: encode(&ciphertext),
+                    })
+                })
+                .collect()
         })
     }
 
     pub fn fleet_epoch_open(
         &self,
+        sealer: FleetSealer,
         epoch: u32,
         nonce: &[u8],
         ciphertext: &[u8],
         aad: &[u8],
     ) -> Result<crate::secret::Secret<Vec<u8>>, FleetError> {
-        if epoch == 0
-            || nonce.len() != 24
-            || ciphertext.len() < 16
-            || ciphertext.len() > MAX_BYTES + 16
-            || aad.len() > MAX_BYTES
-        {
-            return Err(FleetError::InvalidParams);
-        }
+        let item = FleetOpenInput {
+            epoch,
+            nonce,
+            ciphertext,
+            aad,
+        };
+        item.validate()?;
         self.fleet_read(|conn| {
             self_member(conn)?;
             let rows = rows(conn)?;
-            let row = rows
+            open_record(&self.key, &rows, sealer, &item)
+        })
+    }
+
+    pub fn fleet_epoch_open_batch(
+        &self,
+        sealer: FleetSealer,
+        items: &[FleetOpenInput<'_>],
+    ) -> Result<Vec<FleetOpenResult>, FleetError> {
+        validate_batch(items.len(), items.iter().map(FleetOpenInput::validate))?;
+        self.fleet_read(|conn| {
+            self_member(conn)?;
+            let rows = rows(conn)?;
+            if rows.is_empty() {
+                return Err(FleetError::EpochOpenFailed);
+            }
+            items
                 .iter()
-                .find(|r| r.epoch == epoch && r.state != "pending")
-                .ok_or(FleetError::EpochOpenFailed)?;
-            let key = open_epoch(&self.key, row)?;
-            XChaCha20Poly1305::new_from_slice(&key)
-                .map_err(|_| FleetError::StoreError)?
-                .decrypt(
-                    XNonce::from_slice(nonce),
-                    Payload {
-                        msg: ciphertext,
-                        aad: &record_aad(epoch, aad),
-                    },
-                )
-                .map(crate::secret::Secret::new)
-                .map_err(|_| FleetError::EpochOpenFailed)
+                .map(|item| {
+                    let result = open_record(&self.key, &rows, sealer, item);
+                    // A storage failure invalidates the shared read, not just one item.
+                    if matches!(result, Err(FleetError::StoreError)) {
+                        Err(FleetError::StoreError)
+                    } else {
+                        Ok(result)
+                    }
+                })
+                .collect()
         })
     }
 
@@ -746,6 +799,7 @@ mod tests {
         sealed: &FleetSealed,
     ) -> Result<crate::secret::Secret<Vec<u8>>, FleetError> {
         store.fleet_epoch_open(
+            FleetSealer::Entorhinal,
             sealed.epoch,
             &decode(&sealed.nonce, 24).unwrap(),
             &decode(&sealed.ciphertext, MAX_BYTES + 16).unwrap(),
@@ -836,7 +890,9 @@ mod tests {
         assert_eq!(store.fleet_record_removals(&observations, 2).unwrap(), 0);
         assert_eq!(audit_len(&store), before + 1);
         assert_eq!(
-            store.fleet_epoch_seal(b"", b"x").unwrap_err(),
+            store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"x")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
         assert_eq!(
@@ -850,7 +906,9 @@ mod tests {
             vec![id(2)]
         );
         assert_eq!(
-            store.fleet_epoch_seal(b"", b"x").unwrap_err(),
+            store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"x")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
         let (_other_root, other) = rig("fleet-removal-no-self-peer", 2);
@@ -873,7 +931,7 @@ mod tests {
         }).unwrap();
         assert_eq!(
             store
-                .fleet_epoch_open(2, &[0; 24], &[0; 16], b"")
+                .fleet_epoch_open(FleetSealer::Entorhinal, 2, &[0; 24], &[0; 16], b"")
                 .unwrap_err(),
             FleetError::Corrupt { epoch: 2 }
         );
@@ -895,12 +953,14 @@ mod tests {
         let (root, store) = rig("fleet-receipts", 1);
         let mint = store.fleet_epoch_mint(&[id(1)], &[]).unwrap();
         assert_eq!(
-            store.fleet_epoch_seal(b"", b"pending").unwrap_err(),
+            store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"pending")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
         assert_eq!(
             store
-                .fleet_epoch_open(1, &[0; 24], &[0; 16], b"")
+                .fleet_epoch_open(FleetSealer::Entorhinal, 1, &[0; 24], &[0; 16], b"")
                 .unwrap_err(),
             FleetError::EpochOpenFailed
         );
@@ -957,8 +1017,12 @@ mod tests {
         let count = audit_len(&b);
         assert!(b.fleet_epoch_import(wrap, &peers_b).unwrap().already_held);
         assert_eq!(audit_len(&b), count);
-        let from_a = a.fleet_epoch_seal(b"context", b"alpha").unwrap();
-        let from_b = b.fleet_epoch_seal(b"context", b"beta").unwrap();
+        let from_a = a
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"alpha")
+            .unwrap();
+        let from_b = b
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"beta")
+            .unwrap();
         assert_eq!(opened(&a, &from_b).unwrap().expose(), b"beta");
         assert_eq!(opened(&b, &from_a).unwrap().expose(), b"alpha");
         let bad_sender = crate::kem::generate_key().unwrap();
@@ -997,7 +1061,9 @@ mod tests {
         let (_b, b) = rig("fleet-remove-b", 2);
         let (_d, d) = rig("fleet-remove-d", 4);
         commit(&a, &[id(1), id(2)], &[peer(&b, 2)]);
-        let old = a.fleet_epoch_seal(b"context", b"history").unwrap();
+        let old = a
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"history")
+            .unwrap();
         let count = audit_len(&a);
         assert_eq!(
             a.fleet_record_removals(
@@ -1023,7 +1089,8 @@ mod tests {
         );
         assert_eq!(audit_len(&a), count + 1);
         assert_eq!(
-            a.fleet_epoch_seal(b"", b"no").unwrap_err(),
+            a.fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"no")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
         assert_eq!(a.fleet_epoch_status().unwrap().sealing_blocked_by, [id(2)]);
@@ -1042,7 +1109,12 @@ mod tests {
             [1, 2]
         );
         assert_eq!(opened(&d, &old).unwrap().expose(), b"history");
-        assert_eq!(d.fleet_epoch_seal(b"context", b"new").unwrap().epoch, 2);
+        assert_eq!(
+            d.fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"new")
+                .unwrap()
+                .epoch,
+            2
+        );
         let count = audit_len(&a);
         a.fleet_epoch_wrap_for(&id(4), &[peer(&d, 4)]).unwrap();
         assert_eq!(audit_len(&a), count + 1, "even a repeated export audits");
@@ -1079,10 +1151,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            b.fleet_epoch_seal(b"", b"no").unwrap_err(),
+            b.fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"no")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
-        assert!(a.fleet_epoch_seal(b"", b"still unobserved").is_ok());
+        assert!(a
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"still unobserved")
+            .is_ok());
     }
 
     #[test]
@@ -1098,7 +1173,9 @@ mod tests {
         a.fleet_epoch_discard(1, &pending.mint_id).unwrap();
         set_self(&a, 1);
         commit(&a, &[id(1)], &[]);
-        let old = a.fleet_epoch_seal(b"context", b"former self").unwrap();
+        let old = a
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"former self")
+            .unwrap();
         commit(&a, &[id(1)], &[]);
         let held_before = blobs(&a);
         set_self(&a, 3);
@@ -1117,7 +1194,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            a.fleet_epoch_seal(b"", b"no").unwrap_err(),
+            a.fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"no")
+                .unwrap_err(),
             FleetError::EpochUnavailable
         );
         assert_eq!(
@@ -1144,7 +1222,7 @@ mod tests {
         let (_root, mut store) = rig("fleet-rotation", 1);
         commit(&store, &[id(1)], &[]);
         let old = store
-            .fleet_epoch_seal(b"context", b"retired history")
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"retired history")
             .unwrap();
         commit(&store, &[id(1)], &[]);
         let pending = store.fleet_epoch_mint(&[id(1)], &[]).unwrap();
@@ -1163,13 +1241,19 @@ mod tests {
         }
         assert_eq!(opened(&store, &old).unwrap().expose(), b"retired history");
         set_self(&store, 1);
-        let current = store.fleet_epoch_seal(b"context", b"current").unwrap();
+        let current = store
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"current")
+            .unwrap();
         assert_eq!(opened(&store, &current).unwrap().expose(), b"current");
         store
             .fleet_epoch_commit(pending.epoch, &pending.mint_id)
             .unwrap();
         let after = store
-            .fleet_epoch_seal(b"context", b"pending became current")
+            .fleet_epoch_seal(
+                FleetSealer::Entorhinal,
+                b"context",
+                b"pending became current",
+            )
             .unwrap();
         assert_eq!(after.epoch, 3);
         assert_eq!(
@@ -1197,7 +1281,7 @@ mod tests {
         commit(&store, &[id(1)], &[]);
         store.fleet_epoch_mint(&[id(1)], &[]).unwrap();
         let current = store
-            .fleet_epoch_seal(b"context", b"healthy current")
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"healthy current")
             .unwrap();
         store
             .fenced_write(|tx| {
@@ -1300,7 +1384,9 @@ mod tests {
             256
         );
         assert!(blobs(&b).iter().all(|r| r.2.len() == 64));
-        let sealed = a.fleet_epoch_seal(b"context", b"full join").unwrap();
+        let sealed = a
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"full join")
+            .unwrap();
         assert_eq!(opened(&b, &sealed).unwrap().expose(), b"full join");
         let record = a.fleet_read(|conn| a.fleet_wrap_record(conn)).unwrap();
         let pem = std::str::from_utf8(record.payload.expose()).unwrap();
@@ -1353,27 +1439,39 @@ mod tests {
         commit(&store, &[id(1)], &[]);
         let at = vec![5; MAX_BYTES];
         let over = vec![5; MAX_BYTES + 1];
-        let sealed = store.fleet_epoch_seal(&at, &at).unwrap();
+        let sealed = store
+            .fleet_epoch_seal(FleetSealer::Entorhinal, &at, &at)
+            .unwrap();
         let nonce = decode(&sealed.nonce, 24).unwrap();
         let ct = decode(&sealed.ciphertext, MAX_BYTES + 16).unwrap();
         assert_eq!(
             store
-                .fleet_epoch_open(1, &nonce, &ct, &at)
+                .fleet_epoch_open(FleetSealer::Entorhinal, 1, &nonce, &ct, &at)
                 .unwrap()
                 .expose(),
             at.as_slice()
         );
         assert_eq!(
-            store.fleet_epoch_seal(b"", &over).unwrap_err(),
-            FleetError::InvalidParams
-        );
-        assert_eq!(
-            store.fleet_epoch_seal(&over, b"").unwrap_err(),
+            store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", &over)
+                .unwrap_err(),
             FleetError::InvalidParams
         );
         assert_eq!(
             store
-                .fleet_epoch_open(1, &nonce, &vec![0; MAX_BYTES + 17], b"")
+                .fleet_epoch_seal(FleetSealer::Entorhinal, &over, b"")
+                .unwrap_err(),
+            FleetError::InvalidParams
+        );
+        assert_eq!(
+            store
+                .fleet_epoch_open(
+                    FleetSealer::Entorhinal,
+                    1,
+                    &nonce,
+                    &vec![0; MAX_BYTES + 17],
+                    b""
+                )
                 .unwrap_err(),
             FleetError::InvalidParams
         );
@@ -1755,7 +1853,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .fleet_epoch_open(1, &[0; 24], &[0; 16], b"")
+                .fleet_epoch_open(FleetSealer::Entorhinal, 1, &[0; 24], &[0; 16], b"")
                 .unwrap_err(),
             FleetError::EpochUnavailable
         );

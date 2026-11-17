@@ -1,8 +1,36 @@
 use super::*;
 use credentials_core::fleet::{BUS_KEY_ID, RECORD_KEY_ID, WRAP_KEY_ID};
 
+#[tokio::test]
+async fn fleet_prefrontal_routes_admit_only_single_and_batch_crypto() {
+    let (surface, admin, _) = scoped_rig(227);
+    admin.record_bind_at(120, 1, reserved("prefrontal"), "");
+    admin.record_bind_at(121, 1, reserved("prefrontal-core"), "");
+    admin.record_bind_at(122, 1, reserved("unknown"), "");
+    let crypto = [
+        "fleet.epoch_seal", "fleet.epoch_open",
+        "fleet.epoch_seal_batch", "fleet.epoch_open_batch",
+    ];
+    for op in crypto.into_iter().chain([
+        "fleet.epoch_status", "fleet.epoch_mint", "fleet.epoch_commit",
+        "fleet.epoch_discard", "fleet.epoch_import", "fleet.epoch_wrap_for",
+    ]) {
+        let unknown = routed_reply(&surface, &admin, 122, op, json!(null)).await;
+        assert_eq!(unknown.0, FrameType::Response);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&unknown.1).unwrap(), uniform_not_found());
+        let alias = routed_reply(&surface, &admin, 121, op, json!(null)).await;
+        assert_eq!(alias, unknown, "prefrontal-core {op}");
+        let actual = routed_reply(&surface, &admin, 120, op, json!(null)).await;
+        if crypto.contains(&op) {
+            assert_eq!(actual.0, FrameType::Error, "admitted malformed {op}");
+        } else {
+            assert_eq!(actual, unknown, "prefrontal {op}");
+        }
+    }
+}
+
 #[test]
-fn fleet_manifest_pins_all_eight_kinds_and_contract_names() {
+fn fleet_manifest_pins_all_ten_kinds_and_contract_names() {
     let manifest = manifest(credentials_core::MODULE_ID, None);
     let ProviderRole::ManagementSurface { operations, .. } = &manifest.provides[0] else {
         panic!("management surface")
@@ -13,7 +41,7 @@ fn fleet_manifest_pins_all_eight_kinds_and_contract_names() {
         assert_eq!(declarations.len(), 1, "{op}");
         assert_eq!(
             declarations[0].kind,
-            if index < 3 {
+            if index < 5 {
                 ManagementOperationKind::Query
             } else {
                 ManagementOperationKind::Mutate

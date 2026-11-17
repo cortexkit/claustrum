@@ -978,7 +978,7 @@ mod connectors_contract {
                 | federation::ingress::OP_SECRET_SSH_SIGN
                 | federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL
                 | federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS => None,
-                // Entorhinal-only by caller identity; no grant selector reaches them.
+                // Fleet admission uses the attested caller and method, not a grant selector.
                 name if crate::fleet_ops::OPS.contains(&name) => None,
                 // Owner-only: a module reaches its own space by its attested identity,
                 // and no grant selector can reach another module's.

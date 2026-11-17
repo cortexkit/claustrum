@@ -1,0 +1,115 @@
+{
+  "batch": {
+    "open_request": {
+      "items": [
+        {
+          "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+          "ciphertext": "SsW7UwtLV2kJCobIIDjHpsJ3bGFsk5Iq2rIUlUdHmA",
+          "epoch": 1,
+          "nonce": "LJk3ScEg540vXtMJsKAPGoqbddgdDUB1"
+        },
+        {
+          "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+          "ciphertext": "kGJAsaT-DpfT7ssSe3-S9JJRuDSeIs1euy85D9Z2ag",
+          "epoch": 1,
+          "nonce": "k8WCRG1_SGIo9Ys6qfL92Ojf61RmH2d6"
+        }
+      ]
+    },
+    "open_response": {
+      "items": [
+        {
+          "plaintext": "cm9vbSBldmVudCBib2R5"
+        },
+        {
+          "error": {
+            "class": "permanent",
+            "code": "fleet_epoch_open_failed"
+          }
+        }
+      ]
+    },
+    "record_aad_utf8": [
+      "{\"aad\":\"cm9vbTpvbmU6ZXZlbnQ6Nw\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/prefrontal/v1\"}",
+      "{\"aad\":\"cm9vbTpvbmU6ZXZlbnQ6OA\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/prefrontal/v1\"}"
+    ],
+    "request": {
+      "items": [
+        {
+          "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+          "plaintext": "cm9vbSBldmVudCBib2R5"
+        },
+        {
+          "aad": "cm9vbTpvbmU6ZXZlbnQ6OA",
+          "plaintext": "c2Vjb25kIHJvb20gZXZlbnQ"
+        }
+      ]
+    },
+    "response": {
+      "items": [
+        {
+          "ciphertext": "SsW7UwtLV2kJCobIIDjHpsJ3bGFsk5Iq2rIUlUdHmA",
+          "epoch": 1,
+          "nonce": "LJk3ScEg540vXtMJsKAPGoqbddgdDUB1"
+        },
+        {
+          "ciphertext": "iQ2TcutRxboM-x_RuIaEnajsF1BdHDUx7Xw0SMGwXEGb",
+          "epoch": 1,
+          "nonce": "28amiKux_vz8G0B7NRbgmjooV3uB-K73"
+        }
+      ]
+    }
+  },
+  "caller": "reserved:prefrontal",
+  "entorhinal_seal": {
+    "caller": "reserved:entorhinal",
+    "record_aad_utf8": "{\"aad\":\"cm9vbTpvbmU6ZXZlbnQ6Nw\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/v1\"}",
+    "request": {
+      "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+      "plaintext": "cm9vbSBldmVudCBib2R5"
+    },
+    "response": {
+      "ciphertext": "kGJAsaT-DpfT7ssSe3-S9JJRuDSeIs1euy85D9Z2ag",
+      "epoch": 1,
+      "nonce": "k8WCRG1_SGIo9Ys6qfL92Ojf61RmH2d6"
+    }
+  },
+  "epoch_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE",
+  "seal_open": {
+    "cross_domain_open": {
+      "caller": "reserved:entorhinal",
+      "request": {
+        "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+        "ciphertext": "BwQV4jkzXSl8sGNPIpBUQxVDX1drGJ6wTuoW7PgXLA",
+        "epoch": 1,
+        "nonce": "jDbJkGjK_G6RDbSbsl4fXGrUFQv62lkt"
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_epoch_open_failed"
+        }
+      }
+    },
+    "open_request": {
+      "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+      "ciphertext": "BwQV4jkzXSl8sGNPIpBUQxVDX1drGJ6wTuoW7PgXLA",
+      "epoch": 1,
+      "nonce": "jDbJkGjK_G6RDbSbsl4fXGrUFQv62lkt"
+    },
+    "open_response": {
+      "plaintext": "cm9vbSBldmVudCBib2R5"
+    },
+    "record_aad_utf8": "{\"aad\":\"cm9vbTpvbmU6ZXZlbnQ6Nw\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/prefrontal/v1\"}",
+    "request": {
+      "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+      "plaintext": "cm9vbSBldmVudCBib2R5"
+    },
+    "response": {
+      "ciphertext": "BwQV4jkzXSl8sGNPIpBUQxVDX1drGJ6wTuoW7PgXLA",
+      "epoch": 1,
+      "nonce": "jDbJkGjK_G6RDbSbsl4fXGrUFQv62lkt"
+    }
+  },
+  "version": "fleet-epoch-prefrontal-vectors-v1"
+}

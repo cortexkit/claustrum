@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 // UTF-8 form. Both representations derive from the same format constant.
 pub const WRAP_DOMAIN: &str = domain(b"ck-fleet-epoch-wrap/v1");
 pub const AAD_DOMAIN: &str = domain(b"ck-fleet-epoch-aad/v1");
+pub const PREFRONTAL_AAD_DOMAIN: &str = domain(b"ck-fleet-epoch-aad/prefrontal/v1");
 pub const STORE_DOMAIN: &str = domain(b"ck-fleet-epoch-store/v1");
 const fn domain(bytes: &[u8]) -> &str {
     match std::str::from_utf8(bytes) {
@@ -19,8 +20,72 @@ pub const WRAP_KEY_ID: &str = "kem:fleet-epoch-wrap:1";
 pub const RECORD_KEY_ID: &str = "signing:fleet-record:1";
 pub const BUS_KEY_ID: &str = "kem:bus-seal:1";
 pub const MAX_BYTES: usize = 1024 * 1024;
+pub const MAX_BATCH_ITEMS: usize = 256;
+pub const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HOLDERS: usize = 64;
 pub const MAX_EPOCHS: usize = 256;
+
+/// The vault selects the authenticated-data domain from the attested caller.
+/// This is not a wire value and cannot be supplied in fleet request parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FleetSealer {
+    Entorhinal,
+    Prefrontal,
+}
+
+pub struct FleetSealInput<'a> {
+    pub aad: &'a [u8],
+    pub plaintext: &'a [u8],
+}
+
+pub struct FleetOpenInput<'a> {
+    pub epoch: u32,
+    pub nonce: &'a [u8],
+    pub ciphertext: &'a [u8],
+    pub aad: &'a [u8],
+}
+
+pub type FleetOpenResult = Result<crate::secret::Secret<Vec<u8>>, FleetError>;
+
+impl FleetSealInput<'_> {
+    pub fn validate(&self) -> Result<usize, FleetError> {
+        if self.aad.len() > MAX_BYTES || self.plaintext.len() > MAX_BYTES {
+            return Err(FleetError::InvalidParams);
+        }
+        Ok(self.aad.len() + self.plaintext.len())
+    }
+}
+
+impl FleetOpenInput<'_> {
+    pub fn validate(&self) -> Result<usize, FleetError> {
+        if self.epoch == 0
+            || self.nonce.len() != 24
+            || self.ciphertext.len() < 16
+            || self.ciphertext.len() > MAX_BYTES + 16
+            || self.aad.len() > MAX_BYTES
+        {
+            return Err(FleetError::InvalidParams);
+        }
+        Ok(self.aad.len() + self.ciphertext.len())
+    }
+}
+
+pub fn validate_batch(
+    count: usize,
+    sizes: impl Iterator<Item = Result<usize, FleetError>>,
+) -> Result<(), FleetError> {
+    if !(1..=MAX_BATCH_ITEMS).contains(&count) {
+        return Err(FleetError::InvalidParams);
+    }
+    let mut total = 0usize;
+    for size in sizes {
+        total = total
+            .checked_add(size?)
+            .filter(|total| *total <= MAX_BATCH_BYTES)
+            .ok_or(FleetError::InvalidParams)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetRemoval {
@@ -249,14 +314,30 @@ pub(crate) fn wrap_info(from: &str, to: &str) -> Vec<u8> {
         .expect("string-only JSON")
 }
 
-pub(crate) fn record_aad(epoch: u32, aad: &[u8]) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({"aad": encode(aad), "epoch": epoch, "v": AAD_DOMAIN}))
+pub(crate) fn record_aad(sealer: FleetSealer, epoch: u32, aad: &[u8]) -> Vec<u8> {
+    let domain = match sealer {
+        FleetSealer::Entorhinal => AAD_DOMAIN,
+        FleetSealer::Prefrontal => PREFRONTAL_AAD_DOMAIN,
+    };
+    serde_json::to_vec(&serde_json::json!({"aad": encode(aad), "epoch": epoch, "v": domain}))
         .expect("string-only JSON")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleet_caller_aad_bytes_keep_legacy_and_prefrontal_domains() {
+        assert_eq!(
+            record_aad(FleetSealer::Entorhinal, 7, b"room"),
+            br#"{"aad":"cm9vbQ","epoch":7,"v":"ck-fleet-epoch-aad/v1"}"#
+        );
+        assert_eq!(
+            record_aad(FleetSealer::Prefrontal, 7, b"room"),
+            br#"{"aad":"cm9vbQ","epoch":7,"v":"ck-fleet-epoch-aad/prefrontal/v1"}"#
+        );
+    }
 
     #[test]
     fn canonical_bytes_and_member_boundaries() {

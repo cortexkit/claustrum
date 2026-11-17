@@ -1,6 +1,6 @@
 // The CKIOS Secrets page's pinned samples for the `secret.home` query.
 //
-// The iPhone app decodes these replies: the role answer that tells it which vault holds
+// The phone app decodes these replies: the role answer that tells it which vault holds
 // the account's secrets, the two refusals that stop it from using a vault that does not
 // hold them, and the uniform `not_found` the daemon answers when `secret.home` arrives on
 // a route whose caller is not a phone. This file generates

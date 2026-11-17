@@ -461,12 +461,13 @@ Phone operations require both `ck auth federation mapping on` and
 [Federation setup and recovery](#federation-setup-and-recovery).
 
 Phone key registration, secret approvals (agent and flow), secret deletion and
-manifest approvals require a verified production iPhone build. A simulator or
+manifest approvals require a verified production build of the phone app. A simulator or
 development build receives `phone_not_attested` (permanent), even if the phone's
 key was registered before. Nothing is written and no audit row is added. Listing,
 home discovery and deposits keep their existing behavior; they cannot grant access.
-Use the production app through Callosum with Apple App Attest and daemon 0.49.0 or
-newer, then open a new phone route. The vault advertises `peer-build/v1` so the
+Use the production app through Callosum, which verifies the build (Apple App Attest
+for the iPhone app today; an Android app needs Callosum's Android attestation), with
+daemon 0.49.0 or newer, then open a new phone route. The vault advertises `peer-build/v1` so the
 daemon can stamp `peer_build: "production"` on that route. A route opened before
 the verified session must be reopened; registering a key or editing a permissions
 file cannot supply the mark. If the production app still gets this refusal,
@@ -474,7 +475,7 @@ check Callosum's attestation and daemon version rather than retrying the signatu
 An invalid present `peer_build` value produces a warning at bind and is treated
 as unmarked.
 
-Immediately after deploy, open the real iPhone's route and check the vault log
+Immediately after deploy, open the real phone's route and check the vault log
 for `phone route bound` with `production_build=true`. The info line includes only
 the route channel and production-build boolean, never the phone fingerprint. A
 simulator, development build or route without the daemon's production-build
@@ -1585,7 +1586,7 @@ that `federation.manifest_latest`, `federation.manifest_watch` and
 `federation.manifest_report_active` are present. Existing vault shares use
 `all_declared`, so newly declared operations are exposed on the next catalog read.
 
-Keep `manifest.one_tap` off (its default) until the iPhone has the build that reads
+Keep `manifest.one_tap` off (its default) until the phone has the app build that reads
 the binding statement. This setting gates proposing only; the other manifest
 operations, including approving an already-pending proposal, work while it is off.
 The wire forms and admission rules are in

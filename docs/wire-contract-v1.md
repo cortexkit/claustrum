@@ -2810,7 +2810,9 @@ fixed pairing answer and through the real route dispatch for the non-phone refus
 
 The vault declares `peer-build/v1`. On `route.bind`, the daemon stamps
 `peer_build: "production"` only for Callosum sessions whose production app build
-passed Apple App Attest. The vault records this fact per route, never per phone
+passed Callosum's platform attestation (Apple App Attest for the iPhone app; an
+Android app needs Callosum's Android counterpart). The vault records this fact per
+route, never per phone
 fingerprint. An absent mark, `null`, or any value other than exactly `"production"`
 is unmarked; an invalid present value also produces one warning at bind.
 

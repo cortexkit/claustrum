@@ -25,6 +25,10 @@ impl Rig {
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
         std::fs::create_dir_all(&root).unwrap();
+        // The SDK refuses a connection file whose folder other users can reach. On
+        // Windows a folder under target/ inherits broad grants, so narrow it to the owner.
+        #[cfg(windows)]
+        subc_os::windows_acl::create_private_dir(&root).unwrap();
         let path = root.join("connection.json");
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await

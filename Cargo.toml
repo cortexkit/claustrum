@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/claustrum-model", "crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
+members = ["crates/claustrum-model", "crates/claustrum-providers", "crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
 
 [workspace.metadata.release]
 requires_core = "0.20.154"
@@ -73,7 +73,7 @@ async-trait = "0.1"
 # refresh.
 #
 # Provider refresh does NOT negotiate HTTP/2 as a result: `ReqwestTransport::new`
-# (crates/credentials-core/src/http.rs) builds its client with `.http1_only()`, so
+# (crates/claustrum-providers/src/http.rs) builds its client with `.http1_only()`, so
 # every refresh stays on HTTP/1.1 whatever features this line enables. That pin, not
 # this feature list, decides the refresh protocol; the reasoning and how to lift it
 # are in its doc comment. `cargo run -p credentials-core --example

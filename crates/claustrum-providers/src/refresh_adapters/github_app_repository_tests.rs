@@ -3,16 +3,20 @@ use crate::refresh_adapters::{fixture::FixtureTransport, HttpResponse};
 use serde_json::{json, Value};
 
 const RECORD_ID: &str = "github_app:plex-alfonso";
-const INSTALLATIONS: &[u8] = include_bytes!("../../tests/fixtures/github_app/installations.json");
-const ACCESS_TOKENS: &[u8] = include_bytes!("../../tests/fixtures/github_app/access_tokens.json");
+const INSTALLATIONS: &[u8] =
+    include_bytes!("../../../credentials-core/tests/fixtures/github_app/installations.json");
+const ACCESS_TOKENS: &[u8] =
+    include_bytes!("../../../credentials-core/tests/fixtures/github_app/access_tokens.json");
 
 fn credential() -> OAuthCredential {
     let installation: Value = serde_json::from_slice(INSTALLATIONS).unwrap();
     OAuthCredential {
         access_token: "previous-token".to_string().into(),
-        refresh_token: include_str!("../../tests/fixtures/github_app/test_private_key.pem")
-            .to_string()
-            .into(),
+        refresh_token: include_str!(
+            "../../../credentials-core/tests/fixtures/github_app/test_private_key.pem"
+        )
+        .to_string()
+        .into(),
         expires_at_ms: Some(0),
         token_url: String::new(),
         client_id: Some(installation[0]["client_id"].as_str().unwrap().to_owned()),

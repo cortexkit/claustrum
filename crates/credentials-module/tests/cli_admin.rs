@@ -4433,6 +4433,7 @@ fn shipped_test_hatch_env_names() -> Vec<String> {
     walk(&workspace.join("crates/credentials-module/src"), &mut out);
     walk(&workspace.join("crates/credentials-core/src"), &mut out);
     walk(&workspace.join("crates/claustrum-model/src"), &mut out);
+    walk(&workspace.join("crates/claustrum-providers/src"), &mut out);
     out
 }
 

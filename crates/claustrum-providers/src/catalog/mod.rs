@@ -1717,10 +1717,11 @@ mod tests {
             MODEL_VENDOR_FUSIFORM_IDS,
         )
         .unwrap_or_else(|errors| panic!("unresolvable catalog routing ids: {errors:?}"));
-        let expected: std::collections::BTreeMap<String, String> = serde_json::from_str(
-            include_str!("../../tests/fixtures/fusiform/routing-resolution.json"),
-        )
-        .unwrap();
+        let expected: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!(
+                "../../../credentials-core/tests/fixtures/fusiform/routing-resolution.json"
+            ))
+            .unwrap();
         assert_eq!(actual, expected);
     }
 

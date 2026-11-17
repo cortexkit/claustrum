@@ -30,8 +30,8 @@
 
 use serde::Deserialize;
 
+use crate::encoding::base64url;
 use crate::refresh_adapters::{HttpTransport, RefreshError};
-use crate::store::base64url;
 
 /// A PKCE verifier/challenge pair (RFC 7636, method S256).
 #[derive(Debug, Clone)]

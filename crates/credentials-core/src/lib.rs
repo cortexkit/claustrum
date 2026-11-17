@@ -1,9 +1,9 @@
 //! Credential custody logic for the claustrum subc module (the credential vault).
 //!
-//! This crate holds the format/provider-specific weight of the credential vault
-//! (the "Acquisition + Custody" side of the thin-core boundary): the bounded
-//! per-provider refresh adapters, the crash-safe refresh state machine, and
-//! master-key resolution. The typed `VaultRecord`, canonical `OAuthCredential`,
+//! This crate holds the custody logic of the credential vault: the crash-safe
+//! refresh state machine and master-key resolution. The bounded per-provider
+//! refresh adapters are re-exported from `claustrum-providers`.
+//! The typed `VaultRecord`, canonical `OAuthCredential`,
 //! and value-level encryption envelope are re-exported from `claustrum-model`.
 //! It is wire-agnostic — it never speaks the subc protocol;
 //! `credentials-module` is the thin binary that does.
@@ -18,15 +18,15 @@
 pub mod admin_auth;
 pub mod admin_ops;
 pub use claustrum_model::agent_secret;
-pub mod apns;
-pub mod apns_submit;
+pub use claustrum_providers::apns;
+pub use claustrum_providers::apns_submit;
 pub mod audit;
-pub mod bedrock;
-pub mod catalog;
+pub use claustrum_providers::bedrock;
+pub use claustrum_providers::catalog;
 pub mod contract;
 pub use claustrum_model::credential_id;
 pub mod deposit_cookie;
-pub mod device_flow;
+pub use claustrum_providers::device_flow;
 pub mod display_name;
 pub mod engine;
 #[cfg(test)]
@@ -38,21 +38,21 @@ pub mod fleet;
 pub use claustrum_model::fusiform_providers;
 pub mod gateway;
 pub mod gh_manifest;
-pub mod google_login;
+pub use claustrum_providers::google_login;
 pub mod health;
-pub mod http;
+pub use claustrum_providers::http;
 pub mod kem;
 pub use claustrum_model::key;
-pub mod list_auth_method;
+pub use claustrum_providers::list_auth_method;
 pub mod login_sharing;
 pub use claustrum_model::oauth;
-pub mod oauth_login;
-pub mod plan_detection;
+pub use claustrum_providers::oauth_login;
+pub use claustrum_providers::plan_detection;
 pub mod plan_tier;
 mod process_hardening;
 pub mod provider_ids;
 pub use claustrum_model::record;
-pub mod refresh_adapters;
+pub use claustrum_providers::refresh_adapters;
 pub mod resolver;
 pub use claustrum_model::secret;
 pub mod signing;

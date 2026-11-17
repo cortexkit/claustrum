@@ -17,7 +17,8 @@ are easy to break. The consumer-facing wire surface is specified in
 | part | path | what it is |
 |---|---|---|
 | `claustrum-model` | `crates/claustrum-model` | Credential records, the canonical OAuth credential, the encryption envelope, credential ids, provider plan observations, and agent-secret formats and validation. No storage or network dependencies. |
-| `credentials-core` | `crates/credentials-core` | Custody logic, wire-agnostic: master-key resolution, the encrypted store and its migrations, refresh adapters, the refresh engine, the audit chain, enrollment, Ed25519 signing, X25519 KEM keys, APNs provider-token minting. It re-exports the model types and never speaks the supervisor protocol. |
+| `claustrum-providers` | `crates/claustrum-providers` | Provider catalog, bounded refresh adapters, OAuth and device login flows, provider plan detection, HTTP transport, APNs provider-token minting and submission, and Bedrock. Depends on the model, not the store. |
+| `credentials-core` | `crates/credentials-core` | Custody logic, wire-agnostic: master-key resolution, the encrypted store and its migrations, the refresh engine, the audit chain, enrollment, Ed25519 signing, and X25519 KEM keys. It re-exports the model types and provider adapters and never speaks the supervisor protocol. |
 | `ck-claustrum` | `crates/credentials-module/src/main.rs` | The daemon. Registers with the supervisor as the reserved `claustrum` management surface and serves the read surface (`read_surface.rs`), the authenticated admin surface (`admin_surface.rs`) and the health probe. Per-connection rate limits live in `limiter.rs`. |
 | `ck-auth` | `crates/credentials-module/src/bin/credentials_cli.rs` | The operator CLI, run as `ck auth <verb>`. It is the only write surface an operator uses: login, import, put, grants, handles, enrollment, audit. Helpers live in `src/bin/cli_support/`. |
 | `cortexkit-claustrum-client` | `crates/claustrum-client` | The Rust client for supervised modules. |
@@ -142,7 +143,7 @@ operator replacement can also clear the intent by atomically installing new mate
 There are 13 adapters, one per provider family the vault can refresh: `anthropic`,
 `antigravity`, `cursor`, `devin`, `digitalocean`, `github_app`, `github_copilot`,
 `google` (which also serves Gmail logins), `kimi`, `meta`, `openai`, `snowflake` and
-`xai`, each in `crates/credentials-core/src/refresh_adapters/` with conformance tests
+`xai`, each in `crates/claustrum-providers/src/refresh_adapters/` with conformance tests
 over recorded HTTP fixtures. Adding an adapter is a contract change: the count in this
 paragraph is checked against the tree by
 `refresh_adapters::documented_count_tests::the_documented_adapter_count_matches_the_tree`.

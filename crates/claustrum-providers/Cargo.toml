@@ -1,0 +1,27 @@
+[package]
+name = "claustrum-providers"
+version = "0.3.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Provider catalog, bounded refresh adapters, and provider login and HTTP flows."
+
+[features]
+# Exposes provider fixtures to core's tests without linking them into release builds.
+test-support = []
+
+[dependencies]
+claustrum-model = { path = "../claustrum-model" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true }
+getrandom = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+p256 = { workspace = true }
+base64 = { workspace = true }
+ring = { workspace = true }

@@ -94,6 +94,6 @@ pub fn effective_plan(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "plan_detection_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

@@ -42,8 +42,8 @@ pub mod openai;
 pub mod snowflake;
 pub mod xai;
 
-#[cfg(test)]
-pub(crate) mod fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 #[cfg(test)]
 mod oauth_import_tests;
 
@@ -404,7 +404,7 @@ mod token_response_rules {
     async fn refresh_without_lifetime_uses_new_access_jwt_expiry() {
         let jwt = format!(
             "e30.{}.sig",
-            crate::store::base64url(br#"{"exp":2000000000}"#)
+            crate::encoding::base64url(br#"{"exp":2000000000}"#)
         );
         for adapter in [
             Box::new(openai::OpenAiAdapter::new()) as Box<dyn RefreshAdapter>,

@@ -9911,6 +9911,7 @@ mod tests {
         let mut stack: Vec<std::path::PathBuf> = [
             "crates/credentials-core/src",
             "crates/claustrum-model/src",
+            "crates/claustrum-providers/src",
             "crates/credentials-module/src",
         ]
         .iter()
@@ -9990,6 +9991,7 @@ mod tests {
         let mut stack: Vec<_> = [
             "crates/credentials-core/src",
             "crates/claustrum-model/src",
+            "crates/claustrum-providers/src",
             "crates/credentials-module/src",
             "crates/claustrum-client/src",
         ]

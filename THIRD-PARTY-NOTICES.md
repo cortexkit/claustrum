@@ -7,7 +7,7 @@ adapted from the following projects.
 
 - Source: <https://github.com/can1357/oh-my-pi>
 - License: MIT
-- What is adapted: the API-key provider rows in `crates/credentials-core/src/catalog.rs` that
+- What is adapted: the API-key provider rows in `crates/claustrum-providers/src/catalog/rows.rs` that
   carry a `// oh-my-pi auth/<key>.kdl` comment. Each row's display name, dashboard URL, key
   placeholder and validation probe were copied from the named file under
   `packages/catalog/src/compat/rules/auth/` (and, where a comment says so,

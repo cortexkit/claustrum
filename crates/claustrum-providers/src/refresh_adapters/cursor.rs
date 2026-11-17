@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn jwt_expiry_is_read_in_milliseconds() {
-        let payload = crate::store::base64url(br#"{"exp":1234}"#);
+        let payload = crate::encoding::base64url(br#"{"exp":1234}"#);
         assert_eq!(
             access_token_expiry_ms(&format!("header.{payload}.sig"), 0),
             1_234_000

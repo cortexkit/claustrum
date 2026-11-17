@@ -1,10 +1,12 @@
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
+
 use super::*;
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
 use crate::refresh_adapters::{fixture::FixtureTransport, HttpResponse};
 use base64::Engine;
 
-pub(crate) fn jwt(plan: Option<&str>) -> String {
+pub fn jwt(plan: Option<&str>) -> String {
     let claims = match plan {
         Some(plan) => {
             serde_json::json!({"https://api.openai.com/auth": {"chatgpt_plan_type": plan}})
@@ -21,8 +23,8 @@ pub(crate) fn jwt(plan: Option<&str>) -> String {
 // The profile fields used for pricing are organization.organization_type and
 // organization.rate_limit_tier. This sanitized public example (Claude Code issue
 // #48460) pins that nesting, not an independently captured live response.
-pub(crate) const PROFILE: &[u8] = br#"{"account":{"uuid":"account"},"organization":{"uuid":"org","organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}"#;
-pub(crate) const ANTHROPIC_TOKENS: &[u8] = br#"{"token_type":"Bearer","access_token":"sk-ant-oat01-new-access","refresh_token":"sk-ant-ort01-new-refresh","expires_in":28800,"scope":"user:profile user:inference"}"#;
+pub const PROFILE: &[u8] = br#"{"account":{"uuid":"account"},"organization":{"uuid":"org","organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}"#;
+pub const ANTHROPIC_TOKENS: &[u8] = br#"{"token_type":"Bearer","access_token":"sk-ant-oat01-new-access","refresh_token":"sk-ant-ort01-new-refresh","expires_in":28800,"scope":"user:profile user:inference"}"#;
 
 #[test]
 fn chatgpt_mapping_is_exact_and_unknown_claims_never_guess() {

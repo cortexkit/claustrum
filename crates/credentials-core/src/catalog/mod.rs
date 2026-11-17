@@ -500,10 +500,10 @@ pub struct LoginProvider {
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
     /// The catalog provider ids a fresh login stores when the operator passes no
-    /// `--provider-id`. Only the subscription rows the live vault already carries
-    /// ids for name one here; every other row is empty and stays as today. Kept on
-    /// the row (rather than matched on the credential id) so the mapping lives in
-    /// one place next to the ids it derives from.
+    /// `--provider-id`. Only subscription logins whose routing id is settled name one;
+    /// every other row is empty, and such a login stores no provider id unless the
+    /// operator gives one. Kept on the row (rather than matched on the credential id)
+    /// so the mapping lives in one place next to the ids it derives from.
     pub default_provider_ids: &'static [&'static str],
 }
 
@@ -3190,15 +3190,12 @@ mod tests {
     /// THE NATIVE FAMILY IS THE GRANT AXIS; `serves` AND THE PURPOSE CATEGORY ARE NOT.
     ///
     /// A consumer that sends tokens to one provider's own endpoints needs a selector that
-    /// reaches exactly the credentials speaking that protocol. Measured on the live vault:
-    /// `serves` contains "anthropic" for EIGHT rows and only five are Claude OAuth, and
-    /// granting the purpose category `llm-provider` to reach those five hands read
-    /// authority over sixteen. Neither narrows to the family.
-    ///
-    /// Reported by the anthropic-auth seat: "granting category:llm-provider gives the
-    /// enrollment token read authority over all 17 LLM credentials, despite needing only
-    /// native Anthropic OAuth accounts. Consumer-side filtering does not reduce that
-    /// capability's blast radius."
+    /// reaches exactly the credentials speaking that protocol. `serves` doesn't: it names
+    /// every row that can serve a vendor's models, API keys and other providers' logins
+    /// included. Nor does the purpose category `llm-provider`, which reaches every model
+    /// credential. A plugin that only speaks Claude OAuth, granted either of those, could
+    /// read keys it never uses, and filtering on the consumer side doesn't shrink what the
+    /// grant allows. The `<protocol>-native` categories below are that narrower axis.
     #[test]
     fn the_native_family_separates_protocol_from_purpose_and_from_serves() {
         // Same purpose, same served vendor, three different protocols.

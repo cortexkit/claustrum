@@ -20,6 +20,7 @@ use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
 use crate::federation::{MemberGrantOperation, MemberGrantSelector};
 use crate::record::{CredentialKind, RecordIdentity, VaultRecord};
+use crate::store::module_secrets::{validate_module_secret_name, ModuleSecretOwner};
 use crate::store::{
     mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, SelectorKind,
     SetCategoryMode, SetProvidersMode, StoreOpError,
@@ -416,6 +417,16 @@ pub enum AdminOpBody {
     /// operator may no longer hold.
     #[serde(rename = "admin.secret_delete")]
     SecretDelete { v: u32, name: String },
+    #[serde(rename = "admin.module_secret_list")]
+    ModuleSecretList { v: u32, module: Option<String> },
+    #[serde(rename = "admin.module_secret_delete")]
+    ModuleSecretDelete {
+        v: u32,
+        module: String,
+        name: String,
+    },
+    #[serde(rename = "admin.module_secret_move")]
+    ModuleSecretMove { v: u32, from: String, to: String },
     /// `ck auth secret revoke`: remove one grant by id, keeping the secret itself.
     #[serde(rename = "admin.secret_revoke_grant")]
     SecretRevokeGrant { v: u32, grant_id: String },
@@ -909,6 +920,23 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("origins", origins)
                 .field("material_b64url", &"<redacted>")
                 .finish(),
+            AdminOpBody::ModuleSecretList { v, module } => f
+                .debug_struct("ModuleSecretList")
+                .field("v", v)
+                .field("module", module)
+                .finish(),
+            AdminOpBody::ModuleSecretDelete { v, module, name } => f
+                .debug_struct("ModuleSecretDelete")
+                .field("v", v)
+                .field("module", module)
+                .field("name", name)
+                .finish(),
+            AdminOpBody::ModuleSecretMove { v, from, to } => f
+                .debug_struct("ModuleSecretMove")
+                .field("v", v)
+                .field("from", from)
+                .field("to", to)
+                .finish(),
             AdminOpBody::SecretDelete { v, name } => f
                 .debug_struct("SecretDelete")
                 .field("v", v)
@@ -1078,6 +1106,9 @@ impl AdminOpBody {
             | AdminOpBody::SecretDevDesktopApprovalsSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
+            | AdminOpBody::ModuleSecretList { v, .. }
+            | AdminOpBody::ModuleSecretDelete { v, .. }
+            | AdminOpBody::ModuleSecretMove { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
             | AdminOpBody::SecretHomeSet { v, .. }
             | AdminOpBody::FederationSelfSet { v, .. }
@@ -1150,6 +1181,9 @@ impl AdminOpBody {
             | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::ModuleSecretList { .. }
+            | AdminOpBody::ModuleSecretDelete { .. }
+            | AdminOpBody::ModuleSecretMove { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
             | AdminOpBody::SecretHomeSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
@@ -1277,6 +1311,9 @@ impl AdminOpBody {
             | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::ModuleSecretList { .. }
+            | AdminOpBody::ModuleSecretDelete { .. }
+            | AdminOpBody::ModuleSecretMove { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
             | AdminOpBody::SecretHomeSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
@@ -1356,6 +1393,9 @@ impl AdminOpBody {
             }
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
+            AdminOpBody::ModuleSecretList { .. } => "admin.module_secret_list",
+            AdminOpBody::ModuleSecretDelete { .. } => "admin.module_secret_delete",
+            AdminOpBody::ModuleSecretMove { .. } => "admin.module_secret_move",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
             AdminOpBody::SecretHomeSet { .. } => "admin.secret_home_set",
             AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
@@ -1435,6 +1475,9 @@ impl AdminOpBody {
             | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::ModuleSecretList { .. }
+            | AdminOpBody::ModuleSecretDelete { .. }
+            | AdminOpBody::ModuleSecretMove { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
             // Setting the secret home to this vault, or clearing it, is a local write.
             | AdminOpBody::SecretHomeSet {
@@ -2193,6 +2236,53 @@ pub fn apply(
         ),
         AdminOpBody::SecretDelete { name, .. } => {
             store.secret_operator_delete_audited(&name, actor)
+        }
+        AdminOpBody::ModuleSecretList { module, .. } => {
+            let owner = module
+                .as_deref()
+                .map(ModuleSecretOwner::new)
+                .transpose()
+                .map_err(StoreOpError::ModuleSecret)?;
+            let items = match owner {
+                Some(owner) => store.list_module_secrets(&owner),
+                None => store.list_all_module_secrets(),
+            }
+            .map_err(StoreOpError::ModuleSecret)?;
+            let items: Vec<_> = items
+                .into_iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "module": item.module_id, "name": item.name, "version": item.version,
+                        "protected": item.protected, "state": item.state.as_str(),
+                        "updated_at_ms": item.updated_at_ms,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"items": items}))
+        }
+        AdminOpBody::ModuleSecretDelete { module, name, .. } => {
+            let owner = ModuleSecretOwner::new(&module).map_err(StoreOpError::ModuleSecret)?;
+            validate_module_secret_name(&name).map_err(StoreOpError::ModuleSecret)?;
+            store
+                .delete_module_secret_as_operator(
+                    &owner,
+                    &name,
+                    AuditCtx::route_admin(AuditOp::ModuleSecretDelete, actor),
+                )
+                .map_err(StoreOpError::ModuleSecret)?;
+            Ok(serde_json::json!({"deleted": true}))
+        }
+        AdminOpBody::ModuleSecretMove { from, to, .. } => {
+            let from = ModuleSecretOwner::new(&from).map_err(StoreOpError::ModuleSecret)?;
+            let to = ModuleSecretOwner::new(&to).map_err(StoreOpError::ModuleSecret)?;
+            let moved = store
+                .move_module_secrets(
+                    &from,
+                    &to,
+                    AuditCtx::route_admin(AuditOp::ModuleSecretMove, actor),
+                )
+                .map_err(StoreOpError::ModuleSecret)?;
+            Ok(serde_json::json!({"moved": moved}))
         }
         AdminOpBody::SecretRevokeGrant { grant_id, .. } => {
             store.secret_operator_revoke_audited(&grant_id, actor)

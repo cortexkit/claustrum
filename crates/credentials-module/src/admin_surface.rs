@@ -1509,6 +1509,80 @@ mod tests {
         assert!(labels.iter().all(|entry| entry.actor == ROUTE_ADMIN_ACTOR));
     }
 
+    #[test]
+    fn module_secret_admin_refusals_match_the_module_route_contract() {
+        use credentials_core::store::module_secrets::ModuleSecretError as Error;
+        for (error, code, class) in [
+            (Error::InvalidParams, "invalid_params", "permanent"),
+            (Error::NotFound, "not_found", "permanent"),
+            (Error::Protected, "module_secret_protected", "permanent"),
+            (
+                Error::VersionConflict,
+                "module_secret_version_conflict",
+                "permanent",
+            ),
+            (Error::Limit, "module_secret_limit", "permanent"),
+            (Error::Corrupt, "corrupt", "permanent"),
+            (Error::VaultLocked, "vault_locked", "transient"),
+            (Error::Store, "store_error", "transient"),
+        ] {
+            let wrapped = StoreOpError::ModuleSecret(error);
+            assert_eq!(wrapped.wire_code(), Some(code));
+            assert_eq!(wrapped.wire_class(), Some(class));
+            let route: crate::module_secret::ModuleSecretError = error.into();
+            assert_eq!(
+                route.reply(),
+                serde_json::json!({"error":{"code":code,"class":class}})
+            );
+            assert!(
+                matches!(store_err(wrapped), AdminOutcome::Refused(message) if message == format!("{code}/{class}"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn module_secret_verbs_dispatch_through_authenticated_admin_plane() {
+        use credentials_core::store::module_secrets::ModuleSecretOwner;
+        let r = rig(213);
+        r.admin.record_bind(5, Principal::Direct);
+        let from = ModuleSecretOwner::new("old").unwrap();
+        r.store
+            .put_module_secret(&from, "key", b"operator-canary", None, Some(true))
+            .unwrap();
+        let v = credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2;
+        for op in [
+            AdminOpBody::ModuleSecretList {
+                v,
+                module: Some("old".into()),
+            },
+            AdminOpBody::ModuleSecretMove {
+                v,
+                from: "old".into(),
+                to: "new".into(),
+            },
+            AdminOpBody::ModuleSecretDelete {
+                v,
+                module: "new".into(),
+                name: "key".into(),
+            },
+        ] {
+            let body = serde_json::to_string(&op).unwrap();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            match r.admin.execute(5, body.as_bytes(), &tag).await {
+                AdminOutcome::Ok(value) => assert!(!value.to_string().contains("operator-canary")),
+                _ => panic!("module-secret admin operation was refused"),
+            }
+        }
+        assert!(r.store.list_all_module_secrets().unwrap().is_empty());
+        let audit = r.store.read_audit(None).unwrap();
+        for op in ["module_secret_move", "module_secret_delete"] {
+            let rows: Vec<_> = audit.iter().filter(|row| row.op == op).collect();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].actor, ROUTE_ADMIN_ACTOR);
+            assert_eq!(rows[0].alarm_reason.as_deref(), Some("admin_write"));
+        }
+    }
+
     fn store_op_body(id: &str) -> String {
         let record =
             VaultRecord::new_static(CredentialKind::ApiKey, "test", b"sk-1".to_vec(), None);

@@ -46,6 +46,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[path = "cli_support/module_secret_cli.rs"]
+mod module_secret_cli;
 #[path = "cli_support/provider_cli.rs"]
 mod provider_cli;
 
@@ -398,7 +400,8 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
                     && args
                         .get(1)
                         .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-                    || (verb == "manifest" && args.get(1).is_some()) =>
+                    || (matches!(verb.as_str(), "manifest" | "module-secret")
+                        && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
             }
@@ -416,7 +419,8 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
             && args
                 .first()
                 .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-            || (command == "manifest" && args.first().is_some_and(|arg| !arg.starts_with('-')))
+            || (matches!(command.as_str(), "manifest" | "module-secret")
+                && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
             format!("{command} {}", args[0])
         } else {
@@ -488,6 +492,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
         "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
         "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
+        "module-secret" => module_secret_cli::cmd_module_secret(&global, &args),
         "manifest" => cli_support::manifest_cli::cmd_manifest(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
@@ -549,6 +554,9 @@ impl ParsedOptions {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    if command == "module-secret" {
+        return module_secret_cli::guard_args(args).map(|()| ParsedOptions::default());
+    }
     if command == "ssh-key" {
         parse_ssh_key_op(args)?;
         return Ok(ParsedOptions::default());
@@ -805,7 +813,8 @@ fn usage_short() -> String {
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
          federation          member setup and config-file sharing status\n\
-          secret              agent secrets; phone, multi-host, basic-auth gates\n\
+           secret              agent secrets; phone, multi-host, basic-auth gates\n\
+           module-secret       list, delete or move module-owned secrets\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
@@ -835,6 +844,9 @@ fn usage_short() -> String {
 /// overrides — so they stay discoverable without dumping on every invocation.
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
+    if verb == "module-secret" || verb.starts_with("module-secret ") {
+        return module_secret_cli::help_text(verb.strip_prefix("module-secret "));
+    }
     if verb == "manifest" || verb.starts_with("manifest ") {
         return cli_support::manifest_cli::help_text(verb.strip_prefix("manifest "));
     }

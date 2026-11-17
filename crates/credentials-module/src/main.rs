@@ -1747,8 +1747,11 @@ async fn dispatch_route_request(
                         )
                         .await
                     }
+                    // Desktop approvals never route to the permissions ops, so this answer
+                    // can't occur; refusing uniformly keeps a future change from panicking
+                    // the route task instead.
                     secret_phone::PhoneAnswer::PermissionsOperatorRequired => {
-                        unreachable!("desktop approvals do not serve permissions")
+                        send_route_result(writer, header, uniform_not_found()).await
                     }
                 };
             }

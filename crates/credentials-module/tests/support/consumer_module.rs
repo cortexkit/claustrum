@@ -67,11 +67,39 @@ impl ModuleHandler for Handler {
     }
 }
 
+/// Runs one phase and replies `{"module_secret_probe":true}`, or names the failing
+/// step and its error. A panic here would reach the test only as "module handler
+/// panicked", which says nothing about which call failed.
 async fn module_secret_probe(phase: &str) -> HandlerOutcome {
+    match module_secret_phase(phase).await {
+        Ok(()) => HandlerOutcome::Response(br#"{"module_secret_probe":true}"#.to_vec()),
+        Err(failure) => HandlerOutcome::Response(
+            serde_json::to_vec(
+                &serde_json::json!({"module_secret_probe": false, "failure": failure}),
+            )
+            .expect("failure reply"),
+        ),
+    }
+}
+
+fn check(condition: bool, step: &str) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(format!("{step}: check failed"))
+    }
+}
+
+fn absent(result: Result<cortexkit_claustrum_client::ModuleSecret, ModuleSecretError>) -> bool {
+    matches!(result, Err(ModuleSecretError::Other(error)) if error.class == CredentialErrorClass::CredentialAbsent)
+}
+
+async fn module_secret_phase(phase: &str) -> Result<(), String> {
+    let failed = |step: &'static str| move |error: ModuleSecretError| format!("{step}: {error:?}");
     let consumer = Arc::new(
         subc_client_rs::SubcConsumer::connect_default(Default::default())
             .await
-            .expect("module-secret claim-bound consumer"),
+            .map_err(|error| format!("claim-bound consumer: {error:?}"))?,
     );
     let resolver = ClaustrumCredentialResolver::with_consumer(consumer);
     match phase {
@@ -79,75 +107,93 @@ async fn module_secret_probe(phase: &str) -> HandlerOutcome {
             let written = resolver
                 .module_secret_put("identity", Secret::new(vec![0xa5; 65_536]), None, None)
                 .await
-                .expect("module-secret create");
-            assert_eq!(written.name, "identity");
-            assert_eq!(written.version, 1);
-            assert!(written.created);
+                .map_err(failed("create"))?;
+            check(
+                written.name == "identity" && written.version == 1 && written.created,
+                "create reply",
+            )?;
             let got = resolver
                 .module_secret_get("identity")
                 .await
-                .expect("maximum-size module-secret get");
-            assert_eq!(got.name, "identity");
-            assert_eq!(got.version, 1);
-            assert!(!got.protected);
-            assert_eq!(got.value.expose().len(), 65_536);
-            assert!(got.value.expose().iter().all(|byte| *byte == 0xa5));
+                .map_err(failed("maximum-size get"))?;
+            check(
+                got.name == "identity"
+                    && got.version == 1
+                    && !got.protected
+                    && got.value.expose().len() == 65_536
+                    && got.value.expose().iter().all(|byte| *byte == 0xa5),
+                "maximum-size get value",
+            )?;
             let list = resolver
                 .module_secret_list()
                 .await
-                .expect("module-secret list");
-            assert_eq!(list.len(), 1);
-            assert_eq!(list[0].name, "identity");
-            assert_eq!(list[0].state, ModuleSecretState::Active);
-            assert_eq!(list[0].version, 1);
-            assert!(!list[0].protected);
+                .map_err(failed("list"))?;
+            check(
+                list.len() == 1
+                    && list[0].name == "identity"
+                    && list[0].state == ModuleSecretState::Active
+                    && list[0].version == 1
+                    && !list[0].protected,
+                "list contents",
+            )?;
         }
         "isolated" => {
-            assert!(
-                matches!(resolver.module_secret_get("identity").await, Err(ModuleSecretError::Other(error)) if error.class == CredentialErrorClass::CredentialAbsent)
-            );
-            assert!(resolver
-                .module_secret_list()
-                .await
-                .expect("isolated list")
-                .is_empty());
+            check(
+                absent(resolver.module_secret_get("identity").await),
+                "other module's item is absent",
+            )?;
+            check(
+                resolver
+                    .module_secret_list()
+                    .await
+                    .map_err(failed("isolated list"))?
+                    .is_empty(),
+                "isolated list is empty",
+            )?;
             resolver
                 .module_secret_put("identity", Secret::new(vec![7]), None, None)
                 .await
-                .expect("independent same-name item");
+                .map_err(failed("independent same-name item"))?;
             let got = resolver
                 .module_secret_get("identity")
                 .await
-                .expect("second module's own item");
-            assert_eq!(got.value.expose(), &[7]);
+                .map_err(failed("second module's own item"))?;
+            check(got.value.expose() == &[7], "second module's value")?;
             resolver
                 .module_secret_delete("identity", Some(1))
                 .await
-                .expect("second module cleanup");
+                .map_err(failed("second module cleanup"))?;
         }
         "delete" => {
             let got = resolver
                 .module_secret_get("identity")
                 .await
-                .expect("first module retains its item");
-            assert_eq!(got.value.expose().len(), 65_536);
-            assert!(got.value.expose().iter().all(|byte| *byte == 0xa5));
+                .map_err(failed("first module retains its item"))?;
+            check(
+                got.value.expose().len() == 65_536
+                    && got.value.expose().iter().all(|byte| *byte == 0xa5),
+                "first module's value",
+            )?;
             resolver
                 .module_secret_delete("identity", Some(1))
                 .await
-                .expect("owner delete");
-            assert!(resolver
-                .module_secret_list()
-                .await
-                .expect("empty list after delete")
-                .is_empty());
-            assert!(
-                matches!(resolver.module_secret_get("identity").await, Err(ModuleSecretError::Other(error)) if error.class == CredentialErrorClass::CredentialAbsent)
-            );
+                .map_err(failed("owner delete"))?;
+            check(
+                resolver
+                    .module_secret_list()
+                    .await
+                    .map_err(failed("list after delete"))?
+                    .is_empty(),
+                "list is empty after delete",
+            )?;
+            check(
+                absent(resolver.module_secret_get("identity").await),
+                "deleted item is absent",
+            )?;
         }
-        _ => panic!("unknown module-secret probe phase"),
+        _ => return Err(format!("unknown module-secret probe phase {phase}")),
     }
-    HandlerOutcome::Response(br#"{"module_secret_probe":true}"#.to_vec())
+    Ok(())
 }
 
 #[tokio::main]

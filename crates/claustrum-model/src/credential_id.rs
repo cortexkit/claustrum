@@ -17,6 +17,11 @@
 //! as the parked multi-account form `<provider>[:<account>]`, with the provider's
 //! default method (oauth), so old ids do not misroute.
 
+/// Whether an id can name a deposit rather than a category selector or packed id.
+pub fn is_valid_deposit_credential_id(credential_id: &str) -> bool {
+    !credential_id.starts_with("category:") && !credential_id.contains('|')
+}
+
 /// An auth method in the credential-id scheme. A method selects the credential KIND
 /// and, for refreshable methods, the refresh adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

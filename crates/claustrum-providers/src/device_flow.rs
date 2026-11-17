@@ -935,7 +935,7 @@ mod expiry_rules {
     fn device_tokens_without_lifetime_use_access_jwt_expiry() {
         let jwt = format!(
             "e30.{}.sig",
-            crate::store::base64url(br#"{"exp":2000000000}"#)
+            crate::encoding::base64url(br#"{"exp":2000000000}"#)
         );
         let body = serde_json::to_vec(&serde_json::json!({"access_token":jwt})).unwrap();
         match parse_token_response(HttpResponse { status: 200, body }) {

@@ -225,7 +225,7 @@ pub fn validate_ssh_card_key_id(id: &str) -> Result<(), SecretError> {
         .is_some_and(|name| !name.is_empty())
         || id.len() > MAX_SSH_CARD_KEY_ID_BYTES
         || id.chars().any(unreadable_card_character)
-        || crate::store::validate_deposit_credential_id(id).is_err()
+        || !crate::credential_id::is_valid_deposit_credential_id(id)
     {
         return Err(SecretError::InvalidParams);
     }
@@ -916,7 +916,7 @@ impl ApprovalEnvelope {
         Ok(envelope)
     }
 
-    pub(crate) fn parse_canonical(bytes: &[u8], fingerprint: &str) -> Result<Self, SecretError> {
+    pub fn parse_canonical(bytes: &[u8], fingerprint: &str) -> Result<Self, SecretError> {
         let invalid = SecretError::ApprovalInvalid;
         // Deserializing structs (not Value maps) rejects duplicate keys at every level.
         let envelope: Self = serde_json::from_slice(bytes).map_err(|_| invalid)?;
@@ -1295,7 +1295,7 @@ mod v2_statement_tests {
         }
         let emitted_use = serde_json::json!({"vectors": use_vectors});
         let use_pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/vectors/secret-approval-v2.json");
+            .join("../credentials-core/tests/vectors/secret-approval-v2.json");
         if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
             std::fs::create_dir_all(use_pinned.parent().unwrap()).unwrap();
             std::fs::write(
@@ -1356,7 +1356,7 @@ mod v2_statement_tests {
         }
         let emitted_flow = serde_json::json!({"vectors": flow_vectors});
         let flow_pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/vectors/secret-flow-approval-v2.json");
+            .join("../credentials-core/tests/vectors/secret-flow-approval-v2.json");
         if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
             std::fs::create_dir_all(flow_pinned.parent().unwrap()).unwrap();
             std::fs::write(

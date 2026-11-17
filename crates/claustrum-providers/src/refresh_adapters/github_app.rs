@@ -762,14 +762,15 @@ mod tests {
     const RECORDED_INSTALLATION_ID: u64 = 154_356_189;
     const RECORDED_EXPIRY_MS: i64 = 1_786_961_937_000;
     const TEST_PRIVATE_KEY: &str =
-        include_str!("../../tests/fixtures/github_app/test_private_key.pem");
+        include_str!("../../../credentials-core/tests/fixtures/github_app/test_private_key.pem");
     const TEST_PUBLIC_KEY: &[u8] =
-        include_bytes!("../../tests/fixtures/github_app/test_public_key.der");
-    const RECORDED_APP: &[u8] = include_bytes!("../../tests/fixtures/github_app/app.json");
+        include_bytes!("../../../credentials-core/tests/fixtures/github_app/test_public_key.der");
+    const RECORDED_APP: &[u8] =
+        include_bytes!("../../../credentials-core/tests/fixtures/github_app/app.json");
     const RECORDED_INSTALLATIONS: &[u8] =
-        include_bytes!("../../tests/fixtures/github_app/installations.json");
+        include_bytes!("../../../credentials-core/tests/fixtures/github_app/installations.json");
     const RECORDED_ACCESS_TOKENS: &[u8] =
-        include_bytes!("../../tests/fixtures/github_app/access_tokens.json");
+        include_bytes!("../../../credentials-core/tests/fixtures/github_app/access_tokens.json");
 
     #[tokio::test]
     async fn suspended_installation_token_exchange_requires_operator_repair() {
@@ -1175,7 +1176,9 @@ mod tests {
         // issues must sign, "not merely the one our fixtures were generated with" —
         // and its fixture GENERATION step was itself toolchain-dependent. A fixture
         // built by the machine running the test agrees with that machine.
-        let pkcs1 = include_str!("../../tests/fixtures/github_app/test_private_key_pkcs1.pem");
+        let pkcs1 = include_str!(
+            "../../../credentials-core/tests/fixtures/github_app/test_private_key_pkcs1.pem"
+        );
         assert!(
             pkcs1.contains("BEGIN RSA PRIVATE KEY"),
             "the vendored PKCS#1 fixture must actually be PKCS#1"
@@ -1187,7 +1190,9 @@ mod tests {
 
         // Vendored for the same reason, before `genpkey` earns its own incident: its
         // default is PKCS#8 today, and a default nobody promised is not a fixture.
-        let pkcs8 = include_str!("../../tests/fixtures/github_app/test_private_key.pem");
+        let pkcs8 = include_str!(
+            "../../../credentials-core/tests/fixtures/github_app/test_private_key.pem"
+        );
         assert!(
             pkcs8.contains("BEGIN PRIVATE KEY"),
             "the vendored PKCS#8 fixture must actually be PKCS#8"

@@ -10,7 +10,7 @@ multiple copies dangerous is that nobody diffs them.
 
 | fact | declared here | owned by | checked by |
 | --- | --- | --- | --- |
-| APNs payload key for the sealed blob (`cks`) | `crates/credentials-core/src/apns_submit.rs` `SEALED_BLOB_KEY` | `subconscious/docs/push-sealed-payload.md` | `scripts/check-inbound-contracts.sh`, in CI |
+| APNs payload key for the sealed blob (`cks`) | `crates/claustrum-providers/src/apns_submit.rs` `SEALED_BLOB_KEY` | `subconscious/docs/push-sealed-payload.md` | `scripts/check-inbound-contracts.sh`, in CI |
 | `aps` member that runs the notification extension (`mutable-content`) | same file, `MUTABLE_CONTENT_KEY` | same spec | same |
 | Minimum sealed-envelope length (version + encapsulated key + tag) | same file, `MIN_SEALED_LEN` | same spec | same |
 

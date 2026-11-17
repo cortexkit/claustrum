@@ -8,7 +8,7 @@ description = "Credential custody logic for the claustrum subc module: typed Vau
 
 [features]
 # Exposes test fixtures to integration tests without linking them into normal release builds.
-test-support = []
+test-support = ["claustrum-providers/test-support"]
 
 # Compiles a test-only pre-commit seam INTO the refresh engine: a hook that fires
 # after the intent is durably committed and the new tokens are staged, but BEFORE
@@ -88,6 +88,8 @@ path = "src/bin/login_cut_helper.rs"
 required-features = ["login-test-seam"]
 
 [dependencies]
+claustrum-model = { path = "../claustrum-model" }
+claustrum-providers = { path = "../claustrum-providers" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subc-jsonc = { workspace = true }
@@ -132,6 +134,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 zbus = { version = "5.12.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
+claustrum-providers = { path = "../claustrum-providers", features = ["test-support"] }
 subc-os = { workspace = true, features = ["test-support"] }
 cortexkit-test-support = { workspace = true }
 tokio = { workspace = true }

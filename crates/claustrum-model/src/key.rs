@@ -76,9 +76,9 @@ impl MasterKey {
         KeyId(id)
     }
 
-    /// Borrow the raw key bytes to construct a cipher. Crate-internal only — the
-    /// bytes must never escape this crate.
-    pub(crate) fn as_bytes(&self) -> &[u8; MASTER_KEY_LEN] {
+    /// Borrow the raw key bytes for cipher construction and core custody operations.
+    /// Callers must not expose or log the bytes.
+    pub fn as_bytes(&self) -> &[u8; MASTER_KEY_LEN] {
         &self.0
     }
 }

@@ -42,8 +42,10 @@ pub mod openai;
 pub mod snowflake;
 pub mod xai;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 #[cfg(test)]
-pub(crate) mod fixture;
+mod oauth_import_tests;
 
 /// The result of a successful token refresh: the new tokens to commit. The
 /// provider may or may not rotate the refresh token (RFC 9700 providers do); the
@@ -402,7 +404,7 @@ mod token_response_rules {
     async fn refresh_without_lifetime_uses_new_access_jwt_expiry() {
         let jwt = format!(
             "e30.{}.sig",
-            crate::store::base64url(br#"{"exp":2000000000}"#)
+            crate::encoding::base64url(br#"{"exp":2000000000}"#)
         );
         for adapter in [
             Box::new(openai::OpenAiAdapter::new()) as Box<dyn RefreshAdapter>,

@@ -651,7 +651,7 @@ name. The seeds are what a new credential is stamped with at creation:
 - A credential that speaks a provider's OAuth protocol is also stamped `<adapter>-native`.
 - Every new `cookie:` record is stamped only `browser-session`.
 
-The assignments are literal per-entry catalog fields in `crates/credentials-core/src/catalog.rs`;
+The assignments are literal per-entry catalog fields in `crates/claustrum-providers/src/catalog/rows.rs`;
 no fallback derives them from the id. `ModelVendor` (`serves`) is a separate, advisory
 vocabulary that never authorizes.
 

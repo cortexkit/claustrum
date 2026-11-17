@@ -236,8 +236,8 @@ fn claude_plan_mappings_are_specific_to_the_source_field() {
 #[test]
 fn callback_listener_docs_distinguish_provider_bind_policies() {
     for source in [
-        include_str!("../src/refresh_adapters/openai.rs"),
-        include_str!("../src/refresh_adapters/xai.rs"),
+        include_str!("../../claustrum-providers/src/refresh_adapters/openai.rs"),
+        include_str!("../../claustrum-providers/src/refresh_adapters/xai.rs"),
     ] {
         assert!(!source.contains("NO listener"));
         assert!(source.contains("--approve-on other"));

@@ -320,9 +320,9 @@ impl RefreshAdapter for MetaAdapter {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "meta/fixtures.rs"]
-pub(crate) mod fixtures;
+pub mod fixtures;
 #[cfg(test)]
 #[path = "meta/tests.rs"]
 mod tests;

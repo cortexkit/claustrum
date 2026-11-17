@@ -100,7 +100,8 @@ impl RecordState {
         }
     }
 
-    pub(crate) fn from_str(s: &str) -> RecordState {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> RecordState {
         match s {
             "active" => RecordState::Active,
             "needs_reauth" => RecordState::NeedsReauth,
@@ -166,7 +167,7 @@ impl RecordIdentity {
     /// Drop email-only identity before validation or persistence; consumers join on
     /// account_id, so keeping its display-only counterpart would advertise a label
     /// that cannot identify an account.
-    pub(crate) fn normalized(self) -> Self {
+    pub fn normalized(self) -> Self {
         if self.is_servable() {
             self
         } else {

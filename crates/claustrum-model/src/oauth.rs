@@ -404,6 +404,55 @@ impl std::fmt::Debug for OAuthCredential {
     }
 }
 
+/// Decode the payload claims of a JWT WITHOUT signature verification. Used only to
+/// read non-secret identity metadata (the ChatGPT account id) out of a token that was
+/// just received directly from the provider's token endpoint over TLS — the transport
+/// is the trust anchor, exactly as the official Codex CLI treats it. Never used to
+/// make an authorization decision.
+pub fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = base64url_decode(payload_b64)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Base64url-decode (no padding) — JWT segments use the unpadded alphabet.
+fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    // Reverse of `base64url`: restore padding, translate the URL-safe alphabet, and
+    // decode manually (no external base64 dependency in this crate).
+    let translated: String = s
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    let padded = match translated.len() % 4 {
+        0 => translated,
+        2 => format!("{translated}=="),
+        3 => format!("{translated}="),
+        _ => return None,
+    };
+    // Minimal base64 decoder over the standard alphabet.
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(padded.len() / 4 * 3);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for ch in padded.bytes() {
+        if ch == b'=' {
+            break;
+        }
+        let val = ALPHABET.iter().position(|&a| a == ch)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,73 +587,6 @@ mod tests {
             error.to_string(),
             "refusing Claustrum tombstone material; import an actual login instead"
         );
-    }
-
-    #[test]
-    fn imports_antigravity_accounts_store_and_packs_managed_project() {
-        // The version:4 accounts-array store the antigravity plugin writes.
-        let raw = br#"{
-            "version": 4,
-            "activeIndex": 1,
-            "accounts": [
-                {"email":"a@x.com","refreshToken":"1//0-aaa","managedProjectId":"proj-a"},
-                {"email":"b@x.com","refreshToken":"1//0-bbb","managedProjectId":"encouraging-env-qwp21"}
-            ]
-        }"#;
-        // activeIndex picks account[1].
-        let c = import_antigravity_account(raw, None).expect("active account");
-        assert_eq!(
-            c.oauth.refresh_token.expose(),
-            "1//0-bbb||encouraging-env-qwp21",
-            "packs <refresh>||<managed> (empty plain project segment)"
-        );
-        assert!(
-            c.oauth.access_token.expose().is_empty(),
-            "antigravity store carries no access token"
-        );
-        // effective_project_id returns the managed id.
-        assert_eq!(
-            crate::refresh_adapters::antigravity::effective_project_id(
-                c.oauth.refresh_token.expose()
-            )
-            .as_deref(),
-            Some("encouraging-env-qwp21")
-        );
-        // THE IDENTITY COMES BACK WITH THE SELECTED ACCOUNT, and it must be the
-        // selected one rather than the first: antigravity access tokens are opaque, so
-        // this email is the only thing that can tell two accounts apart downstream, and
-        // returning the wrong account's email is worse than returning none.
-        assert_eq!(
-            c.email.as_deref(),
-            Some("b@x.com"),
-            "the active account's email, not the store's first"
-        );
-        // Select a specific account by email (forward-compat multi-account).
-        let a = import_antigravity_account(raw, Some("a@x.com")).expect("by email");
-        assert_eq!(a.oauth.refresh_token.expose(), "1//0-aaa||proj-a");
-        assert_eq!(a.email.as_deref(), Some("a@x.com"), "tracks the selection");
-        // Select by numeric index.
-        let byidx = import_antigravity_account(raw, Some("0")).expect("by index");
-        assert_eq!(byidx.oauth.refresh_token.expose(), "1//0-aaa||proj-a");
-        assert_eq!(byidx.email.as_deref(), Some("a@x.com"));
-        // An account with NO email is None rather than an empty string, which would
-        // present downstream as an account labelled with nothing.
-        let no_email = import_antigravity_account(
-            br#"{"version":4,"activeIndex":0,"accounts":[{"refreshToken":"1//0-ccc"}]}"#,
-            None,
-        )
-        .expect("account without an email");
-        assert_eq!(no_email.email, None);
-        assert_eq!(no_email.oauth.refresh_token.expose(), "1//0-ccc|");
-        // An unknown selector is a typed error; an empty store is rejected.
-        assert!(matches!(
-            import_antigravity_account(raw, Some("nope@x.com")),
-            Err(ImportError::ProviderNotFound(_))
-        ));
-        assert!(matches!(
-            import_antigravity_account(br#"{"version":4,"accounts":[]}"#, None),
-            Err(ImportError::Malformed(_))
-        ));
     }
 
     #[test]

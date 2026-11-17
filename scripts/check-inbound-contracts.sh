@@ -27,6 +27,9 @@ set -o pipefail
 
 spec="${1:-../subconscious/docs/push-sealed-payload.md}"
 source_file="crates/credentials-core/src/apns_submit.rs"
+if [[ -f "crates/claustrum-providers/src/apns_submit.rs" ]]; then
+  source_file="crates/claustrum-providers/src/apns_submit.rs"
+fi
 
 if [[ ! -f "$spec" ]]; then
   echo "REFUSED: spec not found at $spec" >&2

@@ -338,6 +338,14 @@ async fn start_vault_with_seed<F>(seed: F) -> Option<SeededVault>
 where
     F: FnOnce(&SeedCtx) -> (String, Vec<u8>),
 {
+    start_vault_with_seed_and_config(seed, |_, _| {}).await
+}
+
+async fn start_vault_with_seed_and_config<F, C>(seed: F, configure: C) -> Option<SeededVault>
+where
+    F: FnOnce(&SeedCtx) -> (String, Vec<u8>),
+    C: FnOnce(&mut Value, &Path),
+{
     let subc_core = build_subc_core()?;
     let credentials_module = daemon_binary();
     assert!(credentials_module.exists());
@@ -391,7 +399,7 @@ where
     // operator key path passed via env so the daemon resolves the same key the CLI
     // provisioned. `registration_channel: true` is the gated production setting: the
     // daemon then accepts the vault only over the channel it hands over, never by nonce.
-    let subc_jsonc = serde_json::json!({
+    let mut subc_jsonc = serde_json::json!({
         "version": 1,
         "storage": { "backend": "sqlite", "data_home": data_home },
         "modules": {
@@ -404,6 +412,7 @@ where
             }
         }
     });
+    configure(&mut subc_jsonc, &rig);
     std::fs::write(
         config_dir.join("subc.jsonc"),
         serde_json::to_vec_pretty(&subc_jsonc).unwrap(),
@@ -597,6 +606,108 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
         bytes, seeded.payload,
         "served the seeded credential payload"
     );
+}
+
+/// Run with `--features consumer-e2e` so Cargo builds the test-only SDK module.
+#[cfg(feature = "consumer-e2e")]
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn claim_bound_sdk_consumer_reads_vault_through_rust_resolver() {
+    const CONSUMER: &str = "claustrum-client-probe";
+    let Some(seeded) = start_vault_with_seed_and_config(
+        |ctx| {
+            run_cli(&[
+                "put",
+                "--id",
+                "operator:test",
+                "--payload-file",
+                &payload_file("the-secret-bytes"),
+                "--data-dir",
+                &ctx.data_dir,
+                "--key-path",
+                &ctx.key_path,
+            ]);
+            run_cli(&[
+                "grant",
+                "--principal",
+                "reserved:claustrum-client-probe",
+                "--selector-kind",
+                "exact",
+                "--selector",
+                "operator:test",
+                "--operation",
+                "read",
+                "--data-dir",
+                &ctx.data_dir,
+                "--key-path",
+                &ctx.key_path,
+            ]);
+            ("operator:test".into(), b"the-secret-bytes".to_vec())
+        },
+        |config, _rig| {
+            config["modules"][CONSUMER] = json!({
+                "program": env!("CARGO_BIN_EXE_ckdev-claustrum-consumer"),
+                "args": [], "reserved": true, "registration_channel": true,
+            });
+        },
+    )
+    .await
+    else {
+        eprintln!("{}", skip_notice("claim-bound SDK consumer"));
+        return;
+    };
+    let mut driver = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut driver, MODULE_ID, SETUP_TIMEOUT).await;
+    wait_for_catalog(&mut driver, CONSUMER, SETUP_TIMEOUT).await;
+
+    let provenance = control_rpc(
+        &mut driver,
+        9001,
+        json!({
+            "op":"supervisor.provenance", "module_id":CONSUMER,
+        }),
+    )
+    .await;
+    assert_eq!(provenance.header.ty, FrameType::Response);
+    let body: Value = serde_json::from_slice(&provenance.body).unwrap();
+    let entry = body["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["module_id"] == CONSUMER)
+        .expect("consumer provenance");
+    assert_eq!(
+        subc_control::SupervisorModuleProvenanceExt::read_from(entry)
+            .unwrap()
+            .registration,
+        Some(subc_control::RegistrationMethod::Channel)
+    );
+    assert!(entry["module_declared"]["build"]
+        .get("launch_nonce_source")
+        .is_none());
+
+    let opened = control_rpc(
+        &mut driver,
+        9002,
+        json!({
+            "op":"route.open", "target":{"kind":"management_surface","module_id":CONSUMER},
+            "identity":{"harness":"credentials-e2e","session":"sdk-consumer"},
+        }),
+    )
+    .await;
+    assert_eq!(opened.header.ty, FrameType::Response);
+    let route: Value = serde_json::from_slice(&opened.body).unwrap();
+    let result = raw_route_request(
+        &mut driver,
+        common::Route {
+            channel: route["route_channel"].as_u64().unwrap().try_into().unwrap(),
+            epoch: route["route_epoch"].as_u64().unwrap().try_into().unwrap(),
+        },
+        9003,
+        json!({"method":"probe.read","params":{}}),
+    )
+    .await;
+    assert_eq!(result, json!({"claim_bound_read":true}));
 }
 
 /// THE DEPLOY REACHABILITY PROBE for stale-not-dead: a report against a REFRESHABLE

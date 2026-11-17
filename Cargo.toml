@@ -34,7 +34,7 @@ subc-os = { version = "0.1.38", features = ["tokio"] }
 subc-config = "0.1.0"
 # The control-plane request bodies (`route.open` carries the consumer identity).
 # Same release family as subc-protocol, which subc-client-rs pins it alongside.
-subc-control = "0.40.0"
+subc-control = "0.41.0"
 
 cortexkit-store = "0.2.4"
 # 0.1.4: `durable_replace`, the crash-durable replace every temp-then-rename publish

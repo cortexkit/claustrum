@@ -32,6 +32,11 @@ path = "src/main.rs"
 name = "ck-auth"
 path = "src/bin/credentials_cli.rs"
 
+[[bin]]
+name = "ckdev-claustrum-consumer"
+path = "tests/support/consumer_module.rs"
+required-features = ["consumer-e2e"]
+
 # Sets the environment a supervised module's shell inherits, so it must own its whole
 # process: no libtest worker threads, no other tests. See the file's header.
 [[test]]
@@ -42,6 +47,7 @@ harness = false
 [features]
 default = []
 test-support = ["credentials-core/test-support"]
+consumer-e2e = ["dep:subc-client-rs", "dep:cortexkit-claustrum-client"]
 import-prompt-seam = []
 # Debug-only Windows CLI rendezvous points keep real handles open for the
 # runtime tests. The shipped default-feature release contains none of them.
@@ -56,6 +62,8 @@ subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
 subc-config = { workspace = true }
+subc-client-rs = { version = "=0.41.1", optional = true }
+cortexkit-claustrum-client = { path = "../claustrum-client", optional = true }
 cortexkit-store = { workspace = true }
 # `durable_replace`: the engram catalog and the OpenCode file writers replace a file
 # through it so the replace survives a power loss on Windows as well as Unix.

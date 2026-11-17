@@ -207,140 +207,118 @@ fn params(enrollment_token: Option<&str>) -> Value {
 #[cfg(feature = "transport")]
 impl ClaustrumConsumer {
     pub(super) async fn start_scoped_watch(
-        mut self,
+        self,
         enrollment_token: Option<String>,
     ) -> Result<ScopedWatch, CredentialResolverError> {
-        let corr = self.next_correlation();
-        self.write_request(
-            self.route_channel,
-            self.route_epoch,
-            corr,
-            Priority::Interactive,
-            json!({"method":"auth.watch_scoped", "params":params(enrollment_token.as_deref())}),
-        )
-        .await?;
-        let (events, receiver) = mpsc::channel(32);
-        let (closed, outcome) = oneshot::channel();
-        let (stop, mut stopped) = oneshot::channel();
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                biased;
-                _ = &mut stopped => ScopedWatchOutcome::Stopped,
-                result = self.read_scoped_watch(corr, enrollment_token.as_deref(), &events) => result,
-            };
-            // Also cancel malformed/overflowed streams so a live provider frees its slot.
-            if let Ok(cancel) = Frame::build(
-                FrameType::Cancel,
-                Flags::new(false, Priority::Interactive, false),
-                self.route_channel,
-                self.route_epoch,
-                corr,
-                vec![],
-            ) {
-                let _ = tokio::time::timeout(
-                    CREDENTIAL_READ_TIMEOUT,
-                    write_frame(&mut self.stream, &cancel),
-                )
-                .await;
-            }
-            drop(events);
-            let _ = closed.send(result);
-        });
-        Ok(ScopedWatch {
-            events: receiver,
-            closed: outcome,
-            stop: Some(stop),
-        })
+        start_scoped_watch(self, enrollment_token).await
     }
+}
 
-    async fn read_scoped_watch(
-        &mut self,
-        corr: u64,
-        enrollment_token: Option<&str>,
-        events: &mpsc::Sender<ScopedWatchNotice>,
-    ) -> ScopedWatchOutcome {
-        let mut tracker = WatchTracker::default();
-        loop {
-            let frame = match read_frame(&mut self.stream).await {
-                Ok(Some(frame)) => frame,
-                _ => {
+#[cfg(feature = "transport")]
+pub(super) async fn start_scoped_watch<T: transport::CredentialTransport + 'static>(
+    mut transport: T,
+    enrollment_token: Option<String>,
+) -> Result<ScopedWatch, CredentialResolverError> {
+    let corr = transport
+        .subscribe(transport::encode_request(
+            &json!({"method":"auth.watch_scoped", "params":params(enrollment_token.as_deref())}),
+        )?)
+        .await?;
+    let (events, receiver) = mpsc::channel(32);
+    let (closed, outcome) = oneshot::channel();
+    let (stop, mut stopped) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            biased;
+            _ = &mut stopped => ScopedWatchOutcome::Stopped,
+            result = read_scoped_watch(&mut transport, corr, enrollment_token.as_deref(), &events) => result,
+        };
+        // Also cancel malformed/overflowed streams so a live provider frees its slot.
+        transport.cancel_watch(corr).await;
+        drop(events);
+        let _ = closed.send(result);
+    });
+    Ok(ScopedWatch {
+        events: receiver,
+        closed: outcome,
+        stop: Some(stop),
+    })
+}
+
+#[cfg(feature = "transport")]
+async fn read_scoped_watch(
+    transport: &mut impl transport::CredentialTransport,
+    corr: u64,
+    enrollment_token: Option<&str>,
+    events: &mpsc::Sender<ScopedWatchNotice>,
+) -> ScopedWatchOutcome {
+    let mut tracker = WatchTracker::default();
+    loop {
+        let frame = match transport.next_watch(corr).await {
+            Ok(frame) => frame,
+            Err(error) => return ScopedWatchOutcome::TransportLost(error),
+        };
+        match frame {
+            transport::WatchFrame::Data(body) => {
+                let notice = match WatchNotice::decode(&body) {
+                    Ok(notice) => notice,
+                    Err(_) => return ScopedWatchOutcome::InvalidNotice,
+                };
+                tracker.notice(&notice);
+                if events.try_send(notice).is_err() {
                     return ScopedWatchOutcome::TransportLost(CredentialResolverError::transport(
-                        "scoped watch connection lost",
-                    ))
-                }
-            };
-            if frame.header.channel != self.route_channel || frame.header.epoch != self.route_epoch
-            {
-                continue;
-            }
-            if frame.header.ty == FrameType::Goodbye {
-                return ScopedWatchOutcome::TransportLost(CredentialResolverError::unclassified(
-                    "route_closed",
-                    "scoped watch route closed",
-                ));
-            }
-            if frame.header.corr != corr {
-                continue;
-            }
-            match frame.header.ty {
-                FrameType::StreamData => {
-                    let notice = match WatchNotice::decode(&frame.body) {
-                        Ok(notice) => notice,
-                        Err(_) => return ScopedWatchOutcome::InvalidNotice,
-                    };
-                    tracker.notice(&notice);
-                    if events.try_send(notice).is_err() {
-                        return ScopedWatchOutcome::TransportLost(
-                            CredentialResolverError::transport("scoped watch consumer lagged"),
-                        );
-                    }
-                }
-                FrameType::Response => {
-                    let value = serde_json::from_slice(&frame.body).unwrap_or(Value::Null);
-                    if value.get("result").and_then(|r| r.get("error")).is_some() {
-                        tracker.refused();
-                        return ScopedWatchOutcome::Refused(
-                            decode_list_scoped_reply(value).unwrap_err(),
-                        );
-                    }
-                    return ScopedWatchOutcome::InvalidResponse(invalid_listing(
-                        "unexpected watch response",
+                        "scoped watch consumer lagged",
                     ));
                 }
-                FrameType::StreamEnd => {
-                    if tracker.closed() == WatchAction::ResubscribeAndReread {
-                        return ScopedWatchOutcome::Ended;
-                    }
-                    let response = self.credential_request(json!({"method":CREDENTIAL_LIST_SCOPED_OP, "params":params(enrollment_token)}), CREDENTIAL_LIST_SCOPED_OP).await;
-                    return match response {
-                        Ok(value) => {
-                            let refused =
-                                value.get("result").and_then(|r| r.get("error")).is_some();
-                            match decode_list_scoped_reply(value) {
-                                Ok(_) => {
-                                    tracker.list_result(true);
-                                    ScopedWatchOutcome::NotAccepting
-                                }
-                                Err(error) if refused => {
-                                    tracker.list_result(false);
-                                    ScopedWatchOutcome::Refused(error)
-                                }
-                                Err(error) => ScopedWatchOutcome::InvalidResponse(error),
+            }
+            transport::WatchFrame::Response(body) => {
+                let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if value.get("result").and_then(|r| r.get("error")).is_some() {
+                    tracker.refused();
+                    return ScopedWatchOutcome::Refused(
+                        decode_list_scoped_reply(value).unwrap_err(),
+                    );
+                }
+                return ScopedWatchOutcome::InvalidResponse(invalid_listing(
+                    "unexpected watch response",
+                ));
+            }
+            transport::WatchFrame::End => {
+                if tracker.closed() == WatchAction::ResubscribeAndReread {
+                    return ScopedWatchOutcome::Ended;
+                }
+                let response = transport::credential_request(
+                    transport,
+                    json!({"method":CREDENTIAL_LIST_SCOPED_OP, "params":params(enrollment_token)}),
+                    CREDENTIAL_LIST_SCOPED_OP,
+                )
+                .await;
+                return match response {
+                    Ok(value) => {
+                        let refused = value.get("result").and_then(|r| r.get("error")).is_some();
+                        match decode_list_scoped_reply(value) {
+                            Ok(_) => {
+                                tracker.list_result(true);
+                                ScopedWatchOutcome::NotAccepting
                             }
+                            Err(error) if refused => {
+                                tracker.list_result(false);
+                                ScopedWatchOutcome::Refused(error)
+                            }
+                            Err(error) => ScopedWatchOutcome::InvalidResponse(error),
                         }
-                        Err(error) => ScopedWatchOutcome::TransportLost(error),
-                    };
-                }
-                FrameType::Error => {
-                    let value = serde_json::from_slice::<Value>(&frame.body).unwrap_or(Value::Null);
-                    if value.get("code").and_then(Value::as_str) == Some("unknown_method") {
-                        tracker.unknown_method();
-                        return ScopedWatchOutcome::Unsupported;
                     }
-                    tracker.route_lost();
-                    return ScopedWatchOutcome::TransportLost(decode_wire_error(&frame.body));
+                    Err(error) => ScopedWatchOutcome::TransportLost(error),
+                };
+            }
+            transport::WatchFrame::Error(body) => {
+                let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+                if value.get("code").and_then(Value::as_str) == Some("unknown_method") {
+                    tracker.unknown_method();
+                    return ScopedWatchOutcome::Unsupported;
                 }
-                _ => {}
+                tracker.route_lost();
+                return ScopedWatchOutcome::TransportLost(decode_wire_error(&body));
             }
         }
     }

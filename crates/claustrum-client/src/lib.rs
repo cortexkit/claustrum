@@ -2,8 +2,8 @@
 
 //! Claustrum credential consumer for subc-supervised modules.
 //!
-//! Disable the default `transport` feature to reuse the decoders and watch tracker
-//! with a connection owned by the caller.
+//! Disable default features to reuse the decoders and watch tracker
+//! without the socket transport or SDK dependency.
 //!
 //! ```
 //! use cortexkit_claustrum_client::{decode_credential_reply, WatchAction, WatchNotice, WatchTracker};
@@ -49,6 +49,10 @@ use tokio::net::TcpStream;
 #[cfg(feature = "transport")]
 use tokio::sync::Mutex as AsyncMutex;
 
+#[cfg(feature = "consumer")]
+mod consumer;
+#[cfg(feature = "transport")]
+mod transport;
 mod watch;
 #[cfg(feature = "transport")]
 pub use watch::ScopedWatch;
@@ -690,6 +694,7 @@ impl std::fmt::Debug for ClaustrumCredentialResolver {
 impl ClaustrumCredentialResolver {
     /// Creates a lazy resolver for a supervised consumer. Bind identity carries
     /// harness/session labels only; a route's project comes from its session scope.
+    /// Claim-bound modules must use `with_consumer` instead (feature `consumer`).
     pub fn new(connection_file_path: PathBuf, consumer_module_id: impl Into<String>) -> Self {
         Self {
             target: Arc::new(LiveCredentialGetTarget::new(
@@ -704,6 +709,7 @@ impl ClaustrumCredentialResolver {
     }
 
     /// Creates a resolver with an explicit supervised consumer module ID.
+    /// Claim-bound modules must use `with_consumer` instead (feature `consumer`).
     #[doc(hidden)]
     pub fn with_live_consumer_identity(
         connection_file_path: PathBuf,
@@ -715,6 +721,22 @@ impl ClaustrumCredentialResolver {
                     connection_file_path,
                     consumer_module_id,
                 }),
+                CREDENTIAL_CALL_DEADLINE,
+            )),
+            transient_retries: DEFAULT_TRANSIENT_RETRIES,
+        }
+    }
+
+    /// Uses the caller's SDK connection, including its module claim binding.
+    /// Legacy module-ID/launch-nonce identity overrides would conflict with a
+    /// claim-bound connection, so this resolver leaves identity binding to the SDK.
+    /// The consumer is shared because `SubcConsumer` is not `Clone`; dropping
+    /// the resolver never closes the caller's connection or unrelated routes.
+    #[cfg(feature = "consumer")]
+    pub fn with_consumer(consumer: Arc<subc_client_rs::SubcConsumer>) -> Self {
+        Self {
+            target: Arc::new(LiveCredentialGetTarget::new(
+                Arc::new(consumer::ConsumerConnector(consumer)),
                 CREDENTIAL_CALL_DEADLINE,
             )),
             transient_retries: DEFAULT_TRANSIENT_RETRIES,
@@ -913,37 +935,59 @@ trait CredentialConsumerConnection: Send {
         raw_handle: &'a str,
         min_ttl_ms: Option<u64>,
         force_refresh: bool,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            self.credential_request(
+                credential_get_request(raw_handle, min_ttl_ms, force_refresh),
+                "credential.get",
+            )
+            .await
+        })
+    }
 
     fn credential_get_scoped<'a>(
         &'a mut self,
         credential_id: &'a str,
         min_ttl_ms: Option<u64>,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            self.credential_request(
+                credential_get_scoped_request(credential_id, min_ttl_ms),
+                CREDENTIAL_GET_SCOPED_OP,
+            )
+            .await
+        })
+    }
 
     fn credential_report_auth_failure<'a>(
         &'a mut self,
-        _credential_id: &'a str,
-        _record_version: u64,
-        _provider_status: u16,
+        credential_id: &'a str,
+        record_version: u64,
+        provider_status: u16,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async {
-            Err(CredentialResolverError::new(
-                CredentialErrorClass::Unavailable,
-                "credential auth-failure reports are unavailable",
-            ))
+        Box::pin(async move {
+            self.credential_request(
+                credential_report_auth_failure_request(
+                    credential_id,
+                    record_version,
+                    provider_status,
+                ),
+                CREDENTIAL_REPORT_AUTH_FAILURE_OP,
+            )
+            .await
         })
     }
 
     fn credential_status<'a>(
         &'a mut self,
-        _credential_id: &'a str,
+        credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async {
-            Err(CredentialResolverError::new(
-                CredentialErrorClass::Permanent,
-                "credential status reads are unavailable",
-            ))
+        Box::pin(async move {
+            self.credential_request(
+                credential_status_request(credential_id),
+                CREDENTIAL_STATUS_OP,
+            )
+            .await
         })
     }
 
@@ -951,34 +995,51 @@ trait CredentialConsumerConnection: Send {
         &'a mut self,
         credential_id: &'a str,
         payload: &'a [u8],
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            self.credential_request(
+                credential_sign_request(credential_id, payload),
+                CREDENTIAL_SIGN_OP,
+            )
+            .await
+        })
+    }
 
     fn credential_public_key<'a>(
         &'a mut self,
         credential_id: &'a str,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            self.credential_request(
+                credential_public_key_request(credential_id),
+                CREDENTIAL_PUBLIC_KEY_OP,
+            )
+            .await
+        })
+    }
 
     fn credential_seal<'a>(
         &'a mut self,
-        _request: SealRequest<'a>,
+        request: SealRequest<'a>,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async {
-            Err(CredentialResolverError::new(
-                CredentialErrorClass::Permanent,
-                "credential sealing is unavailable",
-            ))
+        Box::pin(async move {
+            self.credential_request(credential_seal_request(request), CREDENTIAL_SEAL_OP)
+                .await
         })
     }
 
     fn credential_list_scoped(
         &mut self,
     ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
-        Box::pin(async {
-            Err(CredentialResolverError::new(
-                CredentialErrorClass::Permanent,
-                "credential listing is unavailable",
-            ))
-        })
+        self.credential_request(credential_list_scoped_request(), CREDENTIAL_LIST_SCOPED_OP)
+    }
+
+    fn credential_request<'a>(
+        &'a mut self,
+        _request: Value,
+        _operation: &'a str,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
 }
 
@@ -1067,7 +1128,7 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         enrollment_token: Option<&'a str>,
     ) -> CredentialResolverFuture<'a, Result<ScopedWatch, CredentialResolverError>> {
         Box::pin(async move {
-            // A watch owns a separate connection so it cannot hold the unary-call mutex.
+            // A watch owns a separate transport handle so it cannot hold the unary-call mutex.
             tokio::time::timeout(self.call_deadline, async {
                 self.connector
                     .connect()
@@ -1379,114 +1440,6 @@ impl ClaustrumConsumer {
         Ok((channel, epoch))
     }
 
-    async fn credential_get(
-        &mut self,
-        raw_handle: &str,
-        min_ttl_ms: Option<u64>,
-        force_refresh: bool,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_get_request(raw_handle, min_ttl_ms, force_refresh),
-            "credential.get",
-        )
-        .await
-    }
-
-    async fn credential_get_scoped(
-        &mut self,
-        credential_id: &str,
-        min_ttl_ms: Option<u64>,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_get_scoped_request(credential_id, min_ttl_ms),
-            CREDENTIAL_GET_SCOPED_OP,
-        )
-        .await
-    }
-
-    async fn credential_report_auth_failure(
-        &mut self,
-        credential_id: &str,
-        record_version: u64,
-        provider_status: u16,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_report_auth_failure_request(credential_id, record_version, provider_status),
-            CREDENTIAL_REPORT_AUTH_FAILURE_OP,
-        )
-        .await
-    }
-
-    async fn credential_status(
-        &mut self,
-        credential_id: &str,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_status_request(credential_id),
-            CREDENTIAL_STATUS_OP,
-        )
-        .await
-    }
-
-    async fn credential_sign(
-        &mut self,
-        credential_id: &str,
-        payload: &[u8],
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_sign_request(credential_id, payload),
-            CREDENTIAL_SIGN_OP,
-        )
-        .await
-    }
-
-    async fn credential_public_key(
-        &mut self,
-        credential_id: &str,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(
-            credential_public_key_request(credential_id),
-            CREDENTIAL_PUBLIC_KEY_OP,
-        )
-        .await
-    }
-
-    async fn credential_seal(
-        &mut self,
-        request: SealRequest<'_>,
-    ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(credential_seal_request(request), CREDENTIAL_SEAL_OP)
-            .await
-    }
-
-    async fn credential_request(
-        &mut self,
-        request: Value,
-        operation: &str,
-    ) -> Result<Value, CredentialResolverError> {
-        let correlation = self.next_correlation();
-        self.write_request(
-            self.route_channel,
-            self.route_epoch,
-            correlation,
-            Priority::Interactive,
-            request,
-        )
-        .await?;
-        let reply = self
-            .read_reply(self.route_channel, self.route_epoch, correlation)
-            .await?;
-        if reply.header.ty == FrameType::Error {
-            return Err(decode_wire_error(&reply.body));
-        }
-        serde_json::from_slice(&reply.body).map_err(|_| {
-            CredentialResolverError::new(
-                CredentialErrorClass::InvalidResponse,
-                format!("{operation} reply is not valid JSON"),
-            )
-        })
-    }
-
     async fn write_request(
         &mut self,
         channel: u16,
@@ -1495,12 +1448,24 @@ impl ClaustrumConsumer {
         priority: Priority,
         body: Value,
     ) -> Result<(), CredentialResolverError> {
-        let bytes = serde_json::to_vec(&body).map_err(|_| {
-            CredentialResolverError::new(
-                CredentialErrorClass::Permanent,
-                "credential request encoding failed",
-            )
-        })?;
+        self.write_bytes(
+            channel,
+            epoch,
+            correlation,
+            priority,
+            transport::encode_request(&body)?,
+        )
+        .await
+    }
+
+    async fn write_bytes(
+        &mut self,
+        channel: u16,
+        epoch: u32,
+        correlation: u64,
+        priority: Priority,
+        bytes: Vec<u8>,
+    ) -> Result<(), CredentialResolverError> {
         let frame = Frame::build(
             FrameType::Request,
             Flags::new(false, priority, false),
@@ -1566,88 +1531,12 @@ impl CredentialConsumerConnection for ClaustrumConsumer {
         Box::pin(async move { (*self).start_scoped_watch(enrollment_token).await })
     }
 
-    fn credential_get<'a>(
+    fn credential_request<'a>(
         &'a mut self,
-        raw_handle: &'a str,
-        min_ttl_ms: Option<u64>,
-        force_refresh: bool,
+        request: Value,
+        operation: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_get(
-            self,
-            raw_handle,
-            min_ttl_ms,
-            force_refresh,
-        ))
-    }
-
-    fn credential_get_scoped<'a>(
-        &'a mut self,
-        credential_id: &'a str,
-        min_ttl_ms: Option<u64>,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_get_scoped(
-            self,
-            credential_id,
-            min_ttl_ms,
-        ))
-    }
-
-    fn credential_report_auth_failure<'a>(
-        &'a mut self,
-        credential_id: &'a str,
-        record_version: u64,
-        provider_status: u16,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_report_auth_failure(
-            self,
-            credential_id,
-            record_version,
-            provider_status,
-        ))
-    }
-
-    fn credential_status<'a>(
-        &'a mut self,
-        credential_id: &'a str,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_status(self, credential_id))
-    }
-
-    fn credential_sign<'a>(
-        &'a mut self,
-        credential_id: &'a str,
-        payload: &'a [u8],
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_sign(
-            self,
-            credential_id,
-            payload,
-        ))
-    }
-
-    fn credential_public_key<'a>(
-        &'a mut self,
-        credential_id: &'a str,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_public_key(
-            self,
-            credential_id,
-        ))
-    }
-
-    fn credential_seal<'a>(
-        &'a mut self,
-        request: SealRequest<'a>,
-    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(ClaustrumConsumer::credential_seal(self, request))
-    }
-
-    fn credential_list_scoped(
-        &mut self,
-    ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
-        Box::pin(
-            self.credential_request(credential_list_scoped_request(), CREDENTIAL_LIST_SCOPED_OP),
-        )
+        Box::pin(transport::credential_request(self, request, operation))
     }
 }
 

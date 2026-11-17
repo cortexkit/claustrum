@@ -4,26 +4,62 @@ Rust client for the claustrum credential vault, used by subc-supervised CortexKi
 modules. The vault owns this client alongside its TypeScript client so the wire
 decoders can be tested against the producer's serialized replies.
 
-Version 0.11.0 builds on subc-protocol 0.37 and subc-transport 0.18; its API is
-unchanged from 0.10.0. A consumer still on subc-protocol 0.36 stays on 0.10.0,
-because one build can hold only one copy of the protocol crate. Listed
+Version 0.12.0 adds a resolver over a caller-owned `subc-client-rs` 0.41.1
+consumer for claim-bound modules. It uses subc-protocol 0.37, subc-control 0.41
+and subc-transport 0.18. The legacy raw constructors remain available. Listed
 credentials carry optional `plan_tier_since_ms`: use the operator's effective
 start when present, otherwise fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.11.0"
+cortexkit-claustrum-client = "0.12.0"
 ```
 
-The default `transport` feature provides the resolver and live watch connection.
-If you already own a bus connection, use `cortexkit-claustrum-client = { version =
-"0.11.0", default-features = false }` for the public `decode_*_reply` functions,
+The default `transport` and `consumer` features provide the resolver, live watch,
+and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
+"0.12.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
-`subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
+`subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.
 
-Construct `ClaustrumCredentialResolver::new(connection_file_path,
-consumer_module_id)` and import the `CredentialResolver` trait to call it. Bind
+### Claim-bound modules
+
+A module registered through the daemon's registration channel must reuse its SDK
+consumer, which authenticates consumer connections with the module's claim. It
+must not open a raw connection with a module ID and launch nonce. Use the
+`consumer` feature (enabled by default):
+
+```rust,no_run
+use std::sync::Arc;
+use cortexkit_claustrum_client::{ClaustrumCredentialResolver, CredentialResolver};
+use subc_client_rs::SubcConsumer;
+
+async fn read_from_vault(consumer: Arc<SubcConsumer>) {
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&consumer));
+    let credential = resolver.get_scoped("provider:account").await.unwrap();
+    // Pass credential.expose() to the provider; never log the bytes.
+    let mut watch = resolver.watch_scoped(None).await.unwrap();
+    while let Some(notice) = watch.next().await {
+        // Re-read the inventory or held keys indicated by WatchTracker.
+        let _ = notice;
+    }
+}
+```
+
+Register the module with the SDK before connecting the consumer, and keep that
+registration serving while the consumer is in use. `SubcConsumer` is not `Clone`,
+so callers share it with `Arc`. All resolver operations, including
+`auth.watch_scoped`, use this consumer. The adapter supplies no consumer identity
+or launch nonce; the SDK binds the connection. Dropping a resolver does not close
+the caller's consumer. Watches cancel their own subscriptions, not other calls.
+Reply decoding, refusal classes, retry policy, and `WatchTracker` are shared with
+the raw path; `seal` and scoped reads still make one unary attempt.
+The client neither acquires grants nor enrolls a consumer.
+
+For processes still using launch-nonce registration, construct
+`ClaustrumCredentialResolver::new(connection_file_path, consumer_module_id)`
+(or the existing `with_live_consumer_identity` constructor). Import the
+`CredentialResolver` trait to call it. Bind
 identity carries only harness/session labels; a route's project comes from its
 session scope, not a caller-supplied project path. The resolver lazily opens a
 route to `claustrum`, presenting the reserved consumer

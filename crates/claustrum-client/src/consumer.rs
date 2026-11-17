@@ -6,6 +6,41 @@ use subc_client_rs::{
 use subc_protocol::{BindIdentity, RouteTarget};
 
 pub(super) struct ConsumerConnector(pub Arc<SubcConsumer>);
+pub(super) struct ModuleSecretConnector(pub Arc<SubcConsumer>);
+
+impl CredentialConsumerConnector for ModuleSecretConnector {
+    fn connect(
+        &self,
+    ) -> CredentialResolverFuture<
+        '_,
+        Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
+    > {
+        connect(
+            Arc::clone(&self.0),
+            BindIdentity::new("callosum-self".to_owned(), "credential-resolver".to_owned()),
+        )
+    }
+}
+
+fn connect(
+    consumer: Arc<SubcConsumer>,
+    identity: BindIdentity,
+) -> CredentialResolverFuture<
+    'static,
+    Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
+> {
+    Box::pin(async move {
+        let handle = consumer
+            .open_route(target(), identity, options())
+            .await
+            .map_err(decode_error)?;
+        Ok(Box::new(ConsumerConnection {
+            consumer,
+            handle,
+            subscription: None,
+        }) as Box<dyn CredentialConsumerConnection>)
+    })
+}
 
 impl CredentialConsumerConnector for ConsumerConnector {
     fn connect(
@@ -14,18 +49,7 @@ impl CredentialConsumerConnector for ConsumerConnector {
         '_,
         Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
     > {
-        let consumer = Arc::clone(&self.0);
-        Box::pin(async move {
-            let handle = consumer
-                .open_route(target(), identity(), options())
-                .await
-                .map_err(decode_error)?;
-            Ok(Box::new(ConsumerConnection {
-                consumer,
-                handle,
-                subscription: None,
-            }) as Box<dyn CredentialConsumerConnection>)
-        })
+        connect(Arc::clone(&self.0), identity())
     }
 }
 
@@ -79,6 +103,25 @@ fn decode_error(error: CallError) -> CredentialResolverError {
 }
 
 impl CredentialConsumerConnection for ConsumerConnection {
+    fn module_secret_request(
+        &mut self,
+        request: Secret<Vec<u8>>,
+    ) -> CredentialResolverFuture<'_, Result<Secret<Vec<u8>>, CredentialResolverError>> {
+        Box::pin(async move {
+            let body =
+                subc_client_rs::RequestBody::new(request.expose().clone()).map_err(decode_error)?;
+            let reservation = self
+                .consumer
+                .reserve(
+                    &self.handle,
+                    tokio::time::Instant::now() + CREDENTIAL_CALL_DEADLINE,
+                )
+                .await
+                .map_err(decode_error)?;
+            let (_, reply) = reservation.send(body, options());
+            reply.await.map(Secret::new).map_err(decode_error)
+        })
+    }
     fn into_scoped_watch(
         self: Box<Self>,
         enrollment_token: Option<String>,

@@ -169,8 +169,7 @@ pub(super) fn cmd_put(
     // in the OAuth shape where the engine's single-flight, expiry and version-CAS
     // machinery already lives. Stored static instead, `credential.get` serves the PEM
     // verbatim; a consumer then puts newline-laden key material into an HTTP header and
-    // fails before the wire. That is not hypothetical -- it is what plexus hit on
-    // 2026-08-17, and the reason this branch exists.
+    // fails before the wire.
     //
     // `--client-id` is what selects the shape, because the adapter cannot mint without
     // it: it is the App JWT's `iss`. Requiring it here means a github_app record cannot
@@ -495,8 +494,8 @@ pub(super) fn attach_import_identity(
             // THE EMAIL BECOMES THE ACCOUNT ID BECAUSE AN EMAIL-ONLY IDENTITY IS DROPPED.
             // `RecordIdentity::normalized` discards an identity with no account_id, so a
             // harness that gives us an address and no subject would otherwise import with
-            // no identity at all -- which is how five antigravity accounts rendered as
-            // indistinguishable unlabelled rows until 2026-09-19.
+            // no identity at all, and several such accounts would render as
+            // indistinguishable unlabelled rows.
             //
             // The consequence is real and belongs here rather than in a commit message: a
             // consumer's account column then holds an email for this provider and a UUID

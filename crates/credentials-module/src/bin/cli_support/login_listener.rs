@@ -5,7 +5,7 @@
 //! authorization-code redirect directly — so the operator just approves in the
 //! browser and the flow completes, no copy-paste.
 //!
-//! Boundaries (the approved envelope):
+//! Boundaries:
 //! - CLI-PROCESS-ONLY. The daemon never runs a listener; this lives in the CLI, the
 //!   same process that owns the interactive half of login. The vault stays headless
 //!   and zero-inbound.

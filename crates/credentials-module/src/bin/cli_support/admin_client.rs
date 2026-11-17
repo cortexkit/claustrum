@@ -3,7 +3,8 @@
 //! When the daemon is up it holds the single-writer lease, so the offline path
 //! (which takes the lease) cannot write. This client talks to the running module
 //! over the subc route plane instead, authenticating each op with a master-key
-//! challenge-response (the module's Gate 2). The CLI resolves the SAME master key
+//! challenge-response: the module checks a message authentication code (MAC) over
+//! the exact operation bytes. The CLI resolves the SAME master key
 //! from the keychain WITHOUT opening the database or taking the lease — the
 //! challenge returns the module's `key_id`. A login carries its preflighted key and
 //! signs with it when that fingerprint still matches; if a rotation landed meanwhile,
@@ -11,7 +12,7 @@
 //! rotation that crashed before its promote leaves the live key in `Next`, and it
 //! stays there until someone rotates again.
 //!
-//! Fallback discipline (Oracle finding 10): the caller falls back to the offline
+//! Fallback discipline: the caller falls back to the offline
 //! lease path ONLY when no live module is reachable. Once an `admin.op` has been
 //! sent, a lost response is INDETERMINATE — the op may have committed — so this
 //! never silently retries or falls back after dispatch; it returns a distinct error
@@ -29,14 +30,15 @@ use tokio::net::TcpStream;
 
 use crate::route_client;
 
-/// Resolve the master key this client signs the Gate-2 MAC with, classifying a failure
-/// as LOCAL rather than as the module refusing.
+/// Resolve the master key this client signs the admin plane's MAC (over the exact
+/// operation bytes) with, classifying a failure as LOCAL rather than as the module
+/// refusing.
 ///
 /// EXTRACTED SO A TEST CAN REACH THE DECISION. Left inline as a match arm, the only
 /// testable surface was `CliError`'s Display on a hand-built variant -- which verifies
 /// the test's own copy of the classification and passes just as well when the production
-/// arm picks the wrong one. Mutation-proved: putting this back on `RouteCommit::Refused`
-/// left the whole bin target green while the operator-facing attribution was wrong again.
+/// arm picks the wrong one: putting this back on `RouteCommit::Refused` would leave the
+/// whole bin target green while the operator-facing attribution was wrong.
 pub fn resolve_signing_key(
     config: &ResolverConfig,
     key_id: KeyId,
@@ -106,15 +108,13 @@ pub enum RouteCommit {
     /// `Refused` is — the offline path needs the same master key, so falling back
     /// would fail identically — but the cause is HERE, not on the module.
     ///
-    /// Split out after a locked-keychain test on a macOS VM (SUBC, 2026-09-11) read
-    /// `the running module refused the op: cannot resolve the master key ...` and BOTH
-    /// of us took it as the daemon refusing. It was the CLI failing to resolve its own
-    /// key to sign the Gate-2 MAC; nothing was sent. The VM was restored to an older
-    /// build partly on the strength of that reading, and the remedy was local the
-    /// whole time (unlock the keychain, or pass `--key-path`).
+    /// Without it, a locked keychain prints `the running module refused the op: cannot
+    /// resolve the master key ...`, which reads as the daemon refusing. In fact the CLI
+    /// could not resolve its own key to sign the admin plane's MAC, nothing was sent,
+    /// and the remedy is local (unlock the keychain, or pass `--key-path`).
     ///
-    /// Five of the seven `Refused` sites were this shape, including "op body is not
-    /// valid utf-8" and "encoding op" — failures where the module was never asked.
+    /// Other failures have this shape too, including "op body is not valid utf-8" and
+    /// "encoding op" — failures where the module was never asked.
     LocalFailure(String),
     /// The op was dispatched but the outcome is UNKNOWN (connection dropped after
     /// send). Do NOT fall back or retry blindly — the op may have committed.

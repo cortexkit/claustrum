@@ -17,7 +17,8 @@ use super::{enrollment_admin_error, reject_unknown_args, StoreOpError};
 /// routes shipped first because they are what a plugin builds against; this is the half
 /// that makes them mean something.
 ///
-/// Every mutating subcommand is master-key gated (Gate 2) through `commit_admin`.
+/// Every mutating subcommand is master-key gated through `commit_admin`: the module
+/// checks the admin plane's MAC over the exact operation bytes.
 /// `list` is not: it reads the pending queue and the live roster, both plaintext, so it
 /// works against a running daemon without the key and without taking the write lease.
 pub(super) fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {

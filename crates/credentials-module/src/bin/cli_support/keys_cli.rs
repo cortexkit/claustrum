@@ -24,11 +24,10 @@ pub(super) fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
     // variants to exit 4, so "a key already exists" and "the keychain is locked and I
     // cannot tell" are indistinguishable to a caller reading the code.
     //
-    // MEASURED NEAR-MISS, 2026-09-03, on a fresh macOS VM over SSH: `ck setup claustrum`
-    // hit exit 4 from a LOCKED LOGIN KEYCHAIN ("User interaction is not allowed"), and a
-    // repair proposal then read exit 4 as "already provisioned" and moved on -- which
-    // would have enabled the module with NO KEY. The conflation did that, not the
-    // proposal: both readings of 4 were defensible.
+    // A LOCKED LOGIN KEYCHAIN ("User interaction is not allowed", common over SSH) also
+    // exits 4, so a caller reading 4 as "already provisioned" would move on and enable
+    // the module with NO KEY. Both readings of 4 are defensible; the conflation is the
+    // defect.
     //
     // So the installer can now always run bootstrap: success means a key exists, and a
     // non-zero exit means one does not. The key_id is printed either way, which is what

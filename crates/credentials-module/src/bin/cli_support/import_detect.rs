@@ -695,7 +695,7 @@ pub fn first_selectable_rendered_index(rows: &[DetectedRow]) -> Option<usize> {
         .map(|index| index + 2)
 }
 
-/// `(state, record_version, id)`, matching the existing CLI parser at the re-verified HEAD.
+/// `(state, record_version, id)`, matching the existing CLI parser.
 pub type InventoryTuple = (String, u64, String);
 
 /// Parse the `admin.status` inventory without allowing the two string fields to trade places.

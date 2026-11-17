@@ -747,11 +747,9 @@ pub(super) fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(
 /// carries is syntactically valid, accepted without complaint, and authorizes zero
 /// credentials, which is indistinguishable from a working grant by reading it.
 ///
-/// Not hypothetical. On 2026-09-19 a `category:llm-provider` grant was created on the live
-/// vault while the only category in the store was `forge-identity` -- registry defaults
-/// apply at CREATION and every credential predated the migration that introduced
-/// categories. Nothing on either side said so; a consumer asking me to double-check a
-/// selector is the only reason it surfaced.
+/// Not hypothetical: registry defaults apply at CREATION, so credentials older than the
+/// migration that introduced categories carry none of them. A `category:llm-provider`
+/// grant on such a vault reaches nothing, and nothing on either side says so.
 ///
 /// UNCATEGORIZED IS A ROW, not an omission. Some credentials carry no category
 /// deliberately, so hiding the count would make a FORGOTTEN assignment indistinguishable
@@ -1243,11 +1241,10 @@ mod taxonomy_cli_tests {
 
     /// AN UNFAMILIAR PRINCIPAL KIND MUST NOT TAKE DOWN THE INVENTORY.
     ///
-    /// Reported live by the insula seat on 2026-09-20: `ck auth grants` and `ck auth
-    /// status` both refused with "invalid grant principal kind at row 0" because the
-    /// parser required `reserved` exactly, and an `enrolled:` grant had been created --
-    /// by THIS BINARY, which accepts `enrolled:` at `parse_grant_principal`. The CLI
-    /// could write a row it could not read back.
+    /// A parser that required `reserved` exactly made `ck auth grants` and `ck auth
+    /// status` both refuse with "invalid grant principal kind at row 0" once an
+    /// `enrolled:` grant existed -- one THIS BINARY creates, since it accepts `enrolled:`
+    /// at `parse_grant_principal`. The CLI could write a row it could not read back.
     ///
     /// The blast radius is the part this test defends. One row refused the WHOLE table,
     /// so a single grant removed the only surface an operator has for seeing grants at

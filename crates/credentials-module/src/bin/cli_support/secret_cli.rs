@@ -2,7 +2,8 @@
 //!
 //! The write verbs (`put`, `delete`, `revoke`, `phone-gate on|off`) all build one admin
 //! op and hand it to `commit_admin`, so they run on the same path as every other operator
-//! write: through the master-key admin MAC when the daemon is up, and under the
+//! write: through a message authentication code (MAC) keyed by the master key when the
+//! daemon is up, and under the
 //! single-writer lease when it is not. The read verbs (`list`, `grants`, `phone-gate
 //! status`) never call the daemon at all — they open the store file read-only, because an
 //! operator asking what exists is usually asking while the vault is serving.

@@ -345,10 +345,11 @@ pub async fn serve(
     method: &str,
     params: &Value,
 ) -> Answer {
-    if !admitted(principal, method) {
+    // Admission implies a sealer; checking both keeps a caller with no domain out
+    // without a panic path, whatever the admission table says.
+    let Some(sealer) = sealer(principal).filter(|_| admitted(principal, method)) else {
         return Answer::Reply(body(FleetError::NotFound));
-    }
-    let sealer = sealer(principal).expect("admission requires an attested fleet sealer");
+    };
     let result = async {
         let command = command(method, params)?;
         let peers = if matches!(

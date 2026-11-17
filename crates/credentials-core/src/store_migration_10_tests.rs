@@ -1002,10 +1002,15 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 47);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 48);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
-    for table in ["fleet_discards", "fleet_epochs", "fleet_removals"] {
+    for table in [
+        "fleet_discards",
+        "fleet_epochs",
+        "fleet_removals",
+        "module_secrets",
+    ] {
         assert_eq!(after.remove(table), Some(vec![]));
     }
     assert_eq!(after, before);
@@ -1025,7 +1030,12 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     let before = every_table_row(&sqlite);
     EncryptedStore::migrate(&sqlite).unwrap();
     let mut after = every_table_row(&sqlite);
-    for table in ["fleet_discards", "fleet_epochs", "fleet_removals"] {
+    for table in [
+        "fleet_discards",
+        "fleet_epochs",
+        "fleet_removals",
+        "module_secrets",
+    ] {
         assert_eq!(after.remove(table), Some(vec![]));
     }
     for table in ["secret_grants", "secret_pending_requests"] {
@@ -1974,6 +1984,20 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
     };
 
     for (table, expected) in [
+        (
+            "module_secrets",
+            vec![
+                column("module_id", "TEXT", true, None, true),
+                column("name", "TEXT", true, None, true),
+                column("version", "INTEGER", true, None, false),
+                column("protected", "INTEGER", true, None, false),
+                column("state", "TEXT", true, None, false),
+                column("key_id", "TEXT", true, None, false),
+                column("envelope", "BLOB", true, None, false),
+                column("created_at_ms", "INTEGER", true, None, false),
+                column("updated_at_ms", "INTEGER", true, None, false),
+            ],
+        ),
         (
             "fleet_epochs",
             vec![

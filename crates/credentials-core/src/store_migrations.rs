@@ -947,6 +947,18 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         ); \
         CREATE TABLE fleet_discards (mint_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL);",
     },
+    Migration {
+        version: MODULE_SECRET_SCHEMA_VERSION,
+        statements: "CREATE TABLE module_secrets (\
+            module_id TEXT NOT NULL, name TEXT NOT NULL, \
+            version INTEGER NOT NULL CHECK (version >= 1), \
+            protected INTEGER NOT NULL CHECK (protected IN (0, 1)), \
+            state TEXT NOT NULL CHECK (state IN ('active', 'corrupt')), \
+            key_id TEXT NOT NULL, envelope BLOB NOT NULL, \
+            created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, \
+            PRIMARY KEY (module_id, name)\
+        );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

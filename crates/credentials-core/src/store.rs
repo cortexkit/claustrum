@@ -142,6 +142,9 @@ const SCHEMA_NAMESPACE: &str = "credentials";
 /// version.
 pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 
+/// Private module-owned values, stored outside the credential and grant tables.
+pub const MODULE_SECRET_SCHEMA_VERSION: u32 = 48;
+
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
 
@@ -1507,6 +1510,9 @@ mod transfer_key_fence_tests;
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
 
+#[path = "store_module_secrets.rs"]
+pub mod module_secrets;
+
 #[path = "store_fleet.rs"]
 mod fleet_store;
 
@@ -1822,6 +1828,9 @@ impl EncryptedStore {
                 }
 
                 quarantined.extend(store_agent_secrets::rotate_agent_secrets_tx(
+                    tx, old_key, &new_key,
+                )?);
+                quarantined.extend(module_secrets::rotate_module_secrets_tx(
                     tx, old_key, &new_key,
                 )?);
                 fleet_store::rotate_fleet_epochs_tx(tx, old_key, &new_key)?;

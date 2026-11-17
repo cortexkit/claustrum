@@ -86,6 +86,10 @@ pub enum AuditOp {
     DepositCookieCreate,
     /// A module replaces a cookie whose recorded creator matches that module.
     DepositCookieReplace,
+    ModuleSecretCreate,
+    ModuleSecretReplace,
+    ModuleSecretDelete,
+    ModuleSecretMove,
     /// A create-only `put` (a new credential).
     Put,
     /// An import of a credential from a source format.
@@ -273,6 +277,10 @@ impl AuditOp {
 
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
+            AuditOp::ModuleSecretCreate => "module_secret_create",
+            AuditOp::ModuleSecretReplace => "module_secret_replace",
+            AuditOp::ModuleSecretDelete => "module_secret_delete",
+            AuditOp::ModuleSecretMove => "module_secret_move",
             AuditOp::Put => "put",
             AuditOp::Import => "import",
             AuditOp::Login => "login",
@@ -973,6 +981,10 @@ mod vocabulary_documentation_tests {
 
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
+                AuditOp::ModuleSecretCreate => AuditOp::ModuleSecretCreate.as_str(),
+                AuditOp::ModuleSecretReplace => AuditOp::ModuleSecretReplace.as_str(),
+                AuditOp::ModuleSecretDelete => AuditOp::ModuleSecretDelete.as_str(),
+                AuditOp::ModuleSecretMove => AuditOp::ModuleSecretMove.as_str(),
                 AuditOp::Put => AuditOp::Put.as_str(),
                 AuditOp::Import => AuditOp::Import.as_str(),
                 AuditOp::Login => AuditOp::Login.as_str(),

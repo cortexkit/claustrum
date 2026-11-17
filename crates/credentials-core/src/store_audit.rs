@@ -57,6 +57,10 @@ pub(super) fn load_or_create_audit_key(
                 && c.query_row("SELECT EXISTS(SELECT 1 FROM secret_flow_grants)", [], |r| {
                     r.get::<_, bool>(0)
                 })?;
+            let module_non_empty = schema_version >= MODULE_SECRET_SCHEMA_VERSION
+                && c.query_row("SELECT EXISTS(SELECT 1 FROM module_secrets)", [], |r| {
+                    r.get::<_, bool>(0)
+                })?;
             let query = if schema_version >= AGENT_SECRET_SCHEMA_VERSION {
                 "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log) \
                  OR EXISTS(SELECT 1 FROM agent_secrets) \
@@ -69,7 +73,7 @@ pub(super) fn load_or_create_audit_key(
                 "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log)"
             };
             c.query_row(query, [], |r| r.get::<_, i64>(0))
-                .map(|v| v != 0 || flow_non_empty)
+                .map(|v| v != 0 || flow_non_empty || module_non_empty)
         })
         .map_err(StoreOpError::from)?;
     if non_empty {

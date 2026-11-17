@@ -2472,8 +2472,8 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
     // looks-where-ck-does-not class that the SUBC_CONNECTION_FILE rung above was added
     // to close, in the same function, by way of tidying.
     //
-    // Duplicate-value scans REPORT THIS PAIR, and the obvious
-    // remedy is the defect. A reported duplicate is a candidate until it is resolved
+    // A tool that flags duplicated values will flag this pair, and the obvious remedy is
+    // the defect. A flagged duplicate is a candidate until it is resolved
     // against the other side's authority; these two have different authorities.
     if let Some(home) = non_empty_env("HOME") {
         let p = PathBuf::from(home)
@@ -2649,9 +2649,8 @@ mod discovery_tests {
     /// what the function did and FALSE about why, which is what makes it expensive --
     /// it reads as a defect in the exclusivity rung rather than as a racing neighbour.
     ///
-    /// *** OBSERVED, NOT ANTICIPATED. *** The race shows as the same commit passing on
-    /// one run and failing on the next, which is the signature of a race rather than a
-    /// platform difference.
+    /// A race like this can make one commit pass on one run and fail on the next, which
+    /// is the signature of a race rather than a platform difference.
     ///
     /// A mutex rather than `--test-threads=1`: the flag is invisible at the call site and
     /// a future runner without it silently reintroduces the race.

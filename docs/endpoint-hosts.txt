@@ -704,6 +704,9 @@ crates/credentials-core/src/refresh_adapters/xai.rs AUTHORIZE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
+crates/credentials-core/src/store_migration_10_tests.rs INLINE_001 a.test\
+crates/credentials-core/src/store_migration_10_tests.rs INLINE_002 b.test\
+crates/credentials-core/src/store_migration_10_tests.rs INLINE_003 x.test
 crates/credentials-core/src/store_secret_basic_auth_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_001 x.test
 crates/credentials-core/src/store_secret_conformance_tests.rs INLINE_002 y.test
@@ -763,6 +766,10 @@ crates/credentials-core/src/store_secret_use_tests.rs INLINE_004 y.test
 crates/credentials-core/src/store_secret_use_tests.rs INLINE_005 x.test:444
 crates/credentials-core/src/store_secret_use_tests.rs INLINE_006 x.test
 crates/credentials-core/src/store_secret_use_tests.rs INLINE_007 x.test:443
+crates/credentials-core/src/store_tests.rs INLINE_001 t.test
+crates/credentials-core/src/store_tests.rs INLINE_002 api.openai.com
+crates/credentials-core/src/store_tests.rs INLINE_003 t.test
+crates/credentials-core/src/store_tests.rs INLINE_004 t.test
 crates/credentials-module/src/account_token.rs CHALLENGE_URL account.cortexkit.io
 crates/credentials-module/src/account_token.rs TOKEN_URL account.cortexkit.io
 crates/credentials-module/src/account_token_tests.rs INLINE_001 account.cortexkit.io

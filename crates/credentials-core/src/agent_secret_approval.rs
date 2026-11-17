@@ -909,6 +909,15 @@ impl ApprovalEnvelope {
         fingerprint: &str,
     ) -> Result<Self, SecretError> {
         let invalid = SecretError::ApprovalInvalid;
+        let envelope = Self::parse_canonical(bytes, fingerprint)?;
+        let key = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| invalid)?;
+        let signature = Signature::from_der(signature).map_err(|_| invalid)?;
+        key.verify(bytes, &signature).map_err(|_| invalid)?;
+        Ok(envelope)
+    }
+
+    pub(crate) fn parse_canonical(bytes: &[u8], fingerprint: &str) -> Result<Self, SecretError> {
+        let invalid = SecretError::ApprovalInvalid;
         // Deserializing structs (not Value maps) rejects duplicate keys at every level.
         let envelope: Self = serde_json::from_slice(bytes).map_err(|_| invalid)?;
         let mut ids = HashSet::new();
@@ -944,9 +953,6 @@ impl ApprovalEnvelope {
         {
             return Err(invalid);
         }
-        let key = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| invalid)?;
-        let signature = Signature::from_der(signature).map_err(|_| invalid)?;
-        key.verify(bytes, &signature).map_err(|_| invalid)?;
         Ok(envelope)
     }
 }

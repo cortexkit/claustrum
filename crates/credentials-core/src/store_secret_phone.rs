@@ -6,6 +6,7 @@ pub const PHONE_MAPPING_SETTING: &str = "secret.phone_mapping";
 pub const MULTI_HOST_SETTING: &str = "secret.multi_host";
 pub const BASIC_AUTH_SETTING: &str = "secret.basic_auth";
 pub const LOCAL_PROGRAMS_SETTING: &str = "secret.local_programs";
+pub const DEV_DESKTOP_APPROVALS_SETTING: &str = "secret.dev_desktop_approvals";
 
 /// The audit payload of an extended scope names its stored `scope_json`. Encoding an
 /// extended scope always yields it, so a missing value is a store error, never a panic
@@ -29,7 +30,7 @@ pub(in crate::store) fn local_programs_enabled(conn: &rusqlite::Connection) -> b
     setting_enabled(conn, LOCAL_PROGRAMS_SETTING)
 }
 
-fn setting_enabled(conn: &rusqlite::Connection, name: &str) -> bool {
+pub(super) fn setting_enabled(conn: &rusqlite::Connection, name: &str) -> bool {
     matches!(
         conn.query_row(
             "SELECT value FROM settings WHERE name=?1",
@@ -55,7 +56,10 @@ pub fn secret_local_programs_status_read_only(
     feature_status_read_only(path, LOCAL_PROGRAMS_SETTING)
 }
 
-fn feature_status_read_only(path: &std::path::Path, name: &str) -> Result<String, StoreOpError> {
+pub(super) fn feature_status_read_only(
+    path: &std::path::Path,
+    name: &str,
+) -> Result<String, StoreOpError> {
     if !path
         .try_exists()
         .map_err(|e| StoreOpError::Store(e.to_string()))?
@@ -214,7 +218,7 @@ impl EncryptedStore {
         )
     }
 
-    fn set_secret_feature_audited(
+    pub(super) fn set_secret_feature_audited(
         &self,
         name: &str,
         op: AuditOp,
@@ -231,7 +235,7 @@ impl EncryptedStore {
             if old == Some(rusqlite::types::Value::Text(wanted.to_owned())) {
                 return Ok(false);
             }
-            if matches!(name, LOCAL_PROGRAMS_SETTING | BASIC_AUTH_SETTING) && old.is_none() && !enabled {
+            if matches!(name, LOCAL_PROGRAMS_SETTING | BASIC_AUTH_SETTING | DEV_DESKTOP_APPROVALS_SETTING) && old.is_none() && !enabled {
                 return Ok(false);
             }
             tx.execute(
@@ -379,9 +383,9 @@ impl EncryptedStore {
                     sweep(tx, &self.audit_key, op_now)?;
                     list(tx).map(Ok)
                 }
-                PhoneOperation::Approve { envelope, signature, card_ref } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, card_ref.as_deref(), false, op_now),
-                PhoneOperation::ManifestApprove { envelope, signature } => self.gh_manifest_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, op_now),
-                PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, None, true, op_now),
+                PhoneOperation::Approve { envelope, signature, card_ref } => self.secret_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, card_ref.as_deref(), false, op_now),
+                PhoneOperation::ManifestApprove { envelope, signature } => self.gh_manifest_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, op_now),
+                PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, None, true, op_now),
                 PhoneOperation::DeleteRequest { name } => self.secret_delete_request_tx(tx, name, op_now),
                 PhoneOperation::Revoke { grant_id } => super::approval::revoke(tx, &self.audit_key, grant_id, &format!("fed-phone:{fingerprint}"), op_now).map(Ok),
                 PhoneOperation::Register { .. } | PhoneOperation::DepositKeys | PhoneOperation::Home => unreachable!(),

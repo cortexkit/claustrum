@@ -449,7 +449,7 @@ impl ManifestBindingEnvelope {
             .map_err(|_| crate::agent_secret::SecretError::ApprovalInvalid)
     }
 
-    fn parse_canonical(
+    pub(crate) fn parse_canonical(
         bytes: &[u8],
         fingerprint: &str,
     ) -> Result<Self, crate::agent_secret::SecretError> {

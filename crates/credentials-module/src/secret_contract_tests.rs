@@ -2876,3 +2876,79 @@ async fn permissions_local_grants_dispatcher_pins_real_approval_samples() {
     }
     assert_eq!(cp_reply(&surface, &admin, "permissions.list", json!({})).await, br#"{"result":{"grants":[]}}"#);
 }
+
+fn desktop_dev_admin(flow: &SecretFlow, seed: u8) -> Arc<admin_surface::AdminSurface> {
+    let engine = Arc::new(RefreshEngine::new(Arc::clone(&flow.store), Vec::new(), Arc::new(crate::test_support::NoHttp)));
+    let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+    Arc::new(admin_surface::AdminSurface::new(engine, credentials_core::admin_auth::AdminMacKey::derive(&key), [0; 32], key.key_id()))
+}
+
+fn desktop_dev_snapshot(flow: &SecretFlow) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let conn = rusqlite::Connection::open(flow._root.join("store.db")).unwrap();
+    ["audit_log", "secret_pending_requests", "secret_grants", "secret_flow_grants", "secret_approval_replies", "secret_phone_observations", "gh_manifests", "gh_manifest_proposals"].iter().map(|table| {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+            let columns = stmt.column_count();
+            let rows = stmt.query_map([], |r| (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<_>>>())?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+    }).collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
+#[tokio::test]
+async fn desktop_dev_valid_unsigned_route_approval_creates_grant_and_audit() {
+    let seed = 214;
+    let flow = SecretFlow::new(seed).await;
+    flow.deposit_both().await;
+    let request = flow.use_secret("aft", &secret_golden("use.request.api_key"));
+    let now = sc_now_ms();
+    let envelope = json!({"v":"ck-secret-use-envelope/v1","items":[{"request_id":request["request_id"],"statement_sha256":sc_sha256_hex(&sc_unb64(request["statement_b64url"].as_str().unwrap()))}],"decision":"allow","duration":"hour","grant_expires_at_ms":now+3_600_000,"device_fingerprint":"00000000000000000000000000000000","issued_at_ms":now});
+    let admin = desktop_dev_admin(&flow, seed);
+    admin.record_bind_at(77, 1, subc_protocol::Principal::Direct, "");
+    flow.store.set_secret_dev_desktop_approvals_audited(true, AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet)).unwrap();
+    let reply = routed_json(&flow.surface, &admin, 77, "secret.approve", json!({"envelope_b64url":sc_b64(&serde_json::to_vec(&envelope).unwrap()),"card_ref":"desktop-card"})).await;
+    assert_eq!(reply["result"]["results"], json!([{"request_id":request["request_id"],"outcome":"granted"}]));
+    {
+        let conn = rusqlite::Connection::open(flow._root.join("store.db")).unwrap();
+        let (actor, card): (String, String) = conn.query_row("SELECT a.actor,g.card_ref FROM audit_log a JOIN secret_grants g ON a.op='secret_grant_create'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!((actor, card), ("desktop-development".into(), "desktop-card".into()));
+    }
+    assert_eq!(flow.use_secret("aft", &secret_golden("use.request.api_key"))["status"], "released");
+}
+
+#[tokio::test]
+async fn desktop_dev_route_refusals_write_nothing_and_emit_vectors() {
+    let seed = 215;
+    let flow = SecretFlow::new(seed).await;
+    let admin = desktop_dev_admin(&flow, seed);
+    let scope = subc_protocol::scope::ScopeStamp::new(subc_protocol::Principal::Direct, "tool", 1, subc_protocol::scope::ScopeKind::Head);
+    let base = json!({"v":"ck-secret-use-envelope/v1","items":[{"request_id":"01HF7YAT000000000000000001","statement_sha256":"00".repeat(32)}],"decision":"allow","duration":"hour","grant_expires_at_ms":1_700_003_600_000u64,"device_fingerprint":"00000000000000000000000000000000","issued_at_ms":1_700_000_000_000u64});
+    let mut cases = Vec::new();
+    for method in ["secret.approve", "manifest.approve"] {
+        for label in ["switch-off", "scoped-route", "reserved-route", "federated-harness", "signature-present", "wrong-fingerprint"] {
+            if method == "manifest.approve" && label == "wrong-fingerprint" { continue; }
+            flow.store.set_secret_dev_desktop_approvals_audited(label != "switch-off", AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet)).unwrap();
+            let principal = if label == "reserved-route" { subc_protocol::Principal::Reserved { module_id:"cingulate".into() } } else { subc_protocol::Principal::Direct };
+            admin.record_connector_bind(77, 1, principal, if label == "federated-harness" { "fed-computer:22222222222222222222222222222222" } else { "" }, None, (label == "scoped-route").then_some(&scope), None, None);
+            let mut envelope = if method == "secret.approve" { base.clone() } else { json!({"v":"ck-manifest-binding-envelope/v1","proposal_id":"01HF7YAT000000000000000004","statement_sha256":"00".repeat(32),"decision":"allow","device_fingerprint":"00000000000000000000000000000000","issued_at_ms":1_700_000_000_000u64}) };
+            if label == "wrong-fingerprint" { envelope["device_fingerprint"] = json!(SC_FP); }
+            let mut params = json!({"envelope_b64url":sc_b64(&serde_json::to_vec(&envelope).unwrap())});
+            if label == "signature-present" { params["signature_b64url"] = json!(""); }
+            let before = desktop_dev_snapshot(&flow);
+            let (kind, bytes) = routed_reply(&flow.surface, &admin, 77, method, params.clone()).await;
+            let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if label == "signature-present" {
+                assert_eq!(kind, FrameType::Error);
+                assert_eq!(reply["code"], "invalid_params");
+            } else {
+                assert_eq!(kind, FrameType::Response);
+                if label == "wrong-fingerprint" {
+                    assert_eq!(reply["result"], credentials_core::agent_secret::SecretError::ApprovalInvalid.body());
+                } else {
+                    assert_eq!(reply, uniform_not_found());
+                }
+            }
+            assert_eq!(desktop_dev_snapshot(&flow), before, "{method}: {label}");
+            cases.push(json!({"case":label,"request":{"method":method,"params":params},"frame_type":format!("{kind:?}"),"reply":reply}));
+        }
+    }
+    credentials_core::test_support::desktop_dev_vector("refusals.json", &json!(cases));
+}

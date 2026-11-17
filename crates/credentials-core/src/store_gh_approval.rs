@@ -4,7 +4,9 @@ use super::{
 };
 use crate::agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
 use crate::audit::{AuditCtx, AuditOp, AuditRecord, GhManifestAudit};
-use crate::gh_manifest::{GhManifest, ManifestBindingEnvelope, ManifestBindingStatement};
+#[cfg(test)]
+use crate::gh_manifest::ManifestBindingEnvelope;
+use crate::gh_manifest::{GhManifest, ManifestBindingStatement};
 use base64::Engine as _;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -70,26 +72,23 @@ fn reply(p: &GhManifestProposal) -> Value {
 }
 
 impl EncryptedStore {
-    /// Called after the phone pipeline admits the pairing, confirms that this
-    /// vault serves agent secrets locally, and loads the current registered
-    /// approval key. Runs while the pipeline's serializing writer is held.
+    /// Runs under the serializing writer after the caller's approval admission.
+    /// Both approval modes use the same proposal and commitment checks.
     pub(super) fn gh_manifest_approval_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
         fingerprint: &str,
-        public_key: &[u8],
+        authority: super::store_agent_secrets::desktop::ApprovalAuthority<'_>,
         bytes: &[u8],
-        signature: &[u8],
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
         if !gh_proposals::setup_complete(tx)? {
             return Ok(Err(SecretError::ManifestSetupIncomplete));
         }
-        let envelope =
-            match ManifestBindingEnvelope::verify(bytes, signature, public_key, fingerprint, now) {
-                Ok(envelope) => envelope,
-                Err(error) => return Ok(Err(error)),
-            };
+        let envelope = match authority.manifest(bytes, fingerprint, now) {
+            Ok(envelope) => envelope,
+            Err(error) => return Ok(Err(error)),
+        };
         let stored = tx.query_row(
             "SELECT proposal_id,agent_id,app_id,app_slug,repo,installation_permissions,base_version, \
              manifest_bytes,manifest_sha256,statement_bytes,statement_sha256,created_at_ms,expires_at_ms, \
@@ -130,7 +129,7 @@ impl EncryptedStore {
             return Ok(Err(SecretError::Expired));
         }
 
-        let actor = format!("fed-phone:{fingerprint}/approver:fed-phone:{fingerprint}");
+        let actor = authority.actor(fingerprint, true);
         let approval = append_audit_tx(
             tx,
             &self.audit_key,

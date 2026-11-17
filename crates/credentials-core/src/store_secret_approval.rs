@@ -135,14 +135,13 @@ impl EncryptedStore {
         &self,
         tx: &rusqlite::Transaction<'_>,
         fingerprint: &str,
-        public_key: &[u8],
+        authority: super::desktop::ApprovalAuthority<'_>,
         bytes: &[u8],
-        signature: &[u8],
         card_ref: Option<&str>,
         delete: bool,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
-        let envelope = match ApprovalEnvelope::verify(bytes, signature, public_key, fingerprint) {
+        let envelope = match authority.secret(bytes, fingerprint) {
             Ok(e) => e,
             Err(e) => return Ok(Err(e)),
         };
@@ -152,10 +151,10 @@ impl EncryptedStore {
             Err(_) => None,
         };
         let hash = phone::hex(&payload_hash(bytes));
-        // A resend of an envelope this phone already had applied answers with the reply
-        // the first call produced. Its requests are consumed by then, so re-running the
-        // items would report every one as refused and hide a grant that exists. The
-        // signature was verified above, so only the phone can reach a stored reply.
+        // An exact resend answers with the first reply: its requests are consumed,
+        // so re-running the items would hide grants that already exist. The phone
+        // signature, or the separately gated development admission, was checked
+        // before consulting replies. Replies retain the envelope's fingerprint.
         tx.execute(
             "DELETE FROM secret_approval_replies WHERE expires_at_ms<=?1",
             [now],
@@ -173,6 +172,7 @@ impl EncryptedStore {
                 Err(_) => Err(rusqlite_err("stored approval reply is unreadable")),
             };
         }
+        let actor = authority.actor(fingerprint, false);
         let mut results = Vec::with_capacity(envelope.items.len());
         for item in &envelope.items {
             let local_item: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM secret_pending_requests WHERE request_id=?1 AND local_use IS NOT NULL)", [&item.request_id], |r| r.get(0))?;
@@ -186,7 +186,7 @@ impl EncryptedStore {
                 &envelope,
                 member.as_deref(),
                 &hash,
-                fingerprint,
+                &actor,
                 card_ref,
                 delete,
                 now,
@@ -217,7 +217,7 @@ impl EncryptedStore {
         e: &ApprovalEnvelope,
         member: Option<&str>,
         envelope_hash: &str,
-        fingerprint: &str,
+        actor: &str,
         card_ref: Option<&str>,
         delete: bool,
         now: i64,
@@ -286,7 +286,7 @@ impl EncryptedStore {
                 e,
                 &p,
                 &statement,
-                fingerprint,
+                actor,
                 envelope_hash,
                 card_ref,
                 now,
@@ -296,7 +296,6 @@ impl EncryptedStore {
         let Some((kind, state, host, path_prefix, location, origin, blob, scope_json)) = row else {
             return Ok(false);
         };
-        let actor = format!("fed-phone:{fingerprint}");
         if delete {
             if e.duration != "none"
                 || statement["v"] != "ck-secret-delete-statement/v1"
@@ -327,7 +326,7 @@ impl EncryptedStore {
                 &self.audit_key,
                 AuditOp::SecretDelete,
                 &p.name,
-                &actor,
+                actor,
                 envelope_hash,
             )?;
             return Ok(true);
@@ -389,7 +388,7 @@ impl EncryptedStore {
                 e,
                 &p,
                 &scope,
-                &actor,
+                actor,
                 envelope_hash,
                 card_ref,
                 now,
@@ -411,7 +410,7 @@ impl EncryptedStore {
             &self.audit_key,
             AuditOp::SecretGrantCreate,
             &p.name,
-            &actor,
+            actor,
             envelope_hash,
         )?;
         Ok(true)
@@ -425,7 +424,7 @@ impl EncryptedStore {
         e: &ApprovalEnvelope,
         p: &Pending,
         statement: &Value,
-        fingerprint: &str,
+        actor: &str,
         envelope_hash: &str,
         card_ref: Option<&str>,
         now: i64,
@@ -530,7 +529,7 @@ impl EncryptedStore {
             &self.audit_key,
             AuditOp::SecretGrantCreate,
             &p.name,
-            &format!("fed-phone:{fingerprint}"),
+            actor,
             envelope_hash,
         )?;
         Ok(true)

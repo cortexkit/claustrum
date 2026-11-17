@@ -389,7 +389,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args, options),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
-        "ssh-key" => cmd_ssh_key(&global, &args),
+        "ssh-key" => cli_support::ssh_key::cmd_ssh_key(&global, &args),
         "sign" => cmd_sign(&global, &args),
         "mint-kem-key" => cmd_mint_kem_key(&global, &args),
         "import" => cmd_import(&global, &args),
@@ -643,6 +643,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
                 "multi-host",
                 "basic-auth",
                 "local-programs",
+                "dev-desktop-approvals",
                 "on",
                 "off",
                 "status",
@@ -2411,15 +2412,6 @@ fn parse_ssh_key_target(input: &str) -> Result<credentials_core::record::AgentSs
     };
     target.validate().map_err(|_| invalid())?;
     Ok(target)
-}
-
-fn cmd_ssh_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let result = commit_admin(global, parse_ssh_key_op(args)?)?;
-    println!(
-        "{}",
-        serde_json::to_string(&result).expect("SSH enrollment result")
-    );
-    Ok(())
 }
 
 fn cmd_sign(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {

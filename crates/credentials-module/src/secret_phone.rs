@@ -99,6 +99,56 @@ pub async fn serve(
     .await
 }
 
+/// Development-only unsigned approvals share the phone's transaction checks, not
+/// its pairing or signature authority. Remove before the next public release.
+pub async fn serve_dev_desktop(
+    store: Arc<EncryptedStore>,
+    method: &str,
+    params: &Value,
+) -> PhoneAnswer {
+    match store.secret_dev_desktop_approvals_enabled() {
+        Ok(true) => {}
+        Ok(false) => return answer(Err(SecretError::NotFound)),
+        Err(error) => return answer(Err(error)),
+    }
+    tracing::info!(target: "approvals", "admitted development desktop approval");
+    let parsed = (|| {
+        keys(params, &["envelope_b64url"], &["card_ref"])?;
+        let envelope = base64(text(params, "envelope_b64url")?)?;
+        let card_ref = match params.get("card_ref") {
+            None => None,
+            Some(value) => {
+                let card = value.as_str().ok_or(SecretError::InvalidParams)?;
+                if card.is_empty()
+                    || card.len() > MAX_SECRET_CARD_REF_BYTES
+                    || !card.bytes().all(|b| b.is_ascii_graphic())
+                {
+                    return Err(SecretError::InvalidParams);
+                }
+                Some(card.to_owned())
+            }
+        };
+        Ok((envelope, card_ref))
+    })();
+    let (envelope, card_ref) = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => return answer(Err(error)),
+    };
+    let manifest = method == "manifest.approve";
+    answer(
+        tokio::task::spawn_blocking(move || {
+            store.secret_dev_desktop_approval(
+                &envelope,
+                card_ref.as_deref(),
+                manifest,
+                wall_now_ms(),
+            )
+        })
+        .await
+        .unwrap_or(Err(SecretError::StoreError)),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_with_lookup(
     store: Arc<EncryptedStore>,

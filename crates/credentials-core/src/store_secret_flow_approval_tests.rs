@@ -295,6 +295,124 @@ fn flow_setup(
 }
 
 #[test]
+fn desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors() {
+    for (label, is_flow, duration) in [("agent", false, "hour"), ("flow", true, "version")] {
+        let (_root, store, _) = approval_setup("desktop-dev-grants");
+        sql(&store, "DELETE FROM secret_pending_requests");
+        let request = pending(&store, API, "key", &scope(), is_flow);
+        let mut e = envelope(vec![item(&request)], duration, NOW);
+        e["device_fingerprint"] = json!("00000000000000000000000000000000");
+        let bytes = serde_json::to_vec(&e).unwrap();
+        let before = store.audit_tip().unwrap();
+        assert_eq!(
+            store.secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW),
+            Err(SecretError::NotFound)
+        );
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert!(!store
+            .set_secret_dev_desktop_approvals_audited(
+                false,
+                AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet)
+            )
+            .unwrap());
+        store
+            .set_secret_dev_desktop_approvals_audited(
+                true,
+                AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+            )
+            .unwrap();
+        let before = store.audit_tip().unwrap();
+        assert!(!store
+            .set_secret_dev_desktop_approvals_audited(
+                true,
+                AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet)
+            )
+            .unwrap());
+        let mut wrong = e.clone();
+        wrong["device_fingerprint"] = json!(FP);
+        assert_eq!(
+            store.secret_dev_desktop_approval(
+                &serde_json::to_vec(&wrong).unwrap(),
+                None,
+                false,
+                NOW
+            ),
+            Err(SecretError::ApprovalInvalid)
+        );
+        assert_eq!(store.audit_tip().unwrap(), before);
+        assert_eq!(
+            count(&store, "SELECT count(*) FROM secret_approval_replies"),
+            0
+        );
+        let reply = store
+            .secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW)
+            .unwrap();
+        assert_eq!(reply, json!({"results":[granted(&request)]}));
+        assert_eq!(
+            store
+                .secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW)
+                .unwrap(),
+            reply
+        );
+        assert_eq!(count(&store, "SELECT count(*) FROM audit_log WHERE op='secret_grant_create' AND actor='desktop-development'"), 1);
+        let table = if is_flow {
+            "secret_flow_grants"
+        } else {
+            "secret_grants"
+        };
+        let desktop = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
+                let columns = stmt
+                    .column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
+                let row = stmt.query_row([], |row| {
+                    columns
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, name)| {
+                            !matches!(name.as_str(), "grant_id" | "envelope_sha256")
+                        })
+                        .map(|(index, name)| {
+                            Ok((name.clone(), row.get::<_, rusqlite::types::Value>(index)?))
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?;
+                Ok(row)
+            })
+            .unwrap();
+        sql(&store, &format!("DELETE FROM {table}; DELETE FROM secret_approval_replies; UPDATE secret_pending_requests SET consumed=0"));
+        let phone_envelope = envelope(vec![item(&request)], duration, NOW);
+        assert_eq!(
+            phone(&store, &signed(&phone_envelope, false), NOW).unwrap(),
+            reply
+        );
+        store
+            .with_raw_conn(|conn| {
+                for (column, expected) in &desktop {
+                    let actual =
+                        conn.query_row(&format!("SELECT {column} FROM {table}"), [], |r| {
+                            r.get::<_, rusqlite::types::Value>(0)
+                        })?;
+                    assert_eq!(&actual, expected, "phone and development {column}");
+                }
+                Ok(())
+            })
+            .unwrap();
+        crate::test_support::desktop_dev_vector(
+            &format!("{label}.json"),
+            &json!({
+                "now_ms":NOW, "statement":request, "envelope":e,
+                "request":{"method":"secret.approve","params":{"envelope_b64url":URL_SAFE_NO_PAD.encode(&bytes),"card_ref":"card-1"}},
+                "reply":reply, "audit_actor":"desktop-development"
+            }),
+        );
+    }
+}
+
+#[test]
 fn secret_flow_approval_consumes_once_and_binds_grant_audit_to_exact_envelope() {
     use sha2::{Digest, Sha256};
     let (_root, store, requests) = flow_setup("flow-grant-audit");

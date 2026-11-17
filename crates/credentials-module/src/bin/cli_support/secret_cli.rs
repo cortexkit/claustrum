@@ -31,6 +31,7 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         "multi-host" => multi_host(global, rest),
         "basic-auth" => basic_auth(global, rest),
         "local-programs" => local_programs(global, rest),
+        "dev-desktop-approvals" => super::dev_desktop_cli::setting(global, rest),
         "put" => put(global, rest),
         "list" => list(global, rest),
         "grants" => grants(global, rest),
@@ -81,7 +82,9 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
     };
     let (value_flags, positional) = match verb.as_str() {
         // Each setting takes one positional operand and no flags.
-        "phone-gate" | "multi-host" | "basic-auth" | "local-programs" => (&[][..], true),
+        "phone-gate" | "multi-host" | "basic-auth" | "local-programs" | "dev-desktop-approvals" => {
+            (&[][..], true)
+        }
         // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
         "delete" => (DELETE_FLAGS, true),
         // `put` names the secret first or with `--name`, then its flags.
@@ -168,6 +171,8 @@ pub fn help_text() -> &'static str {
       show prints it. local-programs on|off|status controls local secrets.\n\
       basic-auth on|off|status controls authorization_basic:<user> creation.\n\
       Keep basic-auth off until the phone can show Basic sign-in cards.\n\
+      dev-desktop-approvals on|off|status admits unsigned desktop approvals.\n\
+      Development only; remove before the next public release. Default: off.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\

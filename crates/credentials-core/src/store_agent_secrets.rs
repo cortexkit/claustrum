@@ -1,6 +1,9 @@
 use super::*;
 use crate::agent_secret::{self, DEPOSIT_KEY_ID};
 
+#[path = "store_secret_desktop.rs"]
+pub(super) mod desktop;
+
 #[path = "store_secret_phone.rs"]
 mod phone;
 pub(super) use phone::local_programs_enabled;

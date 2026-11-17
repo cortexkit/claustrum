@@ -131,6 +131,63 @@ fn approve(e: &ManifestBindingEnvelope) -> PhoneOperation {
     signed_bytes(e.canonical_bytes().unwrap(), &signer())
 }
 
+#[test]
+fn desktop_dev_manifest_approval_uses_shared_commitments_and_emits_vector() {
+    let (_root, store, _) = ready("desktop-dev-manifest");
+    store
+        .set_secret_dev_desktop_approvals_audited(
+            true,
+            AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+        )
+        .unwrap();
+    let mut p = propose(&store, "Octo/New", NOW);
+    let old_id = p.proposal_id.clone();
+    p.proposal_id = "01HF7YAT000000000000000004".into();
+    let mut statement: Value = serde_json::from_slice(&p.statement_bytes).unwrap();
+    statement["proposal_id"] = json!(p.proposal_id);
+    p.statement_bytes = serde_json::to_vec(&statement).unwrap();
+    p.statement_sha256 = hash(&p.statement_bytes);
+    store.with_raw_conn(|conn| conn.execute("UPDATE gh_manifest_proposals SET proposal_id=?2,statement_bytes=?3,statement_sha256=?4 WHERE proposal_id=?1",
+        params![old_id,p.proposal_id,p.statement_bytes,p.statement_sha256])).unwrap();
+    let mut e = envelope(&p, NOW + 10);
+    e.device_fingerprint = "00000000000000000000000000000000".into();
+    let bytes = e.canonical_bytes().unwrap();
+    let before = snapshot(&store);
+    let mut wrong = e.clone();
+    wrong.device_fingerprint = FP.into();
+    assert_eq!(
+        store.secret_dev_desktop_approval(&wrong.canonical_bytes().unwrap(), None, true, NOW + 10),
+        Err(SecretError::ApprovalInvalid)
+    );
+    assert_eq!(snapshot(&store), before);
+    let reply = store
+        .secret_dev_desktop_approval(&bytes, None, true, NOW + 10)
+        .unwrap();
+    assert_eq!(
+        reply,
+        json!({"status":"approved","proposal_id":p.proposal_id,"version":29,"manifest_sha256":p.manifest_sha256})
+    );
+    store
+        .with_raw_conn(|conn| {
+            let actor: String = conn.query_row(
+                "SELECT actor FROM audit_log WHERE op='approval' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(actor, "desktop-development");
+            Ok(())
+        })
+        .unwrap();
+    crate::test_support::desktop_dev_vector(
+        "manifest.json",
+        &json!({
+            "now_ms":NOW + 10,"statement_b64url":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&p.statement_bytes),"envelope":e,
+            "request":{"method":"manifest.approve","params":{"envelope_b64url":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)}},
+            "reply":reply,"audit_actor":"desktop-development"
+        }),
+    );
+}
+
 fn snapshot(store: &EncryptedStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
     store
         .with_raw_conn(|conn| {

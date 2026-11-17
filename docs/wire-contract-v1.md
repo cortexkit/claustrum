@@ -109,8 +109,8 @@ would reasonably conclude that every refusal carries a class, and one of these d
 
 The second shape is the transport refusal: a malformed frame, an unknown operation, or
 ordinary read params that failed to decode (`invalid_params`). Enrollment operations
-are an exception: their typed-param decode failures are classified `Response` refusals
-(`invalid_params`/`permanent`), as described in § 2.1.
+and `module_secret.*` are exceptions: their typed-param decode failures are classified
+`Response` refusals (`invalid_params`/`permanent`), as described in § 2.1 and § 19.
 Purpose-bound ck-bus signing input refusals use the classless transport `Error`
 shape with `invalid_params`, after authorizing the caller; ordinary request decoding
 is unchanged.
@@ -5360,6 +5360,66 @@ signing admits only Entorhinal. Other accesses, including handles, are
 read to Callosum and Entorhinal and sign to Entorhinal. Other grants refuse
 `fleet_key_reserved`. Bus-seal grants remain operator steps (Callosum read,
 ckbus open); rotations use new numbered keys alongside existing ones.
+
+## 19. Module-owned secrets (`module_secret.*`)
+
+Each daemon-attested module has a private space, separate from credentials. Admission
+runs before caller routing and parameter decoding. Only a route-bound
+`Principal::Reserved` with a present caller attestation whose claim is `own`, a module
+id matching `^[a-z0-9][a-z0-9._-]{0,63}$`, and no bearer parameter is admitted. The
+attestation's `first_party` mark is not required. Relay, missing-attestation, direct,
+enrolled, handle, member, phone and refused callers all receive the same `not_found`
+body, even with malformed parameters. The owner comes only from the route, never a
+parameter. No grant can expose another module's items.
+
+All four operations use closed parameter objects. A name matches
+`^[a-z0-9][a-z0-9._-]{0,63}$`. Values use canonical standard base64 with padding, no
+whitespace and canonical trailing bits, and decode to 1–65,536 bytes. An
+`expected_version`, when present, is an integer of at least 1. Unknown fields, wrong
+types, bad names, invalid base64 and out-of-range values return
+`invalid_params`/`permanent` before any store access or write.
+
+| method | params | success body |
+|---|---|---|
+| `module_secret.put` | `{name, value, expected_version?, protected?}` | `{name, version, created}` |
+| `module_secret.get` | `{name}` | `{name, version, value, protected}` |
+| `module_secret.delete` | `{name, expected_version?}` | `{deleted: true}` |
+| `module_secret.list` | `{}` | `{items: [{name, version, protected, state, updated_at_ms}]}` |
+
+These bodies appear inside `result`. Get and list are Query operations; put and delete
+are Mutate operations. Lists are sorted by name and contain no values; state is
+`active` or `corrupt`. A module can hold at most 64 items. Creates start at version 1;
+replacement increments the version and restores state to `active`.
+
+Put checks an existing item's protection first, then an expected-version mismatch,
+then refuses `protected: true` with `invalid_params` (protection is create-only).
+Otherwise it replaces the item without changing protection. For an absent item,
+expected-version presence refuses before the item-count limit is checked. Delete
+checks absence, protection, then expected-version mismatch, in that order. Refused
+writes change neither items nor audit rows. Successful writes and their audit row
+commit atomically.
+
+Get returns `corrupt` for an already quarantined row without opening it. Key mismatch
+returns `vault_locked` without a write. Other open failures quarantine only the exact
+observed active row and return `corrupt`; failed quarantine returns `store_error`.
+
+### Module-secret refusals
+
+Every refusal is a `Response` with `result.error.{code, class}`, never a classless
+transport `Error`. The fixture `module_secret_wire_contract.json` is generated from
+the daemon code and pins every success body and refusal. The refusal table is checked
+against `ModuleSecretError` in both directions.
+
+| code | class | meaning |
+|---|---|---|
+| `invalid_params` | `permanent` | Closed-object decoding or input validation failed; also an attempt to protect an existing item. |
+| `not_found` | `permanent` | Caller not admitted, or the caller's item is absent. |
+| `module_secret_protected` | `permanent` | A protected item cannot be replaced or deleted by its module. |
+| `module_secret_version_conflict` | `permanent` | Compare-and-replace/delete did not match, or compare-and-replace named an absent item. |
+| `module_secret_limit` | `permanent` | Creating another item would exceed 64 items. |
+| `corrupt` | `permanent` | The stored item is quarantined or failed to open. |
+| `vault_locked` | `transient` | The master key cannot be resolved or does not match the envelope. |
+| `store_error` | `transient` | A store transaction, audit append or quarantine failed. |
 
 ## Development desktop approvals
 

@@ -1,4 +1,8 @@
 # One line per THRESHOLD constant: <constant> <file> <boundary test>
+MODULE_SECRET_MAX_ITEMS crates/credentials-core/src/store_module_secrets.rs module_secret_limit_counts_corrupt_and_protected_items_and_allows_replacement
+MODULE_SECRET_MAX_VALUE_BYTES crates/credentials-core/src/store_module_secrets.rs module_secret_bounds_validate_before_store_access
+MODULE_SECRET_MAX_NAME_BYTES crates/credentials-core/src/store_module_secrets.rs module_secret_bounds_validate_before_store_access
+MODULE_SECRET_MAX_MODULE_ID_BYTES crates/credentials-core/src/store_module_secrets.rs module_secret_bounds_validate_before_store_access
 MAX_BYTES crates/credentials-core/src/fleet.rs fleet_byte_caps_and_auth_join_boundaries
 MAX_HOLDERS crates/credentials-core/src/fleet.rs fleet_holder_cap_checks_unions_and_wraps_before_writing
 MAX_EPOCHS crates/credentials-core/src/fleet.rs fleet_history_cap_and_full_join_round_trip

@@ -1115,6 +1115,7 @@ mod connectors_contract {
             );
             let wrong = federation::ingress::ScopedCaller {
                 principal: Some(reserved("another-module")),
+                attestation: None,
                 declared: declared_set(&admin, 77),
             };
             let params = read_surface::ListScopedParams {

@@ -156,10 +156,11 @@ impl MappingGate {
     }
 }
 
-/// A route's principal and declared grants, captured together at request acceptance.
+/// A route's principal, attestation and declared grants captured at request acceptance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedCaller {
     pub principal: Option<Principal>,
+    pub attestation: Option<subc_protocol::peer::CallerAttestation>,
     pub declared: std::sync::Arc<credentials_core::store::DeclaredGrantSet>,
 }
 
@@ -167,6 +168,7 @@ impl ScopedCaller {
     pub fn hand_only(principal: Option<Principal>) -> Self {
         Self {
             principal,
+            attestation: None,
             declared: std::sync::Arc::new(credentials_core::store::DeclaredGrantSet::empty()),
         }
     }

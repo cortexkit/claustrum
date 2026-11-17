@@ -29,6 +29,7 @@ mod manifest;
 mod manifest_active_report;
 mod manifest_identity;
 mod manifest_propose;
+mod module_secret;
 mod plan_warnings;
 mod read_surface;
 mod secret_phone;
@@ -1639,6 +1640,11 @@ async fn dispatch_route_request(
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
+    if let Some(request) = method.as_ref().filter(|r| module_secret::is_op(&r.method)) {
+        if module_secret::admit(&caller, &request.params).is_none() {
+            return send_route_result(writer, header, uniform_not_found()).await;
+        }
+    }
     if let Some(request) = method.as_ref().filter(|r| manifest::is_op(&r.method)) {
         if !matches!(&caller, federation::RouteCaller::Principal(principal) if manifest::admitted(&request.method, principal.as_ref()))
         {
@@ -1957,6 +1963,18 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        method if module_secret::is_op(method) => {
+            let route = federation::RouteCaller::Principal(caller.clone());
+            match module_secret::admit(&route, &request.params) {
+                Some(owner) => wrap_result(module_secret::serve(
+                    surface.store(),
+                    &owner,
+                    method,
+                    &request.params,
+                )),
+                None => uniform_not_found(),
+            }
+        }
         method if fleet_ops::is_op(method) => {
             match fleet_ops::serve(
                 Arc::clone(surface.store()),
@@ -2938,6 +2956,10 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 description: Some("Deposit a consent-attested browser cookie under a reserved principal's deposit grant.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
+            ManagementOperation { name: module_secret::PUT.into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: module_secret::GET.into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: module_secret::DELETE.into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: module_secret::LIST.into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation {
                 name: OP_ENROLL_PROPOSE.to_string(),
                 description: Some("Propose one bounded consumer enrollment using a pre-hashed resumption secret.".to_string()),
@@ -3184,6 +3206,9 @@ mod tests {
     }
     mod fleet_ops_tests {
         include!("fleet_ops_tests.rs");
+    }
+    mod module_secret_tests {
+        include!("module_secret_tests.rs");
     }
     include!("watch_scoped_tests.rs");
     include!("connectors_tests.rs");
@@ -19759,6 +19784,7 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/federation/sharing.rs"
             )),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/module_secret.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -19875,6 +19901,11 @@ mod tests {
                 "//! The trusted sender boundary for secret release.",
             ),
             (14, "fleet_ops.rs", "//! Entorhinal's fleet boundary:"),
+            (
+                16,
+                "module_secret.rs",
+                "//! Private, attested module-owned secret operations.",
+            ),
         ] {
             assert!(
                 sources[slot].starts_with(module_doc),

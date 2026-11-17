@@ -1525,6 +1525,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "main.rs",
         "fleet_ops.rs",
         "fleet_ops_tests.rs",
+        "module_secret.rs",
+        "module_secret_tests.rs",
         "config_gate.rs",
         "config_gate_tests.rs",
         "lib.rs",

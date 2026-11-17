@@ -99,6 +99,7 @@ struct Nonce {
 struct BindState {
     epoch: u32,
     principal: Principal,
+    attestation: Option<subc_protocol::peer::CallerAttestation>,
     declared: Arc<DeclaredGrantSet>,
     /// The opener's `BindIdentity.harness` for this bind. Read only on callosum's routes
     /// and only by the federation ingress mapping (`federation::map_route_caller`).
@@ -316,6 +317,7 @@ impl AdminSurface {
             BindState {
                 epoch,
                 principal,
+                attestation: caller.cloned(),
                 declared,
                 harness: harness.to_string(),
                 operator_app,
@@ -465,10 +467,11 @@ impl AdminSurface {
                     state.harness.clone(),
                     Arc::clone(&state.declared),
                     state.peer_build.clone(),
+                    state.attestation.clone(),
                 )
             })
         };
-        let Some((principal, harness, declared, peer_build)) = bound else {
+        let Some((principal, harness, declared, peer_build, attestation)) = bound else {
             return crate::federation::RouteCaller::Principal(
                 crate::federation::ingress::ScopedCaller::hand_only(None),
             );
@@ -480,6 +483,7 @@ impl AdminSurface {
         if let crate::federation::RouteCaller::Principal(caller) = &mut mapped {
             if caller.as_ref() == Some(&principal) {
                 caller.declared = declared;
+                caller.attestation = attestation;
             }
         }
         mapped

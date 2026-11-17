@@ -5987,11 +5987,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
     // budget for verbs. It includes the operator signing verb, the four
-    // federation verbs (transfer, remote, member, federation), secret controls
-    // and provider-report.
+    // federation verbs (transfer, remote, member, federation), secret controls,
+    // provider-report and module-secret.
     assert_eq!(
         verbs.len(),
-        42,
+        43,
         "the rendered verb-table scan narrowed; ssh-key is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

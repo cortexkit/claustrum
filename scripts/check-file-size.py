@@ -18,9 +18,6 @@ EXCEPTIONS = {
     "crates/credentials-core/src/store.rs": (
         10025, "EncryptedStore core and migrations; continue moving areas into store_*.rs when next worked in"
     ),
-    "crates/credentials-module/src/bin/credentials_cli.rs": (
-        8227, "ck auth verb table and verb bodies; move verb bodies into cli_support/ by area when next worked in"
-    ),
     "crates/credentials-core/src/catalog.rs": (
         5583, "provider catalog rows plus login checks; move the row table out when next worked in"
     ),

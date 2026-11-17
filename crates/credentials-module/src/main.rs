@@ -2713,6 +2713,9 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
     // from sender params; it still refuses flow-scoped transport route binds.
     // The vault never reads project fields from route.bind, so the supervisor can
     // omit its legacy project-root compatibility field on binds to this target.
+    // The daemon sends route.bind's `caller` record only to targets declaring
+    // caller-attestation/v1. Without it every bind arrives with no attestation, so
+    // declared grants and module secrets, which both require one, admit nobody.
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
         provides: vec![
             "permissions/v1".to_owned(),
@@ -2720,6 +2723,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             subc_protocol::peer::PEER_BUILD_CAPABILITY.to_owned(),
             subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
             subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
+            subc_protocol::peer::CALLER_ATTESTATION_CAPABILITY.to_owned(),
         ],
         requires: Vec::new(),
         must_never_reach: Vec::new(),
@@ -3314,7 +3318,8 @@ mod tests {
                 "operator-app/v1",
                 "peer-build/v1",
                 "flow-identity-scopes/v1",
-                "bind-no-project/v1"
+                "bind-no-project/v1",
+                "caller-attestation/v1"
             ]
         );
     }

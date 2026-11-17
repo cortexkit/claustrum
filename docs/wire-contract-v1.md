@@ -528,7 +528,9 @@ plausible list computed for grants you do not hold.
 ### 2.2 Declared grants for first-party modules
 
 The daemon may attest a module's approved `provider_declarations.claustrum` entry in
-the `caller` record of `route.bind`. The daemon has already selected the vault's entry;
+the `caller` record of `route.bind`. The daemon sends that record only to targets that
+declare `caller-attestation/v1`, which the vault's manifest does. The daemon has
+already selected the vault's entry;
 the vault reads that declaration as given, not as a request for operator consent.
 Declared grants supplement hand-made grants without creating `read_grants` rows.
 

@@ -107,6 +107,18 @@ jobs:
           echo "tag commit $(git rev-parse --short HEAD) is on master"
           echo "sha=$checked_sha" >> "$GITHUB_OUTPUT"
 
+      # Development-only features (such as unsigned desktop approvals) carry the phrase
+      # below in their source. A public release must not ship them, and nothing else
+      # would notice one left behind, so the release refuses while any remains.
+      - name: Refuse development-only code
+        run: |
+          set -euo pipefail
+          if grep -rniI 'remove before the next public release' crates/ docs/; then
+            echo "REFUSING: the files above hold development-only code marked for removal" >&2
+            echo "  before a public release. Remove it on master, then move the tag." >&2
+            exit 1
+          fi
+
       - name: Resolve minimum core version
         id: core
         run: |

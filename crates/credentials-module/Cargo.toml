@@ -62,7 +62,7 @@ subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
 subc-config = { workspace = true }
-subc-client-rs = { version = "=0.41.1", optional = true }
+subc-client-rs = { version = "0.41.1", optional = true }
 cortexkit-claustrum-client = { path = "../claustrum-client", optional = true }
 cortexkit-store = { workspace = true }
 # `durable_replace`: the engram catalog and the OpenCode file writers replace a file

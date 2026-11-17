@@ -145,7 +145,11 @@ impl CredentialTransport for ConsumerConnection {
         _corr: u64,
     ) -> CredentialResolverFuture<'_, Result<WatchFrame, CredentialResolverError>> {
         Box::pin(async move {
-            let subscription = self.subscription.as_mut().expect("watch subscribed");
+            let Some(subscription) = self.subscription.as_mut() else {
+                return Err(CredentialResolverError::transport(
+                    "scoped watch read before it was opened",
+                ));
+            };
             // The SDK closes the event channel after queuing all prior notices.
             // Drain it before observing the terminal result to preserve wire order.
             if let Some(body) = subscription.events().recv().await {

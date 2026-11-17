@@ -464,8 +464,10 @@ fi
 # Raise this WITH the arm count. A floor that trails is worse than no floor: it
 # reports a bound it is not enforcing, and the gap is invisible from a green run.
 ship_tests() {
-CRED_REQUIRE_DAEMON=1 run_expect 9 "real-daemon e2e (ship gate)" \
-  cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- \
+# consumer-e2e builds the claim-bound test module, so the Rust client's SDK path is
+# proven against a real daemon here too.
+CRED_REQUIRE_DAEMON=1 run_expect 10 "real-daemon e2e (ship gate)" \
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-module/consumer-e2e --test real_daemon_e2e -- \
     --ignored --nocapture --test-threads=1
 
 # The crash-safety proofs are gated at FILE level: without the feature the file is

@@ -23,7 +23,7 @@ sha2 = { workspace = true }
 subc-protocol = { workspace = true }
 subc-transport = { workspace = true, optional = true }
 subc-os = { workspace = true, optional = true }
-subc-client-rs = { version = "=0.41.1", optional = true }
+subc-client-rs = { version = "0.41.1", optional = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]

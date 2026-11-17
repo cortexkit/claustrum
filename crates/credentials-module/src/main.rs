@@ -2956,10 +2956,13 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 description: Some("Deposit a consent-attested browser cookie under a reserved principal's deposit grant.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
-            ManagementOperation { name: module_secret::PUT.into(), description: None, kind: ManagementOperationKind::Mutate },
-            ManagementOperation { name: module_secret::GET.into(), description: None, kind: ManagementOperationKind::Query },
-            ManagementOperation { name: module_secret::DELETE.into(), description: None, kind: ManagementOperationKind::Mutate },
-            ManagementOperation { name: module_secret::LIST.into(), description: None, kind: ManagementOperationKind::Query },
+            // Written as literals, like the catalog entries above: the federation test
+            // stand-in reads this list from source text. A misspelling fails the
+            // connectors classification test, which matches names with `module_secret::is_op`.
+            ManagementOperation { name: "module_secret.put".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "module_secret.get".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "module_secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "module_secret.list".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation {
                 name: OP_ENROLL_PROPOSE.to_string(),
                 description: Some("Propose one bounded consumer enrollment using a pre-hashed resumption secret.".to_string()),

@@ -4986,9 +4986,18 @@ mod error_class_tests {
         // A code table may list invalid_params (the agent-secrets table does, to show
         // its full refusal set), but only as a transport Error. A row presenting it as
         // an in-result code with a class would tell consumers to branch on it there.
+        // The one exception is the module-secret table: those operations really do
+        // answer invalid_params in the result (contract section 1a names them), and
+        // that table is pinned against the live code by the module-secret tests.
+        let module_secret_table = doc
+            .split("### Module-secret refusals")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("the contract has a module-secret refusal table");
         for row in doc
             .lines()
             .filter(|line| line.starts_with("| `invalid_params` |"))
+            .filter(|line| !module_secret_table.contains(line))
         {
             assert!(
                 row.contains("transport Error"),

@@ -980,6 +980,9 @@ mod connectors_contract {
                 | federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS => None,
                 // Entorhinal-only by caller identity; no grant selector reaches them.
                 name if crate::fleet_ops::OPS.contains(&name) => None,
+                // Owner-only: a module reaches its own space by its attested identity,
+                // and no grant selector can reach another module's.
+                name if crate::module_secret::is_op(name) => None,
                 name => panic!("unclassified operation: {name}"),
             };
             if let Some(classification) = classification {

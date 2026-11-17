@@ -183,6 +183,19 @@ async fn consumer_routes_every_operation_without_identity_override() {
 }
 
 #[tokio::test]
+async fn consumer_closed_by_caller_refuses_scoped_read_as_transport() {
+    let rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    rig.consumer.close().await;
+    let refusal = resolver
+        .get_scoped("id")
+        .await
+        .expect_err("closed consumer refusal");
+    assert_eq!(refusal.class, CredentialErrorClass::Transport);
+    assert_eq!(refusal.code(), "credential_transport");
+}
+
+#[tokio::test]
 async fn consumer_seal_returns_route_busy_without_replaying() {
     let mut rig = Rig::new().await;
     let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));

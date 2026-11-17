@@ -1,0 +1,546 @@
+{
+  "cases": [
+    {
+      "approval_sentences": [
+        "Get short-lived CortexKit account tokens for cortexkit-runners",
+        "Save browser sign-ins into the vault (browser sign-in)",
+        "See which model provider logins and keys exist (no secrets)",
+        "Read your model provider logins and keys"
+      ],
+      "case": "valid-mixed",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "list"
+          },
+          {
+            "category": "browser-session",
+            "operation": "deposit"
+          },
+          {
+            "audience": "cortexkit-runners",
+            "operation": "account_token"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[{\"selector_kind\":\"audience\",\"selector\":\"cortexkit-runners\",\"operation\":\"account_token\"},{\"selector_kind\":\"category\",\"selector\":\"browser-session\",\"operation\":\"deposit\"},{\"selector_kind\":\"category\",\"selector\":\"llm-provider\",\"operation\":\"list\"},{\"selector_kind\":\"category\",\"selector\":\"llm-provider\",\"operation\":\"read\"}]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "unknown-entry-field",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "only": "x",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "field"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "unknown-operation",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "unknown"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "operation"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "category-sign",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "sign"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "operation"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "exact-selector",
+      "declaration": {
+        "grants": [
+          {
+            "exact": "apikey:anthropic",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "selector"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "non-browser-deposit",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "deposit"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "tuple"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "unknown-audience",
+      "declaration": {
+        "grants": [
+          {
+            "audience": "unrecognized",
+            "operation": "account_token"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [
+        {
+          "index": 0,
+          "reason": "audience"
+        }
+      ],
+      "skipped_count": 1,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [
+        "See which model provider logins and keys exist (no secrets)",
+        "Read your model provider logins and keys"
+      ],
+      "case": "duplicates",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "list"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[{\"selector_kind\":\"category\",\"selector\":\"llm-provider\",\"operation\":\"list\"},{\"selector_kind\":\"category\",\"selector\":\"llm-provider\",\"operation\":\"read\"}]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "unsupported-version",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          }
+        ],
+        "v": 2
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 1,
+      "whole_reason": "version"
+    },
+    {
+      "approval_sentences": [],
+      "case": "too-many-entries",
+      "declaration": {
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          },
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 33,
+      "whole_reason": "entry_count"
+    },
+    {
+      "approval_sentences": [],
+      "case": "missing-grants",
+      "declaration": {
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": "grants"
+    },
+    {
+      "approval_sentences": [
+        "Read your model provider logins and keys"
+      ],
+      "case": "ignored-top-level-field",
+      "declaration": {
+        "future_top_level": true,
+        "grants": [
+          {
+            "category": "llm-provider",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[{\"selector_kind\":\"category\",\"selector\":\"llm-provider\",\"operation\":\"read\"}]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [],
+      "case": "empty-grants",
+      "declaration": {
+        "grants": [],
+        "v": 1
+      },
+      "grants_json": "[]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": null
+    },
+    {
+      "approval_sentences": [
+        "Read your custom-native logins and keys"
+      ],
+      "case": "raw-category-name",
+      "declaration": {
+        "grants": [
+          {
+            "category": "custom-native",
+            "operation": "read"
+          }
+        ],
+        "v": 1
+      },
+      "grants_json": "[{\"selector_kind\":\"category\",\"selector\":\"custom-native\",\"operation\":\"read\"}]",
+      "module_id": "striatum",
+      "skipped": [],
+      "skipped_count": 0,
+      "whole_reason": null
+    }
+  ],
+  "category_names": [
+    {
+      "category": "llm-provider",
+      "plain_name": "model provider"
+    },
+    {
+      "category": "llm-gateway",
+      "plain_name": "company AI gateway"
+    },
+    {
+      "category": "data-warehouse",
+      "plain_name": "data warehouse"
+    },
+    {
+      "category": "cloud-infrastructure",
+      "plain_name": "cloud infrastructure"
+    },
+    {
+      "category": "web-search",
+      "plain_name": "web search"
+    },
+    {
+      "category": "media-provider",
+      "plain_name": "speech and media"
+    },
+    {
+      "category": "embedding-provider",
+      "plain_name": "embedding models"
+    },
+    {
+      "category": "browser-session",
+      "plain_name": "browser sign-in"
+    },
+    {
+      "category": "antigravity-native",
+      "plain_name": "Antigravity"
+    },
+    {
+      "category": "anthropic-native",
+      "plain_name": "Anthropic"
+    },
+    {
+      "category": "cursor-native",
+      "plain_name": "Cursor"
+    },
+    {
+      "category": "devin-native",
+      "plain_name": "Devin"
+    },
+    {
+      "category": "digitalocean-native",
+      "plain_name": "DigitalOcean"
+    },
+    {
+      "category": "github-app-native",
+      "plain_name": "GitHub bot"
+    },
+    {
+      "category": "github-copilot-native",
+      "plain_name": "GitHub Copilot"
+    },
+    {
+      "category": "gmail-native",
+      "plain_name": "Gmail"
+    },
+    {
+      "category": "google-native",
+      "plain_name": "Google"
+    },
+    {
+      "category": "kimi-native",
+      "plain_name": "Kimi"
+    },
+    {
+      "category": "meta-native",
+      "plain_name": "Meta AI"
+    },
+    {
+      "category": "openai-native",
+      "plain_name": "OpenAI"
+    },
+    {
+      "category": "snowflake-native",
+      "plain_name": "Snowflake"
+    },
+    {
+      "category": "xai-native",
+      "plain_name": "xAI"
+    }
+  ],
+  "templates": [
+    {
+      "shape": "Category `read`",
+      "template": "Read your <category name> logins and keys"
+    },
+    {
+      "shape": "Category `list`",
+      "template": "See which <category name> logins and keys exist (no secrets)"
+    },
+    {
+      "shape": "Category `deposit`",
+      "template": "Save browser sign-ins into the vault (<category name>)"
+    },
+    {
+      "shape": "Audience `account_token`",
+      "template": "Get short-lived CortexKit account tokens for <audience>"
+    }
+  ],
+  "version": 2
+}

@@ -235,7 +235,10 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         return Ok(true);
     }
     let theme = ColorfulTheme::default();
-    eprintln!("Provider {service} is unknown. Its keys reach only modules granted the groups you choose now.");
+    eprintln!("Provider {service} is unknown. Choose the groups whose modules may read its keys.");
+    eprintln!(
+        "Choose none to keep it private: only a module you grant this key by name can read it."
+    );
     // `llm-gateway` is not offered: gateway keys get it from `admin.gateway_create`,
     // and the registry refuses it as a default for ordinary keys.
     let groups: Vec<_> = credentials_core::catalog::CredentialCategory::ALL
@@ -243,11 +246,24 @@ pub(super) fn provider(global: &GlobalArgs, id: &str) -> Result<bool, CliError> 
         .filter(|category| **category != credentials_core::catalog::CredentialCategory::LlmGateway)
         .map(|category| category.as_str())
         .collect();
+    let labels: Vec<_> = groups
+        .iter()
+        .map(|group| {
+            let name = credentials_core::store::DECLARED_GRANT_CATEGORY_NAMES
+                .iter()
+                .find_map(|(category, name)| (*category == *group).then_some(*name))
+                .unwrap_or(group);
+            format!("{group}: {name}")
+        })
+        .collect();
     let selected = MultiSelect::with_theme(&theme)
-        .with_prompt("Groups for this provider (space to select, enter to finish)")
-        .items(&groups)
+        .with_prompt("Groups for this provider (space to select, enter to finish; none is fine)")
+        .items(&labels)
         .interact()
         .map_err(prompt_error)?;
+    if selected.is_empty() {
+        eprintln!("No groups chosen. To let one module read this key, run ck auth grant --principal reserved:<module> --selector-kind exact --selector {id} --operation read");
+    }
     let categories = selected
         .into_iter()
         .map(|index| groups[index].to_string())

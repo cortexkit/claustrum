@@ -13,7 +13,9 @@ fn declared_grant_approval_wording_formats_admitted_grants_and_unknown_categorie
         {"category":"llm-provider","operation":"list"},
         {"category":"browser-session","operation":"deposit"},
         {"audience":"cortexkit-runners","operation":"account_token"},
-        {"category":"custom-native","operation":"read"}
+        {"category":"custom-native","operation":"read"},
+        {"category":"embedding-provider","operation":"read"},
+        {"category":"embedding-provider","operation":"list"}
     ]));
     assert_eq!(diagnostics, DeclarationDiagnostics::default());
     assert_eq!(
@@ -25,6 +27,8 @@ fn declared_grant_approval_wording_formats_admitted_grants_and_unknown_categorie
             "Get short-lived CortexKit account tokens for cortexkit-runners",
             "Save browser sign-ins into the vault (browser sign-in)",
             "Read your custom-native logins and keys",
+            "See which embedding models logins and keys exist (no secrets)",
+            "Read your embedding models logins and keys",
             "See which model provider logins and keys exist (no secrets)",
             "Read your model provider logins and keys",
         ]
@@ -111,7 +115,27 @@ fn declared_grant_approval_wording_matches_wire_contract_tables() {
 }
 
 #[test]
-fn declared_grants_v1_vectors_are_emitted_by_parser_and_wording_code_and_pinned() {
+fn declared_grant_catalog_categories_have_plain_names() {
+    for category in crate::catalog::CredentialCategory::ALL {
+        let names: Vec<_> = DECLARED_GRANT_CATEGORY_NAMES
+            .iter()
+            .filter(|(name, _)| *name == category.as_str())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "{} needs exactly one plain name",
+            category.as_str()
+        );
+        assert!(
+            !names[0].1.is_empty(),
+            "{} needs a plain name",
+            category.as_str()
+        );
+    }
+}
+
+fn declared_grants_vectors() -> serde_json::Value {
     let declarations = [
         (
             "valid-mixed",
@@ -231,21 +255,42 @@ fn declared_grants_v1_vectors_are_emitted_by_parser_and_wording_code_and_pinned(
         .iter()
         .map(|(category, plain_name)| json!({"category":category,"plain_name":plain_name}))
         .collect();
-    let emitted =
-        json!({"version":1,"templates":templates,"category_names":category_names,"cases":cases});
+    json!({"version":2,"templates":templates,"category_names":category_names,"cases":cases})
+}
+
+#[test]
+fn declared_grants_v1_vectors_still_render_from_live_parser_and_wording() {
+    let emitted = declared_grants_vectors();
+    let expected: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../tests/vectors/declared-grants-v1.json")).unwrap();
+    assert_eq!(expected["version"], 1);
+    // The published v1 category table is historical; its cases and wording remain live checks.
+    assert_eq!(emitted["templates"], expected["templates"]);
+    assert_eq!(emitted["cases"], expected["cases"]);
+}
+
+#[test]
+fn declared_grants_v2_vectors_are_emitted_by_parser_and_wording_code_and_pinned() {
+    use sha2::{Digest, Sha256};
+
+    let emitted = declared_grants_vectors();
     let bytes = serde_json::to_vec_pretty(&emitted).unwrap();
     let pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/vectors/declared-grants-v1.json");
+        .join("tests/vectors/declared-grants-v2.json");
+    let sums_path = pinned.with_file_name("declared-grants-v2.SHA256SUMS");
+    let sums = format!("{:x}  declared-grants-v2.json\n", Sha256::digest(&bytes));
     if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
         std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
         std::fs::write(&pinned, bytes).unwrap();
-        println!("emitted 14 declared-grant parser and approval wording cases");
+        std::fs::write(&sums_path, &sums).unwrap();
+        println!("emitted 14 declared-grant parser and approval wording cases with the live category table");
     } else {
         let expected = std::fs::read(&pinned).expect("pinned declared-grant vectors");
         assert_eq!(
             bytes, expected,
             "vault-emitted declared-grant vectors changed"
         );
+        assert_eq!(std::fs::read_to_string(&sums_path).unwrap(), sums);
     }
 }
 

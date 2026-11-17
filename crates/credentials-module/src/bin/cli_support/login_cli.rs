@@ -1,5 +1,7 @@
 //! Interactive, device, API-key, gateway, and browser login and logout commands.
 
+#[cfg(all(test, unix))]
+use super::spawn_browser;
 use super::{
     api_key_login, browser_login, check_deposit_provider_flags, commit_admin,
     commit_admin_with_key, commit_login_admin, google_login, has_flag, login_listener,
@@ -10,7 +12,7 @@ use super::{
     StoreMode, StoreOpError, VaultRecord, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
 };
 #[cfg(test)]
-use super::{help_verb, parse_plan_since, spawn_browser, usage_short, windows_browser_command};
+use super::{help_verb, parse_plan_since, usage_short, windows_browser_command};
 
 // Vault-native first-party OAuth login uses the shared core catalog so the CLI,
 // creation defaults, reclassification, and scoped listings resolve the same entries.

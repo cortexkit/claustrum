@@ -710,10 +710,13 @@ async fn claim_bound_sdk_consumer_reads_vault_through_rust_resolver() {
     assert_eq!(result, json!({"claim_bound_read":true}));
 }
 
-/// The SDK must preserve Callosum's own principal even when member mapping fails
-/// closed. Admission relies on the reserved module's `own` attestation, not on
-/// trusted first-party build provenance. Neither probe is given credential grants:
-/// module-secret access depends only on the attested module's private space.
+/// Callosum's routes normally speak for other computers. The vault's member-mapping
+/// setting decides how it reads them, and a damaged setting fails closed. In each of
+/// the three states (off, on, unreadable) Callosum's own module-secret calls must
+/// still reach its own space. Admission needs only the daemon's attestation that the
+/// caller is that module itself (`claim: own`), not the daemon's first-party mark.
+/// Neither probe holds credential grants: module-secret access depends only on the
+/// attested module's private space.
 #[cfg(feature = "consumer-e2e")]
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]

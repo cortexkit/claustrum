@@ -60,7 +60,8 @@ pub enum ModuleSecretError {
 }
 
 impl ModuleSecretError {
-    /// The wire code, shared by the module route and the operator admin plane.
+    /// The error code sent on the wire, the same for a module calling `module_secret.*`
+    /// and for the operator's `ck auth module-secret` commands.
     pub fn code(self) -> &'static str {
         match self {
             Self::Protected => "module_secret_protected",
@@ -525,7 +526,10 @@ impl EncryptedStore {
     }
 }
 
-/// Called only inside master-key rotation's enclosing fenced transaction.
+/// Called only from master-key rotation, inside the single write transaction that
+/// `fenced_write` opens for the whole rotation. That transaction is refused if a newer
+/// writer has taken the store's single-writer lease, and the re-sealed rows commit
+/// together with the rest of the rotation or not at all.
 pub(super) fn rotate_module_secrets_tx(
     tx: &rusqlite::Transaction<'_>,
     old_key: &MasterKey,

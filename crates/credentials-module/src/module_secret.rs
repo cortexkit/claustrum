@@ -36,8 +36,8 @@ pub fn admit(caller: &RouteCaller, params: &Value) -> Option<ModuleSecretOwner> 
 
 pub use module_secrets::ModuleSecretError;
 
-/// The refusal body, with the code and class the store defines for both this route and
-/// the operator's admin plane.
+/// The refusal body, with the code and class the store defines. The operator's
+/// `ck auth module-secret` commands report the same code and class.
 pub fn reply(error: ModuleSecretError) -> Value {
     json!({"error": {"code": error.code(), "class": error.class()}})
 }

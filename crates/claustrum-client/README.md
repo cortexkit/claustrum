@@ -209,6 +209,28 @@ watch: its first notice has seq 1 and current digests, covering changes that may
 have happened while disconnected. Neither digest is an event journal, and refresh-only writes do
 not change them.
 
+## Module-owned secrets
+
+Version 0.13.0 adds inherent `module_secret_put`, `module_secret_get`,
+`module_secret_delete` and `module_secret_list` methods. Use `with_consumer` on
+the module's claim-bound SDK connection; a raw `new` connection cannot supply the
+required `own` attestation and the daemon refuses it with `not_found`.
+
+Pass owned bytes as `Secret::new(bytes)` and borrow returned bytes with
+`secret.value.expose()`. The client scrubs its owned value, base64, serialized
+request and reply buffers on drop and redacts their `Debug`. Copies in SDK and
+transport frame buffers are outside this guarantee.
+
+`ModuleSecretError::{VersionConflict, Protected, Limit}` preserve the specific
+module-secret refusals; other failures use `Other(CredentialResolverError)`.
+Missing values are `Other` with class `CredentialAbsent`. None of these methods
+retries automatically, even for transient failures: a lost put reply may already
+have incremented the stored version. The caller decides whether to retry.
+
+The methods use a separate `callosum-self` route on the same SDK consumer, so
+Callosum keeps its own principal regardless of the member-mapping gate. The
+ordinary credential resolver's route and retry behavior are unchanged.
+
 ## Contract tests
 
 The reply decoders are tested against real bytes the vault serialises: the
@@ -235,6 +257,8 @@ and decodes its reply's exact bytes.
 
 ## Changes
 
+- 0.13.0: module-owned secret operations, typed refusals and redacted, zeroizing
+  value buffers. Requires a daemon with `module_secret.*` support.
 - 0.9.0: requires subc-protocol 0.36 and, with the default `transport` feature,
   subc-transport 0.17 and subc-os 0.1.30. The client's own API is unchanged, and
   no subc type appears in it. The minor version moves so that a consumer still on

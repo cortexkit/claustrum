@@ -6,6 +6,7 @@ struct Rig {
     root: PathBuf,
     stream: TcpStream,
     consumer: Arc<SubcConsumer>,
+    route_opens: Vec<Value>,
 }
 
 impl Drop for Rig {
@@ -66,6 +67,7 @@ impl Rig {
             root,
             stream,
             consumer: Arc::new(consumer.unwrap()),
+            route_opens: Vec::new(),
         }
     }
 
@@ -84,6 +86,7 @@ impl Rig {
                 self.reply(&frame, FrameType::Response, json!({"op":"server.describe", "protocol_ver":2, "subc_ops":[], "capabilities":[], "connected_clients":1}))
                     .await;
             } else if body["op"] == "route.open" {
+                self.route_opens.push(body.clone());
                 assert_eq!(
                     body["target"],
                     json!({"kind":"management_surface", "module_id":"claustrum"})
@@ -98,7 +101,7 @@ impl Rig {
                 self.reply(
                     &frame,
                     FrameType::Response,
-                    json!({"op":"route.open", "route_channel":7,"route_epoch":3, "request_window":8, "watch_window":8}),
+                    json!({"op":"route.open", "route_channel":6 + self.route_opens.len(),"route_epoch":3, "request_window":8, "watch_window":8}),
                 )
                 .await;
             } else {
@@ -119,6 +122,128 @@ impl Rig {
         .unwrap();
         write_frame(&mut self.stream, &frame).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn module_secret_consumer_uses_a_second_route_and_never_replays_busy_operations() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        assert!(resolver.get_scoped("barrier").await.is_err());
+        for operation in 0..4 {
+            let error = match operation {
+                0 => resolver
+                    .module_secret_put("key", Secret::new(vec![42]), None, None)
+                    .await
+                    .unwrap_err(),
+                1 => resolver.module_secret_get("key").await.unwrap_err(),
+                2 => resolver
+                    .module_secret_delete("key", None)
+                    .await
+                    .unwrap_err(),
+                _ => resolver.module_secret_list().await.unwrap_err(),
+            };
+            assert!(matches!(
+                error,
+                ModuleSecretError::Other(CredentialResolverError {
+                    class: CredentialErrorClass::Transient,
+                    ..
+                })
+            ));
+        }
+        assert!(resolver.get_scoped("barrier").await.is_err());
+    };
+    let server = async {
+        for method in [
+            "credential.get_scoped",
+            "module_secret.put",
+            "module_secret.get",
+            "module_secret.delete",
+            "module_secret.list",
+            "credential.get_scoped",
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(
+                body["method"], method,
+                "no module-secret operation may replay before the next caller operation"
+            );
+            assert_eq!(
+                frame.header.channel,
+                if method == "credential.get_scoped" {
+                    7
+                } else {
+                    8
+                }
+            );
+            rig.reply(
+                &frame,
+                FrameType::Response,
+                if method == "credential.get_scoped" {
+                    json!({"result":{"error":{"code":"not_found","class":"permanent"}}})
+                } else {
+                    json!({"result":{"error":{"code":"route_busy","class":"transient"}}})
+                },
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 2);
+    assert_eq!(
+        rig.route_opens[0]["identity"]["harness"],
+        "claustrum-client"
+    );
+    assert_eq!(rig.route_opens[1]["identity"]["harness"], "callosum-self");
+    let mut original = rig.route_opens[0].clone();
+    original["identity"]["harness"] = json!("callosum-self");
+    assert_eq!(
+        original, rig.route_opens[1],
+        "only the bind harness changes"
+    );
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn module_secret_consumer_returns_transport_route_busy_as_transient_without_replaying() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let error = resolver
+            .module_secret_put("key", Secret::new(vec![42]), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ModuleSecretError::Other(CredentialResolverError {
+                class: CredentialErrorClass::Transient,
+                ..
+            })
+        ));
+        assert!(resolver.get_scoped("barrier").await.is_err());
+    };
+    let server = async {
+        let (frame, body) = rig.next().await;
+        assert_eq!(body["method"], "module_secret.put");
+        rig.reply(
+            &frame,
+            FrameType::Error,
+            json!({"code":"route_busy","message":"busy"}),
+        )
+        .await;
+        let (frame, body) = rig.next().await;
+        assert_eq!(
+            body["method"], "credential.get_scoped",
+            "the put must not replay"
+        );
+        rig.reply(
+            &frame,
+            FrameType::Response,
+            json!({"result":{"error":{"code":"not_found","class":"permanent"}}}),
+        )
+        .await;
+    };
+    tokio::join!(calls, server);
+    rig.consumer.close().await;
 }
 
 #[tokio::test]

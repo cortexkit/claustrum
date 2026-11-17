@@ -710,6 +710,118 @@ async fn claim_bound_sdk_consumer_reads_vault_through_rust_resolver() {
     assert_eq!(result, json!({"claim_bound_read":true}));
 }
 
+/// The SDK must preserve Callosum's own principal even when member mapping fails
+/// closed. Admission relies on the reserved module's `own` attestation, not on
+/// trusted first-party build provenance. Neither probe is given credential grants:
+/// module-secret access depends only on the attested module's private space.
+#[cfg(feature = "consumer-e2e")]
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn module_secret_sdk_callosum_round_trips_with_each_mapping_gate() {
+    const OTHER: &str = "module-secret-other-probe";
+    for (gate, value) in [
+        ("off", rusqlite::types::Value::Text("false".into())),
+        ("on", rusqlite::types::Value::Text("true".into())),
+        ("unreadable", rusqlite::types::Value::Blob(vec![0xff])),
+    ] {
+        let Some(seeded) = start_vault_with_seed_and_config(
+            |ctx| {
+                run_cli(&[
+                    "put",
+                    "--id",
+                    "operator:test",
+                    "--payload-file",
+                    &payload_file("unrelated-credential"),
+                    "--data-dir",
+                    &ctx.data_dir,
+                    "--key-path",
+                    &ctx.key_path,
+                ]);
+                // A BLOB is a valid SQLite cell but cannot be read as the setting's
+                // String type. Only this gate row is damaged; the vault stays usable.
+                let conn =
+                    rusqlite::Connection::open(Path::new(&ctx.data_dir).join("store.db")).unwrap();
+                conn.execute(
+                    "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 0)",
+                    rusqlite::params![credentials_core::federation::MEMBER_MAPPING_SETTING, value],
+                )
+                .unwrap();
+                let read = conn.query_row(
+                    "SELECT value FROM settings WHERE name = ?1",
+                    [credentials_core::federation::MEMBER_MAPPING_SETTING],
+                    |row| row.get::<_, String>(0),
+                );
+                match gate {
+                    "off" => assert_eq!(read.unwrap(), "false"),
+                    "on" => assert_eq!(read.unwrap(), "true"),
+                    _ => assert!(
+                        read.is_err(),
+                        "the unreadable arm must really fail the gate read"
+                    ),
+                }
+                ("operator:test".into(), b"unrelated-credential".to_vec())
+            },
+            |config, _rig| {
+                for module in ["callosum", OTHER] {
+                    config["modules"][module] = json!({
+                        "program": env!("CARGO_BIN_EXE_ckdev-claustrum-consumer"),
+                        "args": [], "reserved": true, "registration_channel": true,
+                    });
+                }
+            },
+        )
+        .await
+        else {
+            eprintln!("{}", skip_notice("module-secret SDK consumer"));
+            return;
+        };
+        let mut driver = connect_consumer(&seeded.daemon.connection_file).await;
+        for module in [MODULE_ID, "callosum", OTHER] {
+            wait_for_catalog(&mut driver, module, SETUP_TIMEOUT).await;
+        }
+        for (index, (module, phase)) in [
+            ("callosum", "put-get"),
+            (OTHER, "isolated"),
+            ("callosum", "delete"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let corr = 9100 + index as u64 * 2;
+            let opened = control_rpc(
+                &mut driver,
+                corr,
+                json!({
+                    "op":"route.open", "target":{"kind":"management_surface","module_id":module},
+                    "identity":{"harness":"credentials-e2e","session":"module-secret-probe"},
+                }),
+            )
+            .await;
+            assert_eq!(
+                opened.header.ty,
+                FrameType::Response,
+                "probe route in gate {gate}"
+            );
+            let route: Value = serde_json::from_slice(&opened.body).unwrap();
+            let result = raw_route_request(
+                &mut driver,
+                common::Route {
+                    channel: route["route_channel"].as_u64().unwrap().try_into().unwrap(),
+                    epoch: route["route_epoch"].as_u64().unwrap().try_into().unwrap(),
+                },
+                corr + 1,
+                json!({"method":"probe.module-secret","params":{"phase":phase}}),
+            )
+            .await;
+            assert_eq!(
+                result,
+                json!({"module_secret_probe":true}),
+                "{module} {phase} in gate {gate}"
+            );
+        }
+    }
+}
+
 /// THE DEPLOY REACHABILITY PROBE for stale-not-dead: a report against a REFRESHABLE
 /// credential must leave it ACTIVE, not latch it.
 ///

@@ -396,11 +396,16 @@ fn asking(stamp: &ScopeStamp) -> Option<(AskingScope, Option<AskingScope>)> {
         ScopeKind::Head => Some((scope, None)),
         ScopeKind::Worker => Some((scope, parent)),
         ScopeKind::Ephemeral => parent
-            .filter(|p| p.owner == "reserved:prefrontal-core")
+            .filter(|p| PREFRONTAL_OWNERS.contains(&p.owner.as_str()))
             .map(|p| (p, None)),
         _ => None,
     }
 }
+
+/// The module that owns agent heads, under its current id and its id before the rename to
+/// `prefrontal`. Both are accepted so the rename needs no vault restart at the cut; the
+/// old id goes in the build after the cut.
+const PREFRONTAL_OWNERS: [&str; 2] = ["reserved:prefrontal", "reserved:prefrontal-core"];
 
 /// Caller admission precedes all parsing and all diagnostics, including malformed params.
 pub fn serve(

@@ -123,6 +123,14 @@ fn secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch() {
         ("reserved:prefrontal-core", "head", "parent-H", 7)
     );
     assert!(worker.is_none());
+    // The renamed owner maps the same way, and a look-alike doesn't.
+    let mut renamed = base.clone();
+    renamed.parent.as_mut().unwrap().owner = principal("prefrontal");
+    let (mapped, _) = asking(&renamed).expect("renamed prefrontal parent maps");
+    assert_eq!(mapped.owner, "reserved:prefrontal");
+    let mut lookalike = base.clone();
+    lookalike.parent.as_mut().unwrap().owner = principal("prefrontal-core-x");
+    assert!(asking(&lookalike).is_none());
     for mode in [
         "no-parent",
         "no-state",

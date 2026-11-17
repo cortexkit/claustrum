@@ -17,7 +17,9 @@
 //! as the parked multi-account form `<provider>[:<account>]`, with the provider's
 //! default method (oauth), so old ids do not misroute.
 
-/// Whether an id can name a deposit rather than a category selector or packed id.
+/// Whether a new credential may be stored under this id. A `category:` prefix would
+/// read as a grant's category selector, and `|` separates the fields of the audit
+/// target that names a grant, so a stored id may contain neither.
 pub fn is_valid_deposit_credential_id(credential_id: &str) -> bool {
     !credential_id.starts_with("category:") && !credential_id.contains('|')
 }

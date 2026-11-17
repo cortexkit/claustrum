@@ -92,11 +92,13 @@ mod tests {
     /// exactly where a re-derived redirect costs the operator an approval already
     /// given.
     fn cmd_login_source() -> &'static str {
-        const CLI: &str = include_str!("../credentials_cli.rs");
-        let start = CLI.find("\nfn cmd_login(").expect("cmd_login is defined");
+        const CLI: &str = include_str!("login_cli.rs");
+        let start = CLI
+            .find("\npub(super) fn cmd_login(")
+            .expect("cmd_login is defined");
         let body = &CLI[start + 1..];
         let end = body[1..]
-            .find("\nfn ")
+            .find("\npub(super) fn ")
             .map(|offset| offset + 1)
             .unwrap_or(body.len());
         &body[..end]

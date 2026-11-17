@@ -1,0 +1,38 @@
+{
+  "audit_actor": "desktop-development",
+  "envelope": {
+    "decision": "allow",
+    "device_fingerprint": "00000000000000000000000000000000",
+    "duration": "version",
+    "grant_expires_at_ms": 0,
+    "issued_at_ms": 1700000000000,
+    "items": [
+      {
+        "request_id": "01HF7YAT000000000000000001",
+        "statement_sha256": "bcf3f59a99c0beaa52366c6fa37af6a799460257215252d804ce7474240a7c57"
+      }
+    ],
+    "v": "ck-secret-use-envelope/v1"
+  },
+  "now_ms": 1700000000000,
+  "reply": {
+    "results": [
+      {
+        "outcome": "granted",
+        "request_id": "01HF7YAT000000000000000001"
+      }
+    ]
+  },
+  "request": {
+    "method": "secret.approve",
+    "params": {
+      "card_ref": "card-1",
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJkdXJhdGlvbiI6InZlcnNpb24iLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYmNmM2Y1OWE5OWMwYmVhYTUyMzY2YzZmYTM3YWY2YTc5OTQ2MDI1NzIxNTI1MmQ4MDRjZTc0NzQyNDBhN2M1NyJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ"
+    }
+  },
+  "statement": {
+    "request_id": "01HF7YAT000000000000000001",
+    "statement_b64url": "eyJkdXJhdGlvbnMiOlsidmVyc2lvbiJdLCJmbG93Ijp7ImNvZGVfaGFzaCI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJmbG93X2lkIjoiZGFpbHktZmV0Y2giLCJpbnN0YWxsX2lkIjoiaW5zdGFsbC1BIiwidmVyc2lvbiI6N30sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInJlcXVlc3RfZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwic2VjcmV0Ijp7ImluY2FybmF0aW9uIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxNDkiLCJraW5kIjoiYWdlbnRfYXBpX2tleSIsIm5hbWUiOiJrZXkifSwidXNlIjp7Imhvc3QiOiJ4LnRlc3QiLCJsb2NhdGlvbiI6ImhlYWRlcjpYLUFwaS1LZXkiLCJtZXRob2RzIjpbIkdFVCJdLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtZmxvdy1zdGF0ZW1lbnQvdjEifQ",
+    "statement_sha256": "bcf3f59a99c0beaa52366c6fa37af6a799460257215252d804ce7474240a7c57"
+  }
+}

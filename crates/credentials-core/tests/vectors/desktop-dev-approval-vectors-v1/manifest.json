@@ -1,0 +1,25 @@
+{
+  "audit_actor": "desktop-development",
+  "envelope": {
+    "decision": "allow",
+    "device_fingerprint": "00000000000000000000000000000000",
+    "issued_at_ms": 1794355300133,
+    "proposal_id": "01HF7YAT000000000000000004",
+    "statement_sha256": "2c0d26f078ac137b4630c747f8ac424cec1a06b3ec70ce53e00d57f58ef94f86",
+    "v": "ck-manifest-binding-envelope/v1"
+  },
+  "now_ms": 1794355300133,
+  "reply": {
+    "manifest_sha256": "c53e603daca59c263389299c0554f8e272311602a643d53b9716bb2b691f373d",
+    "proposal_id": "01HF7YAT000000000000000004",
+    "status": "approved",
+    "version": 29
+  },
+  "request": {
+    "method": "manifest.approve",
+    "params": {
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMzMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDQiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiMmMwZDI2ZjA3OGFjMTM3YjQ2MzBjNzQ3ZjhhYzQyNGNlYzFhMDZiM2VjNzBjZTUzZTAwZDU3ZjU4ZWY5NGY4NiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0"
+    }
+  },
+  "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InJlcG8tYm90IiwiZXhwaXJlc19hdF9tcyI6MTc5NDQ0MTcwMDEyMywiaW5zdGFsbGF0aW9uX3Blcm1pc3Npb25zIjp7ImNvbnRlbnRzIjoid3JpdGUiLCJtZXRhZGF0YSI6InJlYWQifSwibWFuaWZlc3Rfc2hhMjU2IjoiYzUzZTYwM2RhY2E1OWMyNjMzODkyOTljMDU1NGY4ZTI3MjMxMTYwMmE2NDNkNTNiOTcxNmJiMmI2OTFmMzczZCIsIm1hbmlmZXN0X3ZlcnNpb24iOjI5LCJwcmlvcl9zaGEyNTYiOiI5MTI0NDg5MWM0OThiM2U1MTk5NzYwNGU5ZWRmMzBmNzViNmJmMTBlZGZkMjAyMWM1ZmVmZWVmNTE4Mzg0YmI1IiwicHJpb3JfdmVyc2lvbiI6MjgsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDQiLCJyZXBvIjoiT2N0by9OZXciLCJ2IjoiY2stbWFuaWZlc3QtYmluZGluZy1zdGF0ZW1lbnQvdjEifQ"
+}

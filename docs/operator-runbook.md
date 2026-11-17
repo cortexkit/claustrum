@@ -1921,3 +1921,32 @@ login`; an `account_login_required` refusal means re-run that command. Service
 operator re-login. Periodic mints are in-memory only; first uses and mint refusals
 are trimmable `auth_events`, not repeated HMAC-chain appends. Full wire and retry
 semantics are in [the account-token wire contract](wire-contract-v1.md#12-account-worker-token-credentialaccount_token).
+
+## Development desktop approvals
+
+Development only: remove this unsigned approval path before the next public
+release. Keep the switch off except while approving cards from the development
+desktop:
+
+```sh
+ck auth secret dev-desktop-approvals status
+ck auth secret dev-desktop-approvals on
+ck auth secret dev-desktop-approvals off
+```
+
+The switch is persisted, defaults to off, and changes are audited through the
+normal operator admin path: a master-key message authentication code when the
+daemon is running, or the exclusive database writer lease when it is stopped.
+A same-value
+repeat writes nothing. `status` reads the store without taking the writer lease.
+
+While enabled, an unscoped `direct` development route can approve agent-secret,
+flow-secret and bot-repository manifest cards without a signature or desktop-key
+registration. Scoped calls, reserved-module callers and forwarded federation
+routes (whose harness labels start with `fed-`) cannot use this path.
+The development desktop sends the phone's canonical envelope with a 32-zero
+`device_fingerprint`, in `{envelope_b64url, card_ref?}`; it must omit
+`signature_b64url`. All other envelope and pending-request checks still apply.
+These approvals are audited as `desktop-development`. Turning the switch off
+stops new development approvals; existing grants retain their original expiry.
+The phone path remains paired, production-attested and signed.

@@ -79,9 +79,11 @@ pub enum ConnectorAdmission {
     Denied,
 }
 
-/// This admission exists so unsigned desktop builds can read connectors. Remove it
-/// in the same change that leaves only the daemon's operator-app stamp for desktop.
-/// Unsigned desktop routes have no scope; scoped tool calls are not desktop reads.
+/// This development admission permits connector reads and, behind a separate
+/// off-by-default switch, unsigned approvals. Remove unsigned approvals before the
+/// next public release. Connector reads should then require the daemon's
+/// `operator_app` stamp identifying the signed desktop app, not a direct route.
+/// Unsigned desktop routes have no scope; scoped tool calls are not desktop calls.
 fn unsigned_desktop_development_admission(principal: &Principal, scope_present: bool) -> bool {
     matches!(principal, Principal::Direct) && !scope_present
 }
@@ -238,6 +240,29 @@ impl AdminSurface {
             params,
         )
         .await
+    }
+    pub async fn serve_dev_desktop_approval(
+        &self,
+        channel: u16,
+        epoch: u32,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> crate::secret_phone::PhoneAnswer {
+        let admitted = {
+            let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
+            binds.get(&channel).is_some_and(|bound| {
+                bound.epoch == epoch
+                    && !bound.harness.starts_with("fed-")
+                    && unsigned_desktop_development_admission(&bound.principal, bound.scope_present)
+            })
+        };
+        if !admitted {
+            return crate::secret_phone::PhoneAnswer::Reply(
+                credentials_core::agent_secret::SecretError::NotFound.body(),
+            );
+        }
+        crate::secret_phone::serve_dev_desktop(Arc::clone(self.engine.store()), method, params)
+            .await
     }
     pub fn new(
         engine: Arc<RefreshEngine>,

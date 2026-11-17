@@ -1718,6 +1718,40 @@ async fn dispatch_route_request(
     }
     match caller {
         federation::RouteCaller::Principal(principal) => {
+            if let Some(request) = method.as_ref().filter(|request| {
+                matches!(
+                    request.method.as_str(),
+                    "secret.approve" | "manifest.approve"
+                )
+            }) {
+                return match admin
+                    .serve_dev_desktop_approval(
+                        header.channel,
+                        header.epoch,
+                        &request.method,
+                        &request.params,
+                    )
+                    .await
+                {
+                    secret_phone::PhoneAnswer::Reply(reply) => {
+                        send_route_result(writer, header, wrap_result(reply)).await
+                    }
+                    secret_phone::PhoneAnswer::InvalidParams(detail) => {
+                        invalid_params(
+                            writer,
+                            header.ver,
+                            header.channel,
+                            header.epoch,
+                            header.corr,
+                            &detail,
+                        )
+                        .await
+                    }
+                    secret_phone::PhoneAnswer::PermissionsOperatorRequired => {
+                        unreachable!("desktop approvals do not serve permissions")
+                    }
+                };
+            }
             if method.as_ref().is_some_and(|request| {
                 federation::is_federation_op(&request.method)
                     || secret_phone::is_phone_route_op(&request.method)
@@ -19659,6 +19693,7 @@ mod tests {
     ///             challenge, upstream body or signer material
     ///   info!     unsigned desktop development admission for a connectors read:
     ///             fixed admission name only, never request or credential fields
+    ///   info!     admitted development desktop approval: fixed text only, no ids
     ///   warn/info! member watch failure/recovery: home member id and ending code or
     ///             fixed kind only; repeated failures remain debug-only
     ///   warn/debug! member watch reconciliation and disconnect diagnostics:
@@ -19733,7 +19768,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 27, 0),
+            (1, 2, 28, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -19752,6 +19787,13 @@ mod tests {
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
         let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(
+            output_site_arguments(sources[6], &shapes),
+            vec![(
+                "info".into(),
+                "target: \"approvals\", \"admitted development desktop approval\"".into()
+            )]
+        );
         assert_eq!(output_site_arguments(sources[15], &shapes), vec![
             ("info".into(), "target: \"federation\", \"vault sharing snapshot reconciliation recovered\"".into()),
             ("warn".into(), "target: \"federation\", \"fleet removals not recorded; retrying on the next paired-device snapshot\"".into()),

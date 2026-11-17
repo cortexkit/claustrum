@@ -170,6 +170,25 @@ pub fn bus_signing_inputs(id: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     }
 }
 
+/// Regenerate or byte-compare one development approval sample produced by a real
+/// vault operation. These fixtures contain no production keys or secret material.
+pub fn desktop_dev_vector(name: &str, value: &serde_json::Value) {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/vectors/desktop-dev-approval-vectors-v1");
+    let bytes = serde_json::to_vec_pretty(value).unwrap();
+    let path = folder.join(name);
+    if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    } else {
+        assert_eq!(
+            std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+            bytes,
+            "development approval vector changed: {name}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TestTempDir;

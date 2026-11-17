@@ -50,6 +50,9 @@ mod isolated_cli;
 #[path = "support/secret_multi_host_cli.rs"]
 mod secret_multi_host_cli;
 
+#[path = "support/secret_desktop_cli.rs"]
+mod secret_desktop_cli;
+
 #[path = "support/gateway_put_cli.rs"]
 mod gateway_put_cli;
 

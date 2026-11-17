@@ -358,6 +358,8 @@ pub enum AdminOpBody {
     SecretBasicAuthSet { v: u32, enabled: bool },
     #[serde(rename = "admin.secret_local_programs_set")]
     SecretLocalProgramsSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_dev_desktop_approvals_set")]
+    SecretDevDesktopApprovalsSet { v: u32, enabled: bool },
     /// `ck auth secret put`: create an agent secret from operator-supplied material.
     ///
     /// THE ONLY ADMIN OP THAT CARRIES SECRET MATERIAL INBOUND, shortly after
@@ -868,6 +870,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("enabled", enabled)
                 .finish(),
+            AdminOpBody::SecretDevDesktopApprovalsSet { v, enabled } => f
+                .debug_struct("SecretDevDesktopApprovalsSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::SecretPhoneGateSet { v, enabled } => f
                 .debug_struct("SecretPhoneGateSet")
                 .field("v", v)
@@ -1068,6 +1075,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretMultiHostSet { v, .. }
             | AdminOpBody::SecretBasicAuthSet { v, .. }
             | AdminOpBody::SecretLocalProgramsSet { v, .. }
+            | AdminOpBody::SecretDevDesktopApprovalsSet { v, .. }
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
@@ -1139,6 +1147,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
+            | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1265,6 +1274,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
+            | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -1341,6 +1351,9 @@ impl AdminOpBody {
             AdminOpBody::SecretMultiHostSet { .. } => "admin.secret_multi_host_set",
             AdminOpBody::SecretBasicAuthSet { .. } => "admin.secret_basic_auth_set",
             AdminOpBody::SecretLocalProgramsSet { .. } => "admin.secret_local_programs_set",
+            AdminOpBody::SecretDevDesktopApprovalsSet { .. } => {
+                "admin.secret_dev_desktop_approvals_set"
+            }
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
@@ -1419,6 +1432,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretMultiHostSet { .. }
             | AdminOpBody::SecretBasicAuthSet { .. }
             | AdminOpBody::SecretLocalProgramsSet { .. }
+            | AdminOpBody::SecretDevDesktopApprovalsSet { .. }
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
@@ -2138,6 +2152,13 @@ pub fn apply(
                 AuditCtx::route_admin(AuditOp::SecretLocalProgramsSet, actor),
             )?;
             Ok(serde_json::json!({"local_programs": enabled, "changed": changed}))
+        }
+        AdminOpBody::SecretDevDesktopApprovalsSet { enabled, .. } => {
+            let changed = store.set_secret_dev_desktop_approvals_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretDevDesktopApprovalsSet, actor),
+            )?;
+            Ok(serde_json::json!({"dev_desktop_approvals": enabled, "changed": changed}))
         }
         AdminOpBody::SecretPut {
             kind,

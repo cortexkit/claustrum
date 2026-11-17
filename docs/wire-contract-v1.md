@@ -5359,3 +5359,46 @@ signing admits only Entorhinal. Other accesses, including handles, are
 read to Callosum and Entorhinal and sign to Entorhinal. Other grants refuse
 `fleet_key_reserved`. Bus-seal grants remain operator steps (Callosum read,
 ckbus open); rotations use new numbered keys alongside existing ones.
+
+## Development desktop approvals
+
+Development only; remove this unsigned approval path before the next public
+release. It exists so the development desktop can approve the same pending agent,
+flow and bot-repository manifest cards as the phone, without desktop keys or a
+daemon stamp identifying a signed desktop app. It is not a production approval
+authority.
+
+The persisted `secret.dev_desktop_approvals` switch defaults to off. The operator
+changes it through `ck auth secret dev-desktop-approvals on|off|status`; writes use
+`admin.secret_dev_desktop_approvals_set` with `{v:2, enabled:true|false}` on the
+existing authenticated admin path. Changes are audited as
+`secret_dev_desktop_approvals_set`; repeating the current value writes nothing.
+
+With the switch on, `secret.approve` and `manifest.approve` also accept
+`{envelope_b64url, card_ref?}` on an unscoped `direct` route admitted by
+`unsigned_desktop_development_admission`. A forwarded federation route, whose
+harness label starts with `fed-`, is never admitted.
+There is no signature field: `signature_b64url`, even empty, is `invalid_params`.
+`card_ref` has the same optional display-reference grammar as phone secret
+approvals; it is not used for manifest approvals.
+
+Decode `envelope_b64url` to the exact canonical phone envelope bytes:
+`ck-secret-use-envelope/v1` for agent and flow requests, or
+`ck-manifest-binding-envelope/v1` for a manifest proposal. Set
+`device_fingerprint` to `00000000000000000000000000000000` (32 zeros). The vault
+uses the existing approval transactions and all their canonical-form, statement
+hash, item, duration, issue-time, expiry and request/proposal-state checks, skipping
+only signature verification. Responses and stored grant columns are the phone's;
+approval audit rows name `desktop-development` rather than a phone. Each admitted
+request emits one INFO line with fixed development-admission text and no ids or
+envelope data. Disabling the switch does not revoke already-issued grants.
+
+The switch off, a scoped route, a `reserved:*` caller, a `fed-` harness or any
+other non-admitted caller receives the uniform `not_found` before any write or
+parameter diagnosis. On an admitted route, a wrong fingerprint is
+`approval_invalid`; other envelope and proposal refusals retain the phone's
+existing error precedence. The phone's pairing, production-build and signature
+requirements are unchanged, even while this switch is on.
+
+Vault-generated request/reply samples, including refusals, are in
+`crates/credentials-core/tests/vectors/desktop-dev-approval-vectors-v1/`.

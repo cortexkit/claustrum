@@ -9910,6 +9910,7 @@ mod tests {
         let mut found = Vec::new();
         let mut stack: Vec<std::path::PathBuf> = [
             "crates/credentials-core/src",
+            "crates/claustrum-model/src",
             "crates/credentials-module/src",
         ]
         .iter()
@@ -9988,6 +9989,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut stack: Vec<_> = [
             "crates/credentials-core/src",
+            "crates/claustrum-model/src",
             "crates/credentials-module/src",
             "crates/claustrum-client/src",
         ]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
+members = ["crates/claustrum-model", "crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
 
 [workspace.metadata.release]
 requires_core = "0.20.154"

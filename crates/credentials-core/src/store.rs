@@ -1076,7 +1076,7 @@ impl From<StoreError> for StoreOpError {
 /// Validate a deposit id. The CLI reuses this check so its prompt and the store
 /// refuse exactly the same ids.
 pub fn validate_deposit_credential_id(credential_id: &str) -> Result<(), StoreOpError> {
-    if credential_id.starts_with("category:") || credential_id.contains('|') {
+    if !crate::credential_id::is_valid_deposit_credential_id(credential_id) {
         return Err(StoreOpError::InvalidCredentialId);
     }
     Ok(())

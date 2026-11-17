@@ -381,6 +381,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "claustrum-model"
+version = "0.3.0"
+dependencies = [
+ "aft-secret-rules",
+ "base64",
+ "chacha20poly1305",
+ "chrono",
+ "getrandom 0.2.17",
+ "hmac",
+ "p256",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -517,6 +537,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "claustrum-model",
  "cortexkit-lease",
  "cortexkit-paths",
  "cortexkit-store",

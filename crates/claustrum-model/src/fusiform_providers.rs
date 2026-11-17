@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 /// Exact upstream bytes, shared by release code and the vendoring hash test.
 pub const FUSIFORM_PROVIDERS_JSON: &[u8] =
-    include_bytes!("../tests/fixtures/fusiform/providers-v1.json");
+    include_bytes!("../../credentials-core/tests/fixtures/fusiform/providers-v1.json");
 
 /// The only provider fields the vault reads from Fusiform.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn embedded_bytes_match_the_vendored_sha256_pin() {
-        let manifest = include_str!("../tests/fixtures/fusiform/VENDORED.md");
+        let manifest = include_str!("../../credentials-core/tests/fixtures/fusiform/VENDORED.md");
         let rows: Vec<Vec<&str>> = manifest
             .lines()
             .filter(|line| line.starts_with('|'))

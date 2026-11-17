@@ -508,16 +508,7 @@ pub(crate) fn access_token_expiry_ms(token: &str) -> Option<i64> {
         .map(|s| s.saturating_mul(1000))
 }
 
-/// Decode the payload claims of a JWT WITHOUT signature verification. Used only to
-/// read non-secret identity metadata (the ChatGPT account id) out of a token that was
-/// just received directly from the provider's token endpoint over TLS — the transport
-/// is the trust anchor, exactly as the official Codex CLI treats it. Never used to
-/// make an authorization decision.
-pub fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
-    let payload_b64 = token.split('.').nth(1)?;
-    let bytes = base64url_decode(payload_b64)?;
-    serde_json::from_slice(&bytes).ok()
-}
+pub use claustrum_model::oauth::decode_jwt_claims;
 
 /// Read the ChatGPT account id out of one JWT's claims: the claim path is
 /// `"https://api.openai.com/auth"."chatgpt_account_id"` (verified against the official
@@ -574,44 +565,6 @@ pub fn account_id_for_adapter(adapter: &str, access_token: &str) -> Option<Strin
         "xai" => xai_account_id_from_jwt(access_token),
         _ => None,
     }
-}
-
-/// Base64url-decode (no padding) — JWT segments use the unpadded alphabet.
-fn base64url_decode(s: &str) -> Option<Vec<u8>> {
-    // Reverse of `base64url`: restore padding, translate the URL-safe alphabet, and
-    // decode manually (no external base64 dependency in this crate).
-    let translated: String = s
-        .chars()
-        .map(|c| match c {
-            '-' => '+',
-            '_' => '/',
-            other => other,
-        })
-        .collect();
-    let padded = match translated.len() % 4 {
-        0 => translated,
-        2 => format!("{translated}=="),
-        3 => format!("{translated}="),
-        _ => return None,
-    };
-    // Minimal base64 decoder over the standard alphabet.
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(padded.len() / 4 * 3);
-    let mut buf = 0u32;
-    let mut bits = 0u8;
-    for ch in padded.bytes() {
-        if ch == b'=' {
-            break;
-        }
-        let val = ALPHABET.iter().position(|&a| a == ch)? as u32;
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 #[cfg(test)]

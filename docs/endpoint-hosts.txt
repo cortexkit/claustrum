@@ -9,23 +9,24 @@
 # A host that changed without a reason is a finding: a refresh posts a live
 # refresh token in the body, so a wrong host RECEIVES a working credential
 # and the failure looks like an ordinary dead login.
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_001 x.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_002 x.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_003 x.test:443
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_004 a.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_005 b.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_006 c.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_007 d.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_008 e.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_009 a.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_010 b.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_011 c.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_012 d.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_013 x.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_014 x.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_015 y.test
-crates/credentials-core/src/agent_secret_extended_tests.rs INLINE_016 x.test
-crates/credentials-core/src/agent_secret_tests.rs INLINE_001 a.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_001 x.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_002 x.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_003 x.test:443
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_004 a.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_005 b.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_006 c.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_007 d.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_008 e.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_009 a.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_010 b.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_011 c.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_012 d.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_013 x.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_014 x.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_015 y.test
+crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_016 x.test
+crates/claustrum-model/src/agent_secret_tests.rs INLINE_001 a.test
+crates/claustrum-model/src/plan_detection.rs INLINE_001 api.openai.com
 crates/credentials-core/src/catalog/rows.rs INLINE_001 kiro.dev
 crates/credentials-core/src/catalog/rows.rs INLINE_002 app.kiro.dev
 crates/credentials-core/src/catalog/rows.rs INLINE_003 q.us-east-1.amazonaws.com
@@ -664,7 +665,6 @@ crates/credentials-core/src/google_login.rs TOKEN_URL oauth2.googleapis.com
 crates/credentials-core/src/google_login.rs USERINFO_URL www.googleapis.com
 crates/credentials-core/src/login_sharing.rs INLINE_001 json-schema.org
 crates/credentials-core/src/oauth_login.rs INLINE_001 api.openai.com
-crates/credentials-core/src/plan_detection.rs INLINE_001 api.openai.com
 crates/credentials-core/src/plan_detection.rs PROFILE_URL api.anthropic.com
 crates/credentials-core/src/refresh_adapters/anthropic.rs AUTHORIZE_URL claude.ai
 crates/credentials-core/src/refresh_adapters/anthropic.rs LOGIN_CODE_REDIRECT_URI platform.claude.com

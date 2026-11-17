@@ -44,6 +44,8 @@ pub mod xai;
 
 #[cfg(test)]
 pub(crate) mod fixture;
+#[cfg(test)]
+mod oauth_import_tests;
 
 /// The result of a successful token refresh: the new tokens to commit. The
 /// provider may or may not rotate the refresh token (RFC 9700 providers do); the

@@ -120,7 +120,8 @@ bun run build && bun test packages
 
 | change | where |
 |---|---|
-| custody logic: records, the store and its migrations, encryption, master key, refresh, audit | `crates/credentials-core/src/` |
+| credential records, encryption envelopes, agent-secret formats and validation | `crates/claustrum-model/src/` |
+| custody logic: the store and its migrations, master-key resolution, refresh, audit | `crates/credentials-core/src/` |
 | a provider refresh adapter | `crates/credentials-core/src/refresh_adapters/`, with recorded HTTP fixtures; update the adapter count in [`docs/architecture.md`](docs/architecture.md) |
 | a provider host or URL | the source constant, then `python3 scripts/endpoint-hosts.py --update` and review the diff of `docs/endpoint-hosts.txt` |
 | a cryptographic domain separator | do not change one: existing vaults would stop opening. A new one is recorded in `docs/domain-separators.txt` by the same `--update` |

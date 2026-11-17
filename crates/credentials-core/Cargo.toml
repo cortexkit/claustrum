@@ -88,6 +88,7 @@ path = "src/bin/login_cut_helper.rs"
 required-features = ["login-test-seam"]
 
 [dependencies]
+claustrum-model = { path = "../claustrum-model" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subc-jsonc = { workspace = true }

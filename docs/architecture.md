@@ -16,7 +16,8 @@ are easy to break. The consumer-facing wire surface is specified in
 
 | part | path | what it is |
 |---|---|---|
-| `credentials-core` | `crates/credentials-core` | Custody logic, wire-agnostic: records, the encryption envelope, master-key resolution, the encrypted store and its migrations, refresh adapters, the refresh engine, the audit chain, enrollment, Ed25519 signing, X25519 KEM keys, APNs provider-token minting. It never speaks the supervisor protocol. |
+| `claustrum-model` | `crates/claustrum-model` | Credential records, the canonical OAuth credential, the encryption envelope, credential ids, provider plan observations, and agent-secret formats and validation. No storage or network dependencies. |
+| `credentials-core` | `crates/credentials-core` | Custody logic, wire-agnostic: master-key resolution, the encrypted store and its migrations, refresh adapters, the refresh engine, the audit chain, enrollment, Ed25519 signing, X25519 KEM keys, APNs provider-token minting. It re-exports the model types and never speaks the supervisor protocol. |
 | `ck-claustrum` | `crates/credentials-module/src/main.rs` | The daemon. Registers with the supervisor as the reserved `claustrum` management surface and serves the read surface (`read_surface.rs`), the authenticated admin surface (`admin_surface.rs`) and the health probe. Per-connection rate limits live in `limiter.rs`. |
 | `ck-auth` | `crates/credentials-module/src/bin/credentials_cli.rs` | The operator CLI, run as `ck auth <verb>`. It is the only write surface an operator uses: login, import, put, grants, handles, enrollment, audit. Helpers live in `src/bin/cli_support/`. |
 | `cortexkit-claustrum-client` | `crates/claustrum-client` | The Rust client for supervised modules. |

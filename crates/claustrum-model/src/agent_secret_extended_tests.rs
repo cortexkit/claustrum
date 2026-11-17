@@ -27,7 +27,7 @@ fn fields(params: &Value) -> Value {
 #[test]
 fn extended_deposit_vectors_use_real_encoders_without_rewriting_fixtures() {
     let vectors: Value = serde_json::from_str(include_str!(
-        "../tests/vectors/multi-host/secret-deposit-v2.json"
+        "../../credentials-core/tests/vectors/multi-host/secret-deposit-v2.json"
     ))
     .unwrap();
     let mut encoded = 0;
@@ -254,11 +254,13 @@ fn extended_v3_statement_vectors_use_real_builders_and_pin_jcs_and_digest() {
     for (flow_case, corpus) in [
         (
             false,
-            include_str!("../tests/vectors/multi-host/secret-approval-v3.json"),
+            include_str!("../../credentials-core/tests/vectors/multi-host/secret-approval-v3.json"),
         ),
         (
             true,
-            include_str!("../tests/vectors/multi-host/secret-flow-approval-v3.json"),
+            include_str!(
+                "../../credentials-core/tests/vectors/multi-host/secret-flow-approval-v3.json"
+            ),
         ),
     ] {
         let corpus: Value = serde_json::from_str(corpus).unwrap();

@@ -1,11 +1,12 @@
 //! Credential custody logic for the claustrum subc module (the credential vault).
 //!
 //! This crate holds the format/provider-specific weight of the credential vault
-//! (the "Acquisition + Custody" side of the thin-core boundary): the typed
-//! `VaultRecord`, the canonical `OAuthCredential`, the value-level encryption
-//! envelope, the bounded per-provider refresh adapters, the crash-safe refresh
-//! state machine, and master-key resolution. It is wire-agnostic — it never
-//! speaks the subc protocol; `credentials-module` is the thin binary that does.
+//! (the "Acquisition + Custody" side of the thin-core boundary): the bounded
+//! per-provider refresh adapters, the crash-safe refresh state machine, and
+//! master-key resolution. The typed `VaultRecord`, canonical `OAuthCredential`,
+//! and value-level encryption envelope are re-exported from `claustrum-model`.
+//! It is wire-agnostic — it never speaks the subc protocol;
+//! `credentials-module` is the thin binary that does.
 //!
 //! See docs/architecture.md for how the parts fit together and the invariants they
 //! keep, and SECURITY.md for the threat model. Built behind a security-conformance suite
@@ -16,14 +17,14 @@
 
 pub mod admin_auth;
 pub mod admin_ops;
-pub mod agent_secret;
+pub use claustrum_model::agent_secret;
 pub mod apns;
 pub mod apns_submit;
 pub mod audit;
 pub mod bedrock;
 pub mod catalog;
 pub mod contract;
-pub mod credential_id;
+pub use claustrum_model::credential_id;
 pub mod deposit_cookie;
 pub mod device_flow;
 pub mod display_name;
@@ -31,29 +32,29 @@ pub mod engine;
 #[cfg(test)]
 mod engine_tests;
 pub mod enrollment;
-pub mod envelope;
+pub use claustrum_model::envelope;
 pub mod federation;
 pub mod fleet;
-pub mod fusiform_providers;
+pub use claustrum_model::fusiform_providers;
 pub mod gateway;
 pub mod gh_manifest;
 pub mod google_login;
 pub mod health;
 pub mod http;
 pub mod kem;
-pub mod key;
+pub use claustrum_model::key;
 pub mod list_auth_method;
 pub mod login_sharing;
-pub mod oauth;
+pub use claustrum_model::oauth;
 pub mod oauth_login;
 pub mod plan_detection;
 pub mod plan_tier;
 mod process_hardening;
 pub mod provider_ids;
-pub mod record;
+pub use claustrum_model::record;
 pub mod refresh_adapters;
 pub mod resolver;
-pub mod secret;
+pub use claustrum_model::secret;
 pub mod signing;
 pub mod store;
 #[cfg(any(test, feature = "test-support"))]

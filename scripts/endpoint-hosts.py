@@ -38,6 +38,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIRS = [
     ROOT / "crates" / "credentials-core" / "src",
     ROOT / "crates" / "credentials-module" / "src",
+    ROOT / "crates" / "claustrum-model" / "src",
+    ROOT / "crates" / "claustrum-providers" / "src",
 ]
 MANIFEST = ROOT / "docs" / "endpoint-hosts.txt"
 
@@ -49,6 +51,7 @@ URL_RE = re.compile(r'"(https://[^"\s]+)"')
 # Standalone test modules and Cargo's feature-gated crash-cut binaries do not ship.
 TEST_ONLY_FILES = {
     "engine_tests.rs",
+    "oauth_import_tests.rs",
     "plan_detection_tests.rs",
     "provider_ids_store_tests.rs",
     "store_federation_tests.rs",

@@ -88,6 +88,10 @@ def scope(base, metadata):
         directory = Path(package["manifest_path"]).parent.relative_to(ROOT).as_posix() + "/"
         if shared or any(p.startswith(directory) for p in paths):
             crates.append(package["name"])
+    # Include core with its extracted crates so lint/test commands can enable
+    # credentials-core/test-support and credentials-core/migration-tools.
+    if {"claustrum-model", "claustrum-providers"} & set(crates) and "credentials-core" not in crates:
+        crates.append("credentials-core")
     return sorted(crates), paths, members
 
 

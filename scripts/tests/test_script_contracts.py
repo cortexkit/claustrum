@@ -428,6 +428,61 @@ class ScriptContracts(unittest.TestCase):
         (self.root / 'catalog.rs').write_text('fn probe() { get("https://api.example.test/token"); get("https://{host}/token"); }\n#[cfg(test)] mod tests { const URL: &str = "https://fixture.test"; }')
         self.assertEqual(endpoints.discover(), [('catalog.rs', 'INLINE_001', 'api.example.test')])
 
+    def test_endpoint_scans_cover_split_crates_and_allow_absent_roots(self):
+        endpoints = cast(Any, module('endpoint-hosts'))
+        endpoints.SOURCE_DIRS = [self.root / path.relative_to(endpoints.ROOT)
+                                 for path in endpoints.SOURCE_DIRS]
+        endpoints.ROOT = self.root
+        hosts = []
+        domains = []
+        for crates in [('credentials-core', 'credentials-module'),
+                       ('claustrum-model', 'claustrum-providers')]:
+            for crate in crates:
+                relative = f'crates/{crate}/src/probe.rs'
+                source = self.root / relative
+                source.parent.mkdir(parents=True)
+                domain = f'cortexkit-{crate}/scan/v1'
+                source.write_text('const URL: &str = "https://api.example.test/token";\n'
+                                  f'const DOMAIN: &[u8] = b"{domain}";\n')
+                hosts.append((relative, 'URL', 'api.example.test'))
+                domains.append((relative, domain, domain))
+            with self.subTest(crates=crates):
+                self.assertEqual(endpoints.discover(), sorted(hosts))
+                self.assertEqual(endpoints.discover_domains(), sorted(domains))
+
+    def test_endpoint_scan_excludes_standalone_oauth_import_tests(self):
+        endpoints = cast(Any, module('endpoint-hosts'))
+        endpoints.ROOT = self.root
+        endpoints.SOURCE_DIRS = [self.root]
+        (self.root / 'oauth_import_tests.rs').write_text('get("https://fixture.test/token");')
+        (self.root / 'adapter.rs').write_text('get("https://api.example.test/token");')
+        self.assertEqual(endpoints.discover(), [('adapter.rs', 'INLINE_001', 'api.example.test')])
+
+    def test_fast_check_selects_core_with_each_split_crate(self):
+        from unittest.mock import patch
+        fast = module('fast-check')
+        names = ['claustrum-model', 'claustrum-providers', 'credentials-core',
+                 'credentials-module', 'cortexkit-claustrum-client']
+        packages = [dict(id=name, name=name,
+                         manifest_path=str(self.root / 'crates' / name / 'Cargo.toml'))
+                    for name in names]
+        metadata = dict(packages=packages, workspace_members=names)
+        for leaf in ('claustrum-model', 'claustrum-providers'):
+            for filename in ('Cargo.toml', 'src/lib.rs'):
+                for untracked in (False, True):
+                    path = f'crates/{leaf}/{filename}'
+                    outputs = ['', path + '\0'] if untracked else [path + '\0', '']
+                    with self.subTest(path=path, untracked=untracked), \
+                            patch.object(fast, 'ROOT', self.root), \
+                            patch.object(fast, 'output', side_effect=outputs):
+                        crates, paths, members = fast.scope('base', metadata)
+                        self.assertEqual(crates, [leaf, 'credentials-core'])
+                        self.assertEqual(paths, {path})
+                        self.assertEqual(members, packages)
+        with patch.object(fast, 'ROOT', self.root), \
+                patch.object(fast, 'output', side_effect=['Cargo.lock\0', '']):
+            self.assertEqual(fast.scope('base', metadata)[0], sorted(names))
+
     def test_release_uses_committed_lock_without_updates(self):
         workflow = text('.github/workflows/release.yml')
         self.assertNotIn('cargo update', workflow)
@@ -868,6 +923,40 @@ class ScriptContracts(unittest.TestCase):
                 result = self.run_shell('source_file=fixture; fail=0;\n' + block +
                                         f'\ncompare control "{ours}" "{theirs}"\n[ "$fail" = 1 ]')
                 self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
+
+    def test_inbound_contracts_follow_apns_source_across_crate_split(self):
+        script = text('scripts/check-inbound-contracts.sh')
+        spec = self.root / 'spec.md'
+        spec.write_text(' "sealed":"<base64 of version and ciphertext>"\n'
+                        '"mutable-content":1\n'
+                        'version : 1 byte\n'
+                        'enc     : 32 bytes\n'
+                        'ct      : N bytes includes the 16-byte tag\n')
+        good = ('pub const SEALED_BLOB_KEY: &str = "sealed";\n'
+                'pub const MUTABLE_CONTENT_KEY: &str = "mutable-content";\n'
+                'pub const MIN_SEALED_LEN: usize = 1 + 32 + 16;\n')
+        bad = good.replace('"sealed"', '"wrong"')
+        core = self.root / 'crates/credentials-core/src/apns_submit.rs'
+        providers = self.root / 'crates/claustrum-providers/src/apns_submit.rs'
+        for path in (core, providers):
+            path.parent.mkdir(parents=True)
+        for layout, core_text, providers_text, expected, diagnostic in [
+            ('unsplit', good, None, 0, 'all transcribed facts agree'),
+            ('split', None, good, 0, 'all transcribed facts agree'),
+            ('prefer providers', bad, good, 0, 'all transcribed facts agree'),
+            ('reject providers mismatch', good, bad, 1, 'MISMATCH in sealed blob payload key'),
+            ('missing source', None, None, 1, 'apns_submit.rs not found'),
+        ]:
+            with self.subTest(layout=layout):
+                for path, contents in ((core, core_text), (providers, providers_text)):
+                    if contents is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_text(contents)
+                result = self.run_shell('set -- "$SPEC"\n' + script,
+                                        env=dict(self.env, SPEC=str(spec)), cwd=self.root)
+                self.assertEqual(result.returncode, expected, result.stdout)
                 self.assertIn(diagnostic, result.stdout)
 
     def test_scan_self_control_must_execute_not_skip(self):

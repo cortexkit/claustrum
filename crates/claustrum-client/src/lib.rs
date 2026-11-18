@@ -81,6 +81,10 @@ const CREDENTIAL_GET_OP: &str = "credential.get";
 const CREDENTIAL_GET_SCOPED_OP: &str = "credential.get_scoped";
 #[cfg(any(feature = "transport", test))]
 const CREDENTIAL_REPORT_AUTH_FAILURE_OP: &str = "credential.report_auth_failure";
+#[cfg(feature = "transport")]
+const CREDENTIAL_REPORT_CONDITION_OP: &str = "credential.report_condition";
+#[cfg(feature = "transport")]
+const CREDENTIAL_CLEAR_CONDITION_OP: &str = "credential.clear_condition";
 #[cfg(any(feature = "transport", test))]
 const CREDENTIAL_STATUS_OP: &str = "credential.status";
 #[cfg(any(feature = "transport", test))]
@@ -103,6 +107,8 @@ const CREDENTIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CREDENTIAL_CALL_DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(feature = "transport")]
 const DEFAULT_TRANSIENT_RETRIES: usize = 2;
+
+const MAX_SCOPED_CONDITION_SINCE_MS: u64 = (1 << 53) - 1;
 
 pub type CredentialResolverFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -329,14 +335,14 @@ pub struct ScopedCredentialListing {
     pub grant_tuples: Vec<ListedGrant>,
     /// Tuple-local decode failures; malformed tuples never become usable grants.
     pub undecodable_grants: Vec<String>,
-    /// Digest over the listed rows and grants. It moves when grants, records,
-    /// record states or identities change, but not when a token is refreshed.
+    /// Digest over the listed rows and grants. It moves when grants or listed
+    /// metadata (including conditions) change, but not when a token is refreshed.
     pub view: String,
 }
 
 /// One vault row as `credential.list_scoped` describes it. The vault fills in
-/// `account_id`, `refresh_adapter` and the plan tier only for rows the caller may list
-/// or read.
+/// `account_id`, `refresh_adapter`, the plan tier and the condition only for rows
+/// the caller may list or read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListedCredential {
     /// Catalog service key, distinct from routing provider ids.
@@ -372,6 +378,16 @@ pub struct ListedCredential {
     /// Where `plan_tier` came from: `operator` (set with `ck auth set-plan`, which wins)
     /// or `detected` (read from the provider). Present only alongside `plan_tier`.
     pub plan_tier_source: Option<String>,
+    pub condition: Option<ListedCredentialCondition>,
+}
+
+/// A login condition visible in a scoped listing, without the action link or reporter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedCredentialCondition {
+    /// Open-ended reason code; newer vaults can report reasons this client does not know.
+    pub reason: String,
+    /// When this reason was first set, as Unix epoch milliseconds.
+    pub since_ms: u64,
 }
 
 /// One grant the caller holds: which selector it names and which operation it allows.
@@ -487,6 +503,34 @@ pub trait CredentialResolver: Send + Sync {
         _credential_id: &'a str,
         _record_version: u64,
         _provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    /// Reports a lasting provider condition on the credential and served version.
+    /// The vault decides whether to admit the reason, status and link. `true` means
+    /// it accepted the report, not necessarily that it changed the condition.
+    /// The client does not retry: a lost reply does not tell us whether the vault committed.
+    fn report_condition<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _reason: &'a str,
+        _provider_status: u16,
+        _action_url: Option<&'a str>,
+        _enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    /// Reports that the served version worked. `true` means the vault removed a
+    /// condition; `false` means there was none to clear or the version did not match.
+    /// The client does not retry: a replay could erase a condition reported after the clear.
+    fn clear_condition<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _enrollment_token: Option<&'a str>,
     ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
@@ -613,6 +657,27 @@ pub trait CredentialGetTarget: Send + Sync {
         })
     }
 
+    fn credential_report_condition<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _reason: &'a str,
+        _provider_status: u16,
+        _action_url: Option<&'a str>,
+        _enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    fn credential_clear_condition<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     fn credential_status<'a>(
         &'a self,
         _credential_id: &'a str,
@@ -686,6 +751,7 @@ pub trait CredentialGetTarget: Send + Sync {
 /// retries transient or transport errors for credential operations;
 /// scoped reads return the first error because each consumer owns its one-shot
 /// redial bound. Auth and permanent failures always return immediately.
+/// Login condition reports and clears are never retried.
 /// Module-secret methods are single-shot and use an additional route on the
 /// caller's SDK consumer without changing the ordinary credential route.
 #[cfg(feature = "transport")]
@@ -848,6 +914,44 @@ impl CredentialResolver for ClaustrumCredentialResolver {
                 .credential_report_auth_failure(credential_id, record_version, provider_status)
                 .await
                 .and_then(decode_report_auth_failure_reply)
+        })
+    }
+
+    fn report_condition<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        reason: &'a str,
+        provider_status: u16,
+        action_url: Option<&'a str>,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async move {
+            self.target
+                .credential_report_condition(
+                    credential_id,
+                    record_version,
+                    reason,
+                    provider_status,
+                    action_url,
+                    enrollment_token,
+                )
+                .await
+                .and_then(decode_report_condition_reply)
+        })
+    }
+
+    fn clear_condition<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async move {
+            self.target
+                .credential_clear_condition(credential_id, record_version, enrollment_token)
+                .await
+                .and_then(decode_clear_condition_reply)
         })
     }
 
@@ -1147,6 +1251,26 @@ impl LiveCredentialGetTarget {
         result
     }
 
+    async fn condition_request(
+        &self,
+        operation: &str,
+        params: Value,
+    ) -> Result<Value, CredentialResolverError> {
+        let mut consumer = self.consumer.lock().await;
+        self.connect_if_needed(&mut consumer).await?;
+        let result = tokio::time::timeout(
+            self.call_deadline,
+            consumer
+                .as_mut()
+                .expect("credential consumer initialized")
+                .credential_request(json!({ "method": operation, "params": params }), operation),
+        )
+        .await
+        .unwrap_or_else(|_| Err(Self::deadline_error(operation)));
+        Self::clear_failed_transport(&mut consumer, &result);
+        result
+    }
+
     fn deadline_error(operation: &str) -> CredentialResolverError {
         CredentialResolverError::transport(format!(
             "{operation} timed out waiting for the credential route"
@@ -1272,6 +1396,42 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
             .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_REPORT_AUTH_FAILURE_OP)));
             Self::clear_failed_transport(&mut consumer, &result);
             result
+        })
+    }
+
+    fn credential_report_condition<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        reason: &'a str,
+        provider_status: u16,
+        action_url: Option<&'a str>,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            let mut params = condition_params(credential_id, record_version, enrollment_token);
+            params["reason"] = json!(reason);
+            params["provider_status"] = json!(provider_status);
+            if let Some(action_url) = action_url {
+                params["action_url"] = json!(action_url);
+            }
+            self.condition_request(CREDENTIAL_REPORT_CONDITION_OP, params)
+                .await
+        })
+    }
+
+    fn credential_clear_condition<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            self.condition_request(
+                CREDENTIAL_CLEAR_CONDITION_OP,
+                condition_params(credential_id, record_version, enrollment_token),
+            )
+            .await
         })
     }
 
@@ -1721,6 +1881,27 @@ fn decode_optional_invalid_key(row: &Value) -> Result<Option<InvalidKeyEvidence>
     }))
 }
 
+fn decode_optional_condition(row: &Value) -> Result<Option<ListedCredentialCondition>, String> {
+    let condition = match row.get("condition") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(condition) if condition.is_object() => condition,
+        Some(_) => return Err("condition is not an object".into()),
+    };
+    let reason = condition
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "condition.reason is not a string".to_string())?;
+    let since_ms = condition
+        .get("since_ms")
+        .and_then(Value::as_u64)
+        .filter(|&since_ms| since_ms <= MAX_SCOPED_CONDITION_SINCE_MS)
+        .ok_or_else(|| "condition.since_ms is not a non-negative safe integer".to_string())?;
+    Ok(Some(ListedCredentialCondition {
+        reason: reason.to_owned(),
+        since_ms,
+    }))
+}
+
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
         plan_tier_since_ms: row
@@ -1761,6 +1942,7 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         org_name: decode_optional_string(row, "org_name")?,
         plan_tier: decode_optional_string(row, "plan_tier")?,
         plan_tier_source: decode_optional_string(row, "plan_tier_source")?,
+        condition: decode_optional_condition(row)?,
     })
 }
 
@@ -1863,6 +2045,19 @@ fn credential_report_auth_failure_request(
             "record_version": record_version,
         },
     })
+}
+
+#[cfg(feature = "transport")]
+fn condition_params(
+    credential_id: &str,
+    record_version: u64,
+    enrollment_token: Option<&str>,
+) -> Value {
+    let mut params = json!({ "credential_id": credential_id, "record_version": record_version });
+    if let Some(enrollment_token) = enrollment_token {
+        params["enrollment_token"] = json!(enrollment_token);
+    }
+    params
 }
 
 #[cfg(any(feature = "transport", test))]
@@ -2343,11 +2538,36 @@ pub fn decode_report_auth_failure_reply(value: Value) -> Result<bool, Credential
             )
         })
 }
+
+/// Decodes whether `credential.report_condition` accepted the report.
+pub fn decode_report_condition_reply(value: Value) -> Result<bool, CredentialResolverError> {
+    decode_condition_reply(value, "accepted")
+}
+
+/// Decodes whether `credential.clear_condition` removed a condition.
+pub fn decode_clear_condition_reply(value: Value) -> Result<bool, CredentialResolverError> {
+    decode_condition_reply(value, "cleared")
+}
+
+fn decode_condition_reply(value: Value, field: &str) -> Result<bool, CredentialResolverError> {
+    reply_result(value)?
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            CredentialResolverError::new(
+                CredentialErrorClass::InvalidResponse,
+                format!("credential condition reply has no boolean {field} value"),
+            )
+        })
+}
 #[cfg(test)]
 mod contract_tests;
 
 #[cfg(test)]
 mod client_regressions;
+
+#[cfg(test)]
+mod condition_tests;
 
 #[cfg(test)]
 mod tests {

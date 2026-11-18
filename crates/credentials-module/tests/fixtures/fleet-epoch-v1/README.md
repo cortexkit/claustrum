@@ -118,7 +118,20 @@ The additive `mint-excluded.json` sample mints with one excluded live peer and
 one rotation-wrap recipient, using the same sender and recipient keys as
 `cases.json`. It pins the request, response and wrap plaintext, with the random
 epoch key, mint ID and HPKE input replaced by synthetic bytes. To regenerate
-it and `SHA256SUMS` without rewriting the original samples, set
-`CK_EMIT_FLEET_EXCLUDED_MINT_VECTOR=1` on the command above, replace the test
-filter with `fleet_mint_exclusion_omits_the_peer_from_wraps_and_stored_holders`,
-and return `mint-excluded.json` and `SHA256SUMS` from the build-server job.
+it and `SHA256SUMS` without rewriting the original samples, run this from the
+repository root (the `--return-path` flags copy the two regenerated files back
+from the build server):
+
+```sh
+F=crates/credentials-module/tests/fixtures/fleet-epoch-v1
+ck motor run --cwd "$PWD" --return-path "$PWD/$F/mint-excluded.json" \
+  --return-path "$PWD/$F/SHA256SUMS" -- sh -c \
+  'CK_EMIT_FLEET_EXCLUDED_MINT_VECTOR=1 cargo test --locked -p credentials-module \
+     --features credentials-core/test-support --test fleet_epoch_vectors \
+     fleet_mint_exclusion_omits_the_peer_from_wraps_and_stored_holders'
+```
+
+Review the diff, then run the same `cargo test` command without
+`CK_EMIT_FLEET_EXCLUDED_MINT_VECTOR=1`; it passes only if the files match what
+the code produces. `SHA256SUMS` also covers this README, so editing the README
+means regenerating it the same way.

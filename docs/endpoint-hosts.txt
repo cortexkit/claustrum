@@ -780,6 +780,7 @@ crates/credentials-module/src/account_token.rs CHALLENGE_URL account.cortexkit.i
 crates/credentials-module/src/account_token.rs TOKEN_URL account.cortexkit.io
 crates/credentials-module/src/account_token_tests.rs INLINE_001 account.cortexkit.io
 crates/credentials-module/src/account_token_tests.rs INLINE_002 account.cortexkit.io
+crates/credentials-module/src/config_gate_tests.rs INLINE_001 json-schema.org
 crates/credentials-module/src/secret_phone_tests.rs INLINE_001 b.test
 crates/credentials-module/src/secret_phone_tests.rs INLINE_002 a.test
 crates/credentials-module/src/secret_phone_tests.rs INLINE_003 a.test

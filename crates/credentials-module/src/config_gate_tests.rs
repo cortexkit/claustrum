@@ -238,6 +238,34 @@ fn view(
 }
 
 #[tokio::test(start_paused = true)]
+async fn gate_declares_the_login_sharing_schema_before_get() {
+    let mut rig = Rig::new(true, None, "{}").await;
+    let frame = rig.request(CONFIG_DECLARE_OP).await;
+    assert_eq!((frame.header.channel, frame.header.corr), (0, 2));
+    let user_file = serde_json::to_string(&rig.path).unwrap();
+    let expected = format!(
+        concat!(
+            r#"{{"op":"config.declare","schema":{{"#,
+            r#""$schema":"https://json-schema.org/draft/2020-12/schema","#,
+            r#""properties":{{"login_sharing":{{"default":true,"description":"#,
+            "\"Set to false to stop sharing this computer's logins with paired computers ",
+            "and drop automatic copies of their logins.\",",
+            r#""type":"boolean","x-ck-apply":"live","x-ck-layers":["user"]}}}},"#,
+            r#""type":"object","unevaluatedProperties":false}},"user_file":{},"project_dirs":[]}}"#,
+        ),
+        user_file,
+    );
+    assert_eq!(std::str::from_utf8(&frame.body).unwrap(), expected);
+    let request: ConfigDeclareRequest = serde_json::from_slice(&frame.body).unwrap();
+    subc_config::Schema::new(request.schema).expect("the daemon must admit the declared schema");
+
+    rig.ok(frame, ConfigDeclareReply::new()).await;
+    let get = rig.request(CONFIG_GET_OP).await;
+    rig.refuse(get, "config_gated").await;
+    rig.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn gate_present_uses_only_view_bytes_and_changed_gets_without_redeclare() {
     let mut rig = Rig::new(true, None, r#"{"login_sharing":true}"#).await;
     assert_eq!(
@@ -370,6 +398,33 @@ async fn gate_pending_reports_after_apply_and_replays_anchor_pending_before_get(
         None,
     )
     .await;
+    rig.ping().await;
+    rig.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn gate_acknowledges_active_catch_up_while_declaration_is_pending() {
+    let mut rig = Rig::new(true, Some(true), r#"{"login_sharing":true}"#).await;
+    rig.declared().await;
+    let get = rig.request(CONFIG_GET_OP).await;
+    let active = view(
+        &rig.path,
+        3,
+        ConfigStatus::Active,
+        Some(br#"{"login_sharing":false}"#),
+    );
+    // An empty marker means the declaration is awaiting a plan. The delivery
+    // attempt still belongs to the approved active view, not the declaration.
+    let mut reply = ConfigGetReply::new(Some(active), None);
+    reply.declaration_pending = Some(ConfigDeclarationPending::default());
+    rig.ok(get, reply).await;
+    let report = rig.request(CONFIG_APPLIED_OP).await;
+    assert_eq!(rig.value(), Some(false), "apply must precede report");
+    assert_eq!(
+        std::str::from_utf8(&report.body).unwrap(),
+        r#"{"op":"config.applied","generation":3,"attempt":103,"result":"ack","reasons":[]}"#
+    );
+    rig.ok(report, ConfigAppliedReply::new()).await;
     rig.ping().await;
     rig.finish().await;
 }

@@ -1800,18 +1800,24 @@ login sharing:
 ```
 
 The config home is `XDG_CONFIG_HOME` (normally `~/.config` on Unix); Windows also
-accepts that override and otherwise uses roaming `APPDATA`. Missing file or field
+accepts that override and otherwise uses roaming `APPDATA`. A missing file or field
 defaults to `true`. Comments and trailing commas are accepted; unknown fields and
-non-boolean values are invalid. When the subc daemon offers its config gate, the
-setting reaches the vault through that gate before federation starts, and an edit
-reaches it as the daemon's change notice. Until someone stamps the daemon's
-configuration (`ck config stamp`, approved on the desktop), the gate serves the file
-as it is on disk. Once stamped, the daemon serves only approved configuration, so an
-edit applies only after the operator approves a plan for it, and the vault never reads
-the file itself. Daemons without the gate get a direct file read and a 2-second poll.
-No vault restart is needed. `ck auth federation sharing status` prints
-the path and local file's resolved value without a daemon or vault key, not the
-gate's approved value. Change the file, not a CLI on/off command.
+non-boolean values are invalid.
+
+When the subc daemon offers its config gate, the vault declares the schema and user
+file path on each connection. The daemon validates edits against that schema and
+delivers configuration before the vault starts federation. Until someone stamps the
+daemon's configuration (`ck config stamp`, approved on the desktop), the gate
+serves the file as it is on disk. After stamping, a file edit is only a proposal.
+Run `ck config plan`, review the proposed change, then use `ck config apply <digest>`
+and approve it on the desktop. The vault applies the file bytes delivered by the
+gate, not the daemon's computed effective value. If the gate refuses delivery, the
+vault retains its last applied setting rather than reading the file.
+
+Only daemons without the gate get a direct file read and a 2-second poll. Neither
+path needs a vault restart. `ck auth federation sharing status` prints the path and
+local file's resolved value without a daemon or vault key, not the gate's approved
+value.
 
 Off removes all `sharing_switch` member grants and `home_watch` automatic copies in
 one audited transaction with the applied setting. Open and new remote login watches

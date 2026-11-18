@@ -322,15 +322,20 @@ impl Delivery {
             self.warn("invalid_reply".into());
             return;
         }
+        // While a declaration awaits approval, the daemon can assign a catch-up
+        // attempt for the already approved active view on this connection.
+        let attempt = view.attempt.filter(|_| {
+            pending || (reply.declaration_pending.is_some() && view.status == ConfigStatus::Active)
+        });
         let outcome = self.apply(view).await;
-        if pending {
+        if let Some(attempt) = attempt {
             let (result, reasons) = match outcome {
                 Ok(()) => (ConfigApplyResult::Ack, vec![]),
                 Err(reasons) => (ConfigApplyResult::Nack, reasons),
             };
             self.report = Some(ConfigAppliedRequest::new(
                 view.generation,
-                view.attempt.unwrap(),
+                attempt,
                 result,
                 reasons,
             ));

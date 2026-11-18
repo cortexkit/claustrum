@@ -684,9 +684,16 @@ pub struct GetResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
     /// Read-time gateway, catalog or registry metadata, only for `credential.get_scoped`.
-    /// Grouping the fields keeps an absent descriptor distinct from absent evidence.
+    /// API keys serve a full descriptor; login tokens can serve just receiving hosts.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub scoped_descriptor: Option<Box<ScopedKeyDescriptor>>,
+    pub scoped_descriptor: Option<Box<ScopedDescriptor>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ScopedDescriptor {
+    Key(ScopedKeyDescriptor),
+    Login { hosts: &'static [&'static str] },
 }
 
 #[derive(Debug, Serialize)]
@@ -707,20 +714,33 @@ struct ScopedKeyAuth {
     scheme: String,
 }
 
-impl GetResult {
-    fn with_scoped_descriptor(
-        mut self,
+impl ScopedDescriptor {
+    fn for_record(
         credential_id: &str,
+        login_adapter: Option<&str>,
+        gateway: Option<&credentials_core::StoredGatewaySettings>,
         providers: &[credentials_core::store::RegisteredProvider],
-    ) -> Self {
-        self.scoped_descriptor = ScopedKeyDescriptor::for_id(credential_id, providers);
-        self
+    ) -> Option<Self> {
+        if let Some(gateway) = gateway {
+            return Some(Self::Key(ScopedKeyDescriptor::for_gateway(gateway)));
+        }
+        if let Some(hosts) = login_adapter.and_then(credentials_core::catalog::login_hosts) {
+            return Some(Self::Login { hosts });
+        }
+        ScopedKeyDescriptor::for_id(credential_id, providers).map(Self::Key)
+    }
+
+    fn into_hosts(self) -> Vec<String> {
+        match self {
+            Self::Key(descriptor) => descriptor.hosts,
+            Self::Login { hosts } => hosts.iter().map(|host| (*host).into()).collect(),
+        }
     }
 }
 
 impl ScopedKeyDescriptor {
-    fn for_gateway(gateway: &credentials_core::StoredGatewaySettings) -> Box<Self> {
-        Box::new(Self {
+    fn for_gateway(gateway: &credentials_core::StoredGatewaySettings) -> Self {
+        Self {
             auth: ScopedKeyAuth {
                 header: gateway.settings.auth.header.clone(),
                 scheme: gateway.settings.auth.scheme.clone(),
@@ -736,19 +756,19 @@ impl ScopedKeyDescriptor {
                     .map(|header| (header.name.clone(), header.value.clone()))
                     .collect(),
             ),
-        })
+        }
     }
 
     fn for_id(
         credential_id: &str,
         providers: &[credentials_core::store::RegisteredProvider],
-    ) -> Option<Box<Self>> {
+    ) -> Option<Self> {
         credentials_core::catalog::api_key_provider_for_credential(credential_id)
             .and_then(|row| {
                 if row.hosts.is_empty() {
                     return None;
                 }
-                Some(Box::new(ScopedKeyDescriptor {
+                Some(Self {
                     auth: ScopedKeyAuth {
                         header: row.auth?.header.into(),
                         scheme: match row.auth?.scheme {
@@ -761,7 +781,7 @@ impl ScopedKeyDescriptor {
                     invalid_key: row.invalid_key,
                     base_url: None,
                     headers: None,
-                }))
+                })
             })
             .or_else(|| {
                 let row =
@@ -769,7 +789,7 @@ impl ScopedKeyDescriptor {
                 if row.hosts.is_empty() {
                     return None;
                 }
-                Some(Box::new(ScopedKeyDescriptor {
+                Some(Self {
                     auth: ScopedKeyAuth {
                         header: row.auth_header.clone()?,
                         scheme: row.auth_scheme.clone()?,
@@ -778,7 +798,7 @@ impl ScopedKeyDescriptor {
                     invalid_key: None,
                     base_url: None,
                     headers: None,
-                }))
+                })
             })
     }
 }
@@ -1340,7 +1360,7 @@ mod get_scoped_tests {
             "hosts": ["api.nano-gpt.com", "nano-gpt.com"],
             "invalid_key": null
         });
-        let mut cases = vec![
+        let key_cases = [
             ("apikey:openai", openai_descriptor()),
             ("apikey:nanogpt", null_evidence),
             ("apikey:openai:work", openai_descriptor()),
@@ -1354,19 +1374,28 @@ mod get_scoped_tests {
             ("cookie:openai", json!({})),
             ("manual:openai", json!({})),
         ];
-        cases.extend(
-            credentials_core::catalog::LOGIN_PROVIDERS
-                .iter()
-                .map(|row| (row.default_id, json!({}))),
-        );
+        let login_cases = credentials_core::catalog::LOGIN_PROVIDERS
+            .iter()
+            .map(|row| {
+                let descriptor = if row.hosts.is_empty() {
+                    json!({})
+                } else {
+                    json!({"hosts": row.hosts})
+                };
+                (row.default_id, Some(row.adapter_name), descriptor)
+            });
+        let cases = key_cases
+            .into_iter()
+            .map(|(id, descriptor)| (id, None, descriptor))
+            .chain(login_cases);
         let principal = Principal::Reserved {
             module_id: "descriptor-reader".into(),
         };
-        for (id, descriptor) in cases {
-            let record = if credentials_core::catalog::credential_type(id) == "oauth" {
+        for (id, adapter, descriptor) in cases {
+            let record = if let Some(adapter) = adapter {
                 VaultRecord::new_oauth(
                     "test",
-                    "anthropic",
+                    adapter,
                     credentials_core::oauth::OAuthCredential {
                         access_token: "test-access".to_owned().into(),
                         refresh_token: "test-refresh".to_owned().into(),
@@ -1443,9 +1472,14 @@ mod get_scoped_tests {
 
     #[test]
     fn remote_get_scoped_descriptor_comes_from_local_catalog() {
-        for (id, descriptor) in [
-            ("apikey:openai:remote", openai_descriptor()),
-            ("apikey:anthropic-gw-acme:remote", json!({})),
+        for (id, adapter, descriptor) in [
+            ("apikey:openai:remote", None, openai_descriptor()),
+            ("apikey:anthropic-gw-acme:remote", None, json!({})),
+            (
+                "oauth:shared",
+                Some("anthropic"),
+                json!({"hosts": ["api.anthropic.com"]}),
+            ),
         ] {
             let outcome = remote_get_outcome(
                 id,
@@ -1453,6 +1487,7 @@ mod get_scoped_tests {
                     payload: b"k".to_vec(),
                     expires_at_ms: None,
                     record_version: 7,
+                    refresh_adapter: adapter.map(str::to_owned),
                     project_id: None,
                     account_id: None,
                     email: None,
@@ -1641,6 +1676,7 @@ mod get_scoped_tests {
                 payload: b"k".to_vec(),
                 expires_at_ms: None,
                 record_version: 7,
+                refresh_adapter: None,
                 project_id: None,
                 account_id: None,
                 email: None,
@@ -2200,6 +2236,7 @@ fn project_list_scoped_with_providers(
     providers: &[credentials_core::store::RegisteredProvider],
     gateways: &HashMap<String, credentials_core::StoredGatewaySettings>,
 ) -> ListScopedResult {
+    use credentials_core::ListAuthMethod;
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
         .into_iter()
@@ -2217,6 +2254,12 @@ fn project_list_scoped_with_providers(
         .into_iter()
         .map(|row| {
             let gateway = gateways.get(&row.id);
+            let login_adapter = match row.auth_method {
+                Some(
+                    ListAuthMethod::Oauth | ListAuthMethod::Chatgpt | ListAuthMethod::Antigravity,
+                ) => row.refresh_adapter.as_deref(),
+                _ => None,
+            };
             let (account_id, email, org_name) = row
                 .identity
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
@@ -2232,10 +2275,8 @@ fn project_list_scoped_with_providers(
                     credentials_core::store::RegisteredProvider::for_id(providers, &row.id)
                         .and_then(|provider| provider.fusiform_provider_id.clone())
                 },
-                hosts: gateway
-                    .map(ScopedKeyDescriptor::for_gateway)
-                    .or_else(|| ScopedKeyDescriptor::for_id(&row.id, providers))
-                    .map(|descriptor| descriptor.hosts),
+                hosts: ScopedDescriptor::for_record(&row.id, login_adapter, gateway, providers)
+                    .map(ScopedDescriptor::into_hosts),
                 provider: row.provider,
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
@@ -4138,20 +4179,29 @@ impl ReadSurface {
                     Ok(gateway) => gateway,
                     Err(error) => return err(map_store_error(&error)),
                 };
-                let descriptor = match gateway {
-                    Some(gateway) => {
-                        if gateway.incarnation != refreshed.incarnation {
-                            self.record_scoped_refusal(
-                                principal,
-                                &params.credential_id,
-                                ScopedReadRefusal::NotFound,
-                            );
-                            return err(ReadError::NotFound);
-                        }
-                        Some(ScopedKeyDescriptor::for_gateway(&gateway))
-                    }
-                    None => ScopedKeyDescriptor::for_id(&params.credential_id, &providers),
-                };
+                if gateway
+                    .as_ref()
+                    .is_some_and(|gateway| gateway.incarnation != refreshed.incarnation)
+                {
+                    self.record_scoped_refusal(
+                        principal,
+                        &params.credential_id,
+                        ScopedReadRefusal::NotFound,
+                    );
+                    return err(ReadError::NotFound);
+                }
+                let login_adapter =
+                    if record.kind == credentials_core::record::CredentialKind::Oauth {
+                        record.refresh_adapter.as_deref()
+                    } else {
+                        None
+                    };
+                let descriptor = ScopedDescriptor::for_record(
+                    &params.credential_id,
+                    login_adapter,
+                    gateway.as_ref(),
+                    &providers,
+                );
                 GetOutcome::Ok(GetResult {
                     payload: record.payload.into_inner().to_vec(),
                     expires_at_ms: record.expires_at_ms,
@@ -4163,7 +4213,7 @@ impl ReadSurface {
                     account_id,
                     email: record.identity.email.clone(),
                     org_name: record.identity.org_name.clone(),
-                    scoped_descriptor: descriptor,
+                    scoped_descriptor: descriptor.map(Box::new),
                 })
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
@@ -4802,20 +4852,23 @@ fn remote_get_outcome(
     providers: &[credentials_core::store::RegisteredProvider],
 ) -> GetOutcome {
     match answer {
-        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(
-            GetResult {
-                payload: get.payload,
-                expires_at_ms: get.expires_at_ms,
-                record_version: get.record_version,
-                credential_id: Some(credential_id.to_string()),
-                project_id: get.project_id,
-                account_id: get.account_id,
-                email: get.email,
-                org_name: get.org_name,
-                scoped_descriptor: None,
-            }
-            .with_scoped_descriptor(credential_id, providers),
-        ),
+        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(GetResult {
+            payload: get.payload,
+            expires_at_ms: get.expires_at_ms,
+            record_version: get.record_version,
+            credential_id: Some(credential_id.to_string()),
+            project_id: get.project_id,
+            account_id: get.account_id,
+            email: get.email,
+            org_name: get.org_name,
+            scoped_descriptor: ScopedDescriptor::for_record(
+                credential_id,
+                get.refresh_adapter.as_deref(),
+                None,
+                providers,
+            )
+            .map(Box::new),
+        }),
         crate::federation::RemoteAnswer::Refused(refusal) => GetOutcome::RemoteErr {
             error: refusal.body(),
         },
@@ -5703,6 +5756,8 @@ mod list_scoped_tests {
             |mut row: ScopedListRow, ids: &[&str], method: Option<ListAuthMethod>| {
                 row.provider_ids = ids.iter().map(|id| (*id).to_string()).collect();
                 row.auth_method = method;
+                // Pin the list-view framing when no login host fact is present.
+                row.refresh_adapter = None;
                 row
             };
         let snapshot = ScopedListSnapshot {
@@ -5973,6 +6028,7 @@ mod list_scoped_tests {
         );
         source.provider_ids = vec!["anthropic".into()];
         source.auth_method = Some(credentials_core::list_auth_method::ListAuthMethod::Oauth);
+        source.refresh_adapter = Some("google".into());
         for (tier, origin) in [
             (None, None),
             (Some("max_5x"), Some("operator")),

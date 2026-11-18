@@ -178,6 +178,8 @@ pub struct RemoteGet {
     pub expires_at_ms: Option<i64>,
     /// The home's `record_version`.
     pub record_version: u64,
+    /// Adapter returned in the same reply as this token, for local host lookup.
+    pub(crate) refresh_adapter: Option<String>,
     pub project_id: Option<String>,
     pub account_id: Option<String>,
     pub email: Option<String>,
@@ -602,6 +604,7 @@ fn served(reply: &TokenReply, t0_wall: i64) -> RemoteGet {
             .expires_in_ms
             .map(|expires_in_ms| t0_wall.saturating_add(expires_in_ms)),
         record_version: reply.record_version,
+        refresh_adapter: reply.refresh_adapter.clone(),
         project_id: reply.project_id.clone(),
         account_id: reply.account_id.clone(),
         email: reply.identity.email.clone(),

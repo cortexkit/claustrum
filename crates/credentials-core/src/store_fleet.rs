@@ -1741,6 +1741,67 @@ mod tests {
     }
 
     #[test]
+    fn bus_seal_grants_and_handles_use_the_fleet_fence() {
+        let (_root, store) = rig("bus-seal-grant-store", 1);
+        for key in [BUS_KEY_ID, "kem:bus-seal:2"] {
+            let grant = |kind, principal, operation| {
+                store.create_read_grant_audited(
+                    kind,
+                    principal,
+                    SelectorKind::Exact,
+                    key,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+            };
+            for (principal, operation) in [
+                ("callosum", GrantOperation::Read),
+                ("ckbus", GrantOperation::Open),
+                ("engram", GrantOperation::Open),
+            ] {
+                assert!(grant("reserved", principal, operation).is_ok());
+            }
+            for (kind, principal) in [
+                ("reserved", "other"),
+                ("enrolled", "ckbus"),
+                ("enrolled", "engram"),
+                ("enrolled", "callosum"),
+                ("reserved", "callosum"),
+                ("reserved", "ckbus"),
+                ("reserved", "engram"),
+            ] {
+                for operation in [
+                    GrantOperation::Open,
+                    GrantOperation::Read,
+                    GrantOperation::Sign,
+                    GrantOperation::Seal,
+                    GrantOperation::List,
+                    GrantOperation::Deposit,
+                    GrantOperation::AccountToken,
+                ] {
+                    if matches!(
+                        (kind, principal, operation),
+                        ("reserved", "callosum", GrantOperation::Read)
+                            | ("reserved", "ckbus" | "engram", GrantOperation::Open)
+                    ) {
+                        continue;
+                    }
+                    let result = grant(kind, principal, operation);
+                    assert_eq!(
+                        result.as_ref().err().and_then(|error| error.wire_code()),
+                        Some("fleet_key_reserved"),
+                        "{key} admitted or misclassified {kind}:{principal} {operation:?}: {result:?}"
+                    );
+                }
+            }
+            let error = store
+                .put_handle_hash("canary", key, AuditCtx::admin(AuditOp::MintHandle))
+                .unwrap_err();
+            assert_eq!(error.wire_code(), Some("fleet_key_reserved"));
+        }
+    }
+
+    #[test]
     fn fleet_epoch_row_debug_is_redacted() {
         let row = EpochRow {
             epoch: 1,

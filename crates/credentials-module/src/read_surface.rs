@@ -1957,6 +1957,7 @@ pub enum ReadError {
     /// `credential.sign` was asked to sign more bytes than the cap allows.
     SignPayloadTooLarge,
     KindNotOpenable,
+    BusSealInfoDomain,
     OpenFailed,
     OpenRateLimited,
     /// A `credential.open` byte field is not strict standard base64.
@@ -2026,6 +2027,7 @@ impl ReadError {
             | ReadError::KindNotGettable
             | ReadError::KindNotSignable
             | ReadError::KindNotOpenable
+            | ReadError::BusSealInfoDomain
             | ReadError::OpenFailed
             | ReadError::MalformedEncoding
             | ReadError::InvalidRecipientKey
@@ -2550,6 +2552,8 @@ enum TransferKeyUse {
     Ordinary,
     /// `credential.sign`: only Entorhinal may exercise the fleet record key.
     Sign,
+    /// `credential.open`: admitted bus-seal recipients have distinct info domains.
+    Open,
     /// `credential.public_key`: the read callosum makes to announce the key's public
     /// half.
     PublicKeyAnnounce,
@@ -2619,7 +2623,7 @@ fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bo
     )
 }
 
-/// Fleet purpose keys expose only the routes used to announce or sign records.
+/// Fleet purpose keys expose only their designated routes.
 /// Existing handles and category grants must not bypass the purpose restriction.
 fn fleet_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
     let allowed = match access {
@@ -2643,11 +2647,16 @@ fn fleet_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool 
                 TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::Sign
             )
         }
+        TransferKeyAccess::Scoped {
+            kind,
+            id,
+            usage: TransferKeyUse::Open,
+        } if credentials_core::federation::is_bus_seal_key_id(credential_id) => {
+            credentials_core::federation::bus_seal_info_prefix(kind, id).is_some()
+        }
         _ => false,
     };
-    (credential_id.starts_with("kem:fleet-epoch-wrap:")
-        || credential_id.starts_with("signing:fleet-record:"))
-        && !allowed
+    credentials_core::federation::is_fleet_key_id(credential_id) && !allowed
 }
 
 fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusal> {
@@ -3006,7 +3015,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 KeyAddress::Scoped(&params.credential_id),
                 GrantOperation::Open,
-                TransferKeyUse::Ordinary,
+                TransferKeyUse::Open,
             )
             .await
         {
@@ -3033,6 +3042,16 @@ impl ReadSurface {
             .record;
         if record.kind != credentials_core::record::CredentialKind::KemKey {
             return Err(ReadError::KindNotOpenable);
+        }
+        if credentials_core::federation::is_bus_seal_key_id(&credential_id) {
+            let Some(prefix) = resolved.principal.as_ref().and_then(|(kind, id)| {
+                credentials_core::federation::bus_seal_info_prefix(kind, id)
+            }) else {
+                return Err(ReadError::NotFound);
+            };
+            if !matches!(info.strip_prefix(prefix), Some(suffix) if !suffix.is_empty()) {
+                return Err(ReadError::BusSealInfoDomain);
+            }
         }
         let diagnostic_id: String = credential_id.chars().take(128).collect();
         let parsed = std::str::from_utf8(record.payload.expose())
@@ -5553,6 +5572,7 @@ mod error_class_tests {
         KindNotSignable => "kind_not_signable", "permanent";
         SignPayloadTooLarge => "sign_payload_too_large", "context_overflow";
         KindNotOpenable => "kind_not_openable", "permanent";
+        BusSealInfoDomain => "bus_seal_info_domain", "permanent";
         OpenFailed => "open_failed", "permanent";
         OpenRateLimited => "open_rate_limited", "transient";
         MalformedEncoding => "malformed_encoding", "permanent";

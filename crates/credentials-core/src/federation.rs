@@ -89,13 +89,19 @@ pub fn fleet_key_admits_grant(
 ) -> Result<(), String> {
     let wrap = credential_id.starts_with("kem:fleet-epoch-wrap:");
     let signing = credential_id.starts_with("signing:fleet-record:");
-    if !wrap && !signing {
+    let bus_seal = is_bus_seal_key_id(credential_id);
+    if !wrap && !signing && !bus_seal {
         return Ok(());
     }
     let allowed = (operation == GrantOperation::Read && principal == "reserved:callosum")
         || (signing
             && principal == "reserved:entorhinal"
-            && matches!(operation, GrantOperation::Read | GrantOperation::Sign));
+            && matches!(operation, GrantOperation::Read | GrantOperation::Sign))
+        || (bus_seal
+            && operation == GrantOperation::Open
+            && principal
+                .split_once(':')
+                .is_some_and(|(kind, id)| bus_seal_info_prefix(kind, id).is_some()));
     if allowed {
         Ok(())
     } else {
@@ -104,7 +110,22 @@ pub fn fleet_key_admits_grant(
 }
 
 pub fn is_fleet_key_id(id: &str) -> bool {
-    id.starts_with("kem:fleet-epoch-wrap:") || id.starts_with("signing:fleet-record:")
+    id.starts_with("kem:fleet-epoch-wrap:")
+        || id.starts_with("signing:fleet-record:")
+        || is_bus_seal_key_id(id)
+}
+
+pub fn is_bus_seal_key_id(id: &str) -> bool {
+    id.starts_with("kem:bus-seal:")
+}
+
+/// An admitted bus-seal opener's domain, selected from its resolved principal.
+pub fn bus_seal_info_prefix(kind: &str, id: &str) -> Option<&'static [u8]> {
+    match (kind, id) {
+        ("reserved", "ckbus") => Some(b"ck-bus-seal/v1/ckbus/"),
+        ("reserved", "engram") => Some(b"ck-bus-seal/v1/engram/"),
+        _ => None,
+    }
 }
 
 /// Bus signing keys belong only to ck-bus, including future key generations.

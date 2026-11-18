@@ -27,9 +27,13 @@ pub(super) fn validate_read_grant(
         )
         .map_err(|_| StoreOpError::BusKeyReserved)?;
     }
-    selector_kind
-        .validate_operation(operation)
-        .map_err(StoreOpError::Store)?;
+    // The bus-seal allowlist already restricts exact grants to valid operations.
+    // Let it name the reserved-key refusal even for an otherwise invalid operation.
+    if selector_kind != SelectorKind::Exact || !crate::federation::is_bus_seal_key_id(selector) {
+        selector_kind
+            .validate_operation(operation)
+            .map_err(StoreOpError::Store)?;
+    }
     // The transfer key's one admissible grant is checked before every other grant
     // rule, so an id under its prefix is refused by that name rather than by
     // whichever unrelated rule it happens to trip first.
@@ -463,6 +467,7 @@ impl EncryptedStore {
         if crate::agent_secret::is_deposit_key(credential_id) {
             return Err(StoreOpError::NotFound);
         }
+        let exact_only = bus_key || crate::federation::is_bus_seal_key_id(credential_id);
         self.store
             .with_conn(|conn| {
                 let mut grants = read_grants_from_conn(
@@ -475,7 +480,7 @@ impl EncryptedStore {
                 let grants: Vec<_> = grants
                     .into_iter()
                     .filter(|grant| grant.operation == operation)
-                    .filter(|grant| !bus_key || grant.selector_kind == SelectorKind::Exact)
+                    .filter(|grant| !exact_only || grant.selector_kind == SelectorKind::Exact)
                     .map(|grant| (grant.selector_kind.as_str().to_owned(), grant.selector))
                     .collect();
                 let caller_active_grants = grants.len() as u32;

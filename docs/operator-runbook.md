@@ -1574,6 +1574,16 @@ coordinate the new announcement with the hub rollout. Rotating
 The `gh` routing-manifest root follows its own ceremony: see
 [manifest signing](gh-manifest-signing.md).
 
+### Bus-seal KEM key
+
+Startup also creates `kem:bus-seal:1` if absent. During setup, grant exact `read`
+to `reserved:callosum` to announce the public half, and exact `open` to
+`reserved:ckbus` for agent hand-offs and `reserved:engram` for move archives.
+Other grants and bearer-handle minting are refused with `fleet_key_reserved`.
+Senders seal locally to the announced X25519 public key, using the recipient
+module's required `info` prefix from [the wire contract](wire-contract-v1.md#10-credentialopen).
+When using a new generation, repeat the exact grants for the new id.
+
 ---
 
 ## 12. Deploy and roll back

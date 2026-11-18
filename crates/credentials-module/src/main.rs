@@ -12744,6 +12744,94 @@ mod tests {
         );
     }
 
+    /// Callosum starts stamping its federated scopes with the origin principal, the
+    /// sending session's project, the peer's box id and a run id once every reader
+    /// decodes them. A vault that cannot decode one of those members refuses the whole
+    /// bind with `invalid_control_body`, which would cut every phone approval and every
+    /// vault-to-vault call. This bind carries all of them and must still be bound.
+    #[tokio::test]
+    async fn a_federated_bind_carrying_every_newer_stamp_member_is_bound() {
+        use subc_protocol::scope::{
+            FederatedAttributes, FederatedPeerClass, FederatedProject, RemoteClaim, RootKey,
+            RootKeyKind, ScopeAttributes, ScopeKind, ScopeStamp,
+        };
+        let (surface, _surface_root) = tmp_surface(173);
+        let (admin, _admin_store, _admin_root) = tmp_admin(173);
+        let routes = Arc::new(RouteEpochs::default());
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        let callosum = subc_protocol::Principal::Reserved {
+            module_id: "callosum".to_string(),
+        };
+        let mut facts = FederatedAttributes::new(
+            FederatedPeerClass::Computer,
+            "a".repeat(32),
+            "pairing-1".to_string(),
+            "Peer".to_string(),
+        )
+        .with_origin_principal(Some(subc_protocol::Principal::Reserved {
+            module_id: "aft".to_string(),
+        }))
+        .with_remote_claim(Some(RemoteClaim::run("agent-1").with_run_id("run-1")))
+        .with_project(Some(FederatedProject::new(
+            "pj-example",
+            RootKey::new(RootKeyKind::Remote, "owner/repo"),
+        )));
+        facts.peer_box_id = Some("0123456789abcdef".repeat(2));
+        facts.validate().expect("the stamp is well formed");
+        let request = ModuleControlRequest::RouteBind {
+            route_channel: 7,
+            epoch: 1,
+            target: subc_protocol::RouteTarget::ManagementSurface {
+                module_id: credentials_core::contract::MODULE_ID.to_string(),
+            },
+            identity: subc_protocol::BindIdentity::new(
+                format!("fed-computer:{}", "a".repeat(32)),
+                "s",
+            ),
+            principal: Some(callosum.clone()),
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: Some(
+                ScopeStamp::new(callosum, "federated-1", 1, ScopeKind::Federated)
+                    .with_attributes(ScopeAttributes::new().with_federated(Some(facts))),
+            ),
+            call_mode: None,
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+        let text = String::from_utf8(body.clone()).unwrap();
+        for member in ["origin_principal", "project", "peer_box_id", "run_id"] {
+            assert!(text.contains(member), "the bind must carry `{member}`");
+        }
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            0,
+            7,
+            body,
+        )
+        .unwrap();
+
+        handle_control_request(frame, &tx, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        let ack = rx.try_recv().expect("the bind is answered");
+        assert_eq!(
+            ack.header.ty,
+            FrameType::Response,
+            "refused: {}",
+            String::from_utf8_lossy(&ack.body)
+        );
+        // A `fed-` harness is served with no admin principal by design, so the installed
+        // route epoch is what shows the bind took effect.
+        assert!(
+            routes.matches(7, 1),
+            "the federated bind installs its route"
+        );
+    }
+
     #[tokio::test]
     async fn health_check_control_request_returns_domain_report() {
         let (surface, _surface_root) = tmp_surface(7);

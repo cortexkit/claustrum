@@ -391,6 +391,7 @@
             "email": "fixture@example.invalid",
             "expires_at_ms": null,
             "hosts": [
+              "cloudcode-pa.googleapis.com",
               "daily-cloudcode-pa.googleapis.com"
             ],
             "org_name": "Fixture Team",
@@ -491,6 +492,7 @@
             ],
             "email": "fixture@example.invalid",
             "hosts": [
+              "cloudcode-pa.googleapis.com",
               "daily-cloudcode-pa.googleapis.com"
             ],
             "id": "oauth:antigravity:fixture",
@@ -522,7 +524,7 @@
           }
         ],
         "grants": 2,
-        "view": "wcUNW/4BCdX94PrBG9cz19AMM5ucNDmzpxgU00fBsmQ="
+        "view": "sryP1RRUCbe9nkyQEM14GdW+Z0Aoc8pBsvgxGyOe+yc="
       }
     },
     "refusal": {

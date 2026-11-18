@@ -158,11 +158,11 @@ mod scoped_watch {
     }
 
     macro_rules! login_hosts_tests {
-        ($get:ident, $list:ident, $adapter:literal, $host:literal) => {
+        ($get:ident, $list:ident, $adapter:literal, $($host:literal),+) => {
             #[tokio::test]
             async fn $get() {
                 let get = scoped_login_result(OP_GET_SCOPED, "oauth:scoped-login", $adapter).await;
-                assert_eq!(get["hosts"], json!([$host]));
+                assert_eq!(get["hosts"], json!([$($host),+]));
                 assert!(get.get("auth").is_none());
                 assert!(get.get("invalid_key").is_none());
             }
@@ -170,7 +170,7 @@ mod scoped_watch {
             #[tokio::test]
             async fn $list() {
                 let row = scoped_login_result(OP_LIST_SCOPED, "oauth:scoped-login", $adapter).await;
-                assert_eq!(row["hosts"], json!([$host]));
+                assert_eq!(row["hosts"], json!([$($host),+]));
                 assert!(row.get("auth").is_none());
                 assert!(row.get("invalid_key").is_none());
             }
@@ -179,7 +179,7 @@ mod scoped_watch {
 
     login_hosts_tests!(login_hosts_anthropic_get, login_hosts_anthropic_list, "anthropic", "api.anthropic.com");
     login_hosts_tests!(login_hosts_chatgpt_get, login_hosts_chatgpt_list, "openai", "chatgpt.com");
-    login_hosts_tests!(login_hosts_antigravity_get, login_hosts_antigravity_list, "antigravity", "daily-cloudcode-pa.googleapis.com");
+    login_hosts_tests!(login_hosts_antigravity_get, login_hosts_antigravity_list, "antigravity", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com");
     login_hosts_tests!(login_hosts_xai_get, login_hosts_xai_list, "xai", "api.x.ai");
     login_hosts_tests!(login_hosts_meta_get, login_hosts_meta_list, "meta", "api.meta.ai");
 

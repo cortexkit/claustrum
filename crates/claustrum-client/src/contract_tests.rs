@@ -542,7 +542,10 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     fusiform_provider_id: None,
-                    hosts: Some(vec!["daily-cloudcode-pa.googleapis.com".into()]),
+                    hosts: Some(vec![
+                        "cloudcode-pa.googleapis.com".into(),
+                        "daily-cloudcode-pa.googleapis.com".into(),
+                    ]),
                     id: "antigravity:google".into(),
                     categories: vec!["llm-provider".into()],
                     credential_type: "oauth".into(),
@@ -684,7 +687,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "q9/MZr828iRZMhXfEHJDMn8AromEHFzaCm5pgGHf74c=".into(),
+            view: "AKtuUXnHqM1ZUANENNaZlVaLGL1AmV81zx+HSNMj14w=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

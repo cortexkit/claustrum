@@ -504,6 +504,7 @@ pub struct LoginProvider {
     pub serves: &'static [ModelVendor],
     /// Exact hosts a consumer may send this provider's access token to. The
     /// consumer's send check depends on this list not containing any other host.
+    /// Sorted and unique; consumers must not interpret the order as a preference.
     pub hosts: &'static [&'static str],
     /// The catalog provider ids a fresh login stores when the operator passes no
     /// `--provider-id`. Only subscription logins whose routing id is settled name one;
@@ -730,7 +731,10 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Google, Anthropic, OpenAI],
-        hosts: &["daily-cloudcode-pa.googleapis.com"],
+        hosts: &[
+            "cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.googleapis.com",
+        ],
         default_provider_ids: &["google"],
     },
     LoginProvider {
@@ -1069,6 +1073,20 @@ pub fn valid_category_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn antigravity_login_hosts_include_production_fallback_in_sorted_order() {
+        assert_eq!(
+            super::login_hosts("antigravity"),
+            Some(
+                [
+                    "cloudcode-pa.googleapis.com",
+                    "daily-cloudcode-pa.googleapis.com",
+                ]
+                .as_slice()
+            )
+        );
+    }
+
     #[test]
     fn fusiform_catalog_has_no_unreviewed_gaps() {
         let missing: Vec<_> = missing_fusiform_providers()

@@ -741,7 +741,7 @@ Login records with the following refresh adapters carry `hosts` alone, without
 | --- | --- |
 | `anthropic` | `["api.anthropic.com"]` |
 | `openai` (ChatGPT) | `["chatgpt.com"]` |
-| `antigravity` | `["daily-cloudcode-pa.googleapis.com"]` |
+| `antigravity` | `["cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]` |
 | `xai` | `["api.x.ai"]` |
 | `meta` | `["api.meta.ai"]` |
 

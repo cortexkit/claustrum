@@ -28,7 +28,8 @@ crates/claustrum-model/src/agent_secret_extended_tests.rs INLINE_016 x.test
 crates/claustrum-model/src/agent_secret_tests.rs INLINE_001 a.test
 crates/claustrum-model/src/plan_detection.rs INLINE_001 api.openai.com
 crates/claustrum-providers/src/catalog/mod.rs LOGIN_anthropic_001 api.anthropic.com
-crates/claustrum-providers/src/catalog/mod.rs LOGIN_antigravity_001 daily-cloudcode-pa.googleapis.com
+crates/claustrum-providers/src/catalog/mod.rs LOGIN_antigravity_001 cloudcode-pa.googleapis.com
+crates/claustrum-providers/src/catalog/mod.rs LOGIN_antigravity_002 daily-cloudcode-pa.googleapis.com
 crates/claustrum-providers/src/catalog/mod.rs LOGIN_meta_001 api.meta.ai
 crates/claustrum-providers/src/catalog/mod.rs LOGIN_openai_001 chatgpt.com
 crates/claustrum-providers/src/catalog/mod.rs LOGIN_xai_001 api.x.ai

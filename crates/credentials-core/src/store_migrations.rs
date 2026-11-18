@@ -959,6 +959,24 @@ pub(super) const MIGRATIONS: &[Migration] = &[
             PRIMARY KEY (module_id, name)\
         );",
     },
+    Migration {
+        version: CONDITION_SCHEMA_VERSION,
+        statements: "CREATE TABLE credential_conditions (\
+            credential_id TEXT NOT NULL PRIMARY KEY REFERENCES credentials(credential_id) ON DELETE CASCADE, \
+            incarnation TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            since_ms INTEGER NOT NULL CHECK (typeof(since_ms) = 'integer' AND since_ms BETWEEN 0 AND 9007199254740991), \
+            reporter TEXT NOT NULL, \
+            action_url TEXT\
+        ); \
+        CREATE TABLE remote_record_conditions (\
+            credential_id TEXT NOT NULL PRIMARY KEY REFERENCES remote_records(credential_id) ON DELETE CASCADE, \
+            incarnation TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            since_ms INTEGER NOT NULL CHECK (typeof(since_ms) = 'integer' AND since_ms BETWEEN 0 AND 9007199254740991), \
+            action_url TEXT\
+        );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

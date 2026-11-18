@@ -198,6 +198,7 @@ impl EncryptedStore {
                 (DepositCookieOutcome::Replaced { record_version: next as u64 }, AuditOp::DepositCookieReplace)
             };
             clear_intent_tx(tx, credential_id)?;
+            delete_local_condition_tx(tx, credential_id)?;
             #[cfg(any(test, feature = "test-support"))]
             if self.deposit_cookie_audit_fault.load(Ordering::Relaxed) {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -302,6 +303,7 @@ impl EncryptedStore {
                     bump_grants_generation_tx(tx)?;
                 }
                 clear_intent_tx(tx, credential_id)?;
+                delete_local_condition_tx(tx, credential_id)?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -464,6 +466,7 @@ impl EncryptedStore {
             // reconciliation's hash-mismatch check would later undo this re-login.
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                delete_local_condition_tx(tx, credential_id)?;
                 clear_plan_on_account_change_tx(
                     tx,
                     &audit_key,
@@ -652,6 +655,7 @@ impl EncryptedStore {
             )?;
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                delete_local_condition_tx(tx, credential_id)?;
                 clear_agent_ssh_state_tx(tx, credential_id)?;
                 append_audit_tx(
                     tx,
@@ -1431,6 +1435,7 @@ impl EncryptedStore {
                         [credential_id],
                     )?;
                 }
+                delete_local_condition_tx(tx, credential_id)?;
                 // Diagnostic events go WITH the credential, and this is the one
                 // place they can go.
                 //

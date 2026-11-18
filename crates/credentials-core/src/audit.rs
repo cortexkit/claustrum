@@ -112,6 +112,10 @@ pub enum AuditOp {
     RefreshCommit,
     /// A consumer-reported auth failure that marked the credential needs_reauth.
     ReportAuthFailure,
+    /// A consumer set or replaced a provider login condition.
+    ReportCondition,
+    /// A consumer or operator removed a provider login condition.
+    ClearCondition,
     /// A credential row was permanently removed (its audit history is retained —
     /// removal deletes the row, never the chain).
     Remove,
@@ -290,6 +294,8 @@ impl AuditOp {
             AuditOp::RotateMasterKey => "rotate_master_key",
             AuditOp::RefreshCommit => "refresh_commit",
             AuditOp::ReportAuthFailure => "report_auth_failure",
+            AuditOp::ReportCondition => "report_condition",
+            AuditOp::ClearCondition => "clear_condition",
             AuditOp::Remove => "remove",
             AuditOp::Reactivate => "reactivate",
             AuditOp::MintHandle => "mint_handle",
@@ -359,6 +365,10 @@ auth_event_kinds! {
     ConsumerReportStale => "consumer_report_stale",
     /// A consumer report immediately latched a non-refreshable credential.
     ConsumerReportLatch => "consumer_report_latch",
+    /// A provider condition report passed admission checks, whether or not it applied.
+    ConsumerReportCondition => "consumer_report_condition",
+    /// A consumer condition clear passed admission, whether or not it applied.
+    ConsumerClearCondition => "consumer_clear_condition",
     /// A principal-scoped read was refused; the detail names the internal reason.
     ScopedReadRefusal => "scoped_read_refusal",
     /// The FIRST time a principal successfully exercised a grant over a credential.
@@ -994,6 +1004,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::RotateMasterKey => AuditOp::RotateMasterKey.as_str(),
                 AuditOp::RefreshCommit => AuditOp::RefreshCommit.as_str(),
                 AuditOp::ReportAuthFailure => AuditOp::ReportAuthFailure.as_str(),
+                AuditOp::ReportCondition => AuditOp::ReportCondition.as_str(),
+                AuditOp::ClearCondition => AuditOp::ClearCondition.as_str(),
                 AuditOp::Remove => AuditOp::Remove.as_str(),
                 AuditOp::Reactivate => AuditOp::Reactivate.as_str(),
                 AuditOp::MintHandle => AuditOp::MintHandle.as_str(),
@@ -1056,6 +1068,8 @@ mod vocabulary_documentation_tests {
         assert_documented(section, "audit_log.op", value(AuditOp::RotateMasterKey));
         assert_documented(section, "audit_log.op", value(AuditOp::RefreshCommit));
         assert_documented(section, "audit_log.op", value(AuditOp::ReportAuthFailure));
+        assert_documented(section, "audit_log.op", value(AuditOp::ReportCondition));
+        assert_documented(section, "audit_log.op", value(AuditOp::ClearCondition));
         assert_documented(section, "audit_log.op", value(AuditOp::Remove));
         assert_documented(section, "audit_log.op", value(AuditOp::Reactivate));
         assert_documented(section, "audit_log.op", value(AuditOp::MintHandle));

@@ -879,7 +879,7 @@ fn module_secret_migration_48_preserves_every_existing_step_47_row() {
     }).unwrap();
     let before = all_tables(&store.store);
     assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 47);
-    EncryptedStore::migrate(&store.store).unwrap();
+    migrate_through_for_test(&store.store, 48).unwrap();
     assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 48);
     let mut after = all_tables(&store.store);
     assert_eq!(after.remove("module_secrets"), Some(vec![]));

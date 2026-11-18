@@ -1002,14 +1002,16 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 48);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 49);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
+        "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",
         "module_secrets",
+        "remote_record_conditions",
     ] {
         assert_eq!(after.remove(table), Some(vec![]));
     }
@@ -1031,10 +1033,12 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     EncryptedStore::migrate(&sqlite).unwrap();
     let mut after = every_table_row(&sqlite);
     for table in [
+        "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",
         "module_secrets",
+        "remote_record_conditions",
     ] {
         assert_eq!(after.remove(table), Some(vec![]));
     }
@@ -1984,6 +1988,27 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
     };
 
     for (table, expected) in [
+        (
+            "credential_conditions",
+            vec![
+                column("credential_id", "TEXT", true, None, true),
+                column("incarnation", "TEXT", true, None, false),
+                column("reason", "TEXT", true, None, false),
+                column("since_ms", "INTEGER", true, None, false),
+                column("reporter", "TEXT", true, None, false),
+                column("action_url", "TEXT", false, None, false),
+            ],
+        ),
+        (
+            "remote_record_conditions",
+            vec![
+                column("credential_id", "TEXT", true, None, true),
+                column("incarnation", "TEXT", true, None, false),
+                column("reason", "TEXT", true, None, false),
+                column("since_ms", "INTEGER", true, None, false),
+                column("action_url", "TEXT", false, None, false),
+            ],
+        ),
         (
             "module_secrets",
             vec![

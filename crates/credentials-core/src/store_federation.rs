@@ -404,12 +404,17 @@ fn remove_remote_watch_tx(
     let mut categories = 0;
     // Guard the metadata deletions too: a converted operator row owns all of its
     // metadata, even when foreign-key cascades are disabled on this connection.
+    let condition_table = (read_schema_version(tx)? >= CONDITION_SCHEMA_VERSION)
+        .then_some("remote_record_conditions");
     for table in [
         "remote_record_categories",
         "remote_record_provider_ids",
         "remote_record_plan_tiers",
         "auth_events",
-    ] {
+    ]
+    .into_iter()
+    .chain(condition_table)
+    {
         let deleted = tx.execute(
             &format!(
                 "DELETE FROM {table} WHERE credential_id = ?1 AND EXISTS (\
@@ -770,7 +775,7 @@ impl EncryptedStore {
     /// Rows created by a home watch refuse removal until converted with a remote add
     /// for that same home.
     ///
-    /// The category, provider-id and plan-tier rows are deleted explicitly rather than
+    /// The metadata and condition rows are deleted explicitly rather than
     /// by the foreign-key cascade, because SQLite enforces foreign keys per connection
     /// and nothing guarantees the setting is on: a re-added id must start with no
     /// leftover metadata either way. Its `auth_events` rows go too, as for a local
@@ -815,6 +820,12 @@ impl EncryptedStore {
                 "DELETE FROM remote_record_plan_tiers WHERE credential_id = ?1",
                 [credential_id],
             )?;
+            if read_schema_version(tx)? >= CONDITION_SCHEMA_VERSION {
+                tx.execute(
+                    "DELETE FROM remote_record_conditions WHERE credential_id = ?1",
+                    [credential_id],
+                )?;
+            }
             tx.execute(
                 "DELETE FROM remote_records WHERE credential_id = ?1",
                 [credential_id],

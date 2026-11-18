@@ -1175,6 +1175,8 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `rotate_master_key` | Re-wrap the vault under a new master key. |
 | `refresh_commit` | Commit new tokens from a vault-owned refresh. |
 | `report_auth_failure` | Record a consumer report that changes credential state. |
+| `report_condition` | Set or replace a provider login condition without changing credential state. |
+| `clear_condition` | Remove a provider login condition on consumer or operator request. |
 | `remove` | Permanently remove a credential row while retaining its audit history. |
 | `reactivate` | Clear `needs_reauth` without changing the stored secret. |
 | `mint_handle` | Mint a capability handle for a credential. |
@@ -1280,6 +1282,8 @@ diagnostics table, not the tamper-evident audit chain:
 | `stale_nonrefreshable_latch` | A stale report on a non-refreshable credential was latched as `needs_reauth`. |
 | `consumer_report_stale` | A consumer report marked a refreshable credential stale for its next read. |
 | `consumer_report_latch` | A consumer report immediately latched a non-refreshable credential. |
+| `consumer_report_condition` | An admitted consumer condition report with its applied or unapplied outcome. No detail. |
+| `consumer_clear_condition` | An admitted consumer condition clear with its applied or unapplied outcome. No detail. |
 | `scoped_read_refusal` | A principal-scoped read was refused; `detail` names the internal refusal reason. |
 | `scoped_first_use` | The first time a principal successfully exercised a grant over a credential. Written once per (principal, credential, operation) and never again, so its absence shows a grant that has never been exercised. |
 | `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |

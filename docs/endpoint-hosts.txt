@@ -710,6 +710,17 @@ crates/claustrum-providers/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
 crates/claustrum-providers/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
 crates/claustrum-providers/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
 crates/credentials-core/src/login_sharing.rs INLINE_001 json-schema.org
+crates/credentials-core/src/store_condition_tests.rs INLINE_001 ACCOUNTS.GOOGLE.COM
+crates/credentials-core/src/store_condition_tests.rs INLINE_002 accounts.google.com.evil.test
+crates/credentials-core/src/store_condition_tests.rs INLINE_003 a.accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs INLINE_004 x@accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs INLINE_005 @accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs INLINE_006 accounts.google.com:443
+crates/credentials-core/src/store_condition_tests.rs INLINE_007 accounts.google.com:8443
+crates/credentials-core/src/store_condition_tests.rs INLINE_008 accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs INLINE_009 accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs INLINE_010 accounts.google.com
+crates/credentials-core/src/store_condition_tests.rs LINK accounts.google.com
 crates/credentials-core/src/store_migration_10_tests.rs INLINE_001 a.test\
 crates/credentials-core/src/store_migration_10_tests.rs INLINE_002 b.test\
 crates/credentials-core/src/store_migration_10_tests.rs INLINE_003 x.test

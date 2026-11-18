@@ -851,6 +851,51 @@ pub fn login_hosts(adapter: &str) -> Option<&'static [&'static str]> {
         .map(|entry| entry.hosts)
 }
 
+const LOGIN_CONDITIONS: &[(&str, &str, &[&str])] = &[
+    (
+        refresh_adapters::antigravity::ADAPTER_NAME,
+        "provider_verification_required",
+        &["accounts.google.com"],
+    ),
+    (
+        refresh_adapters::antigravity::ADAPTER_NAME,
+        "provider_ineligible",
+        &[],
+    ),
+];
+
+/// `None` means the adapter does not admit this reason. An empty host list means
+/// the reason is admitted but cannot carry an action link.
+pub fn condition_link_hosts(adapter: &str, reason: &str) -> Option<&'static [&'static str]> {
+    LOGIN_CONDITIONS
+        .iter()
+        .find(|(name, admitted, _)| *name == adapter && *admitted == reason)
+        .map(|(_, _, hosts)| *hosts)
+}
+
+#[cfg(test)]
+#[test]
+fn only_antigravity_admits_login_conditions() {
+    let verification = "provider_verification_required";
+    let ineligible = "provider_ineligible";
+    assert_eq!(
+        condition_link_hosts("antigravity", verification),
+        Some(["accounts.google.com"].as_slice()),
+    );
+    assert_eq!(
+        condition_link_hosts("antigravity", ineligible),
+        Some([].as_slice())
+    );
+    assert_eq!(condition_link_hosts("antigravity", "future_reason"), None);
+    for login in LOGIN_PROVIDERS
+        .iter()
+        .filter(|row| row.adapter_name != "antigravity")
+    {
+        assert_eq!(condition_link_hosts(login.adapter_name, verification), None);
+        assert_eq!(condition_link_hosts(login.adapter_name, ineligible), None);
+    }
+}
+
 /// Published providers still awaiting a reviewed row or skip, ordered by provider id.
 /// Any API-key row carrying an id covers it, independent of its routing defaults.
 pub fn missing_fusiform_providers() -> Vec<&'static crate::fusiform_providers::FusiformProvider> {

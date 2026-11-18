@@ -72,6 +72,18 @@ mod grants;
 #[path = "store_credentials.rs"]
 mod credentials;
 
+#[cfg(test)]
+#[path = "store_condition_tests.rs"]
+mod condition_tests;
+#[path = "store_conditions.rs"]
+mod conditions;
+
+use conditions::delete_local_condition_tx;
+pub use conditions::{
+    check_condition_link, check_condition_report, condition_read_only, Condition, ConditionReport,
+    MAX_CONDITION_ACTION_URL_BYTES, MAX_CONDITION_SINCE_MS,
+};
+
 #[path = "store_refresh.rs"]
 mod refresh;
 
@@ -144,6 +156,9 @@ pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 
 /// Private module-owned values, stored outside the credential and grant tables.
 pub const MODULE_SECRET_SCHEMA_VERSION: u32 = 48;
+
+/// Provider login conditions, stored separately from local and remote record state.
+pub const CONDITION_SCHEMA_VERSION: u32 = 49;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -700,6 +715,14 @@ pub enum StoreOpError {
     InvalidAgentSsh,
     /// The credential id does not exist.
     NotFound,
+    /// The record or its provider does not admit the reported condition.
+    ConditionNotAdmitted,
+    /// The provider status does not admit a condition report.
+    ConditionStatusRefused,
+    /// The reported action link is not permitted. Never carries the supplied value.
+    ConditionLinkRefused,
+    /// A remote copy's condition must be cleared at its home vault.
+    ConditionHomeOwned,
     /// A create was attempted for an id that already exists (create-only default).
     AlreadyExists,
     /// A CAS overwrite's `expected_payload_hash` did not match the current record.
@@ -906,6 +929,10 @@ impl std::fmt::Display for StoreOpError {
                  secrets on this vault before naming another member as the home"
             ),
             StoreOpError::NotFound => f.write_str("credential not found"),
+            StoreOpError::ConditionNotAdmitted => f.write_str("condition not admitted"),
+            StoreOpError::ConditionStatusRefused => f.write_str("condition provider status refused"),
+            StoreOpError::ConditionLinkRefused => f.write_str("condition action link refused"),
+            StoreOpError::ConditionHomeOwned => f.write_str("condition is owned by the home vault"),
             StoreOpError::AlreadyExists => {
                 f.write_str("credential already exists (create-only; use a CAS overwrite)")
             }
@@ -1020,6 +1047,7 @@ impl StoreOpError {
         match self {
             StoreOpError::ModuleSecret(error) => Some(error.code()),
             StoreOpError::InvalidAgentSsh => Some("invalid_params"),
+            StoreOpError::ConditionHomeOwned => Some("condition_home_owned"),
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::SecretMultiHostDisabled => Some("secret_multi_host_disabled"),
             StoreOpError::SecretBasicAuthDisabled => Some("secret_basic_auth_disabled"),

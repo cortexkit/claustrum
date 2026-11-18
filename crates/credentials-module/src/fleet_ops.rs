@@ -7,7 +7,7 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use credentials_core::fleet::{
     validate_batch, FleetError, FleetOpenInput, FleetPeer, FleetSealInput, FleetSealer, FleetWrap,
-    MAX_BATCH_ITEMS, MAX_BYTES,
+    MAX_BATCH_ITEMS, MAX_BYTES, MAX_HOLDERS,
 };
 use credentials_core::secret::Secret;
 use credentials_core::EncryptedStore;
@@ -145,6 +145,8 @@ struct Empty {}
 #[serde(deny_unknown_fields)]
 struct Mint {
     members: Vec<String>,
+    #[serde(default)]
+    excluded: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,7 +255,7 @@ enum Command {
     SealBatch(Vec<SealItem>),
     OpenBatch(Vec<OpenItem>),
     Status,
-    Mint(Vec<String>),
+    Mint(Mint),
     Commit(Transition),
     Discard(Transition),
     Import(FleetWrap),
@@ -302,14 +304,19 @@ fn command(method: &str, params: &Value) -> Result<Command, FleetError> {
         }
         "fleet.epoch_mint" => {
             let p: Mint = parse(params)?;
-            if p.members
-                .iter()
-                .any(|m| !credentials_core::federation::valid_member_id(m))
-                || p.members.iter().collect::<BTreeSet<_>>().len() != p.members.len()
-            {
-                return Err(FleetError::InvalidParams);
+            for ids in [&p.members, &p.excluded] {
+                if ids
+                    .iter()
+                    .any(|m| !credentials_core::federation::valid_member_id(m))
+                    || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+                {
+                    return Err(FleetError::InvalidParams);
+                }
             }
-            Command::Mint(p.members)
+            if p.excluded.len() > MAX_HOLDERS {
+                return Err(FleetError::EpochCapacity);
+            }
+            Command::Mint(p)
         }
         "fleet.epoch_commit" | "fleet.epoch_discard" => {
             let p: Transition = parse(params)?;
@@ -418,7 +425,9 @@ fn execute(
             Ok(json!({"items":replies}))
         }
         Command::Status => wire(store.fleet_epoch_status()?),
-        Command::Mint(members) => wire(store.fleet_epoch_mint(&members, peers)?),
+        Command::Mint(p) => {
+            wire(store.fleet_epoch_mint_with_exclusions(&p.members, &p.excluded, peers)?)
+        }
         Command::Commit(p) => wire(store.fleet_epoch_commit(p.epoch, &p.mint_id)?),
         Command::Discard(p) => wire(store.fleet_epoch_discard(p.epoch, &p.mint_id)?),
         Command::Import(wrap) => wire(store.fleet_epoch_import(&wrap, peers)?),

@@ -113,3 +113,12 @@ build-server job. This emits a newly drawn seal nonce/ciphertext; the three
 deterministic HPKE wraps remain byte-identical. Review the generated differences,
 then run the pin check without the environment variable and the independent
 HPKE verifier. Never hand-edit `cases.json`.
+
+The additive `mint-excluded.json` sample mints with one excluded live peer and
+one rotation-wrap recipient, using the same sender and recipient keys as
+`cases.json`. It pins the request, response and wrap plaintext, with the random
+epoch key, mint ID and HPKE input replaced by synthetic bytes. To regenerate
+it and `SHA256SUMS` without rewriting the original samples, set
+`CK_EMIT_FLEET_EXCLUDED_MINT_VECTOR=1` on the command above, replace the test
+filter with `fleet_mint_exclusion_omits_the_peer_from_wraps_and_stored_holders`,
+and return `mint-excluded.json` and `SHA256SUMS` from the build-server job.

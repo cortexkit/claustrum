@@ -5281,7 +5281,7 @@ refusal stated below, not `invalid_params`.
 | `fleet.epoch_seal_batch` | `{items:[{aad, plaintext},...]}` | `{items:[{epoch, nonce, ciphertext},...]}` |
 | `fleet.epoch_open_batch` | `{items:[{epoch, nonce, ciphertext, aad},...]}` | `{items:[{plaintext}\|{error:{code,class}},...]}` |
 | `fleet.epoch_status` | `{}` | `{current, held, pending, sealing_blocked_by}` |
-| `fleet.epoch_mint` | `{members:[member_id,...]}` | `{epoch, mint_id, wraps:[{member_id, wrap},...]}` |
+| `fleet.epoch_mint` | `{members:[member_id,...], excluded?:[member_id,...]}` | `{epoch, mint_id, wraps:[{member_id, wrap},...]}` |
 | `fleet.epoch_commit` | `{epoch, mint_id}` | `{epoch, state:"current"}` |
 | `fleet.epoch_discard` | `{epoch, mint_id}` | `{epoch, state:"discarded"}` |
 | `fleet.epoch_import` | `{wrap}` | `{epochs:[epoch,...], already_held}` |
@@ -5329,13 +5329,21 @@ Single and batch seal/open write no audit rows.
 ids (empty when current is null). A lost mint response is recovered by reading
 status after restart, discarding its pending mint, then minting again.
 
-`mint` requires the supplied set to equal Self plus every currently paired fleet
-peer, minus permanently removed members. Duplicate or malformed ids are invalid
-parameters; an unequal set refuses `fleet_members_mismatch`. The new pending epoch
-is one above the highest held epoch, or 1. It returns a rotation wrap for each
-other member, none for Self. An existing pending epoch refuses
-`fleet_epoch_pending`; 256 held epochs or more than 64 live/supplied members
-refuses `fleet_epoch_capacity`.
+`mint` defines the live set as Self plus every currently paired fleet peer,
+minus permanently removed members. `excluded` is optional and defaults to an
+empty array. Each exclusion must be a live peer other than Self. `members` must
+contain Self and equal the live set minus `excluded`. Duplicate or malformed ids
+in either list are `invalid_params`; an ineligible exclusion or an unequal member
+set refuses `fleet_members_mismatch`.
+
+The new pending epoch is one above the highest held epoch, or 1. It returns a
+rotation wrap for each member other than Self. Excluded peers receive no wrap
+and do not appear in the stored or wrapped holder lists. Once the epoch is
+committed, an excluded peer can receive it via `wrap_for` under the normal join
+rules. An existing pending epoch refuses `fleet_epoch_pending`. The vault
+refuses `fleet_epoch_capacity` for more than 64 exclusions (before peer lookup),
+more than 64 live or supplied members, or 256 held epochs. The live-member cap
+applies before exclusions are subtracted.
 
 `commit` matches both epoch and mint id. It makes that pending row current and
 retires the previous current, but refuses `fleet_members_mismatch` if its holders

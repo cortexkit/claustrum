@@ -163,6 +163,250 @@ fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fleet-epoch-v1/cases.json")
 }
 
+fn excluded_mint_sender(
+    root: &std::path::Path,
+    callosum: &SharedCallosumStandIn,
+) -> (VaultFixture, Arc<EncryptedStore>) {
+    let a = VaultFixture::new(root, "a", &format!("{:032x}", 1), callosum);
+    let store = HomeStore::open(&a.data_dir).store;
+    install(&store, 1, 0x11);
+    let peers: Vec<Value> = [(2, 0x22), (3, 0x33)]
+        .into_iter()
+        .map(|(n, scalar)| {
+            let public = public(&kem::pem_from_scalar(&[scalar; 32]));
+            let hex: String = public.iter().map(|byte| format!("{byte:02x}")).collect();
+            json!({"fingerprint":format!("{n:032x}"),"class":"computer","key_record":{"keys":{
+                "fleet_epoch_wrap_x25519":{"pub":hex,"version":"1"}}}})
+        })
+        .collect();
+    callosum.answer(
+        TARGET_MODULE,
+        "callosum.peer_keys_read",
+        Reply::Ok(json!({"peers":peers})),
+    );
+    (a, store)
+}
+
+fn excluded_mint_params() -> Value {
+    json!({"members":[member(1),member(2)],"excluded":[member(3)]})
+}
+
+#[tokio::test]
+async fn fleet_mint_exclusion_omits_the_peer_from_wraps_and_stored_holders() {
+    use sha2::{Digest, Sha256};
+
+    let root = support::temp_root("fleet-mint-excludes-peer");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let (a, store) = excluded_mint_sender(root.path(), &callosum);
+    let params = excluded_mint_params();
+    let mut mint = call(&store, Some(&a), "fleet.epoch_mint", params.clone()).await;
+    assert_eq!(mint["epoch"], 1, "mint with an excluded live peer: {mint}");
+    assert_eq!(decode(&mint["mint_id"]).len(), 16);
+    let wraps = mint["wraps"].as_array().unwrap();
+    assert_eq!(wraps.len(), 1);
+    assert_eq!(wraps[0]["member_id"], member(2));
+    let wrap: FleetWrap = serde_json::from_value(wraps[0]["wrap"].clone()).unwrap();
+    assert_eq!(wrap.to, member(2));
+    let b_pem = kem::pem_from_scalar(&[0x22; 32]);
+    let a_pem = kem::pem_from_scalar(&[0x11; 32]);
+    let mut plaintext = open_wrap(&b_pem, &public(&a_pem), &wrap);
+    let expected_members = json!([member(1), member(2)]);
+    assert_eq!(plaintext["keys"][0]["members"], expected_members);
+
+    let conn = rusqlite::Connection::open(a.store_path()).unwrap();
+    let stored_members: String = conn
+        .query_row(
+            "SELECT members_json FROM fleet_epochs WHERE epoch = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored_members).unwrap(),
+        expected_members
+    );
+    let mint_audits: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM audit_log WHERE op = 'fleet_epoch_mint'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mint_audits, 1);
+
+    // Retain the producer's payload and response shapes while replacing the
+    // random key, mint receipt, and HPKE randomness with fixed sample bytes.
+    assert_eq!(decode(&plaintext["keys"][0]["key"]).len(), 32);
+    plaintext["keys"][0]["key"] = json!(encode([0x51; 32]));
+    let ikm = 0x44;
+    mint["mint_id"] = json!(encode([0x55; 16]));
+    mint["wraps"][0]["wrap"] = json!(seal_wrap(&a_pem, &public(&b_pem), 1, 2, &plaintext, ikm));
+    let sample = json!({"name":"mint-excluded", "method":"fleet.epoch_mint",
+        "live":[member(1), member(2), member(3)], "params":params, "response":mint,
+        "ephemeral_ikm":encode([ikm; 32]), "info_utf8":String::from_utf8(info(1, 2)).unwrap(),
+        "plaintext_utf8":serde_json::to_string(&plaintext).unwrap()});
+    let mut generated = serde_json::to_vec_pretty(&sample).unwrap();
+    generated.push(b'\n');
+
+    let path = fixture_path();
+    let folder = path.parent().unwrap();
+    let checksums = format!(
+        "{:x}  README.md\n{:x}  cases.json\n{:x}  mint-excluded.json\n{:x}  verify-hpke.cjs\n",
+        Sha256::digest(std::fs::read(folder.join("README.md")).unwrap()),
+        Sha256::digest(std::fs::read(path.as_path()).unwrap()),
+        Sha256::digest(&generated),
+        Sha256::digest(std::fs::read(folder.join("verify-hpke.cjs")).unwrap()),
+    );
+    let emitting = std::env::var_os("CK_EMIT_FLEET_EXCLUDED_MINT_VECTOR").is_some();
+    for (name, bytes) in [
+        ("mint-excluded.json", generated.as_slice()),
+        ("SHA256SUMS", checksums.as_bytes()),
+    ] {
+        if emitting {
+            std::fs::write(folder.join(name), bytes).unwrap();
+        }
+        assert_eq!(std::fs::read(folder.join(name)).unwrap(), bytes, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn fleet_mint_exclusion_cap_accepts_64_and_refuses_65_before_peer_lookup() {
+    let root = support::temp_root("fleet-mint-exclusion-cap");
+    let store = HomeStore::open(root.path()).store;
+    for (count, code, class) in [
+        (64, "fleet_peer_keys_unavailable", "transient"),
+        (65, "fleet_epoch_capacity", "permanent"),
+    ] {
+        assert_eq!(
+            call(
+                &store,
+                None,
+                "fleet.epoch_mint",
+                json!({"members":[member(1)],"excluded":(2..=count+1).map(member).collect::<Vec<_>>()}),
+            )
+            .await,
+            json!({"error":{"code":code,"class":class}}),
+            "{count} excluded ids"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fleet_mint_exclusion_refuses_self_non_peer_removed_duplicate_or_malformed_ids() {
+    let root = support::temp_root("fleet-mint-exclusion-refusals");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let (a, store) = excluded_mint_sender(root.path(), &callosum);
+    let mismatch = json!({"error":{"code":"fleet_members_mismatch","class":"permanent"}});
+    for (params, expected_code) in [
+        (
+            json!({"members":[member(1),member(2)],"excluded":[member(3),member(3)]}),
+            "invalid_params",
+        ),
+        (
+            json!({"members":[member(1),member(2),member(3)],"excluded":["bad-id"]}),
+            "invalid_params",
+        ),
+        (
+            json!({"members":[member(2),member(3)],"excluded":[member(1)]}),
+            "fleet_members_mismatch",
+        ),
+        (
+            json!({"members":[member(1),member(2),member(3)],"excluded":[member(4)]}),
+            "fleet_members_mismatch",
+        ),
+    ] {
+        let reply = call(&store, Some(&a), "fleet.epoch_mint", params.clone()).await;
+        if expected_code == "invalid_params" {
+            assert_eq!(reply["transport_error"]["code"], expected_code, "{params}");
+        } else {
+            assert_eq!(reply, mismatch, "{params}");
+        }
+    }
+    store
+        .fleet_record_removals(
+            &[FleetRemoval {
+                member_id: member(3),
+                removal_id: "fixture:removed".into(),
+            }],
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        call(&store, Some(&a), "fleet.epoch_mint", excluded_mint_params()).await,
+        mismatch,
+        "a paired computer with a recorded removal is not live"
+    );
+    assert!(store.fleet_epoch_status().unwrap().pending.is_none());
+}
+
+#[tokio::test]
+async fn fleet_mint_exclusion_refuses_members_that_still_include_the_peer() {
+    let root = support::temp_root("fleet-mint-exclusion-overlap");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let (a, store) = excluded_mint_sender(root.path(), &callosum);
+    assert_eq!(
+        call(
+            &store,
+            Some(&a),
+            "fleet.epoch_mint",
+            json!({"members":[member(1),member(2),member(3)],"excluded":[member(3)]}),
+        )
+        .await,
+        json!({"error":{"code":"fleet_members_mismatch","class":"permanent"}})
+    );
+    assert!(store.fleet_epoch_status().unwrap().pending.is_none());
+}
+
+#[tokio::test]
+async fn fleet_mint_exclusion_allows_the_peer_to_receive_the_epoch_later() {
+    let root = support::temp_root("fleet-mint-exclusion-wrap-later");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let (a, store) = excluded_mint_sender(root.path(), &callosum);
+    let c = VaultFixture::new(root.path(), "c", &format!("{:032x}", 3), &callosum);
+    let c_store = HomeStore::open(&c.data_dir).store;
+    install(&c_store, 3, 0x33);
+
+    let mint = call(&store, Some(&a), "fleet.epoch_mint", excluded_mint_params()).await;
+    assert_eq!(
+        mint["epoch"], 1,
+        "mint before the excluded peer joins: {mint}"
+    );
+    let mint_id = mint["mint_id"].as_str().unwrap();
+    store.fleet_epoch_commit(1, mint_id).unwrap();
+
+    let plaintext = encode(b"sealed before join");
+    let sealed = call(
+        &store,
+        None,
+        "fleet.epoch_seal",
+        json!({"aad":"","plaintext":plaintext}),
+    )
+    .await;
+    let open_params = sample_open(&sealed, &json!(""));
+    assert_eq!(
+        call(&c_store, None, "fleet.epoch_open", open_params.clone()).await,
+        json!({"error":{"code":"fleet_epoch_open_failed","class":"permanent"}})
+    );
+
+    let join = call(
+        &store,
+        Some(&a),
+        "fleet.epoch_wrap_for",
+        json!({"member_id":member(3)}),
+    )
+    .await;
+    let wrap: FleetWrap = serde_json::from_value(join["wrap"].clone()).unwrap();
+    let a_public = public(&kem::pem_from_scalar(&[0x11; 32]));
+    let imported = c_store
+        .fleet_epoch_import(&wrap, &[FleetPeer::new(member(1), a_public).unwrap()])
+        .unwrap();
+    assert_eq!(imported.epochs, [1]);
+    assert_eq!(
+        call(&c_store, None, "fleet.epoch_open", open_params).await,
+        json!({"plaintext":plaintext})
+    );
+}
+
 #[tokio::test]
 async fn fleet_epoch_samples_are_producer_generated_and_pinned() {
     let root = support::temp_root("fleet-vectors");

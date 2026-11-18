@@ -391,16 +391,28 @@ impl EncryptedStore {
         members: &[String],
         peers: &[FleetPeer],
     ) -> Result<FleetMint, FleetError> {
+        self.fleet_epoch_mint_with_exclusions(members, &[], peers)
+    }
+
+    pub fn fleet_epoch_mint_with_exclusions(
+        &self,
+        members: &[String],
+        excluded: &[String],
+        peers: &[FleetPeer],
+    ) -> Result<FleetMint, FleetError> {
         let peers = peers_map(peers)?;
         let supplied: BTreeSet<_> = members.iter().cloned().collect();
+        let omitted: BTreeSet<_> = excluded.iter().cloned().collect();
         if supplied.len() != members.len()
+            || omitted.len() != excluded.len()
             || members
                 .iter()
+                .chain(excluded)
                 .any(|id| !crate::federation::valid_member_id(id))
         {
             return Err(FleetError::InvalidParams);
         }
-        if members.len() > MAX_HOLDERS {
+        if members.len() > MAX_HOLDERS || excluded.len() > MAX_HOLDERS {
             return Err(FleetError::EpochCapacity);
         }
         self.fleet_write(|tx| {
@@ -408,9 +420,13 @@ impl EncryptedStore {
             let removed = removals(tx)?;
             let rows = rows(tx)?;
             if rows.iter().any(|r| r.state == "pending") { return Err(FleetError::EpochPending); }
-            let live: BTreeSet<String> = peers.keys().copied().chain(std::iter::once(myself.as_str()))
+            let mut live: BTreeSet<String> = peers.keys().copied().chain(std::iter::once(myself.as_str()))
                 .filter(|id| !removed.contains(*id)).map(str::to_owned).collect();
             if live.len() > MAX_HOLDERS || rows.len() >= MAX_EPOCHS { return Err(FleetError::EpochCapacity); }
+            if omitted.contains(&myself) || !omitted.is_subset(&live) {
+                return Err(FleetError::MembersMismatch);
+            }
+            live.retain(|id| !omitted.contains(id));
             if supplied != live || !supplied.contains(&myself) { return Err(FleetError::MembersMismatch); }
             let epoch = rows.last().map_or(Some(1), |r| r.epoch.checked_add(1)).ok_or(FleetError::EpochCapacity)?;
             let members: Vec<String> = supplied.into_iter().collect();

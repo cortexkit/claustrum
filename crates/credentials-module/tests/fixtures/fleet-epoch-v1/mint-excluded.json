@@ -1,0 +1,37 @@
+{
+  "ephemeral_ikm": "REREREREREREREREREREREREREREREREREREREREREQ",
+  "info_utf8": "{\"from\":\"fed-computer:00000000000000000000000000000001\",\"to\":\"fed-computer:00000000000000000000000000000002\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+  "live": [
+    "fed-computer:00000000000000000000000000000001",
+    "fed-computer:00000000000000000000000000000002",
+    "fed-computer:00000000000000000000000000000003"
+  ],
+  "method": "fleet.epoch_mint",
+  "name": "mint-excluded",
+  "params": {
+    "excluded": [
+      "fed-computer:00000000000000000000000000000003"
+    ],
+    "members": [
+      "fed-computer:00000000000000000000000000000001",
+      "fed-computer:00000000000000000000000000000002"
+    ]
+  },
+  "plaintext_utf8": "{\"keys\":[{\"epoch\":1,\"key\":\"UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVE\",\"members\":[\"fed-computer:00000000000000000000000000000001\",\"fed-computer:00000000000000000000000000000002\"],\"minter\":\"fed-computer:00000000000000000000000000000001\"}],\"kind\":\"rotation\",\"v\":\"ck-fleet-epoch-wrap/v1\"}",
+  "response": {
+    "epoch": 1,
+    "mint_id": "VVVVVVVVVVVVVVVVVVVVVQ",
+    "wraps": [
+      {
+        "member_id": "fed-computer:00000000000000000000000000000002",
+        "wrap": {
+          "ct": "BY0YVi6FhZ9OsCeKhaXhXGcyVf6sbD2fyci1G7qIcw89ZiyPNCDOJWnSDXZZidkdQcS9kTF6JafPniW259ihIdmKQ-JAvcTatd3Vz82AFskM953l7wWIO6361vOphiv_7mFhcTjHPzvFKdtfWWukWCGpjUs5G1WEq4UWw2y6ZGDfUKQDGH86gLokt8m7aQkbFwJaGd7RXXhVd_gMXiF9PYxHpauxTdtw6S0mK9r-3_6CYUNlkDaS5R-QdftqWCyuMc3C_NsR8lkifZcyEBsP1RSDAf8jTruwx5Vd0r5zmRA-e6fvEFTIaC_7cLF8L1hhzbeJI9TRa4V8MKKtRcjR0n82IGactn3BhOdVssMdeX30Ibp-3Nprd0qa8neY3OGVU8_sUJ1AiawvgiH_g44",
+          "enc": "hudrjdCI2r9G2U1IIKJRhhN23mnDo28uU_i__NtRngA",
+          "from": "fed-computer:00000000000000000000000000000001",
+          "to": "fed-computer:00000000000000000000000000000002",
+          "v": "ck-fleet-epoch-wrap/v1"
+        }
+      }
+    ]
+  }
+}

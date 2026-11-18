@@ -411,3 +411,136 @@ async fn consumer_watch_drains_notices_and_confirms_empty_streams() {
     tokio::join!(calls, server);
     rig.consumer.close().await;
 }
+
+#[tokio::test]
+async fn fleet_epoch_consumer_uses_the_normal_attested_route() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        assert!(resolver.get_scoped("barrier").await.is_err());
+        let plaintext = Secret::new(vec![255]);
+        let seal = FleetEpochSealRequest {
+            aad: &[251],
+            plaintext: &plaintext,
+        };
+        let sealed = resolver.fleet_epoch_seal(seal).await.unwrap();
+        let open = FleetEpochOpenRequest {
+            epoch: sealed.epoch,
+            nonce: &sealed.nonce,
+            ciphertext: &sealed.ciphertext,
+            aad: seal.aad,
+        };
+        let opened = resolver.fleet_epoch_open(open).await.unwrap();
+        assert_eq!(opened.expose(), plaintext.expose());
+        let error = resolver
+            .fleet_epoch_seal_batch(&[seal, seal])
+            .await
+            .unwrap_err();
+        assert_eq!(error.class, CredentialErrorClass::InvalidResponse);
+        let opened = resolver
+            .fleet_epoch_open_batch(&[open, open])
+            .await
+            .unwrap();
+        assert_eq!(opened.len(), 2);
+        assert_eq!(opened[0].as_ref().unwrap().expose(), plaintext.expose());
+        assert_eq!(
+            opened[1].as_ref().unwrap_err().code(),
+            "fleet_epoch_open_failed"
+        );
+    };
+    let server = async {
+        let seal = json!({"aad":"-w","plaintext":"_w"});
+        let sealed =
+            json!({"epoch":7,"nonce":"_".repeat(32),"ciphertext":"AAAAAAAAAAAAAAAAAAAAAA"});
+        let mut open = sealed.clone();
+        open["aad"] = json!("-w");
+        for (method, params, result) in [
+            (
+                "credential.get_scoped",
+                json!({"credential_id":"barrier"}),
+                json!({"error":{"code":"not_found","class":"permanent"}}),
+            ),
+            ("fleet.epoch_seal", seal.clone(), sealed.clone()),
+            ("fleet.epoch_open", open.clone(), json!({"plaintext":"_w"})),
+            // A valid slot count in the protocol is still an incomplete reply for this request.
+            (
+                "fleet.epoch_seal_batch",
+                json!({"items":[seal.clone(), seal]}),
+                json!({"items":[sealed]}),
+            ),
+            (
+                "fleet.epoch_open_batch",
+                json!({"items":[open.clone(), open]}),
+                json!({"items":[{"plaintext":"_w"},{"error":{"code":"fleet_epoch_open_failed","class":"permanent"}}]}),
+            ),
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(frame.header.channel, 7);
+            assert_eq!(body, json!({"method":method,"params":params}));
+            rig.reply(&frame, FrameType::Response, json!({"result":result}))
+                .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 1);
+    assert_eq!(
+        rig.route_opens[0]["identity"]["harness"],
+        "claustrum-client"
+    );
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn fleet_epoch_consumer_does_not_replay_a_refusal() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let plaintext = Secret::new(vec![]);
+        let seal = FleetEpochSealRequest {
+            aad: &[],
+            plaintext: &plaintext,
+        };
+        let open = FleetEpochOpenRequest {
+            epoch: 1,
+            nonce: &[0; 24],
+            ciphertext: &[0; 16],
+            aad: &[],
+        };
+        let error = resolver.fleet_epoch_seal(seal).await.unwrap_err();
+        assert_eq!(error.code(), "route_busy");
+        for error in [
+            resolver.fleet_epoch_open(open).await.unwrap_err(),
+            resolver.fleet_epoch_seal_batch(&[seal]).await.unwrap_err(),
+            resolver.fleet_epoch_open_batch(&[open]).await.unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "fleet_epoch_unavailable");
+            assert_eq!(error.class, CredentialErrorClass::Transient);
+        }
+    };
+    let server = async {
+        let (frame, body) = rig.next().await;
+        assert_eq!(body["method"], "fleet.epoch_seal");
+        rig.reply(
+            &frame,
+            FrameType::Error,
+            json!({"code":"route_busy","message":"busy"}),
+        )
+        .await;
+        for method in [
+            "fleet.epoch_open",
+            "fleet.epoch_seal_batch",
+            "fleet.epoch_open_batch",
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body["method"], method);
+            rig.reply(
+                &frame,
+                FrameType::Response,
+                json!({"result":{"error":{"code":"fleet_epoch_unavailable","class":"transient"}}}),
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    rig.consumer.close().await;
+}

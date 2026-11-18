@@ -12,12 +12,12 @@ start when present, otherwise fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.12.0"
+cortexkit-claustrum-client = "0.14.0"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.12.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.14.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.
@@ -231,6 +231,57 @@ The methods use a separate `callosum-self` route on the same SDK consumer, so
 Callosum keeps its own principal regardless of the member-mapping gate. The
 ordinary credential resolver's route and retry behavior are unchanged.
 
+## Fleet epoch records
+
+The four fleet epoch methods use the normal Claustrum route. In a claim-bound
+module, use `ClaustrumCredentialResolver::with_consumer` with the module's SDK
+consumer. The vault admits `reserved:magic-context`, `reserved:prefrontal` and
+`reserved:entorhinal` and chooses the encryption domain from the attested
+caller. There is no caller or domain argument; a record cannot be opened from
+another caller's domain.
+
+```rust,no_run
+use cortexkit_claustrum_client::{
+    ClaustrumCredentialResolver, CredentialResolverError, FleetEpochOpenRequest,
+    FleetEpochSealRequest, Secret,
+};
+
+async fn round_trip(resolver: &ClaustrumCredentialResolver, aad: &[u8], plaintext: Secret<Vec<u8>>)
+    -> Result<Secret<Vec<u8>>, CredentialResolverError>
+{
+    let sealed = resolver.fleet_epoch_seal(FleetEpochSealRequest {
+        aad,
+        plaintext: &plaintext,
+    }).await?;
+    resolver.fleet_epoch_open(FleetEpochOpenRequest {
+        epoch: sealed.epoch,
+        nonce: &sealed.nonce,
+        ciphertext: &sealed.ciphertext,
+        aad,
+    }).await
+}
+```
+
+Store the epoch, nonce, and ciphertext alongside the exact AAD needed to reopen
+the record. The client takes and returns bytes, converting to canonical unpadded
+base64url on the wire. Plaintext is borrowed from `Secret<Vec<u8>>` when sealing
+and returned as `Secret<Vec<u8>>` when opening. The client redacts and scrubs its
+owned plaintext, base64 plaintext and serialized buffers. SDK and transport
+frame copies are outside this guarantee.
+
+`fleet_epoch_seal_batch` and `fleet_epoch_open_batch` take slices of the same
+request types with 1–256 items. The vault remains responsible for checking byte
+limits. Reply items follow request order. An open batch returns one
+`FleetEpochOpenResult` per input: plaintext or a refusal with the vault's exact
+`code()` and `class`. A whole-call refusal, malformed reply, or wrong item count
+returns an outer error and no list. All four methods send once and never retry;
+retrying a seal can produce a second ciphertext.
+
+The `decode_fleet_epoch_*_reply` functions are usable without transport features.
+They take a Response frame's JSON body, including its `result` envelope. Keep
+open reply bytes in zeroizing storage too. Decode Error frame bodies (such as
+`invalid_params`) with `decode_wire_error`.
+
 ## Contract tests
 
 The reply decoders are tested against real bytes the vault serialises: the
@@ -254,9 +305,13 @@ They also decode the X25519 public-key reply for the vault KEM key that produced
 the seal sample.
 The seal tests pin that the client sends exactly the producer's accepted request
 and decodes its reply's exact bytes.
+Fleet epoch tests also read the tagged Magic Context and Prefrontal samples in
+`../credentials-module/tests/fixtures/fleet-epoch-*-v1/` at run time.
 
 ## Changes
 
+- 0.14.0: typed single and batch fleet epoch seal/open operations and pure reply
+  decoders. Requires a vault that serves the four `fleet.epoch_*` methods.
 - 0.13.0: module-owned secret operations, typed refusals and redacted, zeroizing
   value buffers. Requires a daemon with `module_secret.*` support.
 - 0.9.0: requires subc-protocol 0.36 and, with the default `transport` feature,

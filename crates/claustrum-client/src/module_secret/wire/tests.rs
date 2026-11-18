@@ -1,4 +1,5 @@
 use super::*;
+use crate::sensitive_wire::Request;
 
 #[test]
 fn module_secret_decodes_the_real_daemon_wire_fixture() {
@@ -240,7 +241,7 @@ mod live {
     }
     struct Connection(Arc<Script>);
     impl CredentialConsumerConnection for Connection {
-        fn module_secret_request(
+        fn sensitive_request(
             &mut self,
             request: Secret<Vec<u8>>,
         ) -> CredentialResolverFuture<'_, Result<Secret<Vec<u8>>, CredentialResolverError>>
@@ -283,6 +284,7 @@ mod live {
         ));
         (
             ClaustrumCredentialResolver {
+                live_target: None,
                 target: target.clone(),
                 module_secret_target: Some(target),
                 transient_retries: 99,

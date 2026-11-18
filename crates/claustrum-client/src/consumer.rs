@@ -103,24 +103,11 @@ fn decode_error(error: CallError) -> CredentialResolverError {
 }
 
 impl CredentialConsumerConnection for ConsumerConnection {
-    fn module_secret_request(
+    fn sensitive_request(
         &mut self,
         request: Secret<Vec<u8>>,
     ) -> CredentialResolverFuture<'_, Result<Secret<Vec<u8>>, CredentialResolverError>> {
-        Box::pin(async move {
-            let body =
-                subc_client_rs::RequestBody::new(request.expose().clone()).map_err(decode_error)?;
-            let reservation = self
-                .consumer
-                .reserve(
-                    &self.handle,
-                    tokio::time::Instant::now() + CREDENTIAL_CALL_DEADLINE,
-                )
-                .await
-                .map_err(decode_error)?;
-            let (_, reply) = reservation.send(body, options());
-            reply.await.map(Secret::new).map_err(decode_error)
-        })
+        Box::pin(transport::sensitive_request(self, request))
     }
     fn into_scoped_watch(
         self: Box<Self>,

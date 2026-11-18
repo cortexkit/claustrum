@@ -24,6 +24,18 @@ pub(super) enum WatchFrame {
     Error(Vec<u8>),
 }
 
+pub(super) async fn sensitive_request(
+    transport: &mut impl CredentialTransport,
+    request: Secret<Vec<u8>>,
+) -> Result<Secret<Vec<u8>>, CredentialResolverError> {
+    // The transport owns framing and socket buffers. The operation's own
+    // serialized request and returned reply use redacted, zeroizing buffers.
+    transport
+        .request(request.expose().clone())
+        .await
+        .map(Secret::new)
+}
+
 pub(super) async fn credential_request(
     transport: &mut (impl CredentialTransport + ?Sized),
     request: Value,

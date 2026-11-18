@@ -19,6 +19,10 @@ impl<T: Zeroize> Secret<T> {
     pub fn expose(&self) -> &T {
         &self.0
     }
+
+    pub(super) fn expose_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
 }
 
 impl<T: Zeroize> std::fmt::Debug for Secret<T> {
@@ -96,12 +100,6 @@ pub struct ModuleSecretSummary {
 pub(super) mod wire {
     use super::*;
     use serde::Serialize;
-
-    #[derive(Debug, Serialize)]
-    struct Request<P> {
-        method: &'static str,
-        params: P,
-    }
 
     #[derive(Debug, Serialize)]
     struct Put<'a> {
@@ -208,30 +206,12 @@ pub(super) mod wire {
         params: impl Serialize,
         method: &'static str,
     ) -> Result<Secret<Vec<u8>>, ModuleSecretError> {
-        struct Size(usize);
-        impl std::io::Write for Size {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0 += bytes.len();
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let request = Request { method, params };
-        let error = |_| {
+        sensitive_wire::encode_request(method, params).map_err(|_| {
             ModuleSecretError::Other(CredentialResolverError::new(
                 CredentialErrorClass::Permanent,
                 "module-secret request encoding failed",
             ))
-        };
-        // Size first so growing the serialized buffer cannot abandon an unscrubbed
-        // allocation containing a prefix of the value.
-        let mut size = Size(0);
-        serde_json::to_writer(&mut size, &request).map_err(error)?;
-        let mut bytes = Secret::new(Vec::with_capacity(size.0));
-        serde_json::to_writer(&mut *bytes.0, &request).map_err(error)?;
-        Ok(bytes)
+        })
     }
 
     #[cfg(feature = "transport")]
@@ -331,42 +311,21 @@ pub(super) mod wire {
                 .module_secret_target
                 .as_ref()
                 .ok_or_else(CredentialResolverError::unavailable)?;
-            let mut consumer = target.consumer.lock().await;
-            let result = tokio::time::timeout(target.call_deadline, async {
-                target.connect_if_needed(&mut consumer).await?;
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .module_secret_request(request)
-                    .await
-            })
-            .await
-            .unwrap_or_else(|_| Err(LiveCredentialGetTarget::deadline_error("module_secret")));
-            LiveCredentialGetTarget::clear_failed_transport(&mut consumer, &result);
-            result.map_err(|error| {
-                if error.code() == "route_busy" {
-                    CredentialResolverError::new(
-                        CredentialErrorClass::Transient,
-                        "module-secret route busy",
-                    )
-                    .into()
-                } else {
-                    error.into()
-                }
-            })
+            target
+                .sensitive_request(request, "module_secret")
+                .await
+                .map_err(|error| {
+                    if error.code() == "route_busy" {
+                        CredentialResolverError::new(
+                            CredentialErrorClass::Transient,
+                            "module-secret route busy",
+                        )
+                        .into()
+                    } else {
+                        error.into()
+                    }
+                })
         }
-    }
-
-    #[cfg(feature = "transport")]
-    pub(crate) async fn direct_request(
-        consumer: &mut ClaustrumConsumer,
-        request: Secret<Vec<u8>>,
-    ) -> Result<Secret<Vec<u8>>, CredentialResolverError> {
-        // Framing and socket buffers are owned by the transport. Keep the operation's
-        // serialized request and returned reply under redacted, zeroizing ownership.
-        transport::CredentialTransport::request(consumer, request.expose().clone())
-            .await
-            .map(Secret::new)
     }
 
     #[cfg(test)]

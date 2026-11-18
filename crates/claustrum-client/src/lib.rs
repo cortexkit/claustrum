@@ -51,10 +51,18 @@ use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(feature = "consumer")]
 mod consumer;
+mod fleet_epoch;
 mod module_secret;
+#[cfg(any(feature = "transport", test))]
+mod sensitive_wire;
 #[cfg(feature = "transport")]
 mod transport;
 mod watch;
+pub use fleet_epoch::{
+    decode_fleet_epoch_open_batch_reply, decode_fleet_epoch_open_reply,
+    decode_fleet_epoch_seal_batch_reply, decode_fleet_epoch_seal_reply, FleetEpochOpenRequest,
+    FleetEpochOpenResult, FleetEpochSeal, FleetEpochSealRequest,
+};
 pub use module_secret::{
     ModuleSecret, ModuleSecretError, ModuleSecretState, ModuleSecretSummary, ModuleSecretWritten,
     Secret,
@@ -683,6 +691,7 @@ pub trait CredentialGetTarget: Send + Sync {
 #[cfg(feature = "transport")]
 pub struct ClaustrumCredentialResolver {
     target: Arc<dyn CredentialGetTarget>,
+    live_target: Option<Arc<LiveCredentialGetTarget>>,
     module_secret_target: Option<Arc<LiveCredentialGetTarget>>,
     transient_retries: usize,
 }
@@ -713,6 +722,7 @@ impl ClaustrumCredentialResolver {
         ));
         Self {
             target: target.clone(),
+            live_target: Some(target.clone()),
             module_secret_target: Some(target),
             transient_retries: DEFAULT_TRANSIENT_RETRIES,
         }
@@ -735,15 +745,17 @@ impl ClaustrumCredentialResolver {
     /// the resolver never closes the caller's connection or unrelated routes.
     #[cfg(feature = "consumer")]
     pub fn with_consumer(consumer: Arc<subc_client_rs::SubcConsumer>) -> Self {
+        let target = Arc::new(LiveCredentialGetTarget::new(
+            Arc::new(consumer::ConsumerConnector(consumer.clone())),
+            CREDENTIAL_CALL_DEADLINE,
+        ));
         Self {
             module_secret_target: Some(Arc::new(LiveCredentialGetTarget::new(
-                Arc::new(consumer::ModuleSecretConnector(consumer.clone())),
+                Arc::new(consumer::ModuleSecretConnector(consumer)),
                 CREDENTIAL_CALL_DEADLINE,
             ))),
-            target: Arc::new(LiveCredentialGetTarget::new(
-                Arc::new(consumer::ConsumerConnector(consumer)),
-                CREDENTIAL_CALL_DEADLINE,
-            )),
+            target: target.clone(),
+            live_target: Some(target),
             transient_retries: DEFAULT_TRANSIENT_RETRIES,
         }
     }
@@ -752,6 +764,7 @@ impl ClaustrumCredentialResolver {
     pub fn with_target(target: Arc<dyn CredentialGetTarget>, transient_retries: usize) -> Self {
         Self {
             target,
+            live_target: None,
             module_secret_target: None,
             transient_retries,
         }
@@ -929,7 +942,7 @@ impl CredentialResolver for ClaustrumCredentialResolver {
 
 #[cfg(feature = "transport")]
 trait CredentialConsumerConnection: Send {
-    fn module_secret_request(
+    fn sensitive_request(
         &mut self,
         _request: Secret<Vec<u8>>,
     ) -> CredentialResolverFuture<'_, Result<Secret<Vec<u8>>, CredentialResolverError>> {
@@ -1112,6 +1125,26 @@ impl LiveCredentialGetTarget {
             *consumer = Some(self.connector.connect().await?);
         }
         Ok(())
+    }
+
+    async fn sensitive_request(
+        &self,
+        request: Secret<Vec<u8>>,
+        operation: &str,
+    ) -> Result<Secret<Vec<u8>>, CredentialResolverError> {
+        let mut consumer = self.consumer.lock().await;
+        let result = tokio::time::timeout(self.call_deadline, async {
+            self.connect_if_needed(&mut consumer).await?;
+            consumer
+                .as_mut()
+                .expect("credential consumer initialized")
+                .sensitive_request(request)
+                .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(Self::deadline_error(operation)));
+        Self::clear_failed_transport(&mut consumer, &result);
+        result
     }
 
     fn deadline_error(operation: &str) -> CredentialResolverError {
@@ -1536,11 +1569,11 @@ impl ClaustrumConsumer {
 
 #[cfg(feature = "transport")]
 impl CredentialConsumerConnection for ClaustrumConsumer {
-    fn module_secret_request(
+    fn sensitive_request(
         &mut self,
         request: Secret<Vec<u8>>,
     ) -> CredentialResolverFuture<'_, Result<Secret<Vec<u8>>, CredentialResolverError>> {
-        Box::pin(module_secret::wire::direct_request(self, request))
+        Box::pin(transport::sensitive_request(self, request))
     }
     fn into_scoped_watch(
         self: Box<Self>,

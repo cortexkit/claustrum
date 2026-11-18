@@ -33,6 +33,7 @@ mod remote_watch {
             provider_ids: None,
             detected_plan: new.detected_plan,
             home_version: new.home_version,
+            condition: None,
         }
     }
 
@@ -44,6 +45,95 @@ mod remote_watch {
 
     fn get(store: &EncryptedStore, id: &str) -> crate::federation::RemoteRecord {
         store.remote_record(id).unwrap().unwrap()
+    }
+
+    fn condition(reason: &str, since_ms: u64) -> Condition {
+        Condition {
+            reason: reason.into(),
+            since_ms,
+            action_url: None,
+        }
+    }
+
+    #[test]
+    fn remote_condition_reason_accepts_64_bytes_and_refuses_65() {
+        let mut input = row("oauth:watch");
+        input.condition = Some(condition(&"r".repeat(64), 9_007_199_254_740_991));
+        validate_remote_watch_row(HOME, &input).unwrap();
+        input.condition = Some(condition(&"r".repeat(65), 0));
+        assert!(validate_remote_watch_row(HOME, &input).is_err());
+        input.condition = Some(condition("r", 9_007_199_254_740_992));
+        assert!(validate_remote_watch_row(HOME, &input).is_err());
+    }
+
+    #[test]
+    fn remote_condition_tracks_full_snapshots_but_insert_only_never_replays_existing_marks() {
+        let (_root, store) = rig("watch-condition", 240);
+        let mut input = row("oauth:watch");
+        let id = input.credential_id.clone();
+        let apply = |input: &RemoteWatchRow, mode| {
+            store.remote_watch_apply_audited(HOME, "pair", std::slice::from_ref(input), mode, &[])
+        };
+        let mark = |id: &str| {
+            store
+                .remote_record_condition(id, &get(&store, id).incarnation)
+                .unwrap()
+        };
+        let first = condition("future_reason", 7);
+        let second = condition("provider_ineligible", 8);
+        input.condition = Some(first.clone());
+        assert_eq!(full(&store, std::slice::from_ref(&input)).inserted, 1);
+        assert_eq!(mark(&id), Some(first.clone()));
+        let mut replay = input.clone();
+        replay.credential_id = "oauth:replayed".into();
+        assert_eq!(
+            apply(&replay, RemoteWatchApplyMode::InsertOnly)
+                .unwrap()
+                .inserted,
+            1
+        );
+        assert_eq!(mark(&replay.credential_id), Some(first.clone()));
+
+        let version = get(&store, &id).last_home_version;
+        input.condition = Some(second.clone());
+        assert_eq!(
+            apply(&input, RemoteWatchApplyMode::InsertOnly)
+                .unwrap()
+                .updated,
+            0
+        );
+        assert_eq!(mark(&id), Some(first.clone()));
+        store.with_raw_conn(|conn| conn.execute_batch("CREATE TRIGGER reject_condition_update BEFORE INSERT ON audit_log WHEN NEW.op='remote_update' BEGIN SELECT RAISE(ABORT,'watch audit failed'); END;")).unwrap();
+        assert!(apply(&input, RemoteWatchApplyMode::Full).is_err());
+        assert_eq!(mark(&id), Some(first));
+        store
+            .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER reject_condition_update"))
+            .unwrap();
+
+        assert_eq!(
+            apply(&input, RemoteWatchApplyMode::Full).unwrap().updated,
+            1
+        );
+        assert_eq!(mark(&id), Some(second.clone()));
+        assert_eq!(get(&store, &id).last_home_version, version);
+        assert_eq!(
+            apply(&input, RemoteWatchApplyMode::Full).unwrap().updated,
+            0
+        );
+        input.condition = None;
+        assert_eq!(
+            apply(&input, RemoteWatchApplyMode::InsertOnly)
+                .unwrap()
+                .updated,
+            0
+        );
+        assert_eq!(mark(&id), Some(second));
+        assert_eq!(
+            apply(&input, RemoteWatchApplyMode::Full).unwrap().updated,
+            1
+        );
+        assert_eq!(mark(&id), None);
+        assert_eq!(audit_rows(&store, AuditOp::RemoteUpdate).len(), 2);
     }
 
     #[test]
@@ -369,8 +459,16 @@ mod remote_watch {
     fn operator_commands_convert_needs_reauth_in_place_with_operator_audit() {
         use sha2::{Digest, Sha256};
         let (_root, store) = rig("watch-operator-convert", 254);
-        let input = row("oauth:watch");
+        let mut input = row("oauth:watch");
+        input.condition = Some(condition("future_reason", 5));
         full(&store, std::slice::from_ref(&input));
+        let incarnation = get(&store, &input.credential_id).incarnation;
+        assert_eq!(
+            store
+                .remote_record_condition(&input.credential_id, &incarnation)
+                .unwrap(),
+            input.condition
+        );
         store
             .set_providers_audited(
                 &input.credential_id,
@@ -396,6 +494,12 @@ mod remote_watch {
             .remote_convert_home_watch_audited(&input.credential_id, HOME)
             .unwrap();
         assert_eq!(converted, expected[0].record);
+        assert_eq!(
+            store
+                .remote_record_condition(&input.credential_id, &incarnation)
+                .unwrap(),
+            None
+        );
         assert_eq!(converted.last_home_state, RemoteHomeState::NeedsReauth);
         assert_eq!(store.remote_inventory().unwrap(), expected);
         assert_eq!(store.grants_generation().unwrap(), generation);

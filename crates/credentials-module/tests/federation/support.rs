@@ -293,6 +293,8 @@ fn parse_catalogue(source: &str) -> Vec<(String, OpKind)> {
         ("OP_REMOTE_TOKEN", ingress::OP_REMOTE_TOKEN),
         ("OP_REMOTE_WATCH", ingress::OP_REMOTE_WATCH),
         ("OP_REPORT_AUTH_FAILURE", ingress::OP_REPORT_AUTH_FAILURE),
+        ("OP_REPORT_CONDITION", ingress::OP_REPORT_CONDITION),
+        ("OP_CLEAR_CONDITION", ingress::OP_CLEAR_CONDITION),
         ("OP_TRANSFER_DELIVER", ingress::OP_TRANSFER_DELIVER),
         ("OP_SECRET_USE", ingress::OP_SECRET_USE),
         ("OP_SECRET_SSH_SIGN", ingress::OP_SECRET_SSH_SIGN),
@@ -667,6 +669,7 @@ pub fn refusal_class(code: &str) -> &'static str {
 struct StandInState {
     cancelled_watches: usize,
     held_opens: HashMap<String, Held>,
+    gated_opens: HashMap<String, Held>,
     stray_errors: HashMap<String, String>,
     /// Replies keyed by `(target module, method)`. A method with no entry is refused
     /// as `fed_unknown_module`, so a test cannot accidentally prove a call was
@@ -777,6 +780,15 @@ impl SharedCallosumStandIn {
             .unwrap()
             .held_opens
             .insert(target.into(), held);
+    }
+
+    /// Pause before the stand-in accepts a route, then complete normal route setup.
+    pub fn gate_open(&self, target: &str, gate: Held) {
+        self.state
+            .lock()
+            .unwrap()
+            .gated_opens
+            .insert(target.into(), gate);
     }
 
     /// Close every route open to `target_module` with a route `Goodbye`, on every live
@@ -1328,6 +1340,11 @@ async fn serve_one(
                             None,
                         );
                         continue;
+                    }
+                    let gate = state.lock().unwrap().gated_opens.remove(&target);
+                    if let Some(gate) = gate {
+                        gate.note_arrival();
+                        assert!(matches!(gate.released().await, Some(Reply::Ok(_))));
                     }
                     let reopened = closed_routes
                         .iter()

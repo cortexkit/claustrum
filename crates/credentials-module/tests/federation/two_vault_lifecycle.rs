@@ -1106,6 +1106,7 @@ async fn login_sharing_home_off_relays_not_found_and_on_restores_live_state() {
                     provider_ids: None,
                     detected_plan: None,
                     home_version: 1,
+                    condition: None,
                 }],
                 credentials_core::federation::RemoteWatchApplyMode::Full,
                 &[],

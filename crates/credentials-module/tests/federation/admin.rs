@@ -1238,6 +1238,7 @@ fn seed_home_watch(b: &Vault, home: &str, state: RemoteHomeState) -> RemoteRecor
                 provider_ids: None,
                 detected_plan: None,
                 home_version: 17,
+                condition: None,
             }],
             RemoteWatchApplyMode::Full,
             &[],

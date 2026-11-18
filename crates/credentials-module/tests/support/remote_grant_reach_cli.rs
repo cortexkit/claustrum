@@ -27,6 +27,7 @@ fn seed_remote(vault: &GrantCliVault, source: RemoteRecordSource) {
                         provider_ids: None,
                         detected_plan: None,
                         home_version: 1,
+                        condition: None,
                     }],
                     RemoteWatchApplyMode::Full,
                     &[],

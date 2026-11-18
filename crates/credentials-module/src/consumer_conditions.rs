@@ -1,7 +1,9 @@
 use super::{map_store_error, ErrorBody, ReadError, ReadSurface};
 use crate::federation::ingress::ScopedCaller;
 use credentials_core::audit::{AuditCtx, AuditOp};
-use credentials_core::store::{AuthEventPrincipal, ConditionReport, GrantOperation, StoreOpError};
+use credentials_core::store::{
+    check_condition_report, AuthEventPrincipal, ConditionReport, GrantOperation, StoreOpError,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -39,12 +41,12 @@ enum Mutation<'a> {
 }
 
 impl ReadSurface {
-    pub(crate) fn report_condition_reply(
+    pub(crate) async fn report_condition_reply(
         &self,
         caller: &ScopedCaller,
         params: &ReportConditionParams,
     ) -> Value {
-        let result = self.mutate_condition(
+        self.mutate_condition(
             caller,
             &params.credential_id,
             params.record_version,
@@ -54,43 +56,78 @@ impl ReadSurface {
                 provider_status: params.provider_status,
                 action_url: params.action_url.as_deref(),
             }),
-        );
-        condition_reply("accepted", result.map(|_| true))
+        )
+        .await
     }
 
-    pub(crate) fn clear_condition_reply(
+    pub(crate) async fn clear_condition_reply(
         &self,
         caller: &ScopedCaller,
         params: &ClearConditionParams,
     ) -> Value {
-        let result = self.mutate_condition(
+        self.mutate_condition(
             caller,
             &params.credential_id,
             params.record_version,
             params.enrollment_token.as_deref(),
             Mutation::Clear,
-        );
-        condition_reply("cleared", result)
+        )
+        .await
     }
 
-    fn mutate_condition(
+    async fn mutate_condition(
         &self,
         caller: &ScopedCaller,
         id: &str,
         version: u64,
         enrollment_token: Option<&str>,
         mutation: Mutation<'_>,
-    ) -> Result<bool, ReadError> {
+    ) -> Value {
+        let field = match mutation {
+            Mutation::Report(_) => "accepted",
+            Mutation::Clear => "cleared",
+        };
         let store = self.store();
         // Capture the lifetime before authorization, but never expose the lookup result
-        // to an unauthorized caller. The transaction checks that lifetime again.
+        // to an unauthorized caller. The write or dispatch checks that lifetime again.
+        let copy = self.remote.remote_record(id);
         let incarnation = store.credential_incarnation(id);
         let (kind, name) =
-            self.authorize_scoped_as(caller, enrollment_token, id, GrantOperation::Read)?;
-        let incarnation = incarnation.map_err(|error| map_store_error(&error))?;
+            match self.authorize_scoped_as(caller, enrollment_token, id, GrantOperation::Read) {
+                Ok(principal) => principal,
+                Err(error) => return condition_reply(field, Err(error)),
+            };
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
 
+        match copy {
+            Ok(Some(copy)) => {
+                let report = match mutation {
+                    Mutation::Report(report) => {
+                        if let Err(error) = check_condition_report(
+                            copy.refresh_adapter.as_deref(),
+                            report.reason,
+                            report.provider_status,
+                            report.action_url,
+                        ) {
+                            return condition_reply(field, Err(condition_error(&error)));
+                        }
+                        Some(report)
+                    }
+                    Mutation::Clear => None,
+                };
+                return match self.remote.forward_condition(&copy, version, report).await {
+                    Ok(value) => json!({ (field): value }),
+                    Err(refusal) => json!({ (field): false, "error": refusal.body() }),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => return condition_reply(field, Err(map_store_error(&error))),
+        }
+        let incarnation = match incarnation {
+            Ok(incarnation) => incarnation,
+            Err(error) => return condition_reply(field, Err(map_store_error(&error))),
+        };
         let (actor, principal) = if kind == "enrolled" {
             (
                 format!("enrolled:{name}"),
@@ -108,24 +145,30 @@ impl ReadSurface {
             alarm: None,
         };
         let result = match mutation {
-            Mutation::Report(report) => store.report_condition_in_incarnation(
-                id,
-                version,
-                &incarnation,
-                report,
-                audit,
-                principal,
-            ),
+            Mutation::Report(report) => store
+                .report_condition_in_incarnation(
+                    id,
+                    version,
+                    &incarnation,
+                    report,
+                    audit,
+                    principal,
+                )
+                .map(|_| true),
             Mutation::Clear => {
                 store.clear_condition_in_incarnation(id, version, &incarnation, audit, principal)
             }
         };
-        result.map_err(|error| match error {
-            StoreOpError::ConditionNotAdmitted => ReadError::ConditionNotAdmitted,
-            StoreOpError::ConditionStatusRefused => ReadError::ConditionStatusRefused,
-            StoreOpError::ConditionLinkRefused => ReadError::ConditionLinkRefused,
-            other => map_store_error(&other),
-        })
+        condition_reply(field, result.map_err(|error| condition_error(&error)))
+    }
+}
+
+fn condition_error(error: &StoreOpError) -> ReadError {
+    match error {
+        StoreOpError::ConditionNotAdmitted => ReadError::ConditionNotAdmitted,
+        StoreOpError::ConditionStatusRefused => ReadError::ConditionStatusRefused,
+        StoreOpError::ConditionLinkRefused => ReadError::ConditionLinkRefused,
+        other => map_store_error(other),
     }
 }
 

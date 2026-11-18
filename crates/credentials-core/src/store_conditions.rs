@@ -126,6 +126,45 @@ fn condition_in_incarnation(
         .optional()
 }
 
+pub(super) fn remote_condition_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+    incarnation: &str,
+) -> rusqlite::Result<Option<Condition>> {
+    condition_in_incarnation(conn, id, incarnation, Location::Remote)
+}
+
+pub(super) fn local_condition_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+    incarnation: &str,
+) -> rusqlite::Result<Option<Condition>> {
+    condition_in_incarnation(conn, id, incarnation, Location::Local)
+}
+
+pub(super) fn write_remote_condition_tx(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    incarnation: &str,
+    condition: Option<&Condition>,
+) -> rusqlite::Result<()> {
+    if let Some(condition) = condition {
+        tx.execute(
+            "INSERT INTO remote_record_conditions \
+             (credential_id, incarnation, reason, since_ms, action_url) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(credential_id) DO UPDATE SET incarnation = excluded.incarnation, \
+             reason = excluded.reason, since_ms = excluded.since_ms, action_url = excluded.action_url",
+            rusqlite::params![id, incarnation, condition.reason, condition.since_ms, condition.action_url],
+        )?;
+    } else if read_schema_version(tx)? >= CONDITION_SCHEMA_VERSION {
+        tx.execute(
+            "DELETE FROM remote_record_conditions WHERE credential_id = ?1",
+            [id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Read the condition for a row already identified by inventory, without a write
 /// lease or migration. Both record tables may be absent on an older store.
 pub fn condition_read_only(
@@ -165,7 +204,7 @@ impl EncryptedStore {
         incarnation: &str,
     ) -> Result<Option<Condition>, StoreOpError> {
         self.store
-            .with_conn(|conn| condition_in_incarnation(conn, id, incarnation, Location::Local))
+            .with_conn(|conn| local_condition_conn(conn, id, incarnation))
             .map_err(StoreOpError::from)
     }
 
@@ -175,7 +214,7 @@ impl EncryptedStore {
         incarnation: &str,
     ) -> Result<Option<Condition>, StoreOpError> {
         self.store
-            .with_conn(|conn| condition_in_incarnation(conn, id, incarnation, Location::Remote))
+            .with_conn(|conn| remote_condition_conn(conn, id, incarnation))
             .map_err(StoreOpError::from)
     }
 

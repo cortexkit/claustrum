@@ -222,7 +222,7 @@ fn failure(error: OutboundError) -> LinkFailure {
 }
 
 /// One request to make on a route.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RouteCall {
     /// The `route.open` target. The client, not the caller, builds the control body
     /// so the consumer identity is attached in exactly one place and no call site can
@@ -235,6 +235,24 @@ pub struct RouteCall {
     /// The data-plane request body. The frame's own channel, epoch and correlation id
     /// are filled in by the client.
     pub request: Value,
+}
+
+impl std::fmt::Debug for RouteCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut redacted;
+        let request = if self.request.pointer("/params/action_url").is_some() {
+            redacted = self.request.clone();
+            redacted["params"]["action_url"] = json!("[redacted]");
+            &redacted
+        } else {
+            &self.request
+        };
+        f.debug_struct("RouteCall")
+            .field("target", &self.target)
+            .field("prelude", &self.prelude)
+            .field("request", request)
+            .finish()
+    }
 }
 
 /// A resolved binding the client reuses across calls until something breaks it.

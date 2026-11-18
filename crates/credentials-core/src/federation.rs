@@ -378,7 +378,10 @@ pub struct RemoteWatchRow {
     pub provider_ids: Option<Vec<String>>,
     pub detected_plan: Option<DetectedPlan>,
     pub home_version: u64,
+    pub condition: Option<crate::store::Condition>,
 }
+
+const MAX_REMOTE_CONDITION_REASON_BYTES: usize = 64;
 
 /// Check a snapshot row before applying it. A reconciler can retain a rejected row's
 /// id without blocking the other rows in the snapshot. Operator adds use these same
@@ -425,6 +428,27 @@ pub fn validate_remote_watch_row(
     }
     i64::try_from(row.home_version)
         .map_err(|_| StoreOpError::Encode("home record_version out of range".into()))?;
+    if let Some(condition) = &row.condition {
+        let reason = &condition.reason;
+        if reason.is_empty()
+            || reason.len() > MAX_REMOTE_CONDITION_REASON_BYTES
+            || !reason
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(StoreOpError::Encode(
+                "invalid home-watch condition reason".into(),
+            ));
+        }
+        if condition.since_ms > crate::store::MAX_CONDITION_SINCE_MS {
+            return Err(StoreOpError::Encode(
+                "home-watch condition since_ms out of range".into(),
+            ));
+        }
+        if let Some(link) = &condition.action_url {
+            crate::store::check_condition_link(row.refresh_adapter.as_deref(), reason, link)?;
+        }
+    }
     Ok(())
 }
 

@@ -292,6 +292,7 @@ fn watch_row() -> RemoteWatchRow {
         provider_ids: Some(vec!["anthropic".into()]),
         detected_plan: record.detected_plan,
         home_version: 7,
+        condition: None,
     }
 }
 

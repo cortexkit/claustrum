@@ -45,6 +45,7 @@ fn seed(rig: &Rig, home: &str, pairing: &str, id: &str) {
                 provider_ids: None,
                 detected_plan: None,
                 home_version: 1,
+                condition: None,
             }],
             RemoteWatchApplyMode::Full,
             &[],

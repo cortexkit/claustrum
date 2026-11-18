@@ -72,6 +72,9 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `enrollment_name_has_grants` | permanent | enrollment approval needs explicit consent to inherit existing name-bound grants; revoke them first or pass `--keep-grants` |
 | `invalid_plan_tier` | permanent | a plan tier set with `ck auth set-plan` is outside `^[a-z][a-z0-9_]{0,31}$` |
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
+| `condition_not_admitted` | permanent | the login or its refresh adapter does not admit the reported condition reason |
+| `condition_status_refused` | permanent | a condition report carried a `provider_status` other than 403 |
+| `condition_link_refused` | permanent | a condition report carried a link that its reason does not permit or that failed the link rules |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `seal_input_too_large` | context_overflow | a `credential.seal` plaintext over 64 KiB, or info or aad over 1 KiB |
@@ -279,7 +282,7 @@ another (`deposit` and `account_token` are described in sections 11 and 12):
 
 | grant operation | authorizes | does not authorize |
 |---|---|---|
-| `read` | `get_scoped` (the token), scoped `status`, `public_key`, `report_auth_failure`; identity in `list_scoped` | `sign`, `open` |
+| `read` | `get_scoped` (the token), scoped `status`, `public_key`, `report_auth_failure`, `report_condition`, `clear_condition`; identity in `list_scoped` | `sign`, `open` |
 | `sign` | `credential.sign` with a signing key; the row (without identity) in `list_scoped` | the token, `public_key`, `open` |
 | `open` | `credential.open` with a KEM key; the row (without identity) in `list_scoped` | the token, `sign` |
 | `list` | the row in `list_scoped` WITH its identity (`account_id`, `email`, `org_name`) and `refresh_adapter` | every other operation: no token, no status, no key use, no report |
@@ -304,6 +307,8 @@ cannot use those surfaces to learn whether an id exists.
 | `credential.public_key` | yes | yes (`read`) | yes (credential-id form) |
 | `credential.status` | yes | yes (`read`) | yes (credential-id form) |
 | `credential.report_auth_failure` | yes | yes (`read`) | yes (credential-id form) |
+| `credential.report_condition` | — | yes (`read`) | yes |
+| `credential.clear_condition` | — | yes (`read`) | yes |
 
 A request carries exactly one address. `credential.status` with both a handle and a
 `credential_id` is refused as `invalid_params`
@@ -1517,6 +1522,58 @@ incomplete replies count the whole batch as dropped. These counters are process-
 `usage_report_scoped_wire_contract_goldens_are_checked` checks the golden examples;
 `usage_report_scoped_insula_vectors_match_row_and_decode_ignored_reason` checks the
 vendored insula contract, including its `unknown_credential` ignored reason.
+
+## 5b. Reporting and clearing a provider login condition
+
+`credential.report_condition` takes `{credential_id, record_version, reason,
+provider_status, action_url?, enrollment_token?}`. The strings `reason` and `action_url`
+are checked after authorization, not during decoding. `credential.clear_condition`
+takes `{credential_id, record_version, enrollment_token?}`. Both operations reject
+unknown fields with the `invalid_params` Error frame; neither accepts a handle.
+
+Report checks, in order:
+
+1. The caller must have `read` on the id, exactly as on the id form of
+   `credential.report_auth_failure`. Unknown, ungranted and out-of-reach ids are
+   indistinguishable (`not_found`). Neither operation invokes the limiter that records
+   an alarm when too many requests target one handle.
+2. The login must have an admitted refresh adapter. API keys, other record kinds and
+   unreadable login envelopes are refused with `condition_not_admitted`. This does not
+   quarantine the record. `needs_reauth` and `retired` logins remain eligible.
+3. The adapter must admit the reason (`condition_not_admitted`). Currently only
+   Antigravity admits conditions: `provider_verification_required` and `provider_ineligible`.
+4. `provider_status` must be 403 (`condition_status_refused`).
+5. A link is optional for `provider_verification_required`, and forbidden for
+   `provider_ineligible`. The absolute URL must use `https` and the exact host
+   `accounts.google.com` (case-insensitive); no userinfo, explicit port (even `:443`),
+   or fragment. It must be at most 2048 bytes, all printable ASCII `0x21`–`0x7E`.
+   Violations give `condition_link_refused`.
+6. The stored version must match `record_version` for the report to apply.
+
+On the vault holding the login, checks 2–6 use the same row inside the write transaction.
+An id deleted and recreated during an admitted call returns `not_found`. A report sent
+after the delete and recreate is complete can land on the new login if its version
+matches. An identical repeat or version mismatch returns `{accepted: true}` without
+applying a change. A new reason starts a new `since_ms`; replacing only its link keeps
+the time. A refusal returns `{accepted: false, error: {code, class}}` inside `result`.
+
+Clear checks authorization and the same incarnation and version fence, not adapter,
+reason or login state. The result is `{cleared: true}` if a condition was removed,
+`{cleared: false}` if none was set or the version differed, or
+`{cleared: false, error: {code, class}}` on refusal.
+
+A condition neither changes the login's state or version nor changes token serving.
+An applied report or clear appends one corresponding audit row. Successful validation
+and an unchanged incarnation give one applied or unapplied condition diagnostic, with
+null `detail`. A refusal adds neither, apart from the existing authorization diagnostics.
+The link is stored verbatim, not included in errors, diagnostics, debug output or audit
+payloads. Dispatch each mutation once: a lost reply is not grounds to replay it.
+
+The vault's consumer replies are pinned in
+`crates/credentials-module/tests/fixtures/login-conditions-v1/consumer-ops.json`.
+Regenerate them and their checksum with `CK_EMIT_CONDITION_VECTORS=1 cargo test
+--locked -p credentials-module --features credentials-core/test-support --bin ck-claustrum
+consumer_condition_producer_replies_and_local_outcomes_are_pinned`.
 
 ## 6. Health
 

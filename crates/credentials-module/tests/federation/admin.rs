@@ -1531,6 +1531,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "config_gate_tests.rs",
         "lib.rs",
         "read_surface.rs",
+        "consumer_conditions.rs",
         "limiter.rs",
         "manifest.rs",
         "manifest_active_report.rs",

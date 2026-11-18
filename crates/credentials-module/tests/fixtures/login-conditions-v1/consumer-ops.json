@@ -1,0 +1,244 @@
+{
+  "clear_applied": {
+    "result": {
+      "cleared": true
+    }
+  },
+  "clear_invalid_params": {
+    "code": "invalid_params",
+    "message": "params not decodable: invalid condition parameters"
+  },
+  "clear_not_found": {
+    "result": {
+      "cleared": false,
+      "error": {
+        "class": "permanent",
+        "code": "not_found"
+      }
+    }
+  },
+  "clear_unset": {
+    "result": {
+      "cleared": false
+    }
+  },
+  "clear_version_mismatch": {
+    "result": {
+      "cleared": false
+    }
+  },
+  "report_api_key": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_not_admitted"
+      }
+    }
+  },
+  "report_identical": {
+    "result": {
+      "accepted": true
+    }
+  },
+  "report_ineligible": {
+    "result": {
+      "accepted": true
+    }
+  },
+  "report_ineligible_with_link": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_invalid_params": {
+    "code": "invalid_params",
+    "message": "params not decodable: invalid condition parameters"
+  },
+  "report_link_control": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_default_port": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_empty_userinfo": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_fragment": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_non_ascii": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_non_https": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_other_port": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_refused": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_relative": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_space": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_subdomain": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_too_long": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_link_userinfo": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_link_refused"
+      }
+    }
+  },
+  "report_new_link": {
+    "result": {
+      "accepted": true
+    }
+  },
+  "report_not_found": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "not_found"
+      }
+    }
+  },
+  "report_reason_replacement": {
+    "result": {
+      "accepted": true
+    }
+  },
+  "report_status_refused": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_status_refused"
+      }
+    }
+  },
+  "report_unknown_reason": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_not_admitted"
+      }
+    }
+  },
+  "report_unopenable": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_not_admitted"
+      }
+    }
+  },
+  "report_unsupported_adapter": {
+    "result": {
+      "accepted": false,
+      "error": {
+        "class": "permanent",
+        "code": "condition_not_admitted"
+      }
+    }
+  },
+  "report_verification_required": {
+    "result": {
+      "accepted": true
+    }
+  },
+  "report_version_mismatch": {
+    "result": {
+      "accepted": true
+    }
+  }
+}

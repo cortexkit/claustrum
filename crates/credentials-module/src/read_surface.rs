@@ -67,6 +67,10 @@ use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 mod account_token;
 pub use account_token::AccountTokenParams;
 
+#[path = "consumer_conditions.rs"]
+mod consumer_conditions;
+pub(crate) use consumer_conditions::{ClearConditionParams, ReportConditionParams};
+
 /// Cookie-only write parameters. The route-bound module's deposit grant authorizes
 /// creation and replacement of its own cookies, but never reading them.
 #[derive(Debug, Deserialize, Serialize)]
@@ -1939,6 +1943,9 @@ pub enum ReadError {
     /// become a credential death, so a retry cannot succeed. The consumer's repair is to
     /// stop reporting that status, not to send it again.
     ReportStatusNotCredentialDeath,
+    ConditionNotAdmitted,
+    ConditionStatusRefused,
+    ConditionLinkRefused,
     /// A fresh token minted for this request still misses its supplied `min_ttl_ms`.
     /// The credential remains usable for callers that ask for less time.
     TtlUnsatisfiable,
@@ -2029,7 +2036,10 @@ impl ReadError {
             | ReadError::OpenFailed
             | ReadError::MalformedEncoding
             | ReadError::InvalidRecipientKey
-            | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
+            | ReadError::ReportStatusNotCredentialDeath
+            | ReadError::ConditionNotAdmitted
+            | ReadError::ConditionStatusRefused
+            | ReadError::ConditionLinkRefused => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
@@ -5548,6 +5558,9 @@ mod error_class_tests {
         Corrupt => "corrupt", "permanent";
         TooManyItems => "too_many_items", "context_overflow";
         ReportStatusNotCredentialDeath => "report_status_not_credential_death", "permanent";
+        ConditionNotAdmitted => "condition_not_admitted", "permanent";
+        ConditionStatusRefused => "condition_status_refused", "permanent";
+        ConditionLinkRefused => "condition_link_refused", "permanent";
         TtlUnsatisfiable => "ttl_unsatisfiable", "context_overflow";
         KindNotGettable => "kind_not_gettable", "permanent";
         KindNotSignable => "kind_not_signable", "permanent";

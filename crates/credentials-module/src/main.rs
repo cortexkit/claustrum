@@ -123,6 +123,8 @@ const OP_WATCH_SCOPED: &str = "auth.watch_scoped";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
+const OP_REPORT_CONDITION: &str = "credential.report_condition";
+const OP_CLEAR_CONDITION: &str = "credential.clear_condition";
 const OP_SIGN: &str = "credential.sign";
 const OP_PUBLIC_KEY: &str = "credential.public_key";
 const OP_OPEN: &str = "credential.open";
@@ -1600,11 +1602,26 @@ fn health_report_with_usage(surface: &ReadSurface) -> ModuleControlResponse {
 }
 
 /// A read-surface request body: `{ "method": "...", "params": { ... } }`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ReadRequest {
     method: String,
     #[serde(default)]
     params: serde_json::Value,
+}
+
+impl std::fmt::Debug for ReadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut request = f.debug_struct("ReadRequest");
+        request.field("method", &self.method);
+        if matches!(
+            self.method.as_str(),
+            OP_REPORT_CONDITION | OP_CLEAR_CONDITION
+        ) {
+            request.finish_non_exhaustive()
+        } else {
+            request.field("params", &self.params).finish()
+        }
+    }
 }
 
 /// The `admin.op` request params: the EXACT authenticated op-body bytes (as a JSON
@@ -2352,6 +2369,30 @@ async fn handle_read_request(
                 ),
                 Err(e) => {
                     return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+                }
+            }
+        }
+        OP_REPORT_CONDITION | OP_CLEAR_CONDITION => {
+            let reply = if request.method == OP_REPORT_CONDITION {
+                serde_json::from_value::<read_surface::ReportConditionParams>(request.params)
+                    .map(|params| surface.report_condition_reply(&caller, &params))
+            } else {
+                serde_json::from_value::<read_surface::ClearConditionParams>(request.params)
+                    .map(|params| surface.clear_condition_reply(&caller, &params))
+            };
+            match reply {
+                Ok(reply) => wrap_result(reply),
+                // Serde can echo off-contract field names and values from the request.
+                Err(_) => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid condition parameters",
+                    )
+                    .await
                 }
             }
         }
@@ -3105,6 +3146,16 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
+            ManagementOperation {
+                name: OP_REPORT_CONDITION.to_string(),
+                description: Some("Record an admitted provider condition on a login at the reported version.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_CLEAR_CONDITION.to_string(),
+                description: Some("Remove a provider condition on a login at the reported version.".into()),
+                kind: ManagementOperationKind::Mutate,
+            },
             // The ops another computer's vault calls on this one, relayed by callosum.
             // Callosum only offers a paired computer what this catalog declares, so
             // leaving them out made federation unreachable however the profile was set.
@@ -3237,6 +3288,9 @@ mod tests {
     include!("secret_flow_contract_tests.rs");
     include!("secret_home_vectors_tests.rs");
     include!("../tests/fixtures/federation_read_producer.rs");
+    mod consumer_condition_tests {
+        include!("../tests/fixtures/login_conditions_producer.rs");
+    }
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
         use credentials_core::resolver::KeySource;

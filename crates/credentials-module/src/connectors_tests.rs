@@ -927,7 +927,8 @@ mod connectors_contract {
                 OP_GET_SCOPED | OP_USAGE_REPORT_SCOPED => {
                     Some((GrantOperation::Read, "credential_id", true))
                 }
-                OP_PUBLIC_KEY | OP_STATUS | OP_REPORT_AUTH_FAILURE => {
+                OP_PUBLIC_KEY | OP_STATUS | OP_REPORT_AUTH_FAILURE | OP_REPORT_CONDITION
+                | OP_CLEAR_CONDITION => {
                     Some((GrantOperation::Read, "credential_id (not handle)", true))
                 }
                 OP_LIST_SCOPED | OP_WATCH_SCOPED => Some((GrantOperation::List, "inventory", true)),
@@ -989,7 +990,7 @@ mod connectors_contract {
                 scoped.push((op.name.as_str(), classification));
             }
         }
-        assert_eq!(scoped.len(), 12);
+        assert_eq!(scoped.len(), 14);
     }
 
     #[tokio::test(flavor = "current_thread")]

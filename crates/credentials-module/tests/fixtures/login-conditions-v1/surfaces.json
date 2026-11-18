@@ -1,0 +1,198 @@
+{
+  "connectors_condition": {
+    "result": {
+      "rows": [
+        {
+          "condition": {
+            "action_url": "https://accounts.google.com/check?account=condition-query-not-for-diagnostics",
+            "reason": "provider_verification_required",
+            "since_ms": 7
+          },
+          "id": "oauth:antigravity:condition-fixture",
+          "incarnation": "00000000000000000000000000000001",
+          "kind": "account",
+          "name": "oauth:antigravity:condition-fixture",
+          "permissions": [
+            "cg_06cb06875a1dba0d53ae81514e6ad82006be64c4d4418cd89825d71aa56ea204",
+            "cg_27a980439c94f072145f73e97db701c5d68244ca863c70f1d6ce68ee532585e8",
+            "cg_ac6bed38b6098fd45ae8c35e2583f107f44c6716dc9758e7fe93b34eaf384264",
+            "cg_e919331b52ff0d7c6ee4c05638fa05389c8749ea037b63f6726805b7f55c4320"
+          ],
+          "plan": {
+            "source": "operator",
+            "tier": "pro"
+          },
+          "setup": [
+            {
+              "state": "done",
+              "step": "sign_in",
+              "where": "computer"
+            }
+          ],
+          "status": {
+            "state": "ok"
+          }
+        }
+      ],
+      "version": "6476eb85881295fb88d1b0f9d74b153cee2ad2eb8576ca6eddbf5ffbd5487fcb",
+      "watch": true
+    }
+  },
+  "listing_condition": {
+    "result": {
+      "credentials": [
+        {
+          "auth_method": "antigravity",
+          "categories": [
+            "antigravity-native"
+          ],
+          "condition": {
+            "reason": "provider_verification_required",
+            "since_ms": 7
+          },
+          "hosts": [
+            "cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.googleapis.com"
+          ],
+          "id": "oauth:antigravity:condition-fixture",
+          "incarnation": "00000000000000000000000000000001",
+          "operations": [
+            "read"
+          ],
+          "plan_tier_observed_at_ms": null,
+          "provider": null,
+          "provider_ids": [],
+          "record_version": 1,
+          "refresh_adapter": "antigravity",
+          "serves": [],
+          "state": "active",
+          "type": "oauth"
+        }
+      ],
+      "grant_tuples": [
+        {
+          "operation": "read",
+          "selector": "oauth:antigravity:condition-fixture",
+          "selector_kind": "exact"
+        }
+      ],
+      "grants": 1,
+      "view": "Q31ydGBdedsCtjPq91481j4gnzkvpskSUn+K2A/QQgc="
+    }
+  },
+  "listing_condition_with_plan_tier": {
+    "result": {
+      "credentials": [
+        {
+          "auth_method": "antigravity",
+          "categories": [
+            "antigravity-native"
+          ],
+          "condition": {
+            "reason": "provider_verification_required",
+            "since_ms": 7
+          },
+          "hosts": [
+            "cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.googleapis.com"
+          ],
+          "id": "oauth:antigravity:condition-fixture",
+          "incarnation": "00000000000000000000000000000001",
+          "operations": [
+            "read"
+          ],
+          "plan_tier": "pro",
+          "plan_tier_observed_at_ms": 13,
+          "plan_tier_since_ms": 11,
+          "plan_tier_source": "operator",
+          "provider": null,
+          "provider_ids": [],
+          "record_version": 1,
+          "refresh_adapter": "antigravity",
+          "serves": [],
+          "state": "active",
+          "type": "oauth"
+        }
+      ],
+      "grant_tuples": [
+        {
+          "operation": "read",
+          "selector": "oauth:antigravity:condition-fixture",
+          "selector_kind": "exact"
+        }
+      ],
+      "grants": 1,
+      "view": "BEg4t4drQUCA9lSM2WTRl67ZAuonzm2xt08eTBRPpRE="
+    }
+  },
+  "listing_sign_only": {
+    "result": {
+      "credentials": [
+        {
+          "categories": [
+            "antigravity-native"
+          ],
+          "id": "oauth:antigravity:condition-fixture",
+          "incarnation": "00000000000000000000000000000001",
+          "operations": [
+            "sign"
+          ],
+          "plan_tier_observed_at_ms": null,
+          "provider": null,
+          "provider_ids": [],
+          "record_version": 1,
+          "serves": [],
+          "state": "active",
+          "type": "oauth"
+        }
+      ],
+      "grant_tuples": [
+        {
+          "operation": "sign",
+          "selector": "oauth:antigravity:condition-fixture",
+          "selector_kind": "exact"
+        }
+      ],
+      "grants": 1,
+      "view": "xuGi81rS20KVRe1w160LJ6MKWFGKnPMz8vtGT8KD6n4="
+    }
+  },
+  "listing_unconditioned": {
+    "result": {
+      "credentials": [
+        {
+          "auth_method": "antigravity",
+          "categories": [
+            "antigravity-native"
+          ],
+          "hosts": [
+            "cloudcode-pa.googleapis.com",
+            "daily-cloudcode-pa.googleapis.com"
+          ],
+          "id": "oauth:antigravity:condition-fixture",
+          "incarnation": "00000000000000000000000000000001",
+          "operations": [
+            "read"
+          ],
+          "plan_tier_observed_at_ms": null,
+          "provider": null,
+          "provider_ids": [],
+          "record_version": 1,
+          "refresh_adapter": "antigravity",
+          "serves": [],
+          "state": "active",
+          "type": "oauth"
+        }
+      ],
+      "grant_tuples": [
+        {
+          "operation": "read",
+          "selector": "oauth:antigravity:condition-fixture",
+          "selector_kind": "exact"
+        }
+      ],
+      "grants": 1,
+      "view": "MhX3VLl5GG1CCU6wOgz8qsjSw3GEXOUxYW3xGyGliis="
+    }
+  }
+}

@@ -75,6 +75,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `condition_not_admitted` | permanent | the login or its refresh adapter does not admit the reported condition reason |
 | `condition_status_refused` | permanent | a condition report carried a `provider_status` other than 403 |
 | `condition_link_refused` | permanent | a condition report carried a link that its reason does not permit or that failed the link rules |
+| `condition_home_owned` | permanent | the operator tried to clear a condition on a shared copy instead of at its home |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `seal_input_too_large` | context_overflow | a `credential.seal` plaintext over 64 KiB, or info or aad over 1 KiB |
@@ -88,7 +89,7 @@ or an operator replacement must resolve that intent before the credential is ser
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
 `invalid_service_name`, `service_in_provider_catalog`,
 `invalid_provider_id`, `invalid_credential_id`, `invalid_principal`, `invalid_plan_tier`,
-`enrollment_name_has_grants`, and `hub_audience_reserved` are store-taxonomy
+`enrollment_name_has_grants`, `hub_audience_reserved`, and `condition_home_owned` are store-taxonomy
 refusals (`StoreOpError::wire_code` in `credentials-core/src/store.rs`). A read never
 produces them. Every other code in the table is a `ReadError` the read surface emits;
 `read_error_wire_codes_are_golden_and_match_the_doc_table` in `read_surface.rs` checks
@@ -1569,11 +1570,52 @@ null `detail`. A refusal adds neither, apart from the existing authorization dia
 The link is stored verbatim, not included in errors, diagnostics, debug output or audit
 payloads. Dispatch each mutation once: a lost reply is not grounds to replay it.
 
+### Reading a condition
+
+On `credential.list_scoped`, a row covered by `read` or `list` includes
+`condition: {reason, since_ms}` when set. A row covered only by `sign` or `open`
+omits the member. Scoped rows never include the link or the reporter. The reason
+is an open string when reading; `since_ms` is an integer in `0..=2^53−1`.
+
+For a row with a visible condition, the scoped digest appends byte `4`, then
+`push_string(reason)`, then `push_string` of `since_ms` in decimal. This extension
+comes after the plan-tier extension (byte `3`), if present, and before the
+`fusiform_provider_id` frame. A row without a visible condition adds no bytes.
+`auth.watch_scoped` uses the same digest and sends the same notice shape as
+before; changing only the link sends no scoped notice.
+
+`admin.status` includes `condition: {reason, since_ms, action_url?}` only on
+conditioned credential entries. `ck auth status` and `ck auth list` show the reason,
+time in milliseconds, and link when set. The human output shows marked shared
+copies with a reminder to clear the condition at the home vault. The v1
+`ck auth list --json` inventory still lists only local rows. Every row has a
+`condition` field: `null` if unset, otherwise `{reason, since_ms, action_url}`,
+with `action_url: null` when absent. The daemon-free inventory can read an older
+vault without condition tables; it shows no conditions and does not migrate the
+database.
+
+### Operator clear
+
+`admin.op` kind `clear_condition` authenticates the body
+`{op: "admin.clear_condition", v: 1, credential_id}`.
+`ck auth clear-condition --id <credential id>` calls the same operation. It removes
+a local condition and appends one audit row naming the operator, returning
+`{cleared: true}`. It returns `{cleared: false}` without an audit row when nothing
+was set. An unknown id is refused with `credential not found`; a shared copy is
+refused with `condition_home_owned/permanent` because it must be cleared at the
+home. These are `admin_refused` route errors, not consumer `result.error` replies.
+
+### Producer samples
+
 The vault's consumer replies are pinned in
 `crates/credentials-module/tests/fixtures/login-conditions-v1/consumer-ops.json`.
 Regenerate them and their checksum with `CK_EMIT_CONDITION_VECTORS=1 cargo test
 --locked -p credentials-module --features credentials-core/test-support --bin ck-claustrum
 consumer_condition_producer_replies_and_local_outcomes_are_pinned`.
+The scoped (plain, marked, marked with a dated plan, and sign-only) and connector
+replies are pinned in the same directory's `surfaces.json`. Use the same command
+with `login_condition_surface_samples_are_producer_generated_and_pinned` as the
+test filter to regenerate those samples and their checksum.
 
 ## 6. Health
 
@@ -4273,6 +4315,7 @@ and the vault's health counts.
 | `permissions` | Sorted `cg_…` ids of the visible permissions/v1 credential grants that reach the row by exact id or group; audience grants never reach credentials. |
 | `identity?` | Account email, otherwise organization name, as plain text; omitted above 254 UTF-8 bytes. |
 | `plan?` | `{tier, source}` from the existing effective plan, with `source` `operator` or `detected`; absent when unknown. |
+| `condition?` | `{reason, since_ms, action_url?}` from the stored login condition. Omitted when none is set. |
 
 Status maps `active` to `ok`, `needs_reauth` to `needs_sign_in` for accounts and
 `key_refused` for API keys, `retired` to `signed_out`, and `corrupt` to `damaged`.
@@ -4306,8 +4349,9 @@ projected version changes:
 
 Notices never carry rows: read again after a changed version. Refreshes that only
 replace token bytes produce no notice; logout changes status/setup and therefore
-the version. Notices may be dropped under load. Process epochs are random and reset
-on restart.
+the version. A change to a condition, including replacing just the link, also
+changes the version. Notices may be dropped under load. Process epochs are random
+and reset on restart.
 Drain finishes the held request with `StreamEnd`; route teardown/shutdown cancels
 publication as for `auth.watch_scoped`. Capacity/draining refusal is the same NF.
 Admission is rechecked before each watch snapshot; changing the phone setting Off

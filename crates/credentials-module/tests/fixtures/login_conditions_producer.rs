@@ -9,8 +9,10 @@ const ID: &str = "oauth:antigravity:condition-fixture";
 const VERIFY: &str = "provider_verification_required";
 const INELIGIBLE: &str = "provider_ineligible";
 const QUERY: &str = "condition-query-not-for-diagnostics";
+const SEED: u8 = 94;
 const CHANNEL: u16 = 51;
 const READER: &str = "condition-reader";
+const OPERATOR: u16 = 52;
 
 struct Rig {
     surface: Arc<ReadSurface>,
@@ -22,14 +24,13 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let seed = 94;
-        let (surface, store, db, root) = tmp_surface_with_store(seed);
+        let (surface, store, db, root) = tmp_surface_with_store(SEED);
         let engine = Arc::new(RefreshEngine::new(
             Arc::clone(&store),
             Vec::new(),
             Arc::new(crate::test_support::NoHttp),
         ));
-        let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+        let key = MasterKey::from_bytes([SEED; MASTER_KEY_LEN]);
         let admin = Arc::new(admin_surface::AdminSurface::new(
             engine,
             credentials_core::admin_auth::AdminMacKey::derive(&key),
@@ -37,6 +38,7 @@ impl Rig {
             key.key_id(),
         ));
         admin.record_bind_at(CHANNEL, 1, reserved(READER), "");
+        admin.record_bind_at(OPERATOR, 1, subc_protocol::Principal::Direct, "");
         Self {
             surface,
             admin,
@@ -93,6 +95,44 @@ impl Rig {
         no_query(&format!("{:?}", self.condition()));
         (kind, serde_json::from_slice(&bytes).unwrap())
     }
+
+    async fn operator_call(&self, op_body: Value, valid_tag: bool) -> (FrameType, Value) {
+        use credentials_core::admin_auth::{AdminMacKey, TranscriptParts};
+        use credentials_core::enrollment::decode_lower_hex_32;
+
+        let nonce_reply = routed_json(
+            &self.surface,
+            &self.admin,
+            OPERATOR,
+            OP_ADMIN_CHALLENGE,
+            json!({}),
+        )
+        .await;
+        let challenge = &nonce_reply["result"];
+        let nonce = decode_lower_hex_32(challenge["nonce_hex"].as_str().unwrap()).unwrap();
+        let vault_id = decode_lower_hex_32(challenge["vault_id_hex"].as_str().unwrap()).unwrap();
+        let key = MasterKey::from_bytes([if valid_tag { SEED } else { SEED + 1 }; MASTER_KEY_LEN]);
+        let op_body = op_body.to_string();
+        let tag = AdminMacKey::derive(&key)
+            .sign(&TranscriptParts {
+                vault_id: &vault_id,
+                key_id: MasterKey::from_bytes([SEED; MASTER_KEY_LEN]).key_id(),
+                nonce: &nonce,
+                op_body: op_body.as_bytes(),
+            })
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let (frame, bytes) = routed_reply(
+            &self.surface,
+            &self.admin,
+            OPERATOR,
+            OP_ADMIN_OP,
+            json!({"op_body":op_body,"tag_hex":tag}),
+        )
+        .await;
+        (frame, serde_json::from_slice(&bytes).unwrap())
+    }
 }
 
 fn no_query(text: &str) {
@@ -104,6 +144,10 @@ fn no_query(text: &str) {
 
 fn action(host: &str) -> String {
     format!("https://{host}/check?account={QUERY}")
+}
+
+pub(super) fn verification_link() -> String {
+    action("accounts.google.com")
 }
 
 fn report(version: u64, reason: &str, status: u16, link: Option<&str>) -> Value {
@@ -172,17 +216,19 @@ async fn consumer_condition_producer_replies_and_local_outcomes_are_pinned() {
     assert!(logs.contains("condition log capture control"));
     no_query(&logs);
 
+    pin_samples("consumer-ops.json", &samples);
+}
+
+fn pin_samples(filename: &str, samples: &BTreeMap<&str, Value>) {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/login-conditions-v1");
-    let bytes = format!("{}\n", serde_json::to_string_pretty(&samples).unwrap());
-    let sums = format!(
-        "{:x}  consumer-ops.json\n",
-        Sha256::digest(bytes.as_bytes())
-    );
+    let bytes = format!("{}\n", serde_json::to_string_pretty(samples).unwrap());
+    let suffix = format!("  {filename}");
+    let sums = format!("{:x}{suffix}", Sha256::digest(bytes.as_bytes()));
     let manifest_path = path.join("SHA256SUMS");
     if std::env::var("CK_EMIT_CONDITION_VECTORS").as_deref() == Ok("1") {
         std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(path.join("consumer-ops.json"), bytes).unwrap();
+        std::fs::write(path.join(filename), bytes).unwrap();
         let manifest = match std::fs::read_to_string(&manifest_path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -190,25 +236,238 @@ async fn consumer_condition_producer_replies_and_local_outcomes_are_pinned() {
         };
         let mut rows: Vec<_> = manifest
             .lines()
-            .filter(|line| !line.ends_with("  consumer-ops.json"))
+            .filter(|line| !line.ends_with(&suffix))
             .collect();
-        rows.push(sums.trim_end());
+        rows.push(&sums);
         rows.sort_by_key(|line| line.split_once("  ").unwrap().1);
         std::fs::write(manifest_path, rows.join("\n") + "\n").unwrap();
     } else {
         assert_eq!(
-            std::fs::read(path.join("consumer-ops.json")).unwrap(),
+            std::fs::read(path.join(filename)).unwrap(),
             bytes.as_bytes()
         );
         let manifest = std::fs::read_to_string(manifest_path).unwrap();
         assert_eq!(
             manifest
                 .lines()
-                .filter(|line| line.ends_with("  consumer-ops.json"))
+                .filter(|line| line.ends_with(&suffix))
                 .collect::<Vec<_>>(),
-            [sums.trim_end()]
+            [sums.as_str()]
         );
     }
+}
+
+#[tokio::test]
+async fn login_condition_surface_samples_are_producer_generated_and_pinned() {
+    let rig = Rig::new();
+    for id in ["apikey:active", "apikey:dead"] {
+        rig.store
+            .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+    }
+    rig.login(&oauth_record_with_adapter("antigravity"));
+    rig.store
+        .force_credential_incarnation_for_test(ID, "00000000000000000000000000000001");
+    for (channel, principal, operation) in [
+        (53, "condition-signer", GrantOperation::Sign),
+        (54, "condition-lister", GrantOperation::List),
+        (55, "condition-opener", GrantOperation::Open),
+    ] {
+        rig.admin
+            .record_bind_at(channel, 1, reserved(principal), "");
+        grant_for(&rig.store, principal, ID, operation);
+    }
+    let list = |channel| routed_json(&rig.surface, &rig.admin, channel, OP_LIST_SCOPED, json!({}));
+    let plain = list(CHANNEL).await;
+    assert!(plain["result"]["credentials"][0].get("condition").is_none());
+    let sign_before = list(53).await;
+    let open_before = list(55).await;
+    let link = verification_link();
+    assert_eq!(
+        rig.call(OP_REPORT_CONDITION, report(1, VERIFY, 403, Some(&link)))
+            .await,
+        (FrameType::Response, result("accepted", true))
+    );
+    rig.db()
+        .execute(
+            "UPDATE credential_conditions SET since_ms = 7 WHERE credential_id = ?1",
+            [ID],
+        )
+        .unwrap();
+
+    let marked = list(CHANNEL).await;
+    let projection = json!({"reason":VERIFY, "since_ms":7});
+    assert_eq!(marked["result"]["credentials"][0]["condition"], projection);
+    no_query(&marked.to_string());
+    assert_ne!(marked["result"]["view"], plain["result"]["view"]);
+    assert_eq!(
+        list(54).await["result"]["credentials"][0]["condition"],
+        projection
+    );
+    let sign_after = list(53).await;
+    assert_eq!(sign_after, sign_before);
+    assert_eq!(
+        sign_after["result"]["credentials"][0]["operations"],
+        json!(["sign"])
+    );
+    assert_eq!(list(55).await, open_before);
+    assert_eq!(
+        open_before["result"]["credentials"][0]["operations"],
+        json!(["open"])
+    );
+
+    rig.store
+        .set_plan_since_audited(ID, Some("pro"), Some(11), AuditCtx::admin(AuditOp::SetPlan))
+        .unwrap();
+    rig.db()
+        .execute(
+            "UPDATE credential_plan_tiers SET observed_at_ms = 13 WHERE credential_id = ?1",
+            [ID],
+        )
+        .unwrap();
+    let dated = list(CHANNEL).await;
+    assert_eq!(dated["result"]["credentials"][0]["plan_tier_since_ms"], 11);
+    assert_eq!(dated["result"]["credentials"][0]["condition"], projection);
+    rig.admin.record_bind_at(56, 1, reserved("cingulate"), "");
+    let connector = routed_json(&rig.surface, &rig.admin, 56, "connectors.list", json!({})).await;
+    let rows = connector["result"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["condition"],
+        json!({"reason":VERIFY, "since_ms":7, "action_url":link})
+    );
+    assert_eq!(rows[0]["status"], json!({"state":"ok"}));
+    pin_samples(
+        "surfaces.json",
+        &BTreeMap::from([
+            ("listing_unconditioned", plain),
+            ("listing_condition", marked),
+            ("listing_condition_with_plan_tier", dated),
+            ("listing_sign_only", sign_after),
+            ("connectors_condition", connector),
+        ]),
+    );
+}
+
+#[tokio::test]
+async fn admin_clear_condition_routes_and_audits_only_an_applied_local_clear() {
+    use credentials_core::{federation::NewRemoteRecord, record::RecordIdentity};
+
+    const COPY: &str = "oauth:antigravity:shared-condition";
+    let rig = Rig::new();
+    for id in ["apikey:active", "apikey:dead"] {
+        rig.store
+            .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+    }
+    rig.login(&oauth_record_with_adapter("antigravity"));
+    let copy = rig
+        .store
+        .remote_add_audited(&NewRemoteRecord {
+            credential_id: COPY.into(),
+            home_member: "fed-computer:22222222222222222222222222222222".into(),
+            refresh_adapter: Some("antigravity".into()),
+            detected_plan: None,
+            identity: RecordIdentity::default(),
+            home_version: 1,
+            categories: vec![],
+        })
+        .unwrap();
+    let snapshot = || rig.operator_call(json!({"op":"admin.status","v":1}), true);
+    let (frame, unmarked) = snapshot().await;
+    assert_eq!(frame, FrameType::Response);
+    assert!(unmarked["result"]["credentials"][0]
+        .get("condition")
+        .is_none());
+    assert!(unmarked["result"]["remote_credentials"][0]
+        .get("condition")
+        .is_none());
+
+    let link = action("accounts.google.com");
+    assert_eq!(
+        rig.call(OP_REPORT_CONDITION, report(1, VERIFY, 403, Some(&link)))
+            .await
+            .1,
+        result("accepted", true)
+    );
+    rig.db().execute("INSERT INTO remote_record_conditions (credential_id, incarnation, reason, since_ms) VALUES (?1, ?2, ?3, 17)", (COPY, &copy.incarnation, INELIGIBLE)).unwrap();
+    let (frame, mut marked) = snapshot().await;
+    assert_eq!(frame, FrameType::Response);
+    let since_ms = rig.condition().unwrap().since_ms;
+    assert_eq!(
+        marked["result"]["credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("condition"),
+        Some(json!({"reason":VERIFY, "since_ms":since_ms, "action_url":link}))
+    );
+    assert_eq!(
+        marked["result"]["remote_credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("condition"),
+        Some(json!({"reason":INELIGIBLE, "since_ms":17}))
+    );
+    assert_eq!(
+        serde_json::to_vec(&marked).unwrap(),
+        serde_json::to_vec(&unmarked).unwrap()
+    );
+
+    grant_for(&rig.store, READER, COPY, GrantOperation::List);
+    let scoped = routed_json(&rig.surface, &rig.admin, CHANNEL, OP_LIST_SCOPED, json!({})).await;
+    let rows = scoped["result"]["credentials"].as_array().unwrap();
+    let projection = json!({"reason":INELIGIBLE, "since_ms":17});
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == COPY).unwrap()["condition"],
+        projection
+    );
+    rig.admin.record_bind_at(56, 1, reserved("cingulate"), "");
+    let connectors = routed_json(&rig.surface, &rig.admin, 56, "connectors.list", json!({})).await;
+    let rows = connectors["result"]["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == COPY).unwrap()["condition"],
+        projection
+    );
+
+    let clear_op = |id| json!({"op":"admin.clear_condition", "v":1, "credential_id":id});
+    let before = rig.store.read_audit(None).unwrap();
+    let before_events = rig.store.recent_auth_events(40).unwrap().len();
+    for (id, valid_tag, message) in [
+        (ID, false, "auth failed"),
+        ("unknown", true, "credential not found"),
+        (COPY, true, "condition_home_owned/permanent"),
+    ] {
+        let (frame, body) = rig.operator_call(clear_op(id), valid_tag).await;
+        assert_eq!(frame, FrameType::Error);
+        assert_eq!(body["code"], "admin_refused");
+        assert_eq!(body["message"], message);
+        assert_eq!(rig.store.read_audit(None).unwrap(), before);
+        assert!(rig.condition().is_some());
+    }
+    assert_eq!(
+        rig.operator_call(clear_op(ID), true).await,
+        (FrameType::Response, result("cleared", true))
+    );
+    assert_eq!(
+        rig.operator_call(clear_op(ID), true).await,
+        (FrameType::Response, result("cleared", false))
+    );
+    assert_eq!(rig.condition(), None);
+    assert!(rig
+        .store
+        .remote_record_condition(COPY, &copy.incarnation)
+        .unwrap()
+        .is_some());
+    let after = rig.store.read_audit(None).unwrap();
+    assert_eq!(&after[..before.len()], &before);
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after.last().unwrap().op, "clear_condition");
+    assert_eq!(after.last().unwrap().actor, "route-admin");
+    assert_eq!(after.last().unwrap().credential_id.as_deref(), Some(ID));
+    assert_eq!(
+        rig.store.recent_auth_events(40).unwrap().len(),
+        before_events
+    );
 }
 
 async fn applied_and_noop_samples(samples: &mut BTreeMap<&'static str, Value>) {

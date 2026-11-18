@@ -651,6 +651,106 @@ mod scoped_watch {
     }
 
     #[tokio::test]
+    async fn watch_scoped_condition_link_replacement_notifies_only_connectors() {
+        use credentials_core::store::{AuthEventPrincipal, ConditionReport};
+
+        let mut rig = Rig::new();
+        let id = "oauth:antigravity:watch";
+        rig.store
+            .create(id, &oauth_record_with_adapter("antigravity"))
+            .unwrap();
+        rig.grant("condition-list", id);
+        rig.bind(1, reserved("condition-list"));
+        rig.bind(2, reserved("cingulate"));
+        routed_json(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, json!({})).await;
+        let mut completed = rig.surface.watches.completed.subscribe();
+        rig.open(1, 1, json!({})).await;
+        let base = rig.notice(1, 1, 1).await;
+        rig.dispatch(2, 2, FrameType::Request, "connectors.watch", json!({}))
+            .await;
+        let initial_connector = rig.next().await;
+        assert_eq!(initial_connector.header.ty, FrameType::StreamData);
+        assert_eq!(initial_connector.header.corr, 2);
+        let initial_connector: serde_json::Value =
+            serde_json::from_slice(&initial_connector.body).unwrap();
+        assert_eq!(initial_connector["seq"], 1);
+
+        let incarnation = rig.store.credential_incarnation(id).unwrap();
+        let report = |store: &EncryptedStore, link| {
+            assert!(store
+                .report_condition_in_incarnation(
+                    id,
+                    1,
+                    &incarnation,
+                    ConditionReport {
+                        reason: "provider_verification_required",
+                        provider_status: 403,
+                        action_url: Some(link)
+                    },
+                    AuditCtx::route_admin(AuditOp::ReportCondition, "condition-reporter"),
+                    AuthEventPrincipal::Reserved("condition-reporter"),
+                )
+                .unwrap());
+        };
+        async fn wait_for_snapshots(completed: &mut tokio::sync::watch::Receiver<u64>, count: u64) {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                completed.wait_for(|seen| *seen >= count),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let first_link = super::consumer_condition_tests::verification_link();
+        wait_for_snapshots(&mut completed, 2).await;
+        report(&rig.store, first_link.as_str());
+        wait_for_snapshots(&mut completed, 4).await;
+        let mut notices = std::collections::BTreeMap::new();
+        while let Ok(frame) = rig.rx.try_recv() {
+            assert_eq!(frame.header.ty, FrameType::StreamData);
+            let notice: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+            assert_eq!(notice["seq"], 2);
+            assert!(notices.insert(frame.header.corr, notice).is_none());
+        }
+        assert_eq!(notices.len(), 2);
+        assert_ne!(notices[&1]["view"], base["view"]);
+        assert_eq!(notices[&1]["keys"], base["keys"]);
+        assert_eq!(notices[&1].as_object().unwrap().len(), 5);
+        assert_ne!(notices[&2]["version"], initial_connector["version"]);
+        let before = routed_reply(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, json!({})).await;
+
+        let next_link = format!("{first_link}&next=1");
+        report(&rig.store, next_link.as_str());
+        wait_for_snapshots(&mut completed, 6).await;
+        let frame = rig.rx.try_recv().unwrap();
+        assert_eq!(frame.header.ty, FrameType::StreamData);
+        assert_eq!(frame.header.corr, 2);
+        let notice: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        assert_eq!(notice["seq"], 3);
+        assert_eq!(notice.as_object().unwrap().len(), 4);
+        assert_ne!(notice["version"], notices[&2]["version"]);
+        assert!(
+            rig.rx.try_recv().is_err(),
+            "link-only change sent a scoped notice"
+        );
+        assert_eq!(
+            routed_reply(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, json!({})).await,
+            before
+        );
+        let list = routed_json(&rig.surface, &rig.admin, 2, "connectors.list", json!({})).await;
+        assert_eq!(notice["version"], list["result"]["version"]);
+        assert_eq!(
+            list["result"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .unwrap()["condition"]["action_url"],
+            next_link
+        );
+    }
+
+    #[tokio::test]
     async fn watch_scoped_token_refresh_is_quiet() {
         let mut rig = Rig::new();
         let record = roster_oauth_record();

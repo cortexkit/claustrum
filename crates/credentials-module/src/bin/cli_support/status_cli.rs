@@ -97,10 +97,18 @@ pub(super) fn request_admin_status_with_schema(
     };
     let mut result =
         credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false);
-    credentials_core::admin_ops::attach_remote_credentials(
+    let remote = EncryptedStore::remote_inventory_read_only(&db).map_err(CliError::Store)?;
+    credentials_core::admin_ops::attach_remote_credentials(&mut result, &remote);
+    let read_condition = |id: &str, incarnation: &str| {
+        credentials_core::store::condition_read_only(&db, id, incarnation)
+    };
+    credentials_core::admin_ops::attach_login_conditions(
         &mut result,
-        &EncryptedStore::remote_inventory_read_only(&db).map_err(CliError::Store)?,
-    );
+        &remote,
+        read_condition,
+        read_condition,
+    )
+    .map_err(CliError::Store)?;
     if let Ok(key) = resolve_store_key(global) {
         if let Ok(plans) = credentials_core::store::detected_plans_read_only(&db, &key) {
             credentials_core::admin_ops::attach_detected_plans(&mut result, &plans);
@@ -329,7 +337,19 @@ pub(super) fn render_inventory_row(
             format!("  method=gateway  base_url={base_url}  headers={headers}")
         })
         .unwrap_or_default();
-    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{plan}{creator}{gateway}")
+    let condition = entry.and_then(inventory_condition_text).unwrap_or_default();
+    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{plan}{creator}{gateway}{condition}")
+}
+
+fn inventory_condition_text(row: &serde_json::Value) -> Option<String> {
+    let condition = &row["condition"];
+    let reason = condition["reason"].as_str()?;
+    let since = condition["since_ms"].as_u64()?;
+    let link = condition["action_url"]
+        .as_str()
+        .map(|link| format!("  action_url={link}"))
+        .unwrap_or_default();
+    Some(format!("  condition={reason} since_ms={since}{link}"))
 }
 
 fn inventory_has_plan(result: &serde_json::Value) -> bool {
@@ -347,6 +367,14 @@ fn print_inventory(rows: &[InventoryRow], result: &serde_json::Value) {
     println!("STATE          VER   CREDENTIAL  CATEGORIES  PROVIDERS{plan_header}");
     for row in rows {
         println!("{}", render_inventory_row(row, result));
+    }
+    if let Some(remote) = result["remote_credentials"].as_array() {
+        for row in remote {
+            if let (Some(id), Some(condition)) = (row["id"].as_str(), inventory_condition_text(row))
+            {
+                println!("shared copy   {id}{condition}  (clear at the home vault)");
+            }
+        }
     }
     if result["credentials"]
         .as_array()
@@ -759,6 +787,13 @@ fn inventory_json_rows(
                     .copied()
                     .flatten()
                     .map(|method| method.as_str());
+                let condition = entry.and_then(|row| row["condition"].as_object()).map(|condition| {
+                    serde_json::json!({
+                        "reason": condition.get("reason"),
+                        "since_ms": condition.get("since_ms"),
+                        "action_url": condition.get("action_url"),
+                    })
+                });
                 let mut row = serde_json::json!({
                     "id": id,
                     "state": state,
@@ -773,6 +808,7 @@ fn inventory_json_rows(
                     "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "plan_tier_since_ms": entry.and_then(|row| row.get("plan_tier_since_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,
+                    "condition": condition,
                 });
                 if let Some(gateway) = entry.filter(|row| row.get("base_url").is_some()) {
                     row["base_url"] = gateway["base_url"].clone();

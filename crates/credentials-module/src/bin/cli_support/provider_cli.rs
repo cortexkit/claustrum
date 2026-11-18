@@ -10,8 +10,23 @@ use super::{
     catalog_default_provider_ids, check_cli_provider_ids, commit_admin, help_verb, optional,
     parse_inventory, provider_deposit_error, provider_id_flags, request_admin_status, required,
     set_providers_op, store_path, AdminOpBody, CliError, GlobalArgs, ParsedOptions,
-    SetProvidersMode, StoreOpError, ADMIN_OP_SCHEMA_V2, ADMIN_OP_SCHEMA_V3,
+    SetProvidersMode, StoreOpError, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2, ADMIN_OP_SCHEMA_V3,
 };
+
+pub(super) fn cmd_clear_condition(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let reply = commit_admin(
+        global,
+        AdminOpBody::ClearCondition {
+            v: ADMIN_OP_SCHEMA_V1,
+            credential_id: required(args, "--id")?,
+        },
+    )?;
+    let cleared = reply["cleared"].as_bool().ok_or_else(|| {
+        CliError::StatusReportInvalid("clear-condition returned an invalid result".into())
+    })?;
+    println!("cleared={cleared}");
+    Ok(())
+}
 
 pub(super) fn cmd_set_plan(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;

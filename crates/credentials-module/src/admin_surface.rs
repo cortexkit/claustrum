@@ -2636,6 +2636,7 @@ mod tests {
             "set_category",
             "set_providers",
             "set_plan",
+            "clear_condition",
             "reclassify",
             "approval",
             "status",

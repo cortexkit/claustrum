@@ -52,8 +52,8 @@ mod module_secret_cli;
 mod provider_cli;
 
 use provider_cli::{
-    cmd_provider, cmd_provider_report, cmd_set_plan, cmd_set_providers, finish_provider_deposit,
-    print_missing_provider_note, provider_set_op,
+    cmd_clear_condition, cmd_provider, cmd_provider_report, cmd_set_plan, cmd_set_providers,
+    finish_provider_deposit, print_missing_provider_note, provider_set_op,
 };
 
 #[cfg(test)]
@@ -297,6 +297,9 @@ impl std::fmt::Display for CliError {
                  verify --key-path points to an existing operator key file"
             ),
             CliError::MasterKey(e) => write!(f, "master key: {e}"),
+            CliError::Store(StoreOpError::ConditionHomeOwned) => {
+                f.write_str("condition_home_owned/permanent")
+            }
             CliError::Store(e) => write!(f, "{e}"),
             CliError::StoreOpen(e) => write!(f, "{e}"),
             CliError::Io(m) => write!(f, "{m}"),
@@ -463,6 +466,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "set-providers" => cmd_set_providers(&global, &args),
         "provider" => cmd_provider(&global, &args, options),
         "set-plan" => cmd_set_plan(&global, &args),
+        "clear-condition" => cmd_clear_condition(&global, &args),
         "reclassify" => cmd_reclassify(&global, &args),
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
@@ -614,6 +618,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         "set-category" => &["--set", "--add", "--remove"],
         "set-providers" => &["--id"],
         "set-plan" => &["--id", "--tier", "--since"],
+        "clear-condition" => &["--id"],
         "login" => &[
             "--provider",
             "--approve-on",
@@ -796,6 +801,7 @@ fn usage_short() -> String {
          set-category        replace/add/remove authorization categories\n\
            set-providers       replace/add/remove catalog provider ids\n\
            set-plan            set/clear a subscription tier and optional start date\n\
+           clear-condition     clear a provider login condition\n\
           reclassify          apply registry category defaults atomically\n\
         mint-handle         mint a capability handle for a credential\n\
         revoke-handle       revoke one capability handle\n\
@@ -966,6 +972,14 @@ fn help_verb(verb: &str) -> String {
              A bare date means midnight UTC. The start must be positive and not future.\n\
              --since requires --tier; omitting it clears any previous start date."
         }
+        "clear-condition" => {
+            "ck auth clear-condition --id <credential-id>\n\
+             \n\
+             \x20 --id <credential-id>  login whose condition is cleared\n\
+             \n\
+             Prints cleared=true if a condition was removed, or cleared=false if none\n\
+             was set. Clear a shared copy's condition at its home vault."
+        }
         "set-providers" => {
             "ck auth set-providers --id <credential-id> (--add | --remove | --set)\n\
              \x20                     <provider-id>...\n\
@@ -1081,8 +1095,8 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Vault health + per-credential inventory (no secrets) — run this when the health\n\
-             table says degraded. Reads the RUNNING daemon when one is up, else the offline\n\
-             store."
+             table says degraded. Shows provider login conditions and links when set.\n\
+             Reads the running daemon when one is up, otherwise the offline store."
         }
         "list" => {
             "ck auth list [--json]\n\
@@ -1098,6 +1112,9 @@ fn help_verb(verb: &str) -> String {
               provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
               Rows also carry provider (service name), incarnation and\n\
               plan_tier_observed_at_ms and plan_tier_since_ms (null when unknown).\n\
+             JSON lists local rows only. condition is null when unset, otherwise an\n\
+             object with reason, since_ms and action_url (null when absent). The human\n\
+             table also shows conditions on shared copies.\n\
              auth_method is apikey, chatgpt, antigravity, oauth or gateway, and null when the\n\
              credential has no subscription or API plane. plan_tier and plan_tier_source\n\
              are null when unset; creator is null when none. No payloads, tokens,\n\

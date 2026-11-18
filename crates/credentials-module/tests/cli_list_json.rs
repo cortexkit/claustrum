@@ -145,6 +145,34 @@ impl JsonVault {
             .cloned()
             .expect("credentials is an array")
     }
+
+    fn store(&self) -> EncryptedStore {
+        let descriptor = StorageDescriptor {
+            module_id: credentials_core::contract::MODULE_ID.into(),
+            storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: self
+                    .data_dir
+                    .join("store.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        };
+        let key = credentials_core::resolver::resolve(
+            &credentials_core::resolver::ResolverConfig {
+                data_dir: self.data_dir.clone(),
+                source: credentials_core::resolver::KeySource::OperatorPath {
+                    path: self.key_path.clone(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+        let store = open_sqlite(&descriptor).unwrap();
+        EncryptedStore::migrate(&store).unwrap();
+        EncryptedStore::open(store, key).unwrap()
+    }
 }
 
 /// Dropping the isolation from `cli()` would let a test that omits `--data-dir`
@@ -154,10 +182,10 @@ fn every_cli_command_runs_in_the_isolated_home() {
     isolated_cli::assert_isolated(&cli());
 }
 
-/// The thirteen keys every `--json` row carries, in the documented order. Pinned
+/// The keys every `--json` row carries. Pinned
 /// literally so a later field (a handle, a token, an email) cannot slip into
 /// the script surface without reddening here first.
-const JSON_ROW_KEYS: [&str; 13] = [
+const JSON_ROW_KEYS: [&str; 14] = [
     "id",
     "state",
     "record_version",
@@ -171,7 +199,166 @@ const JSON_ROW_KEYS: [&str; 13] = [
     "incarnation",
     "plan_tier_observed_at_ms",
     "plan_tier_since_ms",
+    "condition",
 ];
+
+#[test]
+fn login_condition_inventory_and_clear_condition_work_without_daemon() {
+    use credentials_core::{
+        audit::{AuditCtx, AuditOp},
+        federation::NewRemoteRecord,
+        record::RecordIdentity,
+        store::{AuthEventPrincipal, ConditionReport},
+        OAuthCredential, VaultRecord,
+    };
+    use serde_json::json;
+
+    const LOCAL: &str = "oauth:antigravity:cli";
+    const COPY: &str = "oauth:antigravity:cli-copy";
+    const LINK: &str = "https://accounts.google.com/check?mark=cli";
+    let vault = JsonVault::new("login-condition-inventory");
+    vault.bootstrap();
+    let store = vault.store();
+    let record = VaultRecord::new_oauth(
+        "fixture",
+        "antigravity",
+        OAuthCredential {
+            access_token: "test-access".to_owned().into(),
+            refresh_token: "test-refresh".to_owned().into(),
+            expires_at_ms: Some(4_102_444_800_000),
+            token_url: "https://accounts.google.com/token".into(),
+            client_id: None,
+            client_secret: None,
+            scopes: vec![],
+        },
+        b"test-access".to_vec(),
+    );
+    store.create(LOCAL, &record).unwrap();
+    let local_incarnation = store.credential_incarnation(LOCAL).unwrap();
+    assert!(store
+        .report_condition_in_incarnation(
+            LOCAL,
+            1,
+            &local_incarnation,
+            ConditionReport {
+                reason: "provider_verification_required",
+                provider_status: 403,
+                action_url: Some(LINK)
+            },
+            AuditCtx::route_admin(AuditOp::ReportCondition, "cli-reader"),
+            AuthEventPrincipal::Reserved("cli-reader"),
+        )
+        .unwrap());
+    let since = store
+        .credential_condition(LOCAL, &local_incarnation)
+        .unwrap()
+        .unwrap()
+        .since_ms;
+    let copy = store
+        .remote_add_audited(&NewRemoteRecord {
+            credential_id: COPY.into(),
+            home_member: "fed-computer:22222222222222222222222222222222".into(),
+            refresh_adapter: Some("antigravity".into()),
+            detected_plan: None,
+            identity: RecordIdentity::default(),
+            home_version: 1,
+            categories: vec![],
+        })
+        .unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    db.execute("INSERT INTO remote_record_conditions (credential_id, incarnation, reason, since_ms, action_url) VALUES (?1, ?2, 'provider_verification_required', 19, ?3)", (COPY, copy.incarnation, LINK)).unwrap();
+    for cmd in ["status", "list"] {
+        let out = vault.run(&[cmd]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.lines().any(|line| line.contains(LOCAL)
+            && line.contains(&format!(
+                "condition=provider_verification_required since_ms={since}"
+            ))
+            && line.contains(LINK)));
+        assert!(text.lines().any(|line| line.contains(COPY)
+            && line.contains("condition=provider_verification_required since_ms=19")
+            && line.contains(LINK)
+            && line.contains("clear at the home vault")));
+    }
+    let rows = vault.list_json();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], LOCAL);
+    assert_eq!(
+        rows[0]["condition"],
+        json!({"reason":"provider_verification_required", "since_ms":since, "action_url":LINK})
+    );
+    db.execute(
+        "UPDATE credential_conditions SET action_url = NULL WHERE credential_id = ?1",
+        [LOCAL],
+    )
+    .unwrap();
+    assert_eq!(
+        vault.list_json()[0]["condition"],
+        json!({"reason":"provider_verification_required", "since_ms":since, "action_url":null})
+    );
+
+    for (id, error) in [
+        (COPY, "condition_home_owned/permanent"),
+        ("unknown", "credential not found"),
+    ] {
+        let out = vault.run(&["clear-condition", "--id", id]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8(out.stderr).unwrap().contains(error));
+    }
+    for expected in ["cleared=true\n", "cleared=false\n"] {
+        let out = vault.run(&["clear-condition", "--id", LOCAL]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
+    }
+    assert_eq!(
+        vault.list_json()[0].get("condition"),
+        Some(&serde_json::Value::Null)
+    );
+}
+
+#[test]
+fn login_condition_inventory_reads_schema_before_condition_tables_without_migrating() {
+    use credentials_core::store::CONDITION_SCHEMA_VERSION;
+
+    let vault = JsonVault::new("inventory-before-login-conditions");
+    vault.bootstrap();
+    vault.import_oauth("oauth:anthropic", "before-conditions");
+    let db = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    db.execute_batch("DROP TABLE credential_conditions; DROP TABLE remote_record_conditions;")
+        .unwrap();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM cortexkit_schema_version WHERE namespace = 'credentials' AND version = ?1",
+            [CONDITION_SCHEMA_VERSION]
+        )
+        .unwrap(),
+        1
+    );
+    let rows = vault.list_json();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "oauth:anthropic");
+    assert_eq!(rows[0].get("condition"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        db.query_row(
+            "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = 'credentials'",
+            [],
+            |row| row.get::<_, u32>(0)
+        )
+        .unwrap(),
+        CONDITION_SCHEMA_VERSION - 1
+    );
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('credential_conditions','remote_record_conditions')", [], |row| row.get::<_, u32>(0)).unwrap(), 0);
+}
 
 fn seed_three_credentials(vault: &JsonVault) {
     vault.bootstrap();
@@ -204,7 +391,7 @@ fn seed_three_credentials(vault: &JsonVault) {
 /// guard: a new field lands here first, and anything secret (a token, handle,
 /// or email) fails this test before it can reach a script.
 #[test]
-fn list_json_reports_the_exact_thirteen_key_set_sorted_by_id() {
+fn list_json_reports_the_exact_key_set_sorted_by_id() {
     let vault = JsonVault::new("list-json-keys");
     seed_three_credentials(&vault);
 

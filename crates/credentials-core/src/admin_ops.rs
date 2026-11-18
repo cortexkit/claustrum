@@ -313,6 +313,8 @@ pub enum AdminOpBody {
         )]
         since_ms: Option<serde_json::Value>,
     },
+    #[serde(rename = "admin.clear_condition")]
+    ClearCondition { v: u32, credential_id: String },
     #[serde(rename = "admin.reclassify")]
     Reclassify { v: u32, force: bool },
     /// Record that a NAMED APPROVER approved a specific artifact, identified by the
@@ -848,6 +850,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("plan_tier", plan_tier)
                 .field("since_ms", since_ms)
                 .finish(),
+            AdminOpBody::ClearCondition { v, credential_id } => f
+                .debug_struct("ClearCondition")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .finish(),
             AdminOpBody::Reclassify { v, force } => f
                 .debug_struct("Reclassify")
                 .field("v", v)
@@ -1091,6 +1098,7 @@ impl AdminOpBody {
             | AdminOpBody::SetCategory { v, .. }
             | AdminOpBody::SetProviders { v, .. }
             | AdminOpBody::SetPlan { v, .. }
+            | AdminOpBody::ClearCondition { v, .. }
             | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
             | AdminOpBody::EnrollApprove { v, .. }
@@ -1215,6 +1223,7 @@ impl AdminOpBody {
             | AdminOpBody::GrantCreate { .. }
             | AdminOpBody::GrantRevoke { .. }
             | AdminOpBody::Approval { .. }
+            | AdminOpBody::ClearCondition { .. }
             | AdminOpBody::Status { .. } => ADMIN_OP_SCHEMA_V1,
         }
     }
@@ -1255,6 +1264,7 @@ impl AdminOpBody {
                 credential_id: id, ..
             }
             | AdminOpBody::SetPlan { credential_id: id, .. }
+            | AdminOpBody::ClearCondition { credential_id: id, .. }
             | AdminOpBody::SetProviders {
                 credential_id: id, ..
             }
@@ -1380,6 +1390,7 @@ impl AdminOpBody {
             AdminOpBody::SetCategory { .. } => "admin.set_category",
             AdminOpBody::SetProviders { .. } => "admin.set_providers",
             AdminOpBody::SetPlan { .. } => "admin.set_plan",
+            AdminOpBody::ClearCondition { .. } => "admin.clear_condition",
             AdminOpBody::Reclassify { .. } => "admin.reclassify",
             AdminOpBody::Approval { .. } => "admin.approval",
             AdminOpBody::Status { .. } => "admin.status",
@@ -1460,6 +1471,7 @@ impl AdminOpBody {
             | AdminOpBody::SetCategory { .. }
             | AdminOpBody::SetProviders { .. }
             | AdminOpBody::SetPlan { .. }
+            | AdminOpBody::ClearCondition { .. }
             | AdminOpBody::Reclassify { .. }
             | AdminOpBody::Approval { .. }
             | AdminOpBody::Status { .. }
@@ -2163,6 +2175,13 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({ "plan_tier": resulting }))
         }
+        AdminOpBody::ClearCondition { credential_id, .. } => {
+            let cleared = store.clear_condition_audited(
+                &credential_id,
+                AuditCtx::route_admin(AuditOp::ClearCondition, actor),
+            )?;
+            Ok(serde_json::json!({ "cleared": cleared }))
+        }
         AdminOpBody::Reclassify { force, .. } => {
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
@@ -2405,7 +2424,14 @@ pub fn apply(
             let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
             let mut result = status_result(&metas, &grants, open_intents, store.is_fenced_out());
-            attach_remote_credentials(&mut result, &store.remote_inventory()?);
+            let remote = store.remote_inventory()?;
+            attach_remote_credentials(&mut result, &remote);
+            attach_login_conditions(
+                &mut result,
+                &remote,
+                |id, incarnation| store.credential_condition(id, incarnation),
+                |id, incarnation| store.remote_record_condition(id, incarnation),
+            )?;
             if let Ok(plans) = store.detected_plans() {
                 attach_detected_plans(&mut result, &plans);
             }
@@ -2567,6 +2593,53 @@ pub fn attach_remote_credentials(
         .collect::<Vec<_>>());
 }
 
+/// Add only conditions that still belong to the local or shared row's lifetime.
+pub fn attach_login_conditions(
+    result: &mut serde_json::Value,
+    remote: &[crate::federation::RemoteInventoryRow],
+    read_local: impl Fn(&str, &str) -> Result<Option<crate::store::Condition>, StoreOpError>,
+    read_remote: impl Fn(&str, &str) -> Result<Option<crate::store::Condition>, StoreOpError>,
+) -> Result<(), StoreOpError> {
+    fn attach(row: &mut serde_json::Value, condition: Option<crate::store::Condition>) {
+        if let Some(condition) = condition {
+            let mut value = serde_json::json!({
+                "reason": condition.reason,
+                "since_ms": condition.since_ms,
+            });
+            if let Some(link) = condition.action_url {
+                value["action_url"] = serde_json::json!(link);
+            }
+            row["condition"] = value;
+        }
+    }
+
+    if let Some(rows) = result
+        .get_mut("credentials")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for row in rows {
+            if let (Some(id), Some(incarnation)) = (row["id"].as_str(), row["incarnation"].as_str())
+            {
+                let condition = read_local(id, incarnation)?;
+                attach(row, condition);
+            }
+        }
+    }
+    if let Some(rows) = result
+        .get_mut("remote_credentials")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for (row, entry) in rows.iter_mut().zip(remote) {
+            let record = &entry.record;
+            attach(
+                row,
+                read_remote(&record.credential_id, &record.incarnation)?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build the status report shared by the authenticated route and lease-free CLI fallback.
 pub fn status_result(
     metas: &[(String, RecordMeta)],
@@ -2726,7 +2799,9 @@ mod tests {
     #[test]
     fn status_inventory_non_gateway_row_keeps_its_exact_bytes() {
         // Category membership alone must not add gateway fields to an ordinary key.
-        let result = status_result(&[("apikey:custom".into(), inventory_meta())], &[], 0, false);
+        let mut result =
+            status_result(&[("apikey:custom".into(), inventory_meta())], &[], 0, false);
+        attach_login_conditions(&mut result, &[], |_, _| Ok(None), |_, _| unreachable!()).unwrap();
         assert_eq!(
             serde_json::to_string(&result["credentials"][0]).unwrap(),
             r#"{"categories":["llm-gateway"],"id":"apikey:custom","incarnation":"fixture-incarnation","plan_tier":null,"plan_tier_observed_at_ms":null,"plan_tier_since_ms":null,"provider":null,"provider_ids":[],"record_version":1,"state":"active"}"#
@@ -3322,6 +3397,15 @@ mod admin_schema_v2_tests {
                     since_ms: None,
                 },
                 v2,
+                Some("id"),
+            ),
+            (
+                "ClearCondition",
+                AdminOpBody::ClearCondition {
+                    v: v1,
+                    credential_id: "id".into(),
+                },
+                v1,
                 Some("id"),
             ),
             (

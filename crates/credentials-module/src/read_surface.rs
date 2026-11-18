@@ -302,6 +302,8 @@ pub struct ListScopedCredential {
     pub plan_tier_observed_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_tier_since_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<ScopedCondition>,
     pub categories: Vec<String>,
     #[serde(rename = "type")]
     pub credential_type: String,
@@ -356,6 +358,14 @@ pub struct ListScopedCredential {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
 }
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ScopedCondition {
+    pub reason: String,
+    pub since_ms: u64,
+}
+
+type ScopedConditions = HashMap<String, (String, ScopedCondition)>;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GrantTuple {
@@ -2378,11 +2388,16 @@ pub(crate) fn list_scoped_view(
                 .map(|time| time.to_string())
                 .as_deref(),
         );
-        // Undated tiers retain their old digest. Byte 3 marks a dated extension;
-        // the following optional provider-card frame always starts with 0 or 1.
+        // Absent extensions add no bytes. The following optional fusiform_provider_id
+        // always starts with its presence byte, 0 or 1.
         if let Some(since_ms) = credential.plan_tier_since_ms {
             digest_input.push(3);
             push_string(&mut digest_input, &since_ms.to_string());
+        }
+        if let Some(condition) = &credential.condition {
+            digest_input.push(4);
+            push_string(&mut digest_input, &condition.reason);
+            push_string(&mut digest_input, &condition.since_ms.to_string());
         }
         push_optional_string(
             &mut digest_input,
@@ -2410,13 +2425,14 @@ pub(crate) fn list_scoped_view(
 
 #[cfg(test)]
 pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
-    project_list_scoped_with_providers(snapshot, &[], &HashMap::new())
+    project_list_scoped_with_providers(snapshot, &[], &HashMap::new(), HashMap::new())
 }
 
 fn project_list_scoped_with_providers(
     snapshot: ScopedListSnapshot,
     providers: &[credentials_core::store::RegisteredProvider],
     gateways: &HashMap<String, credentials_core::StoredGatewaySettings>,
+    mut conditions: ScopedConditions,
 ) -> ListScopedResult {
     use credentials_core::ListAuthMethod;
     let mut grant_tuples: Vec<GrantTuple> = snapshot
@@ -2460,6 +2476,10 @@ fn project_list_scoped_with_providers(
                 hosts: ScopedDescriptor::for_record(&row.id, login_adapter, gateway, providers)
                     .map(ScopedDescriptor::into_hosts),
                 provider: row.provider,
+                condition: conditions
+                    .remove(&row.id)
+                    .filter(|(incarnation, _)| incarnation == &row.incarnation)
+                    .map(|(_, condition)| condition),
                 incarnation: row.incarnation,
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
                 plan_tier_since_ms: row.plan_tier_since_ms,
@@ -3954,7 +3974,7 @@ impl ReadSurface {
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id, &caller.declared)
             .map_err(|_| ReadError::StoreError)?;
-        self.add_remote_rows(&mut snapshot)?;
+        let conditions = self.add_remote_rows_and_read_conditions(&mut snapshot)?;
         // A grant that reaches the transfer key (through a category it was put in)
         // lists nothing for it.
         snapshot.rows.retain(|row| {
@@ -3974,7 +3994,8 @@ impl ReadSurface {
             .store()
             .registered_providers()
             .map_err(|_| ReadError::StoreError)?;
-        let result = project_list_scoped_with_providers(snapshot, &providers, &gateways);
+        let result =
+            project_list_scoped_with_providers(snapshot, &providers, &gateways, conditions);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -4019,7 +4040,7 @@ impl ReadSurface {
             .store()
             .watch_scoped_snapshot(kind, &id, &caller.declared)
             .map_err(|_| ReadError::StoreError)?;
-        self.add_remote_rows(&mut snapshot)?;
+        let conditions = self.add_remote_rows_and_read_conditions(&mut snapshot)?;
         // The rows take the same fence as `list_scoped`, so no watcher's view shows the
         // transfer key. The held-key digest admits it for callosum alone, so a new or
         // rotated transfer key moves callosum's digest and it re-reads the key to announce
@@ -4044,7 +4065,8 @@ impl ReadSurface {
             .registered_providers()
             .map_err(|_| ReadError::StoreError)?;
         let gateways = self.scoped_gateway_settings(&mut snapshot)?;
-        let view = project_list_scoped_with_providers(snapshot, &providers, &gateways).view;
+        let view =
+            project_list_scoped_with_providers(snapshot, &providers, &gateways, conditions).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
         input.push(1);
@@ -4092,20 +4114,57 @@ impl ReadSurface {
     }
 
     /// Add the rows for every remote record the snapshot's grants reach, read from this
-    /// vault's own storage (no home call), and keep the listing in id order as the
-    /// local query returns it.
-    fn add_remote_rows(&self, snapshot: &mut ScopedListSnapshot) -> Result<(), ReadError> {
+    /// vault's own storage (no home call). Like identity, conditions are disclosed
+    /// only on rows covered by read or list, and must belong to the listed lifetime.
+    fn add_remote_rows_and_read_conditions(
+        &self,
+        snapshot: &mut ScopedListSnapshot,
+    ) -> Result<ScopedConditions, ReadError> {
         let remote = self
             .remote
             .scoped_rows(&snapshot.grants)
             .map_err(|_| ReadError::StoreError)?;
+        let store = self.engine.store();
+        let mut conditions = HashMap::new();
+        for (row, is_remote) in snapshot
+            .rows
+            .iter()
+            .map(|row| (row, false))
+            .chain(remote.iter().map(|row| (row, true)))
+        {
+            if !row
+                .operations
+                .iter()
+                .any(|op| matches!(op, GrantOperation::Read | GrantOperation::List))
+            {
+                continue;
+            }
+            let condition = if is_remote {
+                store.remote_record_condition(&row.id, &row.incarnation)
+            } else {
+                store.credential_condition(&row.id, &row.incarnation)
+            }
+            .map_err(|_| ReadError::StoreError)?;
+            if let Some(condition) = condition {
+                conditions.insert(
+                    row.id.clone(),
+                    (
+                        row.incarnation.clone(),
+                        ScopedCondition {
+                            reason: condition.reason,
+                            since_ms: condition.since_ms,
+                        },
+                    ),
+                );
+            }
+        }
         if !remote.is_empty() {
             snapshot.rows.extend(remote);
             snapshot
                 .rows
                 .sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
         }
-        Ok(())
+        Ok(conditions)
     }
 
     /// The remote record a principal-scoped `credential_id` address names, if it is one.
@@ -5649,6 +5708,7 @@ mod error_class_tests {
         let rule = credentials_core::provider_ids::ProviderIdRule::Charset;
         let store_errors = [
             StoreOpError::InvalidCredentialId,
+            StoreOpError::ConditionHomeOwned,
             StoreOpError::InvalidCategoryName,
             StoreOpError::InvalidServiceName {
                 service: String::new(),
@@ -5854,10 +5914,15 @@ mod list_scoped_tests {
                 rows: vec![source],
                 grants: vec![],
             };
-            let before =
-                project_list_scoped_with_providers(snapshot.clone(), &providers, &HashMap::new());
+            let before = project_list_scoped_with_providers(
+                snapshot.clone(),
+                &providers,
+                &HashMap::new(),
+                HashMap::new(),
+            );
             gateways.insert(id.into(), gateway);
-            let after = project_list_scoped_with_providers(snapshot, &providers, &gateways);
+            let after =
+                project_list_scoped_with_providers(snapshot, &providers, &gateways, HashMap::new());
             assert_eq!(after.credentials[0].hosts, Some(vec!["[::1]".into()]));
             assert_eq!(after.credentials[0].serves, ["moonshot"]);
             assert_eq!(after.credentials[0].fusiform_provider_id, None);
@@ -5868,8 +5933,18 @@ mod list_scoped_tests {
             grants: vec![],
         };
         assert_eq!(
-            project_list_scoped_with_providers(ordinary.clone(), &providers, &gateways),
-            project_list_scoped_with_providers(ordinary, &providers, &HashMap::new()),
+            project_list_scoped_with_providers(
+                ordinary.clone(),
+                &providers,
+                &gateways,
+                HashMap::new()
+            ),
+            project_list_scoped_with_providers(
+                ordinary,
+                &providers,
+                &HashMap::new(),
+                HashMap::new()
+            ),
         );
     }
 
@@ -6105,6 +6180,7 @@ mod list_scoped_tests {
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
             plan_tier_since_ms: None,
+            condition: None,
             id: "oauth:x".into(),
             categories: vec!["llm-provider".into()],
             credential_type: "oauth".into(),
@@ -6317,7 +6393,12 @@ mod list_scoped_tests {
                 .collect(),
             grants: vec![],
         };
-        let result = project_list_scoped_with_providers(snapshot(), &providers, &HashMap::new());
+        let result = project_list_scoped_with_providers(
+            snapshot(),
+            &providers,
+            &HashMap::new(),
+            HashMap::new(),
+        );
         for (id, expected) in cases {
             let credential = result.credentials.iter().find(|row| row.id == id).unwrap();
             assert_eq!(credential.fusiform_provider_id.as_deref(), expected, "{id}");
@@ -6330,7 +6411,12 @@ mod list_scoped_tests {
             .unwrap();
         assert_eq!(custom.hosts, None, "an id does not require a descriptor");
         providers[0].fusiform_provider_id = None;
-        let cleared = project_list_scoped_with_providers(snapshot(), &providers, &HashMap::new());
+        let cleared = project_list_scoped_with_providers(
+            snapshot(),
+            &providers,
+            &HashMap::new(),
+            HashMap::new(),
+        );
         assert_eq!(
             cleared
                 .credentials
@@ -6394,6 +6480,7 @@ mod list_scoped_tests {
                 string(&mut bytes, "0123456789abcdef0123456789abcdef");
                 bytes.push(1);
                 string(&mut bytes, "42");
+                let extension_at = bytes.len();
                 match fusiform_id {
                     None => bytes.push(0),
                     Some(id) => {
@@ -6442,6 +6529,29 @@ mod list_scoped_tests {
                     expected,
                     "clearing the date restores the independently assembled pre-date digest"
                 );
+                credential.condition = Some(ScopedCondition {
+                    reason: "provider_ineligible".into(),
+                    since_ms: 17,
+                });
+                for date in [None, Some(12)] {
+                    credential.plan_tier_since_ms = date;
+                    let mut extended = bytes[..extension_at].to_vec();
+                    if date.is_some() {
+                        extended.extend_from_slice(b"\x03\x00\x00\x00\x0212");
+                    }
+                    extended.extend_from_slice(
+                        b"\x04\x00\x00\x00\x13provider_ineligible\x00\x00\x00\x0217",
+                    );
+                    extended.extend_from_slice(&bytes[extension_at..]);
+                    let expected = base64::engine::general_purpose::STANDARD
+                        .encode(ring::digest::digest(&ring::digest::SHA256, &extended).as_ref());
+                    assert_eq!(
+                        list_scoped_view(std::slice::from_ref(&credential), &[]),
+                        expected
+                    );
+                }
+                credential.condition = None;
+                credential.plan_tier_since_ms = None;
                 assert!(views.insert(view), "every id/host frame must be distinct");
                 let wire = serde_json::to_value(&credential).unwrap();
                 if let Some(id) = fusiform_id {

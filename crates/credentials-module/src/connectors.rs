@@ -6,7 +6,7 @@ use credentials_core::{
     catalog::connector_metadata,
     plan_detection::{effective_plan, DetectedPlan},
     record::{RecordIdentity, RecordState},
-    store::EncryptedStore,
+    store::{Condition, EncryptedStore},
     CredentialKind,
 };
 use serde_json::{json, Value};
@@ -249,6 +249,16 @@ fn labels(
     }
 }
 
+fn attach_condition(row: &mut Value, condition: Option<Condition>) {
+    if let Some(condition) = condition {
+        let mut value = json!({"reason":condition.reason, "since_ms":condition.since_ms});
+        if let Some(link) = condition.action_url {
+            value["action_url"] = json!(link);
+        }
+        row["condition"] = value;
+    }
+}
+
 pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
     let error = |_| ReadError::StoreError;
     let runtime = store.connector_runtime_ids().map_err(error)?;
@@ -270,6 +280,7 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             continue;
         }
         let meta = store.meta(&id).map_err(error)?;
+        let incarnation = meta.incarnation.as_deref().ok_or(ReadError::StoreError)?;
         let permissions = store
             .connector_permission_ids(&id, &meta.categories)
             .map_err(error)?;
@@ -281,7 +292,7 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
         let mut value = row(
             &id,
             kind,
-            meta.incarnation.as_deref().ok_or(ReadError::StoreError)?,
+            incarnation,
             &meta.categories,
             (meta.state.as_str(), reason),
             permissions,
@@ -292,6 +303,12 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             &record.identity,
             meta.plan_tier,
             record.detected_plan.as_ref(),
+        );
+        attach_condition(
+            &mut value,
+            store
+                .credential_condition(&id, incarnation)
+                .map_err(error)?,
         );
         rows.push(value);
     }
@@ -322,6 +339,12 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
             &record.identity,
             entry.plan_tier,
             record.detected_plan.as_ref(),
+        );
+        attach_condition(
+            &mut value,
+            store
+                .remote_record_condition(&record.credential_id, &record.incarnation)
+                .map_err(error)?,
         );
         rows.push(value);
     }

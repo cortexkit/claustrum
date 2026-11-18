@@ -27,7 +27,19 @@ separate RFC 9180 implementation to open and reseal both success cases.
 
 The `ck-claustrum` test `bus_seal_open_samples_are_producer_generated_and_pinned`
 constructs the ciphertext using the Rust HPKE sender, executes the real daemon
-dispatcher, and checks both `cases.json` and `SHA256SUMS`. To regenerate, run
-that test with `CK_EMIT_BUS_SEAL_VECTORS=1` on the build server and return both
-generated files. Review the diff, then rerun the test without the flag. The
-checksum file covers `cases.json` and this README.
+dispatcher, and checks both `cases.json` and `SHA256SUMS`. To regenerate both
+files, run this from the repository root; the `--return-path` flags copy them
+back from the build server into this folder:
+
+```sh
+F=crates/credentials-module/tests/fixtures/bus-seal-v1
+ck motor run --cwd "$PWD" --return-path "$PWD/$F/cases.json" \
+  --return-path "$PWD/$F/SHA256SUMS" -- sh -c \
+  'CK_EMIT_BUS_SEAL_VECTORS=1 cargo test --locked -p credentials-module \
+     --bin ck-claustrum bus_seal_open_samples_are_producer_generated_and_pinned'
+```
+
+Review the diff, then run the same `cargo test` command without
+`CK_EMIT_BUS_SEAL_VECTORS=1`; it passes only if the files match what the code
+produces. The checksum file covers `cases.json` and this README, so editing the
+README means regenerating it the same way.

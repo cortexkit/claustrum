@@ -541,7 +541,7 @@ mod scoped_watch {
                 ("apikey:customdescriptor", Some(json!(["api.example.com"]))),
                 ("apikey:nodescriptor", None),
                 ("apikey:searxng", None),
-                ("apikey:typesafe", None),
+                ("apikey:typesafe", Some(json!(["api.typesafe.ai"]))),
                 ("apikey:kagi", None),
                 ("oauth:anthropic", None),
                 ("cookie:openai", None),

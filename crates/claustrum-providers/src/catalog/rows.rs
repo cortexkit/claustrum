@@ -1008,8 +1008,8 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
     ApiKeyProvider {
         key: "typesafe",
         fusiform_provider_id: Some("typesafe"),
-        auth: None,
-        hosts: &[],
+        auth: Some(BEARER_AUTH),
+        hosts: &["api.typesafe.ai"],
         hosts_doc: "https://docs.typesafe.ai/introduction/quickstart",
         invalid_key: None,
         default_provider_ids: &["typesafe"],

@@ -1341,7 +1341,6 @@ mod tests {
                 "vercel-ai-gateway",
                 "Fusiform links GitHub documentation; gateway requests use vercel.sh",
             ),
-            ("typesafe", "TypeSafe has no fixed receiving hosts yet"),
             (
                 "ainetcafe",
                 "ainetcafe's guides send K3 keys to its API host, microquickjs.com",
@@ -1834,10 +1833,6 @@ mod tests {
         (
             "searxng",
             "SearXNG is self-hosted, with instance-specific authentication and hosts",
-        ),
-        (
-            "typesafe",
-            "TypeSafe keys may belong to a deployment at a custom base URL",
         ),
     ];
 

@@ -940,6 +940,20 @@ mod get_scoped_tests {
             .unwrap();
     }
 
+    #[test]
+    fn typesafe_scoped_key_descriptor_has_receiving_host_and_bearer_auth() {
+        let descriptor = ScopedKeyDescriptor::for_id("apikey:typesafe", &[])
+            .expect("TypeSafe must have a scoped descriptor");
+        assert_eq!(
+            serde_json::to_value(descriptor).unwrap(),
+            json!({
+                "hosts": ["api.typesafe.ai"],
+                "auth": { "header": "authorization", "scheme": "bearer" },
+                "invalid_key": null
+            })
+        );
+    }
+
     fn openai_descriptor() -> Value {
         json!({
             "auth": {"header": "authorization", "scheme": "bearer"},
@@ -1365,7 +1379,14 @@ mod get_scoped_tests {
             ("apikey:nanogpt", null_evidence),
             ("apikey:openai:work", openai_descriptor()),
             ("apikey:searxng", json!({})),
-            ("apikey:typesafe", json!({})),
+            (
+                "apikey:typesafe",
+                json!({
+                    "auth": {"header": "authorization", "scheme": "bearer"},
+                    "hosts": ["api.typesafe.ai"],
+                    "invalid_key": null
+                }),
+            ),
             ("apikey:kagi", json!({})),
             ("apikey:customservice:work", json!({})),
             ("apikey:customdescriptor", registered_descriptor()),

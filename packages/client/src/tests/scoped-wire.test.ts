@@ -45,6 +45,7 @@ test('producer get_scoped success decodes through the real client method', async
       credentialId: 'oauth:anthropic',
       expiresAtMs: 4_102_444_800_000,
       recordVersion: 1,
+      hosts: ['api.anthropic.com'],
     })
     expect(requests).toEqual([{ credential_id: 'oauth:anthropic', enrollment_token: 'fixture-token', min_ttl_ms: 300_000 }])
   } finally {

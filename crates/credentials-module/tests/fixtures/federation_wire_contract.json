@@ -323,6 +323,9 @@
             "credential_id": "oauth:anthropic:fixture",
             "email": "fixture@example.invalid",
             "expires_at_ms": null,
+            "hosts": [
+              "api.anthropic.com"
+            ],
             "org_name": "Fixture Team",
             "payload": [
               102,
@@ -387,6 +390,9 @@
             "credential_id": "oauth:antigravity:fixture",
             "email": "fixture@example.invalid",
             "expires_at_ms": null,
+            "hosts": [
+              "daily-cloudcode-pa.googleapis.com"
+            ],
             "org_name": "Fixture Team",
             "payload": [
               102,
@@ -457,6 +463,9 @@
               "llm-provider"
             ],
             "email": "fixture@example.invalid",
+            "hosts": [
+              "api.anthropic.com"
+            ],
             "id": "oauth:anthropic:fixture",
             "incarnation": "00000000000000000000000000000001",
             "operations": [
@@ -481,6 +490,9 @@
               "llm-provider"
             ],
             "email": "fixture@example.invalid",
+            "hosts": [
+              "daily-cloudcode-pa.googleapis.com"
+            ],
             "id": "oauth:antigravity:fixture",
             "incarnation": "00000000000000000000000000000002",
             "operations": [
@@ -510,7 +522,7 @@
           }
         ],
         "grants": 2,
-        "view": "DoFc79tkbwoerldFvOCaQL413bsTZmdexRnDZSbUvqQ="
+        "view": "wcUNW/4BCdX94PrBG9cz19AMM5ucNDmzpxgU00fBsmQ="
       }
     },
     "refusal": {

@@ -29,6 +29,8 @@ test('remote Anthropic and Antigravity producer get replies decode', () => {
       accountId: `fixture-${row.adapter}-account`,
       email: 'fixture@example.invalid',
       orgName: 'Fixture Team',
+      // Each login's receiving host comes from the reading vault's own catalog.
+      hosts: [row.adapter === 'antigravity' ? 'daily-cloudcode-pa.googleapis.com' : 'api.anthropic.com'],
       ...(row.adapter === 'antigravity' ? { projectId: 'fixture-managed-project' } : {}),
     })
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the HOST every provider endpoint constant reaches.
+"""Pin provider endpoint hosts and the login catalog's receiving hosts.
 
 WHY A MANIFEST RATHER THAN MORE UNIT TESTS. Seven of these are pinned by a literal
 assertion in `refresh_adapters/mod.rs`; the rest were not, and as separate
@@ -48,6 +48,13 @@ CONST_RE = re.compile(
     r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"(https://[^"]+)"'
 )
 URL_RE = re.compile(r'"(https://[^"\s]+)"')
+LOGIN_CATALOG_RE = re.compile(
+    r'^pub const LOGIN_PROVIDERS:\s*&\[LoginProvider\]\s*=\s*&\[(.*?)^\];', re.M | re.S
+)
+LOGIN_ROW_RE = re.compile(r'^[ \t]*LoginProvider\s*\{(.*?)^[ \t]*\},', re.M | re.S)
+LOGIN_KEY_RE = re.compile(r'^[ \t]*key:\s*"([a-z0-9-]+)"\s*,', re.M)
+LOGIN_HOSTS_RE = re.compile(r'^[ \t]*hosts:\s*&\[([^\]]*)\]\s*,', re.M)
+HOST_LABEL_RE = re.compile(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?')
 # Standalone test modules and Cargo's feature-gated crash-cut binaries do not ship.
 TEST_ONLY_FILES = {
     "engine_tests.rs",
@@ -95,8 +102,34 @@ DOMAIN_MANIFEST = ROOT / "docs" / "domain-separators.txt"
 TEST_MOD_RE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+\w+\s*\{")
 
 
+def discover_login_hosts(text: str, rel: str) -> list[tuple[str, str, str]]:
+    """Pin literal receiving hosts, which consumers use before sending login tokens."""
+    catalog = LOGIN_CATALOG_RE.search(text)
+    if catalog is None:
+        return []
+    found = []
+    for row in LOGIN_ROW_RE.finditer(catalog[1]):
+        key = LOGIN_KEY_RE.search(row[1])
+        field = LOGIN_HOSTS_RE.search(row[1])
+        if key is None or field is None:
+            raise SystemExit(f'{rel}: expected literal login provider key and hosts')
+        source = field[1].strip().removesuffix(',').strip()
+        hosts = []
+        for literal in source.split(',') if source else []:
+            quoted = re.fullmatch(r'"([^"]*)"', literal.strip())
+            if quoted is None or not all(HOST_LABEL_RE.fullmatch(label)
+                                         for label in quoted[1].split('.')):
+                raise SystemExit(f'{rel}: invalid login host for {key[1]}: {literal.strip()}')
+            hosts.append(quoted[1])
+        if hosts != sorted(set(hosts)):
+            raise SystemExit(f'{rel}: login hosts for {key[1]} must be sorted and unique')
+        found.extend((rel, f'LOGIN_{key[1]}_{index:03d}', host)
+                     for index, host in enumerate(hosts, 1))
+    return found
+
+
 def discover() -> list[tuple[str, str, str]]:
-    """Production https URL literals, including inline and catalog endpoints.
+    """Production https URL literals and login catalog receiving hosts.
 
     Inline keys use source order within a file; reorderings need a reviewed diff.
     Dynamically assembled URLs and unnamed format strings are outside this scan.
@@ -155,6 +188,8 @@ def discover() -> list[tuple[str, str, str]]:
                 # carry the local path flavour.
                 rel = path.relative_to(ROOT).as_posix()
                 found.append((rel, name, host))
+            if "LOGIN_PROVIDERS" in text[:cutoff]:
+                found.extend(discover_login_hosts(text[:cutoff], path.relative_to(ROOT).as_posix()))
     return sorted(found)
 
 

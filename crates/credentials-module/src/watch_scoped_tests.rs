@@ -126,6 +126,73 @@ mod scoped_watch {
         }
     }
 
+    async fn scoped_login_result(method: &str, id: &str, adapter: &str) -> serde_json::Value {
+        let mut rig = Rig::new();
+        let mut record = roster_oauth_record();
+        record.refresh_adapter = Some(adapter.to_owned());
+        rig.store.create(id, &record).unwrap();
+        for operation in [GrantOperation::Read, GrantOperation::List] {
+            grant_for(&rig.store, "login-reader", id, operation);
+        }
+        rig.bind(1, reserved("login-reader"));
+        let params = if method == OP_GET_SCOPED {
+            json!({"credential_id": id})
+        } else {
+            json!({})
+        };
+        rig.dispatch(1, 11, FrameType::Request, method, params).await;
+        let frame = rig.next().await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let mut body: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        if method == OP_GET_SCOPED {
+            assert_eq!(body["result"]["credential_id"], id);
+            assert_eq!(body["result"]["payload"], json!(record.payload.expose()));
+            body["result"].take()
+        } else {
+            let rows = body["result"]["credentials"].as_array_mut().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["id"], id);
+            assert_eq!(rows[0]["refresh_adapter"], adapter);
+            rows[0].take()
+        }
+    }
+
+    macro_rules! login_hosts_tests {
+        ($get:ident, $list:ident, $adapter:literal, $host:literal) => {
+            #[tokio::test]
+            async fn $get() {
+                let get = scoped_login_result(OP_GET_SCOPED, "oauth:scoped-login", $adapter).await;
+                assert_eq!(get["hosts"], json!([$host]));
+                assert!(get.get("auth").is_none());
+                assert!(get.get("invalid_key").is_none());
+            }
+
+            #[tokio::test]
+            async fn $list() {
+                let row = scoped_login_result(OP_LIST_SCOPED, "oauth:scoped-login", $adapter).await;
+                assert_eq!(row["hosts"], json!([$host]));
+                assert!(row.get("auth").is_none());
+                assert!(row.get("invalid_key").is_none());
+            }
+        };
+    }
+
+    login_hosts_tests!(login_hosts_anthropic_get, login_hosts_anthropic_list, "anthropic", "api.anthropic.com");
+    login_hosts_tests!(login_hosts_chatgpt_get, login_hosts_chatgpt_list, "openai", "chatgpt.com");
+    login_hosts_tests!(login_hosts_antigravity_get, login_hosts_antigravity_list, "antigravity", "daily-cloudcode-pa.googleapis.com");
+    login_hosts_tests!(login_hosts_xai_get, login_hosts_xai_list, "xai", "api.x.ai");
+    login_hosts_tests!(login_hosts_meta_get, login_hosts_meta_list, "meta", "api.meta.ai");
+
+    #[tokio::test]
+    async fn login_hosts_absent_for_other_adapters_even_with_a_known_id() {
+        for method in [OP_GET_SCOPED, OP_LIST_SCOPED] {
+            let result = scoped_login_result(method, "oauth:anthropic", "google").await;
+            for field in ["hosts", "auth", "invalid_key"] {
+                assert!(result.get(field).is_none(), "{method} must omit {field}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn watch_scoped_refusal_backpressure_does_not_block_control() {
         for params in [json!({}), json!({"unknown_param":true})] {
@@ -348,6 +415,7 @@ mod scoped_watch {
         assert_eq!(
             listing["result"]["credentials"][0]["provider_ids"], json!(["anthropic"])
         );
+        assert_eq!(listing["result"]["credentials"][0]["hosts"], json!(["api.anthropic.com"]));
         assert_eq!(listing["result"]["view"], initial["view"]);
         let writes = rig.store.subscribe_writes();
         row.provider_ids = Some(vec!["openai".into()]);
@@ -597,8 +665,32 @@ mod scoped_watch {
             .unwrap();
         rig.grant("watcher", "oauth:watch-refresh");
         rig.bind(1, reserved("watcher"));
+        let mut completed = rig.surface.watches.completed.subscribe();
         rig.open(1, 11, json!({})).await;
-        rig.notice(1, 11, 1).await;
+        let initial = rig.notice(1, 11, 1).await;
+        completed.changed().await.unwrap();
+        let list = || {
+            rig.surface
+                .list_scoped(
+                    &crate::federation::ingress::ScopedCaller::hand_only(Some(reserved("watcher"))),
+                    &ListScopedParams { enrollment_token: None },
+                )
+                .unwrap()
+        };
+        let mut listing = list();
+        assert_eq!(listing.credentials.len(), 1);
+        assert_eq!(initial["view"], listing.view);
+        // Compare with the same view input except for the receiving host fact.
+        listing.credentials[0].hosts = Some(vec!["api.anthropic.com".into()]);
+        assert_eq!(
+            initial["view"],
+            crate::read_surface::list_scoped_view(&listing.credentials, &listing.grant_tuples),
+        );
+        listing.credentials[0].hosts = None;
+        assert_ne!(
+            initial["view"],
+            crate::read_surface::list_scoped_view(&listing.credentials, &listing.grant_tuples),
+        );
         let mut refreshed = record.clone();
         refreshed.payload = b"fresh-token".to_vec().into();
         rig.store
@@ -611,7 +703,12 @@ mod scoped_watch {
                 .record_version,
             2
         );
-        rig.quiet().await;
+        assert_eq!(initial["view"], list().view);
+        completed.changed().await.unwrap();
+        assert!(rig.rx.try_recv().is_err(), "refresh published a notice");
+        rig.dispatch(1, 11, FrameType::Cancel, "", json!({})).await;
+        rig.open(1, 12, json!({})).await;
+        assert_eq!(initial, rig.notice(1, 12, 1).await);
     }
 
     /// Callosum re-reads the transfer key to announce it only when its watch's held-key

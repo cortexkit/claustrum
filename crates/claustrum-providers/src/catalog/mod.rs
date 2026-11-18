@@ -502,6 +502,9 @@ pub struct LoginProvider {
     pub device: Option<DeviceKind>,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
+    /// Exact hosts a consumer may send this provider's access token to. The
+    /// consumer's send check depends on this list not containing any other host.
+    pub hosts: &'static [&'static str],
     /// The catalog provider ids a fresh login stores when the operator passes no
     /// `--provider-id`. Only subscription logins whose routing id is settled name one;
     /// every other row is empty, and such a login stores no provider id unless the
@@ -535,6 +538,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Anthropic],
+        hosts: &["api.anthropic.com"],
         default_provider_ids: &["anthropic"],
     },
     LoginProvider {
@@ -558,6 +562,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::OpenAi),
         categories: LLM,
         serves: &[OpenAI],
+        hosts: &["chatgpt.com"],
         default_provider_ids: &["openai"],
     },
     LoginProvider {
@@ -581,6 +586,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Xai),
         categories: LLM,
         serves: &[XAI],
+        hosts: &["api.x.ai"],
         default_provider_ids: &["xai"],
     },
     LoginProvider {
@@ -604,6 +610,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::GithubCopilot),
         categories: LLM,
         serves: &[OpenAI, Anthropic, Google, XAI],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -627,6 +634,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Kimi),
         categories: LLM,
         serves: &[Moonshot],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -650,6 +658,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Meta),
         categories: LLM,
         serves: &[Meta],
+        hosts: &["api.meta.ai"],
         default_provider_ids: &["meta"],
     },
     LoginProvider {
@@ -673,6 +682,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Google],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -696,6 +706,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: NO_CATEGORIES,
         serves: &[],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -708,7 +719,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         redirect_uri: google::ANTIGRAVITY_REDIRECT_URI,
         scopes: google::SCOPES,
         extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
-        adapter_name: "antigravity",
+        adapter_name: refresh_adapters::antigravity::ADAPTER_NAME,
         default_id: "antigravity:google",
         exchange: ExchangeWire::RfcForm,
         needs_oidc_nonce: false,
@@ -719,6 +730,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Google, Anthropic, OpenAI],
+        hosts: &["daily-cloudcode-pa.googleapis.com"],
         default_provider_ids: &["google"],
     },
     LoginProvider {
@@ -742,6 +754,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -765,6 +778,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: NO_CATEGORIES,
         serves: &[],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -788,6 +802,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: DATA_WAREHOUSE,
         serves: &[],
+        hosts: &[],
         default_provider_ids: &[],
     },
     LoginProvider {
@@ -811,6 +826,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: CLOUD_INFRASTRUCTURE,
         serves: &[],
+        hosts: &[],
         default_provider_ids: &[],
     },
 ];
@@ -821,6 +837,14 @@ pub fn api_key_provider(key: &str) -> Option<&'static ApiKeyProvider> {
 
 pub fn login_provider(key: &str) -> Option<&'static LoginProvider> {
     LOGIN_PROVIDERS.iter().find(|entry| entry.key == key)
+}
+
+/// A login without a catalogued receiving host has no host fact to serve.
+pub fn login_hosts(adapter: &str) -> Option<&'static [&'static str]> {
+    LOGIN_PROVIDERS
+        .iter()
+        .find(|entry| entry.adapter_name == adapter && !entry.hosts.is_empty())
+        .map(|entry| entry.hosts)
 }
 
 /// Published providers still awaiting a reviewed row or skip, ordered by provider id.

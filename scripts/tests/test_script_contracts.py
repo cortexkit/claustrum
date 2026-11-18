@@ -887,6 +887,49 @@ class ScriptContracts(unittest.TestCase):
         with patch.object(sys, 'argv', ['endpoint-hosts.py']):
             self.assertEqual(endpoints.main(), 0)
 
+    def test_login_catalog_hosts_must_match_manifest_and_be_canonical(self):
+        endpoints = cast(Any, module('endpoint-hosts'))
+        endpoints.ROOT = self.root
+        endpoints.SOURCE_DIRS = [self.root]
+        endpoints.MANIFEST = self.root / 'hosts'
+        endpoints.DOMAIN_MANIFEST = self.root / 'domains'
+        catalog = self.root / 'catalog.rs'
+        source = (
+            'const DOMAIN: &[u8] = b"ck-control-cookie/v1";\n'
+            'pub const LOGIN_PROVIDERS: &[LoginProvider] = &[\n'
+            '    LoginProvider {\n'
+            '        key: "first",\n'
+            '        hosts: &["api.example"],\n'
+            '    },\n'
+            '    LoginProvider {\n'
+            '        key: "second",\n'
+            '        hosts: &[],\n'
+            '    },\n'
+            '];\n'
+            'pub const OTHER_PROVIDERS: &[LoginProvider] = &[\n'
+            '    LoginProvider {\n'
+            '        key: "other",\n'
+            '        hosts: &["not-a-login.example"],\n'
+            '    },\n'
+            '];\n'
+        )
+        catalog.write_text(source)
+        rows = endpoints.discover()
+        self.assertEqual(rows, [('catalog.rs', 'LOGIN_first_001', 'api.example')])
+        endpoints.MANIFEST.write_text(endpoints.render(rows))
+        endpoints.DOMAIN_MANIFEST.write_text(endpoints.render_domains(endpoints.discover_domains()))
+        self.assertEqual(endpoints.main(), 0)
+        for drift in [source.replace('api.example', 'new.example'),
+                      source.replace('hosts: &[]', 'hosts: &["new.example"]')]:
+            catalog.write_text(drift)
+            self.assertEqual(endpoints.main(), 1)
+        for host in ['Api.example', 'https://api.example', 'api.example:443',
+                     'api.example/path', '*.example']:
+            with self.subTest(host=host):
+                catalog.write_text(source.replace('api.example', host))
+                with self.assertRaisesRegex(SystemExit, 'invalid login host'):
+                    endpoints.discover()
+
     def test_uncovered_fixture_directory_is_refused(self):
         from unittest.mock import patch
         fixtures = module('check-fixture-line-endings')

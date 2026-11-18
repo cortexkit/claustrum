@@ -94,12 +94,15 @@
       }
     },
     {
-      "case": "oauth_without_descriptor",
+      "case": "oauth_hosts_only",
       "frame_type": "Response",
       "reply": {
         "result": {
           "credential_id": "oauth:anthropic",
           "expires_at_ms": null,
+          "hosts": [
+            "api.anthropic.com"
+          ],
           "payload": [
             118,
             101,
@@ -120,8 +123,8 @@
           "record_version": 1
         }
       },
-      "reply_b64url": "eyJyZXN1bHQiOnsiY3JlZGVudGlhbF9pZCI6Im9hdXRoOmFudGhyb3BpYyIsImV4cGlyZXNfYXRfbXMiOm51bGwsInBheWxvYWQiOlsxMTgsMTAxLDk5LDExNiwxMTEsMTE0LDQ1LDExNiwxMDEsMTE1LDExNiw0NSwxMDcsMTAxLDEyMV0sInJlY29yZF92ZXJzaW9uIjoxfX0",
-      "reply_sha256": "a37de73c8e4fad8ab8e38285056ee9296f0186d46aa9447d4726535fe9cb9f90",
+      "reply_b64url": "eyJyZXN1bHQiOnsiY3JlZGVudGlhbF9pZCI6Im9hdXRoOmFudGhyb3BpYyIsImV4cGlyZXNfYXRfbXMiOm51bGwsImhvc3RzIjpbImFwaS5hbnRocm9waWMuY29tIl0sInBheWxvYWQiOlsxMTgsMTAxLDk5LDExNiwxMTEsMTE0LDQ1LDExNiwxMDEsMTE1LDExNiw0NSwxMDcsMTAxLDEyMV0sInJlY29yZF92ZXJzaW9uIjoxfX0",
+      "reply_sha256": "54df4d5af093413a813c32cb48804c25712bcc334ea996cb253255870c52fd4e",
       "request": {
         "method": "credential.get_scoped",
         "params": {

@@ -734,13 +734,26 @@ Company AI gateway credentials below). The three top-level fields are served tog
   vault never evaluates this evidence. `invalid_key: null` means the descriptor is
   known but no invalid-key observation is recorded.
 
-All three fields are absent for OAuth and other login-provider records,
-no-descriptor catalog rows, registered providers without hosts, and non-provider
-records such as cookies or manual ids. Absence is not the same as `invalid_key: null`.
+Login records with the following refresh adapters carry `hosts` alone, without
+`auth` or `invalid_key`. The lookup uses the refresh adapter, not the credential id.
+
+| Refresh adapter | `hosts` |
+| --- | --- |
+| `anthropic` | `["api.anthropic.com"]` |
+| `openai` (ChatGPT) | `["chatgpt.com"]` |
+| `antigravity` | `["daily-cloudcode-pa.googleapis.com"]` |
+| `xai` | `["api.x.ai"]` |
+| `meta` | `["api.meta.ai"]` |
+
+All three fields are absent for other login providers, no-descriptor catalog rows,
+registered providers without hosts, and non-provider records such as cookies or
+manual ids. An absent `hosts` means the vault has no host fact, never that any host
+is allowed. An absent `invalid_key` is not the same as `invalid_key: null`.
 The fields are read-time projections of provider or per-credential gateway settings.
-Registered providers always serve `invalid_key: null`. Remote records use this vault's catalog
-and registry lookup by credential id too; no descriptor fields cross federation.
-`credential.get` (and its handle-based batch form) never serves these fields.
+Registered providers with a descriptor always serve `invalid_key: null`. Remote
+records use the reading vault's own catalog and registry too; no descriptor fields
+cross federation. `credential.get` (and its handle-based batch form) never serves
+these fields.
 
 `account_id` IS THE PROVIDER'S ACCOUNT IDENTIFIER AND ITS SHAPE IS THE PROVIDER'S CHOICE.
 Treat it as an opaque string. It is stable per account and comparable to itself, and
@@ -831,12 +844,12 @@ Consumers join on exact provider-id equality, with no fallback. `serves` answers
 model vendors are reachable; `provider_ids` answers which catalog providers the operator
 assigned to this credential. They are not interchangeable.
 
-List rows also carry `hosts` exactly when `credential.get_scoped` would serve an
-API-key descriptor for that id: a nonempty array of exact receiving host names from
-this vault's gateway settings, catalog or registry, in served order. Otherwise the
-field is omitted, not null or `[]`. This applies equally to local and remote rows, including labeled
-ids. Like the descriptor, it is a read-time projection, never a stored routing fact;
-no remote descriptor is trusted or sent across federation.
+List rows carry `hosts` exactly when `credential.get_scoped` would serve `hosts`
+for the same record: a nonempty array of exact receiving host names from this vault's
+gateway settings, catalog or registry, in served order. Otherwise the field is
+omitted, not null or `[]`. This applies equally to local and remote rows, including
+labeled ids. Like the descriptor, it is a read-time projection, never a stored
+routing fact; no remote descriptor is trusted or sent across federation.
 
 Three additive fields are present on every current row:
 
@@ -1210,7 +1223,7 @@ method, standing in for an older vault. Storage incarnations and detection times
 fixed test values; only the process-local watch boot nonce is normalized to zero.
 `crates/credentials-module/tests/vectors/get-scoped-v1.json` pins real dispatched
 `get_scoped` replies for a catalog row with invalid-key evidence, a catalog row with
-`invalid_key: null`, and an OAuth record with all descriptor fields absent.
+`invalid_key: null`, and an OAuth record with `hosts` alone.
 Each case carries decoded JSON, base64url reply bytes and a reply hash; `SHA256SUMS`
 pins both files. Regenerate both with `CK_EMIT_LIST_SCOPED_VECTORS=1` and the
 `list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned` test.

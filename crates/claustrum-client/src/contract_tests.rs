@@ -235,7 +235,7 @@ fn producer_reply(reply: &Value) -> Value {
 }
 
 #[test]
-fn provider_catalog_decodes_producer_fusiform_ids_hosts_and_absence() {
+fn provider_catalog_decodes_producer_fusiform_ids_and_hosts() {
     let reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
     let listing = decode_list_scoped_reply(reply.clone()).unwrap();
     assert!(listing.undecodable_credentials.is_empty());
@@ -264,15 +264,32 @@ fn provider_catalog_decodes_producer_fusiform_ids_hosts_and_absence() {
         .iter()
         .find(|row| row.id == "oauth:anthropic")
         .unwrap();
-    assert_eq!(oauth.hosts, None);
     assert_eq!(oauth.fusiform_provider_id, None);
+}
+
+#[test]
+fn list_scoped_decodes_login_hosts_without_static_auth() {
+    let reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
+    let id = "oauth:anthropic";
+    let login = reply["result"]["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    for field in ["auth", "invalid_key"] {
+        assert!(login.get(field).is_none());
+    }
+    let listing = decode_list_scoped_reply(reply).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    let login = listing.credentials.iter().find(|row| row.id == id).unwrap();
+    assert_eq!(login.hosts, Some(vec!["api.anthropic.com".into()]));
 }
 
 #[test]
 fn provider_catalog_decodes_empty_hosts_missing_from_vectors() {
     let mut reply = producer_vector_reply("list-scoped-v2.json", "descriptor_presence");
     // The vectors omit explicitly empty host lists; exercise that presence separately.
-    assert!(reply["result"]["credentials"][2].get("hosts").is_none());
     reply["result"]["credentials"][2]["hosts"] = json!([]);
     let listing = decode_list_scoped_reply(reply).unwrap();
     assert!(listing.undecodable_credentials.is_empty());
@@ -356,21 +373,21 @@ fn producer_get_scoped_decodes_real_auth_hosts_and_invalid_key() {
         };
         assert_eq!(decoded.invalid_key, expected_evidence);
     }
-    let reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
-    for field in ["auth", "hosts", "invalid_key"] {
+    let reply = producer_vector_reply("get-scoped-v1.json", "oauth_hosts_only");
+    for field in ["auth", "invalid_key"] {
         assert!(reply["result"].get(field).is_none());
     }
     let decoded = decode_credential_reply(reply).unwrap();
     assert_eq!(decoded.expose(), b"vector-test-key");
     assert_eq!(decoded.auth, None);
-    assert_eq!(decoded.hosts, None);
+    assert_eq!(decoded.hosts, Some(vec!["api.anthropic.com".into()]));
     assert_eq!(decoded.invalid_key, None);
 }
 
 #[test]
 fn producer_get_scoped_decodes_descriptor_values_missing_from_vectors() {
     // Preserve the catalog descriptors and inject only wire values absent from the vectors.
-    let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
+    let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_hosts_only");
     reply["result"]["auth"] = json!({"header": "authorization", "scheme": "raw"});
     let decoded = decode_credential_reply(reply).unwrap();
     assert_eq!(
@@ -381,7 +398,7 @@ fn producer_get_scoped_decodes_descriptor_values_missing_from_vectors() {
         })
     );
     for status in [0, 65535] {
-        let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_without_descriptor");
+        let mut reply = producer_vector_reply("get-scoped-v1.json", "oauth_hosts_only");
         reply["result"]["hosts"] = json!([]);
         reply["result"]["invalid_key"] =
             json!({"status": status, "error_code": null, "error_code_field": null});

@@ -358,7 +358,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     for (index, (label, id)) in [
         ("catalog_with_evidence", "apikey:openai"),
         ("catalog_without_evidence", "apikey:nanogpt"),
-        ("oauth_without_descriptor", "oauth:anthropic"),
+        ("oauth_hosts_only", "oauth:anthropic"),
     ].iter().enumerate() {
         let record = if *id == "oauth:anthropic" {
             VaultRecord::new_oauth(
@@ -402,7 +402,8 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
                 assert_eq!(reply.get("invalid_key"), Some(&serde_json::Value::Null));
             }
             _ => {
-                for field in ["auth", "hosts", "invalid_key"] {
+                assert_eq!(reply["hosts"], json!(["api.anthropic.com"]));
+                for field in ["auth", "invalid_key"] {
                     assert!(reply.get(field).is_none(), "OAuth must omit {field}");
                 }
             }
@@ -419,7 +420,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[1]["hosts"], json!(["api.openai.com"]));
     assert_eq!(rows[0]["fusiform_provider_id"], "nano-gpt");
     assert_eq!(rows[1]["fusiform_provider_id"], "openai");
-    assert!(rows[2].get("hosts").is_none());
+    assert_eq!(rows[2]["hosts"], json!(["api.anthropic.com"]));
     assert!(rows[2].get("fusiform_provider_id").is_none());
     cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     let emitted =

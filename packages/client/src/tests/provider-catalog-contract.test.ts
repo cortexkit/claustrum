@@ -66,7 +66,7 @@ function producerGetScopedReply(caseName = 'catalog_with_evidence'): any {
   return entry.reply
 }
 
-test('provider catalog decodes producer Fusiform ids, hosts and absence', () => {
+test('provider catalog decodes producer Fusiform ids and hosts', () => {
   const reply = producerReply('descriptor_presence')
   const decoded = decodeScopedInventory(reply, () => {})
   expect(decoded.rows).toHaveLength(3)
@@ -80,14 +80,20 @@ test('provider catalog decodes producer Fusiform ids, hosts and absence', () => 
   expect(openai.hosts).toEqual(['api.openai.com'])
   expect(openai.fusiformProviderId).toBe('openai')
   const oauth = decoded.rows.find((row) => row.id === 'oauth:anthropic')!
-  expect(oauth.hosts).toBeUndefined()
   expect(oauth.fusiformProviderId).toBeUndefined()
+})
+
+test('list_scoped decodes login hosts without static auth', () => {
+  const reply = producerReply('descriptor_presence')
+  const login = reply.result.credentials.find((row: { id: string }) => row.id === 'oauth:anthropic')!
+  for (const field of ['auth', 'invalid_key']) expect(Object.hasOwn(login, field)).toBe(false)
+  const decoded = decodeScopedInventory(reply, () => {})
+  expect(decoded.rows.find((row) => row.id === login.id)!.hosts).toEqual(['api.anthropic.com'])
 })
 
 test('provider catalog decodes empty hosts missing from vectors', () => {
   const reply = producerReply('descriptor_presence')
   // The vectors omit explicitly empty host lists; exercise that presence separately.
-  expect(reply.result.credentials[2].hosts).toBeUndefined()
   reply.result.credentials[2].hosts = []
   const decoded = decodeScopedInventory(reply, () => {})
   expect(decoded.rows[1]!.fusiformProviderId).toBe('openai')
@@ -138,22 +144,22 @@ test('get_scoped decodes real auth, hosts and invalid-key evidence', () => {
       expect(decoded.invalidKey).toBeUndefined()
     }
   }
-  const reply = producerGetScopedReply('oauth_without_descriptor')
-  for (const field of ['auth', 'hosts', 'invalid_key']) expect(Object.hasOwn(reply.result, field)).toBe(false)
+  const reply = producerGetScopedReply('oauth_hosts_only')
+  for (const field of ['auth', 'invalid_key']) expect(Object.hasOwn(reply.result, field)).toBe(false)
   const decoded = decodeCredential(reply, () => {})
   expect(decoded.material).toBe('vector-test-key')
   expect(decoded.auth).toBeUndefined()
-  expect(decoded.hosts).toBeUndefined()
+  expect(decoded.hosts).toEqual(['api.anthropic.com'])
   expect(decoded.invalidKey).toBeUndefined()
 })
 
 test('get_scoped decodes descriptor values missing from vectors', () => {
   // Preserve the catalog descriptors and inject only wire values absent from the vectors.
-  const reply = producerGetScopedReply('oauth_without_descriptor')
+  const reply = producerGetScopedReply('oauth_hosts_only')
   reply.result.auth = { header: 'authorization', scheme: 'raw' }
   expect(decodeCredential(reply, () => {}).auth).toEqual({ header: 'authorization', scheme: 'raw' })
   for (const status of [0, 65535]) {
-    const reply = producerGetScopedReply('oauth_without_descriptor')
+    const reply = producerGetScopedReply('oauth_hosts_only')
     reply.result.hosts = []
     reply.result.invalid_key = { status, error_code: null, error_code_field: null }
     const decoded = decodeCredential(reply, () => {})

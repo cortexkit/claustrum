@@ -14296,7 +14296,7 @@ mod tests {
     /// same production path a deposit would: a hand-written fixture agrees with
     /// whatever its author expected, which is how this repo shipped a parser demanding
     /// PKCS#8 at a world that issues PKCS#1.
-    fn test_ed25519_pem() -> String {
+    pub(super) fn test_ed25519_pem() -> String {
         use base64::Engine;
         use ring::rand::SystemRandom;
         use ring::signature::Ed25519KeyPair;

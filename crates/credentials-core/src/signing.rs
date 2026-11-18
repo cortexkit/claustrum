@@ -67,11 +67,12 @@ impl std::fmt::Display for SignError {
 /// manifest is under 4 KiB) and far below anything that would stall the loop.
 pub const MAX_SIGN_PAYLOAD: usize = 1024 * 1024;
 
-pub const BUS_SIGNING_KEY_IDS: [&str; 4] = [
+pub const BUS_SIGNING_KEY_IDS: [&str; 5] = [
     "signing:bus-leaf:1",
     "signing:bus-hub-operator:1",
     "signing:bus-hub-account:1",
     "signing:bus-hub-tls:1",
+    "signing:bus-federation-account:1",
 ];
 
 pub const MAX_BUS_LEAF_NONCE_BYTES: usize = 15;
@@ -93,6 +94,7 @@ pub(crate) fn bus_key_purpose(id: &str) -> Option<BusKeyPurpose> {
         Some(BusKeyPurpose::Leaf)
     } else if id.starts_with("signing:bus-hub-operator:")
         || id.starts_with("signing:bus-hub-account:")
+        || id.starts_with("signing:bus-federation-account:")
     {
         Some(BusKeyPurpose::Jwt)
     } else if id.starts_with("signing:bus-hub-tls:") {

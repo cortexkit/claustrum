@@ -806,32 +806,188 @@ impl ScopedKeyDescriptor {
 #[cfg(test)]
 mod get_scoped_tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
     use credentials_core::record::{CredentialKind, VaultRecord};
-    use credentials_core::store::SelectorKind;
+    use credentials_core::store::{EncryptedStore, SelectorKind};
+    use ring::signature::{UnparsedPublicKey, ED25519};
     use serde_json::{json, Value};
+
+    const BUS_FEDERATION_ACCOUNT: &str = "signing:bus-federation-account:1";
+    const BUS_HUB_ACCOUNT: &str = "signing:bus-hub-account:1";
+
+    fn ckbus_caller() -> crate::federation::ingress::ScopedCaller {
+        crate::federation::ingress::ScopedCaller::hand_only(Some(Principal::Reserved {
+            module_id: "ckbus".into(),
+        }))
+    }
+
+    fn grant_ckbus(store: &EncryptedStore, id: &str, operation: GrantOperation) {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ckbus",
+                SelectorKind::Exact,
+                id,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+
+    fn scoped_bus_sign_params(id: &str, payload: &[u8]) -> SignParams {
+        SignParams {
+            handle: None,
+            credential_id: Some(id.into()),
+            payload_b64: STANDARD.encode(payload),
+            enrollment_token: None,
+        }
+    }
+
+    fn seed_bus_account_keys(store: &EncryptedStore) {
+        for id in [BUS_HUB_ACCOUNT, BUS_FEDERATION_ACCOUNT] {
+            let pem = crate::tests::test_ed25519_pem();
+            let record = VaultRecord::new_static(
+                CredentialKind::SigningKey,
+                "vault",
+                pem.into_bytes(),
+                None,
+            );
+            store.create(id, &record).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bus_federation_account_ckbus_can_read_and_sign_jwt() {
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(213);
+        store.ensure_fleet_keys(1).unwrap();
+        let caller = ckbus_caller();
+        grant_ckbus(&store, BUS_FEDERATION_ACCOUNT, GrantOperation::Read);
+        grant_ckbus(&store, BUS_FEDERATION_ACCOUNT, GrantOperation::Sign);
+        let audit = store.read_audit(None).unwrap();
+        let (valid, _) = credentials_core::test_support::bus_signing_inputs(BUS_HUB_ACCOUNT);
+        let payload = &valid[0];
+        let signed = surface
+            .sign(
+                213,
+                &caller,
+                &scoped_bus_sign_params(BUS_FEDERATION_ACCOUNT, payload),
+            )
+            .await
+            .expect("ckbus can sign a NATS JWT with the startup federation account key");
+        let public = surface
+            .public_key(
+                213,
+                &caller,
+                &PublicKeyParams {
+                    handle: None,
+                    credential_id: Some(BUS_FEDERATION_ACCOUNT.into()),
+                    enrollment_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(public.algorithm, "ed25519");
+        assert_eq!(signed.key_id, public.key_id);
+        let public: Vec<_> = (0..public.public_key_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
+            .collect();
+        let signature = STANDARD.decode(signed.signature_b64).unwrap();
+        UnparsedPublicKey::new(&ED25519, public)
+            .verify(payload, &signature)
+            .unwrap();
+        assert_eq!(store.read_audit(None).unwrap(), audit);
+    }
+
+    #[tokio::test]
+    async fn bus_federation_account_refuses_malformed_jwt_like_hub_account() {
+        let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(213);
+        // A valid key record isolates purpose validation from startup provisioning.
+        seed_bus_account_keys(&store);
+        let caller = ckbus_caller();
+        for id in [BUS_HUB_ACCOUNT, BUS_FEDERATION_ACCOUNT] {
+            grant_ckbus(&store, id, GrantOperation::Sign);
+            let audit = store.read_audit(None).unwrap();
+            let result = surface
+                .sign(
+                    213,
+                    &caller,
+                    &scoped_bus_sign_params(id, b"not a JWT signing input"),
+                )
+                .await;
+            assert_eq!(result.err(), Some(SignError::InvalidParams), "{id}");
+            assert_eq!(store.read_audit(None).unwrap(), audit);
+        }
+    }
+
+    #[tokio::test]
+    async fn bus_federation_account_refuses_stale_grants_and_handles_like_hub_account() {
+        use crate::federation::ingress::ScopedCaller;
+        use credentials_core::enrollment::{enrollment_secret_hash, EnrollmentPoll};
+        let (surface, store, db, _root) = crate::tests::tmp_surface_with_store(213);
+        seed_bus_account_keys(&store);
+        let secret = "ab".repeat(32);
+        let request = store
+            .propose_enrollment("ckbus", &enrollment_secret_hash(&secret).unwrap())
+            .unwrap();
+        store
+            .approve_enrollment(&request.request_id, "ckbus", "operator")
+            .unwrap();
+        let EnrollmentPoll::Approved { token, .. } =
+            store.poll_enrollment(&request.request_id, &secret).unwrap()
+        else {
+            panic!("expected an approved enrollment");
+        };
+        let reserved = ScopedCaller::hand_only(Some(Principal::Reserved {
+            module_id: "other".into(),
+        }));
+        let unbound = ScopedCaller::hand_only(None);
+        let (valid, _) = credentials_core::test_support::bus_signing_inputs(BUS_HUB_ACCOUNT);
+        for id in [BUS_HUB_ACCOUNT, BUS_FEDERATION_ACCOUNT] {
+            // Insert the rows directly to verify that signing is refused even when a grant or handle exists.
+            let handle = credentials_core::store::mint_handle().unwrap();
+            {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                conn.execute(
+                    "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                     VALUES ('reserved', 'other', 'exact', ?1, 'sign', 0), ('enrolled', 'ckbus', 'exact', ?1, 'sign', 0)",
+                    [id],
+                ).unwrap();
+                conn.execute(
+                    "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) VALUES (?1, ?2, 0, 0)",
+                    rusqlite::params![handle.hash, id],
+                ).unwrap();
+            }
+            let scoped = scoped_bus_sign_params(id, &valid[0]);
+            let enrolled = SignParams {
+                enrollment_token: Some(token.clone()),
+                ..scoped_bus_sign_params(id, &valid[0])
+            };
+            let bearer = SignParams {
+                handle: Some(handle.raw),
+                credential_id: None,
+                ..scoped_bus_sign_params(id, &valid[0])
+            };
+            let refusals = [
+                surface.sign(213, &reserved, &scoped).await.err(),
+                surface.sign(213, &unbound, &enrolled).await.err(),
+                surface.sign(213, &unbound, &bearer).await.err(),
+            ];
+            assert_eq!(
+                refusals,
+                [Some(SignError::from(ReadError::NotFound)); 3],
+                "{id}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn consumer_bus_signing_checks_purpose_and_preserves_unaudited_keys() {
-        use base64::Engine as _;
-        use ring::signature::{UnparsedPublicKey, ED25519};
         let (surface, store, _db, _root) = crate::tests::tmp_surface_with_store(213);
         store.ensure_fleet_keys(1).unwrap();
-        let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(
-            subc_protocol::Principal::Reserved {
-                module_id: "ckbus".into(),
-            },
-        ));
+        let caller = ckbus_caller();
         for id in credentials_core::signing::BUS_SIGNING_KEY_IDS {
-            store
-                .create_read_grant_audited(
-                    "reserved",
-                    "ckbus",
-                    SelectorKind::Exact,
-                    id,
-                    GrantOperation::Sign,
-                    AuditCtx::admin(AuditOp::GrantCreate),
-                )
-                .unwrap();
+            grant_ckbus(&store, id, GrantOperation::Sign);
             let record = store.get(id).unwrap();
             let public = credentials_core::signing::public_key_ed25519(
                 std::str::from_utf8(record.payload.expose()).unwrap(),
@@ -841,12 +997,7 @@ mod get_scoped_tests {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
                 .collect();
-            let params = |payload: &[u8]| SignParams {
-                handle: None,
-                credential_id: Some(id.into()),
-                payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
-                enrollment_token: None,
-            };
+            let params = |payload: &[u8]| scoped_bus_sign_params(id, payload);
             let (accepted, refused) = credentials_core::test_support::bus_signing_inputs(id);
             let audit_before = store.read_audit(None).unwrap();
             let events_before = store.recent_auth_events(1000).unwrap().len();

@@ -66,7 +66,9 @@ pub fn bus_signing_inputs(id: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
             bad.push(wrong_padding);
             (vec![input(32), input(48)], bad)
         }
-        "signing:bus-hub-operator:1" | "signing:bus-hub-account:1" => {
+        "signing:bus-hub-operator:1"
+        | "signing:bus-hub-account:1"
+        | "signing:bus-federation-account:1" => {
             let header = br#"{"alg":"ed25519-nkey","typ":"JWT","extra":true}"#;
             let jwt = |header: &[u8], claims: &str| {
                 format!("{}.{}", URL_SAFE_NO_PAD.encode(header), claims).into_bytes()

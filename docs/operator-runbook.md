@@ -1543,22 +1543,25 @@ A key rotated to a new generation id instead (for example a bus account key
 
 ### ck-bus keys
 
-Every daemon start ensures four sealed Ed25519 keys exist:
+Every daemon start ensures five sealed Ed25519 keys exist:
 `signing:bus-leaf:1`, `signing:bus-hub-operator:1`,
-`signing:bus-hub-account:1`, and `signing:bus-hub-tls:1`.
-Every computer gets all four; unused hub keys need no ceremony. Startup never
+`signing:bus-hub-account:1`, `signing:bus-hub-tls:1`, and
+`signing:bus-federation-account:1`.
+Every computer gets all five; unused hub keys need no ceremony. Startup never
 replaces an existing key, even a damaged one, and each initial creation has exactly
 one `fleet_key_create` audit row. Private keys stay in the vault: ck-bus asks
 `credential.sign` to sign NATS nonces, JWT inputs, or TLS CertificateVerify bytes.
 See the wire contract's purpose-bound ck-bus section for the exact input grammar.
 Malformed purpose inputs return `invalid_params` and produce no signature or write.
 
-Grant only exact `read` and `sign` on these ids to `reserved:ckbus`. The same fence
-applies to every generation. Other grants and bearer handles are refused with
-`bus_key_reserved`; category grants do not cover bus keys. `read` serves only the
-public half. Startup leaves per-signature auditing off to avoid a row for every TLS
-handshake. Startup also leaves operator-signing opt-in off; an explicitly opted-in
-operator signature remains audited and purpose-checked.
+During setup, grant `reserved:ckbus` exact `read` and `sign` on each of these ids.
+For `signing:bus-federation-account:1`, ck-bus reads the public half to list in the
+computer's federation account JWT and signs user JWTs for modules in that account.
+The same fence applies to every generation. Other grants and bearer handles are
+refused with `bus_key_reserved`; category grants do not cover bus keys. `read`
+serves only the public half. Startup leaves per-signature auditing off to avoid a
+row for every TLS handshake. Startup also leaves operator-signing opt-in off; an
+explicitly opted-in operator signature remains audited and purpose-checked.
 
 Rotate a bus key in place with **`ck auth put --replace`**, retaining its credential
 id and increasing `record_version`. Never delete and re-mint it: that resets the

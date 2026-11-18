@@ -357,10 +357,11 @@ that are not hubs:
 | `signing:bus-hub-operator:1` | sign NATS operator JWTs |
 | `signing:bus-hub-account:1` | sign NATS account/user JWTs |
 | `signing:bus-hub-tls:1` | sign the hub's TLS 1.3 server CertificateVerify |
+| `signing:bus-federation-account:1` | sign NATS user JWTs for modules in the computer's federation account |
 
 Creation is create-only: one `fleet_key_create` audit row per missing key, with
 actor `vault`, and no replacement or new row on a subsequent start. All generations
-under these four prefixes admit only exact `read` and `sign` grants to
+under these five prefixes admit only exact `read` and `sign` grants to
 `reserved:ckbus`. Other principals, operations, non-exact selectors naming these
 keys, and bearer-handle minting receive `bus_key_reserved` / `permanent`. Category
 grants never cover these keys. `read` exposes the public half, not the private key;

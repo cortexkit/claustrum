@@ -294,7 +294,12 @@ async fn fleet_daemon_start_creates_missing_keys_once_and_preserves_existing_env
         .await
         .unwrap();
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        for id in [RECORD_KEY_ID, WRAP_KEY_ID, BUS_KEY_ID] {
+        for id in [
+            RECORD_KEY_ID,
+            WRAP_KEY_ID,
+            BUS_KEY_ID,
+            "signing:bus-federation-account:1",
+        ] {
             let blob: Vec<u8> = conn.query_row("SELECT envelope FROM credentials WHERE credential_id = ?1 AND state = 'active'", [id], |r| r.get(0)).unwrap();
             if let Some(original) = originals.get(id) {
                 assert_eq!(&blob, original);

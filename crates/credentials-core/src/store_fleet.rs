@@ -854,7 +854,7 @@ mod tests {
         let audit = store.read_audit(None).unwrap();
         assert_eq!(
             audit.iter().filter(|a| a.op == "fleet_key_create").count(),
-            7
+            8
         );
         for (id, public) in crate::signing::BUS_SIGNING_KEY_IDS
             .into_iter()

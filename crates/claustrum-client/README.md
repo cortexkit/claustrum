@@ -305,7 +305,9 @@ They also decode the X25519 public-key reply for the vault KEM key that produced
 the seal sample.
 The seal tests pin that the client sends exactly the producer's accepted request
 and decodes its reply's exact bytes.
-Fleet epoch tests also read the tagged Magic Context and Prefrontal samples in
+Login condition tests read the producer's `login-conditions-v1/` samples for
+scoped listings and report and clear replies. Fleet epoch tests also read the
+tagged Magic Context and Prefrontal samples in
 `../credentials-module/tests/fixtures/fleet-epoch-*-v1/` at run time.
 
 ## Changes

@@ -53,6 +53,11 @@ brief.
   one your brief asked for, and list each changed case in your report. Never hand-edit one.
   Build-server Linux jobs can't write tracked files, so name each regenerated file in the
   bash tool's `return_paths`; that's the only way the new bytes reach your checkout.
+- **Dependency bumps your brief allows.** Edit the `Cargo.toml` line, then run the build on
+  the build server with `Cargo.lock` named in `return_paths`; Cargo rewrites the lock
+  offline and the updated file comes back. Without that, the job's read-only `Cargo.lock`
+  makes Cargo fail with "Operation not permitted". Check the lock diff moves only the
+  packages your brief names, with one version of each `subc-*` crate.
 - **Line endings.** Files whose exact bytes are tested go under a `-text` rule in
   `.gitattributes` (fixtures, golden and vectors directories are already covered).
 - **Limits.** A new numeric limit needs a test on both sides of its boundary (the last

@@ -1227,6 +1227,44 @@ async fn reconcile_with_valid_check_clears_intent_and_keeps_active() {
 }
 
 #[tokio::test]
+async fn reconcile_keeps_an_interrupted_github_app_refresh_active_without_a_network_call() {
+    // A restart in the middle of an App refresh must not force a re-login: the App's
+    // private key is the refresh state and no refresh ever changes it. The transport
+    // refuses every request, so this also proves recovery makes no GitHub call.
+    use crate::refresh_adapters::github_app::GithubAppAdapter;
+
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 98);
+    let record = github_app_record();
+    store.create("github_app:interrupted", &record).unwrap();
+    let old_hash = crate::store::refresh_token_hash(record.oauth.unwrap().refresh_token.expose());
+    store
+        .open_intent("github_app:interrupted", 1, &old_hash)
+        .unwrap();
+    let eng = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(GithubAppAdapter::new())],
+        Arc::new(NoHttp),
+    );
+
+    let outcomes = eng.reconcile().await.expect("reconcile");
+    assert!(
+        matches!(&outcomes[..], [Reconciliation::ClearedValid { credential_id }] if credential_id == "github_app:interrupted"),
+        "an interrupted App refresh must clear, not latch"
+    );
+    assert_eq!(
+        eng.store().meta("github_app:interrupted").unwrap().state,
+        crate::store::RecordState::Active
+    );
+    assert!(eng
+        .store()
+        .read_intent("github_app:interrupted")
+        .unwrap()
+        .is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn reconcile_hash_mismatch_is_needs_reauth() {
     // A stored refresh token whose hash != the intent's old_refresh_hash means a
     // write landed without clearing the intent: fail closed.

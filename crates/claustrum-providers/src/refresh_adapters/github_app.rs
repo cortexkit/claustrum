@@ -13,7 +13,7 @@ use base64::Engine as _;
 use ring::{rand::SystemRandom, signature};
 use serde::{Deserialize, Serialize};
 
-use super::{HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens};
+use super::{HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome};
 use crate::oauth::OAuthCredential;
 use crate::secret::SecretString;
 
@@ -448,6 +448,19 @@ impl RefreshAdapter for GithubAppAdapter {
             }
             Err(error) => Err(error.into_refresh_error()),
         }
+    }
+
+    /// An interrupted App refresh spends nothing. The stored "refresh token" is the
+    /// App's private key, which a refresh only uses to sign a JWT and returns unchanged,
+    /// so the record is exactly as usable as before the refresh began. Startup recovery
+    /// therefore keeps the App active instead of marking it for re-login. A key that
+    /// GitHub really refuses still latches `needs_reauth` on the next refresh.
+    async fn non_mutating_check(
+        &self,
+        _cred: &OAuthCredential,
+        _http: &dyn HttpTransport,
+    ) -> Option<Result<ValidityOutcome, RefreshError>> {
+        Some(Ok(ValidityOutcome::Valid))
     }
 }
 

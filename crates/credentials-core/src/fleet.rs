@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 pub const WRAP_DOMAIN: &str = domain(b"ck-fleet-epoch-wrap/v1");
 pub const AAD_DOMAIN: &str = domain(b"ck-fleet-epoch-aad/v1");
 pub const PREFRONTAL_AAD_DOMAIN: &str = domain(b"ck-fleet-epoch-aad/prefrontal/v1");
+pub const MAGIC_CONTEXT_AAD_DOMAIN: &str = domain(b"ck-fleet-epoch-aad/magic-context/v1");
 pub const STORE_DOMAIN: &str = domain(b"ck-fleet-epoch-store/v1");
 const fn domain(bytes: &[u8]) -> &str {
     match std::str::from_utf8(bytes) {
@@ -31,6 +32,7 @@ pub const MAX_EPOCHS: usize = 256;
 pub enum FleetSealer {
     Entorhinal,
     Prefrontal,
+    MagicContext,
 }
 
 pub struct FleetSealInput<'a> {
@@ -318,6 +320,7 @@ pub(crate) fn record_aad(sealer: FleetSealer, epoch: u32, aad: &[u8]) -> Vec<u8>
     let domain = match sealer {
         FleetSealer::Entorhinal => AAD_DOMAIN,
         FleetSealer::Prefrontal => PREFRONTAL_AAD_DOMAIN,
+        FleetSealer::MagicContext => MAGIC_CONTEXT_AAD_DOMAIN,
     };
     serde_json::to_vec(&serde_json::json!({"aad": encode(aad), "epoch": epoch, "v": domain}))
         .expect("string-only JSON")
@@ -336,6 +339,14 @@ mod tests {
         assert_eq!(
             record_aad(FleetSealer::Prefrontal, 7, b"room"),
             br#"{"aad":"cm9vbQ","epoch":7,"v":"ck-fleet-epoch-aad/prefrontal/v1"}"#
+        );
+    }
+
+    #[test]
+    fn fleet_magic_context_aad_bytes_pin_its_domain() {
+        assert_eq!(
+            record_aad(FleetSealer::MagicContext, 7, b"room"),
+            br#"{"aad":"cm9vbQ","epoch":7,"v":"ck-fleet-epoch-aad/magic-context/v1"}"#
         );
     }
 

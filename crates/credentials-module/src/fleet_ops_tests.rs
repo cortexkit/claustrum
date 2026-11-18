@@ -2,6 +2,29 @@ use super::*;
 use credentials_core::fleet::{BUS_KEY_ID, RECORD_KEY_ID, WRAP_KEY_ID};
 
 #[tokio::test]
+async fn fleet_magic_context_routes_admit_only_single_and_batch_crypto() {
+    let (surface, admin, _) = scoped_rig(227);
+    admin.record_bind_at(120, 1, reserved("magic-context"), "");
+    admin.record_bind_at(122, 1, reserved("unknown"), "");
+    for op in [
+        "fleet.epoch_status", "fleet.epoch_mint", "fleet.epoch_commit",
+        "fleet.epoch_discard", "fleet.epoch_import", "fleet.epoch_wrap_for",
+    ] {
+        let unknown = routed_reply(&surface, &admin, 122, op, json!(null)).await;
+        assert_eq!(unknown.0, FrameType::Response);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&unknown.1).unwrap(), uniform_not_found());
+        let actual = routed_reply(&surface, &admin, 120, op, json!(null)).await;
+        assert_eq!(actual, unknown, "magic-context {op}");
+    }
+    for op in [
+        "fleet.epoch_seal", "fleet.epoch_open", "fleet.epoch_seal_batch", "fleet.epoch_open_batch",
+    ] {
+        let actual = routed_reply(&surface, &admin, 120, op, json!(null)).await;
+        assert_eq!(actual.0, FrameType::Error, "admitted malformed {op}");
+    }
+}
+
+#[tokio::test]
 async fn fleet_prefrontal_routes_admit_only_single_and_batch_crypto() {
     let (surface, admin, _) = scoped_rig(227);
     admin.record_bind_at(120, 1, reserved("prefrontal"), "");

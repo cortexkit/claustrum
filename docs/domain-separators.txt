@@ -37,6 +37,7 @@ crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-op/v1\0 co
 crates/credentials-core/src/admin_auth.rs cortexkit-credentials/vault-id/v1 cortexkit-credentials/vault-id/v1
 crates/credentials-core/src/audit.rs cortexkit-credentials/audit-payload-key/v1 cortexkit-credentials/audit-payload-key/v1
 crates/credentials-core/src/deposit_cookie.rs ck-deposit-cookie/v1 ck-deposit-cookie/v1
+crates/credentials-core/src/fleet.rs ck-fleet-epoch-aad/magic-context/v1 ck-fleet-epoch-aad/magic-context/v1
 crates/credentials-core/src/fleet.rs ck-fleet-epoch-aad/prefrontal/v1 ck-fleet-epoch-aad/prefrontal/v1
 crates/credentials-core/src/fleet.rs ck-fleet-epoch-aad/v1 ck-fleet-epoch-aad/v1
 crates/credentials-core/src/fleet.rs ck-fleet-epoch-store/v1 ck-fleet-epoch-store/v1

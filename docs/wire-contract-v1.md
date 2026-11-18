@@ -5243,6 +5243,7 @@ name from parameters or a credential grant:
 |---|---|
 | `reserved:entorhinal` | All ten operations below |
 | `reserved:prefrontal` | `fleet.epoch_seal`, `fleet.epoch_open`, `fleet.epoch_seal_batch`, `fleet.epoch_open_batch` only |
+| `reserved:magic-context` | `fleet.epoch_seal`, `fleet.epoch_open`, `fleet.epoch_seal_batch`, `fleet.epoch_open_batch` only |
 | Every other caller, including `reserved:prefrontal-core` | None |
 
 An unadmitted caller receives exactly
@@ -5282,9 +5283,10 @@ chooses the domain solely from the attested caller:
 |---|---|
 | `reserved:entorhinal` | `ck-fleet-epoch-aad/v1` (unchanged bytes) |
 | `reserved:prefrontal` | `ck-fleet-epoch-aad/prefrontal/v1` |
+| `reserved:magic-context` | `ck-fleet-epoch-aad/magic-context/v1` |
 
 There is no domain parameter. Under the same epoch key, nonce, ciphertext and
-caller aad, opening in the other caller's domain refuses `fleet_epoch_open_failed`.
+caller aad, opening in a different caller's domain refuses `fleet_epoch_open_failed`.
 `open` accepts any held epoch (current or retired), a 24-byte nonce, ciphertext
 of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. Unknown epochs and bad
 tags both refuse `fleet_epoch_open_failed`, without distinguishing them.

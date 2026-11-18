@@ -150,6 +150,132 @@ fn open_params(sealed: &Value, aad: &str) -> Value {
 }
 
 #[tokio::test]
+async fn fleet_magic_context_single_round_trip_across_stores_without_audit() {
+    let root = temp_root("fleet-magic-context-single");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let before_a = a.store.read_audit(None).unwrap();
+    let before_b = b.store.read_audit(None).unwrap();
+    let aad = URL_SAFE_NO_PAD.encode(b"memory change aad");
+    let plaintext = URL_SAFE_NO_PAD.encode(b"first memory change");
+    let sealed = a
+        .call_as(
+            "magic-context",
+            "fleet.epoch_seal",
+            json!({"aad":aad,"plaintext":plaintext}),
+        )
+        .await;
+    assert_eq!(sealed["epoch"], 1, "seal reply: {sealed}");
+    assert_eq!(
+        b.call_as(
+            "magic-context",
+            "fleet.epoch_open",
+            open_params(&sealed, &aad)
+        )
+        .await,
+        json!({"plaintext":plaintext})
+    );
+    assert_eq!(a.store.read_audit(None).unwrap(), before_a);
+    assert_eq!(b.store.read_audit(None).unwrap(), before_b);
+}
+
+#[tokio::test]
+async fn fleet_magic_context_batch_round_trip_across_stores_without_audit() {
+    let root = temp_root("fleet-magic-context-batch");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let before_a = a.store.read_audit(None).unwrap();
+    let before_b = b.store.read_audit(None).unwrap();
+    let aad = [
+        URL_SAFE_NO_PAD.encode(b"revision 3"),
+        URL_SAFE_NO_PAD.encode(b"revision 4"),
+    ];
+    let plaintext = [
+        URL_SAFE_NO_PAD.encode(b"first change"),
+        URL_SAFE_NO_PAD.encode(b"second change"),
+    ];
+    let sealed = a
+        .call_as(
+            "magic-context",
+            "fleet.epoch_seal_batch",
+            json!({"items":[
+                {"aad":aad[0],"plaintext":plaintext[0]}, {"aad":aad[1],"plaintext":plaintext[1]}
+            ]}),
+        )
+        .await;
+    let items = sealed["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("batch seal reply: {sealed}"));
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["epoch"], 1);
+    assert_eq!(items[1]["epoch"], 1);
+    assert_ne!(items[0]["nonce"], items[1]["nonce"]);
+    let open_items: Vec<_> = items
+        .iter()
+        .zip(&aad)
+        .map(|(item, aad)| open_params(item, aad))
+        .collect();
+    assert_eq!(
+        b.call_as(
+            "magic-context",
+            "fleet.epoch_open_batch",
+            json!({"items":open_items})
+        )
+        .await,
+        json!({"items":[{"plaintext":plaintext[0]},{"plaintext":plaintext[1]}]})
+    );
+    assert_eq!(a.store.read_audit(None).unwrap(), before_a);
+    assert_eq!(b.store.read_audit(None).unwrap(), before_b);
+}
+
+#[tokio::test]
+async fn fleet_magic_context_domain_refuses_both_directions_with_each_other_caller() {
+    let root = temp_root("fleet-magic-context-domains");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    let aad = URL_SAFE_NO_PAD.encode(b"same caller aad");
+    let plaintext = URL_SAFE_NO_PAD.encode(b"same plaintext");
+    let failure = json!({"error":{"code":"fleet_epoch_open_failed","class":"permanent"}});
+    for (sealer, other) in [
+        ("entorhinal", "magic-context"),
+        ("prefrontal", "magic-context"),
+        ("magic-context", "entorhinal"),
+        ("magic-context", "prefrontal"),
+    ] {
+        let sealed = a
+            .call_as(
+                sealer,
+                "fleet.epoch_seal",
+                json!({"aad":aad,"plaintext":plaintext}),
+            )
+            .await;
+        assert_eq!(sealed["epoch"], 1, "{sealer} seal reply: {sealed}");
+        let params = open_params(&sealed, &aad);
+        assert_eq!(
+            b.call_as(sealer, "fleet.epoch_open", params.clone()).await,
+            json!({"plaintext":plaintext})
+        );
+        assert_eq!(
+            b.call_as(other, "fleet.epoch_open", params.clone()).await,
+            failure,
+            "{sealer} seal opened as {other}"
+        );
+        assert_eq!(
+            b.call_as(other, "fleet.epoch_open_batch", json!({"items":[params]}))
+                .await,
+            json!({"items":[failure]}),
+            "{sealer} seal batch-opened as {other}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn fleet_prefrontal_round_trips_across_two_stores_and_retained_epochs_without_audit() {
     let root = temp_root("fleet-prefrontal-round-trip");
     let callosum = SharedCallosumStandIn::start(root.path()).await;

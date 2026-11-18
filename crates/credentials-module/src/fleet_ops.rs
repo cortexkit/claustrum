@@ -43,6 +43,9 @@ fn sealer(principal: Option<&Principal>) -> Option<FleetSealer> {
         Some(Principal::Reserved { module_id }) if module_id == "prefrontal" => {
             Some(FleetSealer::Prefrontal)
         }
+        Some(Principal::Reserved { module_id }) if module_id == "magic-context" => {
+            Some(FleetSealer::MagicContext)
+        }
         _ => None,
     }
 }
@@ -50,7 +53,7 @@ fn sealer(principal: Option<&Principal>) -> Option<FleetSealer> {
 pub fn admitted(principal: Option<&Principal>, method: &str) -> bool {
     match sealer(principal) {
         Some(FleetSealer::Entorhinal) => is_op(method),
-        Some(FleetSealer::Prefrontal) => matches!(
+        Some(FleetSealer::Prefrontal | FleetSealer::MagicContext) => matches!(
             method,
             "fleet.epoch_seal"
                 | "fleet.epoch_open"

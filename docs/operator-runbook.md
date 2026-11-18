@@ -1800,8 +1800,8 @@ login sharing:
 ```
 
 The config home is `XDG_CONFIG_HOME` (normally `~/.config` on Unix); Windows also
-accepts that override and otherwise uses roaming `APPDATA`. A missing file or field
-defaults to `true`. Comments and trailing commas are accepted; unknown fields and
+accepts that override and otherwise uses roaming `APPDATA`. If `claustrum.jsonc` is
+missing, or has no `login_sharing` field, login sharing stays on (`true`). Comments and trailing commas are accepted; unknown fields and
 non-boolean values are invalid.
 
 When the subc daemon offers its config gate, the vault declares the schema and user

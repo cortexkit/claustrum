@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { ClaustrumClient } from '../wire.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { ClaustrumClient, decodeScopedInventory } from '../wire.js'
 import { throwerOf } from './settle'
 
 /**
@@ -58,6 +60,43 @@ const ROW = {
   operations: ['read'],
   created_at_ms: 1_750_000_000_000,
 }
+
+const CONDITION_SURFACES = JSON.parse(readFileSync(join(
+  import.meta.dir, '../../../../crates/credentials-module/tests/fixtures/login-conditions-v1/surfaces.json',
+), 'utf8')) as Record<string, { result: { credentials: Record<string, unknown>[]; view: string } }>
+
+test('scoped login condition producer rows decode alongside the plan tier and disappear when absent', () => {
+  const decode = (sample: string) => decodeScopedInventory(CONDITION_SURFACES[sample], () => {}).rows[0]!
+  const condition = { reason: 'provider_verification_required', sinceMs: 7 }
+  expect(decode('listing_condition').condition).toEqual(condition)
+  expect(decode('listing_condition_with_plan_tier')).toMatchObject({ condition, planTierSinceMs: 11 })
+  expect(decode('listing_unconditioned')).not.toHaveProperty('condition')
+  expect(decode('listing_sign_only')).not.toHaveProperty('condition')
+})
+
+function decodeWithCondition(condition: unknown) {
+  const { result } = CONDITION_SURFACES.listing_condition
+  return decodeScopedInventory({ result: {
+    ...result, credentials: [{ ...result.credentials[0], condition }],
+  } }, () => {}).rows[0]!
+}
+
+test('scoped login conditions accept an unknown reason and both safe since_ms endpoints', () => {
+  const reason = 'future_provider_condition'
+  for (const sinceMs of [0, 2 ** 53 - 1]) {
+    expect(decodeWithCondition({ reason, since_ms: sinceMs }).condition).toEqual({ reason, sinceMs })
+  }
+})
+
+test('scoped login conditions refuse malformed fields and out-of-range since_ms', () => {
+  const reason = 'provider_verification_required'
+  for (const since_ms of [-1, 2 ** 53, 0.5, '7', undefined]) {
+    expect(() => decodeWithCondition({ reason, since_ms })).toThrow('invalid_response')
+  }
+  for (const condition of [null, [], { reason: 5, since_ms: 7 }]) {
+    expect(() => decodeWithCondition(condition)).toThrow('invalid_response')
+  }
+})
 
 describe('list_scoped decoding', () => {
   test('a covered row survives the round trip with its adapter intact', async () => {

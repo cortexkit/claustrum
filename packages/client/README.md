@@ -96,6 +96,26 @@ or any material that may not be UTF-8. Both return `ServedCredentialBytes`, with
 checks, and TTL semantics as their text counterparts. Neither byte method performs
 text decoding.
 
+## Reporting login conditions
+
+A `listScoped` row can have `condition: { reason, sinceMs }`. It is separate from
+the login's `state`. Treat `reason` as an open string: new vaults may report
+reasons this client does not know. The scoped row does not carry an action link.
+
+- `reportCondition({ credentialId, recordVersion, reason, providerStatus, actionUrl?, enrollmentToken? })`
+  resolves without a value when the vault accepts the report, including when a
+  version mismatch leaves the condition unchanged. A refusal rejects with the
+  vault's error code.
+- `clearCondition({ credentialId, recordVersion, enrollmentToken? })` returns
+  `true` if it removed a condition and `false` if there was no condition to
+  remove or the version did not match. A refusal rejects with the vault's error
+  code.
+
+An older vault rejects both methods with `unknown_method`. If a reply is lost,
+the call rejects with the transport error and the client does not resend it: the
+vault may already have committed the write. Read `listScoped` to see the current
+condition rather than assuming the write failed.
+
 ## Watching for changes
 
 Since 0.12.0, `client.watchScoped(onNotice, { enrollmentToken? })` holds an

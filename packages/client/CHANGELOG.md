@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `listScoped` exposes an optional `condition` with `reason` and `sinceMs`.
+  Future reason strings decode without an update to the client.
+- `reportCondition` and `clearCondition` let a reader record or clear a login
+  condition. The client does not resend either call if the reply is lost, since
+  the vault may already have committed the change.
+
 ## 0.20.0
 
 Unpublished until the vault runs database step 44; release still requires owner approval.

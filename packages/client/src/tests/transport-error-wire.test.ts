@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,7 +23,7 @@ import { ClaustrumClient, ClaustrumCredentialError } from '../index'
 // spoken to through the real SDK, so the codes arrive exactly as a live vault's would.
 
 type Reply = { type: FrameType; body?: unknown }
-type Answer = (method: string, params: unknown) => Reply
+type Answer = (method: string, params: unknown) => Reply | null
 
 const KEY = new Uint8Array(32).fill(7)
 const DAEMON_ID = new Uint8Array(16).fill(9)
@@ -112,7 +112,12 @@ async function startVault(dir: string, answer: Answer): Promise<Vault> {
             continue
           }
           requests.push(body)
-          send(answer(body.method, body.params))
+          const reply = answer(body.method, body.params)
+          if (reply === null) {
+            socket.destroy()
+            return
+          }
+          send(reply)
         }
       } catch (error) {
         failure = error
@@ -294,3 +299,106 @@ test('every other definitive transport code is permanent and skips the reconnect
     }
   }
 })
+
+const CONDITION_TARGET = { credentialId: 'oauth:antigravity:condition-fixture', recordVersion: 1 }
+const CONDITION_REPORT = { ...CONDITION_TARGET, reason: 'provider_verification_required', providerStatus: 403 }
+
+test('condition mutations keep their request shape and decode the producer replies', async () => {
+  const samples = JSON.parse(await readFile(join(
+    import.meta.dir, '../../../../crates/credentials-module/tests/fixtures/login-conditions-v1/consumer-ops.json',
+  ), 'utf8')) as Record<string, unknown>
+  const replies = [
+    samples.report_verification_required, samples.report_version_mismatch,
+    samples.report_link_refused, samples.report_status_refused,
+    samples.clear_applied, samples.clear_unset, samples.clear_not_found,
+  ]
+  const token = 'fixture-enrollment-not-a-secret'
+  const target = { credential_id: CONDITION_TARGET.credentialId, record_version: 1 }
+  const report = { ...target, reason: 'provider_verification_required', provider_status: 403 }
+  await withVault(() => ({ type: FrameType.Response, body: replies.shift() }), async ({ client, vault, connects }) => {
+    expect(await client.reportCondition(CONDITION_REPORT)).toBeUndefined()
+    expect(await client.reportCondition(CONDITION_REPORT)).toBeUndefined()
+    const refusedLink = await failureOf(client.reportCondition({
+      ...CONDITION_REPORT, actionUrl: 'not-a-url', enrollmentToken: token,
+    }))
+    expect(refusedLink).toMatchObject({ code: 'condition_link_refused', class: 'permanent' })
+    const refusedStatus = await failureOf(client.reportCondition({ ...CONDITION_REPORT, providerStatus: 401 }))
+    expect(refusedStatus).toMatchObject({ code: 'condition_status_refused', class: 'permanent' })
+    expect(await client.clearCondition({ ...CONDITION_TARGET, enrollmentToken: token })).toBe(true)
+    expect(await client.clearCondition(CONDITION_TARGET)).toBe(false)
+    expect(await failureOf(client.clearCondition(CONDITION_TARGET)))
+      .toMatchObject({ code: 'not_found', class: 'permanent' })
+    expect(vault.requests).toEqual([
+      { method: 'credential.report_condition', params: report },
+      { method: 'credential.report_condition', params: report },
+      { method: 'credential.report_condition', params: { ...report, action_url: 'not-a-url', enrollment_token: token } },
+      { method: 'credential.report_condition', params: { ...report, provider_status: 401 } },
+      { method: 'credential.clear_condition', params: { ...target, enrollment_token: token } },
+      { method: 'credential.clear_condition', params: target },
+      { method: 'credential.clear_condition', params: target },
+    ])
+    expect(connects()).toBe(1)
+  })
+})
+
+test('condition mutations reject error replies even if a success flag is set', async () => {
+  const error = { code: 'not_found', class: 'permanent' }
+  await withVault((method) => ({ type: FrameType.Response, body: { result: {
+    ...(method === 'credential.report_condition' ? { accepted: true } : { cleared: true }), error,
+  } } }), async ({ client }) => {
+    expect(await failureOf(client.reportCondition(CONDITION_REPORT))).toMatchObject(error)
+    expect(await failureOf(client.clearCondition(CONDITION_TARGET))).toMatchObject(error)
+  })
+})
+
+test('condition mutations reject responses without valid success flags', async () => {
+  await withVault((method) => ({ type: FrameType.Response, body: { result:
+    method === 'credential.report_condition' ? { accepted: false } : { cleared: 'true' },
+  } }), async ({ client }) => {
+    expect((await failureOf(client.reportCondition(CONDITION_REPORT))).code).toBe('invalid_response')
+    expect((await failureOf(client.clearCondition(CONDITION_TARGET))).code).toBe('invalid_response')
+  })
+})
+
+test('unknown_method for condition mutations is definitive and does not reconnect', async () => {
+  await withVault(() => errorFrame('unknown_method'), async ({ client, vault, connects }) => {
+    for (const call of [
+      () => client.reportCondition(CONDITION_REPORT),
+      () => client.clearCondition(CONDITION_TARGET),
+    ]) {
+      expect(await failureOf(call())).toMatchObject({ code: 'unknown_method', class: 'permanent', action: 'gone' })
+    }
+    expect(vault.requests.map(({ method }) => method)).toEqual(['credential.report_condition', 'credential.clear_condition'])
+    expect(connects()).toBe(1)
+  })
+})
+
+for (const operation of ['report', 'clear'] as const) {
+  for (const loss of ['terminal error', 'connection drop'] as const) {
+    test(`condition ${operation} is dispatched once when its committed reply is lost to a ${loss}`, async () => {
+      let condition: string | undefined = operation === 'clear' ? CONDITION_REPORT.reason : undefined
+      let mutations = 0
+      await withVault(() => {
+        const result = operation === 'report' ? { accepted: true } : { cleared: condition !== undefined }
+        condition = operation === 'report' ? CONDITION_REPORT.reason : undefined
+        if (++mutations === 1) {
+          // Another reader reports a new condition after the clear commits.
+          if (operation === 'clear') condition = 'provider_ineligible'
+          return loss === 'terminal error' ? errorFrame('module_timeout') : null
+        }
+        return { type: FrameType.Response, body: { result } }
+      }, async ({ client, vault }) => {
+        const call = operation === 'report'
+          ? client.reportCondition(CONDITION_REPORT)
+          : client.clearCondition(CONDITION_TARGET)
+        const outcome = await call.then(() => undefined, (error: unknown) => error)
+        expect(vault.requests.map(({ method }) => method)).toEqual([`credential.${operation}_condition`])
+        expect(condition).toBe(operation === 'report' ? CONDITION_REPORT.reason : 'provider_ineligible')
+        expect(outcome).toBeInstanceOf(ClaustrumCredentialError)
+        expect(outcome).toMatchObject({
+          code: loss === 'terminal error' ? 'module_timeout' : 'transport_error', class: 'transient',
+        })
+      })
+    })
+  }
+}

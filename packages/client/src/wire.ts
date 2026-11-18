@@ -505,6 +505,45 @@ export class ClaustrumClient {
     if (result?.accepted !== true) throw asCredentialError(response, 'invalid_response', this.#logger)
   }
 
+  /** Report a login condition using the version served to this caller. */
+  async reportCondition(input: {
+    credentialId: string
+    recordVersion: number
+    reason: string
+    providerStatus: number
+    actionUrl?: string
+    enrollmentToken?: string
+  }): Promise<void> {
+    const response = await this.#callOnce('credential.report_condition', {
+      credential_id: input.credentialId,
+      record_version: input.recordVersion,
+      reason: input.reason,
+      provider_status: input.providerStatus,
+      action_url: input.actionUrl,
+      enrollment_token: input.enrollmentToken,
+    })
+    if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', this.#logger)
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+    if (result?.accepted !== true) throw asCredentialError(response, 'invalid_response', this.#logger)
+  }
+
+  /** Clear a login condition after a successful use of the served version. */
+  async clearCondition(input: {
+    credentialId: string
+    recordVersion: number
+    enrollmentToken?: string
+  }): Promise<boolean> {
+    const response = await this.#callOnce('credential.clear_condition', {
+      credential_id: input.credentialId,
+      record_version: input.recordVersion,
+      enrollment_token: input.enrollmentToken,
+    })
+    if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', this.#logger)
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+    if (typeof result?.cleared !== 'boolean') throw asCredentialError(response, 'invalid_response', this.#logger)
+    return result.cleared
+  }
+
   /**
    * Fire-and-forget quota reporting: `accepted` means queued, never that the
    * usage-processing module insula applied the reading.
@@ -617,21 +656,36 @@ export class ClaustrumClient {
     this.#client.close()
   }
 
+  #send(client: ClaustrumTransport, method: string, params: unknown): Promise<unknown> {
+    return client.call(CLAUSTRUM_MODULE_ID, method, params, {
+      identity: this.#identity,
+      consumerIdentity: null,
+    })
+  }
+
+  async #callOnce(method: string, params: unknown): Promise<unknown> {
+    const sentClient = this.#client
+    try {
+      return await this.#send(sentClient, method, params)
+    } catch (error) {
+      // The vault may have committed the write. Reconnecting can help future
+      // calls, but must not resend this one or replace its original error.
+      if (this.#client === sentClient && this.#shouldReconnect(error)) {
+        void this.#reconnect().catch(() => {})
+      }
+      throw this.#asTransportError(error)
+    }
+  }
+
   async #call(method: string, params: unknown): Promise<unknown> {
     const sentClient = this.#client
     try {
-      return await sentClient.call(CLAUSTRUM_MODULE_ID, method, params, {
-        identity: this.#identity,
-        consumerIdentity: null,
-      })
+      return await this.#send(sentClient, method, params)
     } catch (error) {
       if (!this.#shouldReconnect(error)) throw this.#asTransportError(error)
       try {
         if (this.#client === sentClient) await this.#reconnect()
-        return await this.#client.call(CLAUSTRUM_MODULE_ID, method, params, {
-          identity: this.#identity,
-          consumerIdentity: null,
-        })
+        return await this.#send(this.#client, method, params)
       } catch (recoveryError) {
         // Report the call's own failure, not the recovery's. A failed reconnect would
         // otherwise replace the original call's code with `transport_error`, so
@@ -726,6 +780,8 @@ export interface ScopedInventoryRow {
   readonly planTierObservedAtMs?: number
   /** Operator's effective start; fall back to planTierObservedAtMs when absent. */
   readonly planTierSinceMs?: number
+  /** A provider condition separate from state. Future reasons are open strings. */
+  readonly condition?: { readonly reason: string; readonly sinceMs: number }
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
@@ -883,6 +939,16 @@ export function decodeScopedInventory(
       (typeof planTierSinceMs !== 'number' || !Number.isSafeInteger(planTierSinceMs) || planTierSinceMs < 0)) {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
+    const rawCondition = row.condition
+    let condition: ScopedInventoryRow['condition']
+    if (rawCondition !== undefined) {
+      if (!isRecord(rawCondition) || typeof rawCondition.reason !== 'string' ||
+        typeof rawCondition.since_ms !== 'number' || !Number.isSafeInteger(rawCondition.since_ms) ||
+        rawCondition.since_ms < 0) {
+        throw asCredentialError(response, 'invalid_response', logUnknownClass)
+      }
+      condition = { reason: rawCondition.reason, sinceMs: rawCondition.since_ms }
+    }
     if (
       !isOptionalString(provider) || !isOptionalString(fusiformProviderId) ||
       (hosts !== undefined && !isStringArray(hosts)) || !isOptionalString(incarnation) ||
@@ -916,6 +982,7 @@ export function decodeScopedInventory(
       incarnation,
       planTierObservedAtMs,
       planTierSinceMs,
+      ...(condition === undefined ? {} : { condition }),
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),

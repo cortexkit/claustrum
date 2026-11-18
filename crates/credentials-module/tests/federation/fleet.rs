@@ -436,12 +436,13 @@ async fn fleet_batch_single_interoperate_and_mixed_opens_keep_order_and_domains(
         pending_open["epoch"] = pending["epoch"].clone();
         let good = json!({"plaintext":requests[0]["plaintext"]});
         let failed = json!({"error":{"code":"fleet_epoch_open_failed","class":"permanent"}});
+        let unavailable = json!({"error":{"code":"fleet_epoch_unavailable","class":"transient"}});
         let response = a.call_as(sealer, "fleet.epoch_open_batch", json!({"items":[
             open_params(&single,&aad), tampered, unknown, open_params(&wrong_domain,&aad), pending_open, open_params(&items[1],&aad)
         ]})).await;
         assert_eq!(
             response,
-            json!({"items":[good,failed,failed,failed,failed,{"plaintext":requests[1]["plaintext"]}]})
+            json!({"items":[good,failed,unavailable,failed,unavailable,{"plaintext":requests[1]["plaintext"]}]})
         );
         a.ok(
             "fleet.epoch_discard",
@@ -459,32 +460,28 @@ async fn fleet_batch_item_count_accepts_256_refuses_257_and_empty_before_store_a
     let root = temp_root("fleet-batch-count");
     let callosum = SharedCallosumStandIn::start(root.path()).await;
     let a = Vault::new(root.path(), 1, &callosum);
-    for (method, item, code) in [
-        (
-            "fleet.epoch_seal_batch",
-            json!({"aad":"","plaintext":""}),
-            "fleet_epoch_unavailable",
-        ),
+    let unavailable = json!({"error":{"code":"fleet_epoch_unavailable","class":"transient"}});
+    for (method, item) in [
+        ("fleet.epoch_seal_batch", json!({"aad":"","plaintext":""})),
         (
             "fleet.epoch_open_batch",
             json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode([0;16]),"aad":""}),
-            "fleet_epoch_open_failed",
         ),
     ] {
         for count in [1, 256] {
-            refused(
+            let expected = if method == "fleet.epoch_open_batch" {
+                json!({"items":vec![unavailable.clone();count]})
+            } else {
+                unavailable.clone()
+            };
+            assert_eq!(
                 a.call_as(
                     "prefrontal",
                     method,
                     json!({"items":vec![item.clone();count]}),
                 )
                 .await,
-                code,
-                if method.contains("seal") {
-                    "transient"
-                } else {
-                    "permanent"
-                },
+                expected,
             );
         }
         for count in [0, 257] {
@@ -514,28 +511,27 @@ async fn fleet_batch_bytes_accept_eight_mib_refuse_one_byte_more_before_store_ac
     let callosum = SharedCallosumStandIn::start(root.path()).await;
     let a = Vault::new(root.path(), 1, &callosum);
     let mib = 1024 * 1024;
-    for (method, item, code) in [
+    let unavailable = json!({"error":{"code":"fleet_epoch_unavailable","class":"transient"}});
+    for (method, item) in [
         (
             "fleet.epoch_seal_batch",
             json!({"aad":URL_SAFE_NO_PAD.encode(vec![0;mib]),"plaintext":URL_SAFE_NO_PAD.encode(vec![0;mib])}),
-            "fleet_epoch_unavailable",
         ),
         (
             "fleet.epoch_open_batch",
             json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode(vec![0;mib]),"aad":URL_SAFE_NO_PAD.encode(vec![0;mib])}),
-            "fleet_epoch_open_failed",
         ),
     ] {
         let mut items = vec![item; 4];
-        refused(
+        let expected = if method == "fleet.epoch_open_batch" {
+            json!({"items":vec![unavailable.clone();items.len()]})
+        } else {
+            unavailable.clone()
+        };
+        assert_eq!(
             a.call_as("prefrontal", method, json!({"items":items}))
                 .await,
-            code,
-            if method.contains("seal") {
-                "transient"
-            } else {
-                "permanent"
-            },
+            expected,
         );
         items.push(if method.contains("seal") {json!({"aad":"AA","plaintext":""})} else {json!({"epoch":1,"nonce":URL_SAFE_NO_PAD.encode([0;24]),"ciphertext":URL_SAFE_NO_PAD.encode([0;16]),"aad":""})});
         if method.contains("open") {

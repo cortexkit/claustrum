@@ -111,5 +111,19 @@
       "nonce": "jDbJkGjK_G6RDbSbsl4fXGrUFQv62lkt"
     }
   },
+  "unheld_epoch_open": {
+    "request": {
+      "aad": "cm9vbTpvbmU6ZXZlbnQ6Nw",
+      "ciphertext": "BwQV4jkzXSl8sGNPIpBUQxVDX1drGJ6wTuoW7PgXLA",
+      "epoch": 1,
+      "nonce": "jDbJkGjK_G6RDbSbsl4fXGrUFQv62lkt"
+    },
+    "response": {
+      "error": {
+        "class": "transient",
+        "code": "fleet_epoch_unavailable"
+      }
+    }
+  },
   "version": "fleet-epoch-prefrontal-vectors-v1"
 }

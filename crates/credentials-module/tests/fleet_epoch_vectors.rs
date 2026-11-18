@@ -11,7 +11,7 @@ use credentials_core::fleet::{FleetPeer, FleetRemoval, FleetWrap, WRAP_DOMAIN, W
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::{kem, EncryptedStore};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subc_protocol::Principal;
 use support::{HomeStore, Reply, SharedCallosumStandIn, VaultFixture, TARGET_MODULE};
@@ -161,6 +161,14 @@ fn refusal(
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fleet-epoch-v1/cases.json")
+}
+
+fn pinned_cases(path: &Path, emitting: bool) -> Option<Value> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes).unwrap()),
+        Err(err) if emitting && err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => panic!("read {}: {err}", path.display()),
+    }
 }
 
 fn excluded_mint_sender(
@@ -385,7 +393,7 @@ async fn fleet_mint_exclusion_allows_the_peer_to_receive_the_epoch_later() {
     let open_params = sample_open(&sealed, &json!(""));
     assert_eq!(
         call(&c_store, None, "fleet.epoch_open", open_params.clone()).await,
-        json!({"error":{"code":"fleet_epoch_open_failed","class":"permanent"}})
+        json!({"error":{"code":"fleet_epoch_unavailable","class":"transient"}})
     );
 
     let join = call(
@@ -469,8 +477,8 @@ async fn fleet_epoch_samples_are_producer_generated_and_pinned() {
             false,
         ),
         (
-            "fleet_epoch_open_failed",
-            "permanent",
+            "fleet_epoch_unavailable",
+            "transient",
             "fleet.epoch_open",
             json!({"epoch":1,"nonce":encode([0;24]),"ciphertext":encode([0;16]),"aad":""}),
             false,
@@ -582,18 +590,15 @@ async fn fleet_epoch_samples_are_producer_generated_and_pinned() {
     .await;
     assert_eq!(joined, json!({"epochs":[],"already_held":true}));
 
-    // Production chooses the nonce. Emission captures it once; ordinary runs
-    // replay the committed ciphertext and independently exercise a fresh seal.
+    // Replay the committed ciphertext even during regeneration so unrelated
+    // edits do not change its nonce or ciphertext. Exercise a fresh seal too.
     let fresh = call(&a_store, None, "fleet.epoch_seal", seal_params.clone()).await;
     let emitting = std::env::var_os("CK_EMIT_FLEET_VECTORS").is_some();
-    let sealed = if emitting {
-        fresh.clone()
-    } else {
-        let pinned: Value =
-            serde_json::from_slice(&std::fs::read(fixture_path()).expect("generate fleet samples"))
-                .unwrap();
-        pinned["seal_open"]["response"].clone()
-    };
+    let pinned = pinned_cases(&fixture_path(), emitting);
+    let sealed = pinned.as_ref().map_or_else(
+        || fresh.clone(),
+        |cases| cases["seal_open"]["response"].clone(),
+    );
     assert_eq!(decode(&sealed["nonce"]).len(), 24);
     assert_eq!(
         decode(&sealed["ciphertext"]).len(),
@@ -618,7 +623,7 @@ async fn fleet_epoch_samples_are_producer_generated_and_pinned() {
     for field in ["nonce", "ciphertext"] {
         stable_fresh.as_object_mut().unwrap().remove(field);
         stable_sample.as_object_mut().unwrap().remove(field);
-        if !emitting {
+        if pinned.is_some() {
             assert_ne!(fresh[field], sealed[field]);
         }
     }
@@ -748,6 +753,8 @@ are separate and unchanged.
   in `record_aad_utf8`, and the successful single open on two stores sharing the
   epoch key. `cross_domain_open` reuses those exact epoch, nonce, ciphertext and
   caller AAD bytes as Entorhinal and pins the open refusal.
+- `unheld_epoch_open` sends the same request to a vault without the epoch and
+  pins the transient `fleet_epoch_unavailable` refusal.
 - `batch` records two Prefrontal seal inputs and outputs, each with a fresh nonce
   under the same epoch and its exact AEAD AAD bytes. Each output opens through
   single open. Its two-item open batch contains the first Prefrontal ciphertext
@@ -774,8 +781,8 @@ cargo test --locked -p credentials-module --features credentials-core/test-suppo
 
 The test replays every committed ciphertext through real open calls, regenerates
 and compares every file byte for byte, and exercises fresh single and batch seals.
-Production draws each nonce once at emission; normal runs replay that nonce rather
-than adding a deterministic-nonce hook. Deliberate regeneration sets
+Regeneration reuses existing sealed samples; if `cases.json` is absent, production
+draws fresh nonces. Deliberate regeneration sets
 `CK_EMIT_PREFRONTAL_FLEET_VECTORS=1` on the command above and returns all three
 folder files from the build-server job. The test generates `README.md` and
 `SHA256SUMS` along with `cases.json`; never hand-edit generated sample files.
@@ -785,6 +792,25 @@ folder files from the build-server job. The test generates `README.md` and
 fn sample_open(sealed: &Value, aad: &Value) -> Value {
     json!({"epoch":sealed["epoch"],"nonce":sealed["nonce"],
         "ciphertext":sealed["ciphertext"],"aad":aad})
+}
+
+async fn sample_unheld_epoch_open(
+    root: &Path,
+    callosum: &SharedCallosumStandIn,
+    caller: &str,
+    request: &Value,
+) -> Value {
+    let receiver = VaultFixture::new(root, "unheld", &format!("{:032x}", 3), callosum);
+    let store = HomeStore::open(&receiver.data_dir).store;
+    store
+        .set_federation_self_member_audited(&member(3), AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    let response = call_as(&store, None, caller, "fleet.epoch_open", request.clone()).await;
+    assert_eq!(
+        response,
+        json!({"error":{"code":"fleet_epoch_unavailable","class":"transient"}})
+    );
+    json!({"request":request,"response":response})
 }
 
 fn sample_aad(sealed: &Value, aad: &Value, domain: &str) -> String {
@@ -828,14 +854,7 @@ async fn fleet_epoch_prefrontal_samples_are_producer_generated_and_pinned() {
     let folder =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fleet-epoch-prefrontal-v1");
     let emitting = std::env::var_os("CK_EMIT_PREFRONTAL_FLEET_VECTORS").is_some();
-    let pinned: Value = if emitting {
-        Value::Null
-    } else {
-        serde_json::from_slice(
-            &std::fs::read(folder.join("cases.json")).expect("generate Prefrontal samples"),
-        )
-        .unwrap()
-    };
+    let pinned = pinned_cases(&folder.join("cases.json"), emitting);
     let request = json!({"aad":encode(b"room:one:event:7"),"plaintext":encode(b"room event body")});
     let batch_request = json!({"items":[request.clone(),
         {"aad":encode(b"room:one:event:8"),"plaintext":encode(b"second room event")}]});
@@ -861,11 +880,9 @@ async fn fleet_epoch_prefrontal_samples_are_producer_generated_and_pinned() {
         ),
     ] {
         let fresh = call_as(&a_store, None, caller, method, params.clone()).await;
-        let sealed = if emitting {
-            fresh.clone()
-        } else {
-            pinned[field]["response"].clone()
-        };
+        let sealed = pinned
+            .as_ref()
+            .map_or_else(|| fresh.clone(), |cases| cases[field]["response"].clone());
         let fresh_items = if field == "batch" {
             fresh["items"].as_array().unwrap().clone()
         } else {
@@ -904,7 +921,7 @@ async fn fleet_epoch_prefrontal_samples_are_producer_generated_and_pinned() {
                     json!({"plaintext":input["plaintext"]})
                 );
             }
-            if !emitting {
+            if pinned.is_some() {
                 assert_ne!(fresh["nonce"], sample["nonce"]);
                 assert_ne!(fresh["ciphertext"], sample["ciphertext"]);
             }
@@ -949,6 +966,8 @@ async fn fleet_epoch_prefrontal_samples_are_producer_generated_and_pinned() {
     )
     .await;
     assert_eq!(batch_opened, json!({"items":[opened,refused]}));
+    let unheld =
+        sample_unheld_epoch_open(root.path(), &callosum, "prefrontal", &open_request).await;
     let aad =
         |sealed: &Value, aad: &Value| sample_aad(sealed, aad, "ck-fleet-epoch-aad/prefrontal/v1");
     let samples = json!({"version":"fleet-epoch-prefrontal-vectors-v1","caller":"reserved:prefrontal","epoch_key":encode([0x31;32]),
@@ -959,7 +978,8 @@ async fn fleet_epoch_prefrontal_samples_are_producer_generated_and_pinned() {
             "record_aad_utf8":sample_aad(entorhinal,&request["aad"],"ck-fleet-epoch-aad/v1")},
         "batch":{"request":batch_request,"response":batch,
             "record_aad_utf8":[aad(&batch["items"][0],&batch_request["items"][0]["aad"]),aad(&batch["items"][1],&batch_request["items"][1]["aad"])],
-            "open_request":batch_open,"open_response":batch_opened}});
+            "open_request":batch_open,"open_response":batch_opened},
+        "unheld_epoch_open":unheld});
     let mut cases = serde_json::to_vec_pretty(&samples).unwrap();
     cases.push(b'\n');
     let checksums = format!(
@@ -998,6 +1018,8 @@ in `tests/fleet_epoch_vectors.rs`.
 - `seal_open` records a Magic Context single seal and its successful open on the
   second store. `cross_domain_open` submits the identical open request as
   Prefrontal and pins the refusal.
+- `unheld_epoch_open` sends the same request to a vault without the epoch and
+  pins the transient `fleet_epoch_unavailable` refusal.
 - `batch` records two ordered Magic Context seal inputs and outputs and their
   successful open batch on the second store. Each item has a separate nonce.
 
@@ -1021,8 +1043,8 @@ cargo test --locked -p credentials-module --features credentials-core/test-suppo
 
 The test exercises fresh single and batch seals, replays the committed
 ciphertexts through real open calls, and compares all three generated files byte
-for byte. Production draws each nonce at emission; normal runs replay those
-nonces rather than changing the nonce source. To regenerate, set
+for byte. Regeneration reuses existing sealed samples; if `cases.json` is absent,
+production draws fresh nonces. To regenerate, set
 `CK_EMIT_MAGIC_CONTEXT_FLEET_VECTORS=1` on the command above and return all three
 files from the build-server job. Never hand-edit generated sample files.
 `SHA256SUMS` pins README and cases, excluding itself.
@@ -1068,15 +1090,13 @@ async fn fleet_epoch_magic_context_samples_are_producer_generated_and_pinned() {
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/fleet-epoch-magic-context-v1");
     let emitting = std::env::var_os("CK_EMIT_MAGIC_CONTEXT_FLEET_VECTORS").is_some();
-    let (sealed, batch) = if emitting {
-        (fresh.clone(), fresh_batch.clone())
-    } else {
-        let pinned: Value =
-            serde_json::from_slice(&std::fs::read(folder.join("cases.json")).unwrap()).unwrap();
-        (
-            pinned["seal_open"]["response"].clone(),
-            pinned["batch"]["response"].clone(),
-        )
+    let pinned = pinned_cases(&folder.join("cases.json"), emitting);
+    let (sealed, batch) = match &pinned {
+        Some(cases) => (
+            cases["seal_open"]["response"].clone(),
+            cases["batch"]["response"].clone(),
+        ),
+        None => (fresh.clone(), fresh_batch.clone()),
     };
     let batch_items = batch["items"].as_array().unwrap();
     assert_eq!(batch_items.len(), requests.len());
@@ -1094,7 +1114,7 @@ async fn fleet_epoch_magic_context_samples_are_producer_generated_and_pinned() {
                 decode(&input["plaintext"]).len() + 16
             );
         }
-        if !emitting {
+        if pinned.is_some() {
             assert_ne!(fresh["nonce"], sample["nonce"]);
         }
     }
@@ -1150,6 +1170,7 @@ async fn fleet_epoch_magic_context_samples_are_producer_generated_and_pinned() {
     )
     .await;
     assert_eq!(batch_opened, expected_batch);
+    let unheld = sample_unheld_epoch_open(root.path(), &callosum, CALLER, &open).await;
     let batch_aad: Vec<_> = batch_items
         .iter()
         .zip(&requests)
@@ -1161,7 +1182,8 @@ async fn fleet_epoch_magic_context_samples_are_producer_generated_and_pinned() {
             "open_request":open,"open_response":opened,
             "cross_domain_open":{"caller":"reserved:prefrontal","request":open,"response":refused}},
         "batch":{"request":batch_request,"response":batch,"record_aad_utf8":batch_aad,
-            "open_request":batch_open,"open_response":batch_opened}
+            "open_request":batch_open,"open_response":batch_opened},
+        "unheld_epoch_open":unheld
     });
     let mut cases = serde_json::to_vec_pretty(&samples).unwrap();
     cases.push(b'\n');

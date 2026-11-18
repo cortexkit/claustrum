@@ -5331,8 +5331,10 @@ chooses the domain solely from the attested caller:
 There is no domain parameter. Under the same epoch key, nonce, ciphertext and
 caller aad, opening in a different caller's domain refuses `fleet_epoch_open_failed`.
 `open` accepts any held epoch (current or retired), a 24-byte nonce, ciphertext
-of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. Unknown epochs and bad
-tags both refuse `fleet_epoch_open_failed`, without distinguishing them.
+of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. If the vault has no row
+for the requested epoch or holds it only as pending, opening refuses
+`fleet_epoch_unavailable` (transient). For a held epoch, a bad tag, wrong aad or
+different caller's domain refuses `fleet_epoch_open_failed` (permanent).
 Pending epochs are never used to seal, open or export history.
 
 Both batch operations require 1 through 256 items. Each item obeys the single
@@ -5347,10 +5349,10 @@ input order. The same caller-domain rule applies to every item in a batch.
 with a separate fresh random 24-byte nonce per item. A missing usable epoch, pending
 removal or store failure refuses the whole call with the same body as single seal;
 no items are returned. `open_batch` returns a plaintext or the single open's exact
-error code and class for each item. Tampering, a wrong domain or an unknown/pending
-epoch affects only that item. A shared failure (missing Self, no fleet state, a
-failed store read, or a store error even after processing has begun) refuses the
-whole call with the corresponding single open body, never a partial list.
+error code and class for each item. If the vault has no epoch rows at all, each
+item returns `fleet_epoch_unavailable`. An unset self member ID still refuses the
+whole call with `fleet_epoch_unavailable`. A failed store read or a store error
+after processing has begun also refuses the whole call, never a partial list.
 Single and batch seal/open write no audit rows.
 
 `status` returns `current: int|null`, ascending `held` including current,

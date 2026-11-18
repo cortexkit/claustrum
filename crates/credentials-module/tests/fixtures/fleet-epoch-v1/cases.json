@@ -86,8 +86,8 @@
       },
       "response": {
         "error": {
-          "class": "permanent",
-          "code": "fleet_epoch_open_failed"
+          "class": "transient",
+          "code": "fleet_epoch_unavailable"
         }
       }
     },

@@ -542,9 +542,10 @@ Each of these rows keeps `invalid_key: None`. Their checks are not changed here.
 
 - `searxng`: self-hosted instances have no fixed receiving hosts or universal client
   key header. See <https://docs.searxng.org/dev/search_api.html>.
-- `typesafe`: a key can belong to a deployment at a custom base URL. The public
-  service's Bearer API does not describe those deployments; see
-  <https://docs.typesafe.ai/introduction/quickstart>.
+- `typesafe` (removed from this list): TypeSafe's quick start documents one public
+  host, `POST https://api.typesafe.ai/v1/systemone` with `Authorization: Bearer`,
+  and the one consumer sends every TypeSafe key there. The row now serves that
+  host and Bearer auth. See <https://docs.typesafe.ai/introduction/quickstart>.
 - `kagi` (added to the no-descriptor list): the API portal documents
   `Authorization: Bot <key>`, which is neither supported scheme. See
   <https://help.kagi.com/kagi/api/api-portal.html>. The search page now also shows

@@ -100,7 +100,7 @@ fn params() -> AccountTokenParams {
     }
 }
 struct Rig {
-    surface: ReadSurface,
+    surface: Arc<ReadSurface>,
     store: Arc<EncryptedStore>,
     root: TestTempDir,
     http: Arc<Server>,
@@ -150,7 +150,7 @@ impl Rig {
             )
             .unwrap();
         let rig = Self {
-            surface,
+            surface: Arc::new(surface),
             store,
             root,
             http,
@@ -554,13 +554,83 @@ async fn account_token_cache_window_and_minimum_ttl() {
         .await
         .unwrap();
     assert_eq!(rig.http.requests().len(), 4);
-    rig.surface.account_tokens.clock = Some(1_800_000_840_000);
+    Arc::get_mut(&mut rig.surface).unwrap().account_tokens.clock = Some(1_800_000_840_000);
     rig.call().await.unwrap();
     assert_eq!(
         rig.http.requests().len(),
         6,
         "exactly sixty seconds is not a cache hit"
     );
+}
+
+#[tokio::test]
+async fn account_token_cache_hit_does_not_open_the_signer_and_tracks_key_lifetimes() {
+    let rig = Rig::new(
+        [exchange(), exchange(), exchange()]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let record = rig.store.get(VAULT_KEY).unwrap();
+    let meta = rig.store.meta(VAULT_KEY).unwrap();
+    rig.call().await.unwrap();
+    let opens = || {
+        rig.surface
+            .account_tokens
+            .signer_opens
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert_eq!(opens(), 1);
+
+    for n in 0..24 {
+        rig.store
+            .create(
+                &format!("operator:unrelated-{n}"),
+                &VaultRecord::new_static(
+                    CredentialKind::Opaque,
+                    "test",
+                    b"unrelated".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+    }
+    // An unrelated row need not even be readable as inventory metadata.
+    rusqlite::Connection::open(rig.root.join("store.db"))
+        .unwrap()
+        .execute(
+            "UPDATE credentials SET incarnation=X'00' WHERE credential_id='operator:unrelated-0'",
+            [],
+        )
+        .unwrap();
+    rig.call().await.unwrap();
+    assert_eq!(rig.http.requests().len(), 2);
+    assert_eq!(opens(), 1);
+
+    rig.store
+        .remove_audited(VAULT_KEY, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    rig.store.create(VAULT_KEY, &record).unwrap();
+    let recreated = rig.store.meta(VAULT_KEY).unwrap();
+    assert_eq!(recreated.record_version, meta.record_version);
+    assert_ne!(recreated.incarnation, meta.incarnation);
+    rig.call().await.unwrap();
+    assert_eq!(rig.http.requests().len(), 4);
+    assert_eq!(opens(), 2);
+
+    rig.store
+        .overwrite_unconditional_audited(VAULT_KEY, &record, AuditCtx::admin(AuditOp::Overwrite))
+        .unwrap();
+    rig.call().await.unwrap();
+    assert_eq!(rig.http.requests().len(), 6);
+    assert_eq!(opens(), 3);
+
+    rig.store
+        .invalidate_audited(VAULT_KEY, AuditCtx::admin(AuditOp::Invalidate))
+        .unwrap();
+    assert_eq!(error(rig.call().await).code, "account_login_required");
+    assert_eq!(rig.http.requests().len(), 6);
+    assert_eq!(opens(), 3);
 }
 
 #[tokio::test]
@@ -711,6 +781,37 @@ async fn account_token_unusable_refusal_bodies_are_transient_at_both_stages() {
                 );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn account_token_non_json_success_is_transient_at_both_stages() {
+    for on_token in [false, true] {
+        let mut responses = Vec::new();
+        if on_token {
+            responses.push(reply(200, challenge()));
+        }
+        responses.push(Ok(HttpResponse {
+            status: 200,
+            body: b"{\"truncated\":".to_vec(),
+        }));
+        let rig = Rig::new(responses);
+        let error = error(rig.call().await);
+        assert_eq!(
+            error.code, "account_exchange_unavailable",
+            "on_token={on_token}"
+        );
+        assert_eq!(error.class, ErrorClass::Transient);
+        assert_eq!(error.retry_after_ms, None);
+        assert_eq!(rig.http.requests().len(), if on_token { 2 } else { 1 });
+        assert!(rig
+            .store
+            .recent_auth_events(64)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "scoped_read_refusal"
+                && event.provider_status == Some(200)
+                && event.detail.as_deref() == Some("account_exchange_unavailable")));
     }
 }
 

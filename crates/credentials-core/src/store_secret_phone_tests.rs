@@ -841,6 +841,70 @@ fn phone_gate_persists_and_defaults_off_and_audits_once() {
 }
 
 #[test]
+fn phone_gate_cache_loads_unreadable_closed_and_only_publishes_commits() {
+    let (root, store) = rig("phone-gate-cache", 60);
+    let ctx = AuditCtx::admin(AuditOp::SecretPhoneGateSet);
+    store
+        .set_federation_member_mapping_audited(true, AuditCtx::admin(AuditOp::FederationGateSet))
+        .unwrap();
+    store.set_secret_phone_mapping_audited(true, ctx).unwrap();
+    assert_eq!(store.cached_mapping_gates(), Some((true, Some(true))));
+
+    store
+        .store
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER reject_phone_gate BEFORE INSERT ON main.audit_log
+         BEGIN SELECT RAISE(ABORT, 'blocked audit'); END;",
+            )
+        })
+        .unwrap();
+    assert!(store.set_secret_phone_mapping_audited(false, ctx).is_err());
+    assert_eq!(store.cached_mapping_gates(), Some((true, Some(true))));
+    assert!(store.secret_phone_mapping().unwrap());
+    store
+        .store
+        .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_phone_gate;"))
+        .unwrap();
+
+    store.set_secret_phone_mapping_audited(false, ctx).unwrap();
+    assert_eq!(store.cached_mapping_gates(), Some((true, Some(false))));
+
+    store
+        .store
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "UPDATE settings SET value=X'00' WHERE name='secret.phone_mapping'",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    MAPPING_GATE_READS.with(|count| count.set(0));
+    for _ in 0..3 {
+        assert_eq!(store.cached_mapping_gates(), Some((true, Some(false))));
+    }
+    MAPPING_GATE_READS.with(|count| assert_eq!(count.get(), 0));
+
+    // Damage to the persisted setting is observed on reopen.
+    drop(store);
+    let descriptor = cortexkit_store::StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: "taxonomy-phone-gate-cache".into(),
+        isolation: cortexkit_store::Isolation::Module,
+        backend: cortexkit_store::StorageBackend::Sqlite {
+            path: root.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let reopened = EncryptedStore::open(
+        cortexkit_store::open_sqlite(&descriptor).unwrap(),
+        MasterKey::from_bytes([60; 32]),
+    )
+    .unwrap();
+    assert_eq!(reopened.cached_mapping_gates(), None);
+    MAPPING_GATE_READS.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
 fn secret_shared_validators_pin_material_and_header_boundaries() {
     for (limit, location) in [(64, "query:"), (256, "json_pointer:/")] {
         for len in [limit, limit + 1] {

@@ -1,6 +1,8 @@
 use super::*;
+use crate::{ConnectorInventory, ConnectorRecordMetadata, ConnectorRow};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
 
 /// The category an operator puts on a stored secret that a module needs in order to run
 /// at all, such as Broca's session-storage key. Grants on such a record are left out of
@@ -10,6 +12,15 @@ pub const MODULE_RUNTIME_CATEGORY: &str = "module-runtime";
 
 fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant>> {
     let runtime = runtime_ids(conn)?;
+    visible_grants_for_runtime(conn, &runtime)
+}
+
+fn visible_grants_for_runtime(
+    conn: &rusqlite::Connection,
+    runtime: &BTreeSet<String>,
+) -> rusqlite::Result<Vec<ReadGrant>> {
+    #[cfg(test)]
+    tests::count_grant_load();
     Ok(
         read_grants_from_conn(conn, None, None, read_schema_version(conn)?)?
             .into_iter()
@@ -24,77 +35,167 @@ fn visible_grants(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ReadGrant
     )
 }
 
+#[derive(Default)]
+struct PermissionIndex {
+    exact: HashMap<String, Vec<String>>,
+    category: HashMap<String, Vec<String>>,
+}
+
+impl PermissionIndex {
+    fn new(grants: Vec<ReadGrant>) -> Self {
+        let mut index = Self::default();
+        for grant in grants {
+            let bucket = match grant.selector_kind {
+                SelectorKind::Exact => &mut index.exact,
+                SelectorKind::Category => &mut index.category,
+                SelectorKind::Audience => continue,
+            };
+            let id = grant_id(&grant);
+            bucket.entry(grant.selector).or_default().push(id);
+        }
+        index
+    }
+
+    fn ids_for(&self, id: &str, categories: &[String]) -> Vec<String> {
+        let mut ids: Vec<_> = self.exact.get(id).into_iter().flatten().cloned().collect();
+        for category in categories {
+            ids.extend(self.category.get(category).into_iter().flatten().cloned());
+        }
+        ids.sort_unstable();
+        ids
+    }
+}
+
 impl EncryptedStore {
-    /// Credentials in the `module-runtime` group are omitted from both app lists.
-    /// Use the same category membership query as the permission grant filter.
-    pub fn connector_runtime_ids(
-        &self,
-    ) -> Result<std::collections::BTreeSet<String>, StoreOpError> {
+    /// Newest existing diagnostic reason, without imposing a global event limit.
+    pub fn connector_auth_reason(&self, id: &str) -> Result<Option<String>, StoreOpError> {
         self.store
-            .with_conn(runtime_ids)
+            .with_conn(|conn| connector_auth_reason(conn, id))
             .map_err(StoreOpError::from)
     }
 
-    /// Permission-row ids reaching a credential, using the permission list's visible
-    /// grants and opaque id function. Audience grants never reach stored credentials.
-    pub fn connector_permission_ids(
-        &self,
-        id: &str,
-        categories: &[String],
-    ) -> Result<Vec<String>, StoreOpError> {
+    /// Open display metadata even for non-active records. Each row, including its
+    /// categories and incarnation, must come from the same snapshot as its envelope.
+    pub fn connector_inventory(&self) -> Result<ConnectorInventory, StoreOpError> {
         self.store
             .with_conn(|conn| {
-                let mut ids: Vec<_> = visible_grants(conn)?
-                    .iter()
-                    .filter(|grant| match grant.selector_kind {
-                        SelectorKind::Exact => grant.selector == id,
-                        SelectorKind::Category => categories.contains(&grant.selector),
-                        SelectorKind::Audience => false,
-                    })
-                    .map(grant_id)
-                    .collect();
-                ids.sort();
-                Ok(ids)
+                let tx = conn.unchecked_transaction()?;
+                let inventory = self.connector_inventory_in_snapshot(&tx)?;
+                tx.commit()?;
+                Ok(inventory)
             })
             .map_err(StoreOpError::from)
     }
 
-    /// Open display metadata without lifecycle gating or writes. Undecodable records
-    /// are omitted because their kind cannot be determined safely.
-    pub fn connector_records(
+    fn connector_inventory_in_snapshot(
         &self,
-    ) -> Result<Vec<(String, crate::ConnectorRecordMetadata)>, StoreOpError> {
-        self.store.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT credential_id, record_version, envelope FROM credentials ORDER BY credential_id")?;
-            let mut records = Vec::new();
-            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Vec<u8>>(2)?)))? {
-                let (id, version, bytes) = row?;
-                if let Ok(plaintext) = envelope::open(&self.key, &bytes, &RecordBinding { credential_id: &id, record_version: version }) {
-                    if let Ok(record) = VaultRecord::decode(&plaintext) {
-                        records.push((id, crate::ConnectorRecordMetadata {
-                            kind: record.kind,
-                            refresh_adapter: record.refresh_adapter,
-                            identity: record.identity,
-                            detected_plan: record.detected_plan,
-                        }));
-                    }
-                }
+        conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<ConnectorInventory> {
+        let runtime = runtime_ids(conn)?;
+        #[cfg(test)]
+        tests::after_first_read()?;
+        let permissions = PermissionIndex::new(visible_grants_for_runtime(conn, &runtime)?);
+        let mut local = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT credential_id, record_version, envelope, incarnation, state,
+                COALESCE((SELECT group_concat(category, ',') FROM (
+                    SELECT category FROM credential_categories
+                    WHERE credential_id=credentials.credential_id ORDER BY category
+                )), ''),
+                (SELECT plan_tier FROM credential_plan_tiers WHERE credential_id=credentials.credential_id)
+             FROM credentials ORDER BY credential_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            if runtime.contains(&id) {
+                continue;
             }
-            Ok(records)
-        }).map_err(StoreOpError::from)
-    }
-
-    /// Newest existing diagnostic reason, without imposing a global event limit.
-    pub fn connector_auth_reason(&self, id: &str) -> Result<Option<String>, StoreOpError> {
-        self.store.with_conn(|conn| {
-            conn.query_row("SELECT detail FROM auth_events WHERE credential_id=?1 AND detail IS NOT NULL ORDER BY seq DESC LIMIT 1", [id], |row| row.get(0)).optional()
-        }).map_err(StoreOpError::from)
+            let version = row.get(1)?;
+            let bytes: Vec<u8> = row.get(2)?;
+            let Ok(plaintext) = envelope::open(
+                &self.key,
+                &bytes,
+                &RecordBinding {
+                    credential_id: &id,
+                    record_version: version,
+                },
+            ) else {
+                continue;
+            };
+            // Undecodable records have no trustworthy kind for the connector list.
+            let Ok(record) = VaultRecord::decode(&plaintext) else {
+                continue;
+            };
+            let kind = match record.kind {
+                CredentialKind::Oauth
+                    if record.refresh_adapter.as_deref().is_some_and(|adapter| {
+                        adapter != crate::refresh_adapters::github_app::ADAPTER_NAME
+                    }) =>
+                {
+                    "account"
+                }
+                CredentialKind::Cookie => "account",
+                CredentialKind::ApiKey if record.refresh_adapter.is_none() => "api_key",
+                _ => continue,
+            };
+            let state = RecordState::from_str(&row.get::<_, String>(4)?);
+            let categories = crate::store::metadata::split_categories(row.get(5)?);
+            let incarnation: String = row.get(3)?;
+            local.push(ConnectorRow {
+                permissions: permissions.ids_for(&id, &categories),
+                auth_reason: if state == RecordState::Active {
+                    None
+                } else {
+                    connector_auth_reason(conn, &id)?
+                },
+                condition: conditions::local_condition_conn(conn, &id, &incarnation)?,
+                record: ConnectorRecordMetadata {
+                    id,
+                    incarnation,
+                    state,
+                    categories,
+                    kind,
+                    identity: record.identity,
+                    detected_plan: record.detected_plan,
+                    plan_tier: row.get(6)?,
+                },
+            });
+        }
+        let mut remote = Vec::new();
+        for entry in Self::remote_inventory_in_snapshot(conn)? {
+            let id = &entry.record.credential_id;
+            if !runtime.contains(id) {
+                remote.push(ConnectorRow {
+                    permissions: permissions.ids_for(id, &entry.categories),
+                    auth_reason: connector_auth_reason(conn, id)?,
+                    condition: conditions::remote_condition_conn(
+                        conn,
+                        id,
+                        &entry.record.incarnation,
+                    )?,
+                    record: entry,
+                });
+            }
+        }
+        let computer =
+            federation_store::read_setting(conn, crate::federation::SELF_MEMBER_SETTING)?;
+        Ok(ConnectorInventory {
+            local,
+            remote,
+            computer,
+        })
     }
 }
 
-fn runtime_ids(
+fn connector_auth_reason(
     conn: &rusqlite::Connection,
-) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT detail FROM auth_events WHERE credential_id=?1 AND detail IS NOT NULL ORDER BY seq DESC LIMIT 1", [id], |row| row.get(0)).optional()
+}
+
+fn runtime_ids(conn: &rusqlite::Connection) -> rusqlite::Result<BTreeSet<String>> {
     conn.prepare("SELECT credential_id FROM credential_categories WHERE category=?1 UNION SELECT credential_id FROM remote_record_categories WHERE category=?1")?
         .query_map([MODULE_RUNTIME_CATEGORY], |row| row.get(0))?
         .collect()
@@ -267,6 +368,125 @@ fn credential_scope_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::taxonomy_tests::{api_record, rig};
+    use std::cell::{Cell, RefCell};
+
+    type BetweenReads = Box<dyn FnOnce() -> rusqlite::Result<()>>;
+    thread_local! {
+        static BETWEEN_READS: RefCell<Option<BetweenReads>> = const { RefCell::new(None) };
+        static GRANT_LOADS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn after_first_read() -> rusqlite::Result<()> {
+        BETWEEN_READS.with(|hook| hook.take().map_or(Ok(()), |hook| hook()))
+    }
+
+    pub(super) fn count_grant_load() {
+        GRANT_LOADS.with(|count| count.set(count.get() + 1));
+    }
+
+    #[test]
+    fn connector_inventory_keeps_coherent_rows_across_replacement_and_removal() {
+        const REPLACED: &str = "apikey:zai";
+        const REMOVED: &str = "apikey:to-remove";
+        const NEXT: &str = "11111111111111111111111111111111";
+        let (root, store) = rig("connector-snapshot", 95);
+        let record_with_identity = |identity: &str| {
+            api_record().with_identity(crate::record::RecordIdentity {
+                account_id: Some(identity.into()),
+                ..Default::default()
+            })
+        };
+        store
+            .create(REPLACED, &record_with_identity("old"))
+            .unwrap();
+        store.create(REMOVED, &api_record()).unwrap();
+        let old = store.meta(REPLACED).unwrap();
+        let replacement = store
+            .seal_record(REPLACED, &record_with_identity("new"))
+            .unwrap();
+        let path = root.join("store.db");
+        BETWEEN_READS.with(|slot| slot.replace(Some(Box::new(move || {
+            let writer = rusqlite::Connection::open(path)?;
+            let tx = writer.unchecked_transaction()?;
+            tx.execute("UPDATE credentials SET envelope=?1,incarnation=?2,state='retired' WHERE credential_id=?3",
+                rusqlite::params![replacement, NEXT, REPLACED])?;
+            tx.execute("DELETE FROM credential_categories WHERE credential_id=?1", [REPLACED])?;
+            tx.execute("INSERT INTO credential_categories(credential_id,category) VALUES (?1,'monitoring')", [REPLACED])?;
+            tx.execute("DELETE FROM credentials WHERE credential_id=?1", [REMOVED])?;
+            tx.commit()
+        }))));
+        let first = store.connector_inventory().unwrap();
+        let snapshot = first
+            .local
+            .iter()
+            .find(|row| row.record.id == REPLACED)
+            .unwrap();
+        assert_eq!(Some(&snapshot.record.incarnation), old.incarnation.as_ref());
+        assert_eq!(snapshot.record.identity.account_id.as_deref(), Some("old"));
+        assert_eq!(snapshot.record.state, RecordState::Active);
+        assert_eq!(snapshot.record.categories, old.categories);
+        assert!(first.local.iter().any(|row| row.record.id == REMOVED));
+
+        let next = store.connector_inventory().unwrap();
+        assert_eq!(next.local.len(), 1);
+        let row = &next.local[0].record;
+        assert_eq!(row.incarnation, NEXT);
+        assert_eq!(row.identity.account_id.as_deref(), Some("new"));
+        assert_eq!(row.state, RecordState::Retired);
+        assert_eq!(row.categories, ["monitoring"]);
+    }
+
+    #[test]
+    fn connector_inventory_loads_grants_once_for_many_rows() {
+        let (_root, store) = rig("connector-permission-index", 96);
+        let grant = |kind, selector: &str| {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "consumer",
+                    kind,
+                    selector,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        };
+        grant(SelectorKind::Category, "monitoring");
+        for n in 0..20 {
+            let id = format!("apikey:test-{n}");
+            store.create(&id, &api_record()).unwrap();
+            grant(SelectorKind::Exact, &id);
+        }
+        store.with_raw_conn(|conn| {
+            conn.execute("INSERT INTO credential_categories(credential_id,category) VALUES ('apikey:test-0','monitoring')", [])?;
+            Ok(())
+        }).unwrap();
+        GRANT_LOADS.with(|count| count.set(0));
+        let inventory = store.connector_inventory().unwrap();
+        GRANT_LOADS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(inventory.local.len(), 20);
+        for row in inventory.local {
+            let mut expected = vec![credential_permission_id([
+                "reserved",
+                "consumer",
+                "exact",
+                &row.record.id,
+                "read",
+            ])];
+            if row.record.id == "apikey:test-0" {
+                expected.push(credential_permission_id([
+                    "reserved",
+                    "consumer",
+                    "category",
+                    "monitoring",
+                    "read",
+                ]));
+            }
+            expected.sort_unstable();
+            assert_eq!(row.permissions, expected);
+        }
+    }
 
     #[test]
     fn credential_permission_ids_are_framed_and_stable() {

@@ -33,7 +33,10 @@ const MAX_FETCH_OUTCOME_LEN: usize = 64;
 /// equality only, so this bounds a column, not a format.
 const MAX_PAIRING_ID_LEN: usize = 128;
 
-fn read_setting(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<Option<String>> {
+pub(super) fn read_setting(
+    conn: &rusqlite::Connection,
+    name: &str,
+) -> rusqlite::Result<Option<String>> {
     if read_schema_version(conn)? < SETTINGS_SCHEMA_VERSION {
         return Ok(None);
     }
@@ -567,7 +570,7 @@ impl EncryptedStore {
     ) -> Result<bool, StoreOpError> {
         let audit_key = self.audit_key.clone();
         let wanted = if enabled { "true" } else { "false" };
-        self.fenced_write(|tx| {
+        self.write_mapping_gates(|tx| {
             // Compared with the stored text, not the effective value: a damaged row
             // reads as off, and asking for off then rewrites it to exactly `false`.
             if read_setting(tx, MEMBER_MAPPING_SETTING)?.as_deref() == Some(wanted) {
@@ -1110,10 +1113,18 @@ impl EncryptedStore {
     fn remote_inventory_from_conn(
         conn: &rusqlite::Connection,
     ) -> rusqlite::Result<Vec<RemoteInventoryRow>> {
-        if read_schema_version(conn)? < REMOTE_METADATA_SCHEMA_VERSION {
+        let tx = conn.unchecked_transaction()?;
+        let rows = Self::remote_inventory_in_snapshot(&tx)?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    pub(super) fn remote_inventory_in_snapshot(
+        tx: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<RemoteInventoryRow>> {
+        if read_schema_version(tx)? < REMOTE_METADATA_SCHEMA_VERSION {
             return Ok(Vec::new());
         }
-        let tx = conn.unchecked_transaction()?;
         let records = {
             let mut stmt = tx.prepare("SELECT * FROM remote_records ORDER BY credential_id")?;
             let rows = stmt
@@ -1152,10 +1163,10 @@ impl EncryptedStore {
                 )
                 .optional()?;
             out.push(RemoteInventoryRow {
-                        plan_tier_since_ms: if read_schema_version(&tx)? >= crate::store::PLAN_TIER_SINCE_SCHEMA_VERSION {
+                        plan_tier_since_ms: if read_schema_version(tx)? >= crate::store::PLAN_TIER_SINCE_SCHEMA_VERSION {
                             tx.query_row("SELECT since_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
                         } else { None },
-                        plan_tier_observed_at_ms: if read_schema_version(&tx)? >= crate::store::PLAN_TIER_OBSERVED_SCHEMA_VERSION {
+                        plan_tier_observed_at_ms: if read_schema_version(tx)? >= crate::store::PLAN_TIER_OBSERVED_SCHEMA_VERSION {
                             tx.query_row("SELECT observed_at_ms FROM remote_record_plan_tiers WHERE credential_id = ?1", [id], |row| row.get(0)).optional()?.flatten()
                         } else { None },
                         record,
@@ -1164,7 +1175,6 @@ impl EncryptedStore {
                         plan_tier,
                     });
         }
-        tx.commit()?;
         Ok(out)
     }
 

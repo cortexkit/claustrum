@@ -37,6 +37,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use cortexkit_store::{Migration, SqliteStore, StoreError};
 use rusqlite::OptionalExtension;
@@ -1141,6 +1142,8 @@ pub fn payload_hash(payload: &[u8]) -> [u8; 32] {
 pub struct EncryptedStore {
     store: SqliteStore,
     writes: tokio::sync::watch::Sender<()>,
+    mapping_gates: Mutex<MappingGates>,
+    mapping_gate_writes: Mutex<()>,
     key: MasterKey,
     key_id: KeyId,
     // The audit-chain HMAC key, held in a zeroizing buffer so it is scrubbed from memory
@@ -1188,6 +1191,31 @@ pub struct EncryptedStore {
     fenced_out: AtomicBool,
     #[cfg(any(test, feature = "test-support"))]
     deposit_cookie_audit_fault: AtomicBool,
+}
+
+// None means the settings query was unreadable. An unreadable phone value on
+// its own is represented separately from an explicitly disabled phone gate.
+type MappingGates = Option<(bool, Option<bool>)>;
+
+/// One sealed row selected by the account machine-key lookup. Its identity and
+/// envelope can be checked against a cached token before opening key material.
+pub struct AccountMachineKey {
+    credential_id: String,
+    incarnation: String,
+    record_version: u64,
+    envelope_digest: String,
+    envelope: Vec<u8>,
+}
+
+impl AccountMachineKey {
+    pub fn identity(&self) -> (&str, &str, u64, &str) {
+        (
+            &self.credential_id,
+            &self.incarnation,
+            self.record_version,
+            &self.envelope_digest,
+        )
+    }
 }
 
 fn mint_hex_32_sqlite() -> rusqlite::Result<String> {
@@ -1661,9 +1689,14 @@ impl EncryptedStore {
     pub fn open(store: SqliteStore, key: MasterKey) -> Result<Self, StoreOpError> {
         let key_id = key.key_id();
         let audit_key = load_or_create_audit_key(&store, &key)?;
+        let gates = store
+            .with_conn(store_agent_secrets::mapping_gates_from_conn)
+            .ok();
         let encrypted = EncryptedStore {
             store,
             writes: tokio::sync::watch::channel(()).0,
+            mapping_gates: Mutex::new(gates),
+            mapping_gate_writes: Mutex::new(()),
             key,
             key_id,
             audit_key,
@@ -1706,7 +1739,18 @@ impl EncryptedStore {
         &self,
         f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
+        self.fenced_write_after_commit(f, |_| {})
+    }
+
+    fn fenced_write_after_commit<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
+        after_commit: impl FnOnce(&T),
+    ) -> Result<T, StoreError> {
         let out = self.store.with_conn_fenced(f);
+        if let Ok(value) = &out {
+            after_commit(value);
+        }
         if matches!(out, Err(StoreError::Fenced { .. })) {
             self.fenced_out.store(true, Ordering::Relaxed);
         }

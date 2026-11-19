@@ -1132,16 +1132,20 @@ mod connectors_contract {
         }
     }
 
-    fn rig(
-        seed: u8,
-    ) -> (
+    type Rig = (
         Arc<ReadSurface>,
         Arc<admin_surface::AdminSurface>,
         Arc<EncryptedStore>,
         std::path::PathBuf,
         TestTempDir,
-    ) {
-        let (surface, store, db, root) = tmp_surface_with_store(seed);
+    );
+
+    fn rig(seed: u8) -> Rig {
+        rig_with_settings(seed, |_| {})
+    }
+
+    fn rig_with_settings(seed: u8, seed_settings: impl FnOnce(&std::path::Path)) -> Rig {
+        let (surface, store, db, root) = tmp_surface_with_seeded_store(seed, seed_settings);
         for id in ["apikey:active", "apikey:dead"] {
             store
                 .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
@@ -1556,8 +1560,6 @@ mod connectors_contract {
 
     #[tokio::test]
     async fn connectors_admission_matrix_uses_real_binds_and_route_dispatch() {
-        let (surface, admin, _store, db, _root) = rig(221);
-        let conn = rusqlite::Connection::open(db).unwrap();
         let rows = [
             (
                 Some(subc_protocol::Principal::Direct),
@@ -1702,11 +1704,14 @@ mod connectors_contract {
             (None, "", None, BindScope::Plain, "denied"),
         ];
         let mut cells = 0;
-        for (principal, harness, app, scope, expected) in rows {
-            for member in ["true", "false", "unreadable"] {
-                for phone in ["true", "false", "unreadable"] {
+        for member in ["true", "false", "unreadable"] {
+            for phone in ["true", "false", "unreadable"] {
+                let (surface, admin, _store, _db, _root) = rig_with_settings(221, |db| {
+                    let conn = rusqlite::Connection::open(db).unwrap();
                     conn.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('federation.member_mapping',?1,1)",[member]).unwrap();
                     conn.execute("INSERT OR REPLACE INTO settings (name,value,updated_at_ms) VALUES ('secret.phone_mapping',?1,1)",[phone]).unwrap();
+                });
+                for (principal, harness, app, scope, expected) in rows.iter().cloned() {
                     if scope == BindScope::Flow {
                         admin.drop_bind(77);
                     }

@@ -1289,26 +1289,29 @@ async fn handle_frame(
             // who that bind speaks for and its declared grants before spawning so a later
             // route reuse cannot lend new authority to an already-accepted request.
             let caller = admin.route_caller(frame.header.channel);
+            let request = RouteRequest::decode(frame);
             let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
-                && serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                && request.body.as_ref().is_ok_and(|request| {
                     matches!(
                         request.method.as_str(),
                         federation::ingress::OP_REMOTE_WATCH
                             | federation::ingress::OP_MANIFEST_WATCH
                     )
                 }) {
-                Some(admin.home().remote_watches.register(frame.header))
+                Some(admin.home().remote_watches.register(request.header))
             } else {
                 None
             };
             // Register subscriptions before reading the next ingress frame, so a
             // following CANCEL or route close cannot race ahead of registration.
             // Opening only spawns the SQLite work; it never waits on the reactor.
-            if serde_json::from_slice::<ReadRequest>(&frame.body)
+            if request
+                .body
+                .as_ref()
                 .is_ok_and(|request| request.method == "connectors.watch")
             {
-                handle_read_request(
-                    frame,
+                serve_read_request(
+                    request,
                     &route,
                     &surface,
                     &admin,
@@ -1318,14 +1321,14 @@ async fn handle_frame(
                 return Ok(true);
             }
             if let federation::RouteCaller::Principal(principal) = &caller {
-                if serde_json::from_slice::<ReadRequest>(&frame.body).is_ok_and(|request| {
+                if request.body.as_ref().is_ok_and(|request| {
                     request.method == OP_WATCH_SCOPED
                         || (request.method == manifest::OP_WATCH
                             && manifest::admitted(&request.method, principal.as_ref())
                             && request.params.as_object().is_some_and(|p| p.is_empty()))
                 }) {
                     let principal = principal.clone();
-                    handle_read_request(frame, &route, &surface, &admin, principal).await?;
+                    serve_read_request(request, &route, &surface, &admin, principal).await?;
                     return Ok(true);
                 }
             }
@@ -1334,8 +1337,7 @@ async fn handle_frame(
             // wait ever runs on this frame loop or the control lane.
             tokio::spawn(async move {
                 let _ =
-                    dispatch_route_request(frame, &route, &surface, &admin, caller, remote_watch)
-                        .await;
+                    dispatch_request(request, &route, &surface, &admin, caller, remote_watch).await;
             });
             Ok(true)
         }
@@ -1602,9 +1604,35 @@ fn health_report_with_usage(surface: &ReadSurface) -> ModuleControlResponse {
 /// A read-surface request body: `{ "method": "...", "params": { ... } }`.
 #[derive(Deserialize)]
 struct ReadRequest {
+    #[cfg_attr(test, serde(deserialize_with = "count_route_decode"))]
     method: String,
     #[serde(default)]
     params: serde_json::Value,
+}
+
+struct RouteRequest {
+    header: subc_protocol::EnvelopeHeader,
+    body: Result<ReadRequest, serde_json::Error>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROUTE_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_route_decode<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    ROUTE_DECODE_COUNT.with(|count| count.set(count.get() + 1));
+    String::deserialize(de)
+}
+
+impl RouteRequest {
+    fn decode(frame: Frame) -> Self {
+        Self {
+            header: frame.header,
+            body: serde_json::from_slice(&frame.body),
+        }
+    }
 }
 
 impl std::fmt::Debug for ReadRequest {
@@ -1636,13 +1664,7 @@ struct AdminOpParams {
     tag_hex: String,
 }
 
-/// Serve one data-plane request according to who its bind speaks for.
-///
-/// The one dispatch hook for federation: a federation channel reaches only the
-/// federation ops (`federation::HomeVault::serve` enforces the closed allowlist), a
-/// refused channel answers every op with the uniform `not_found`, and every other
-/// channel is the read surface as before, where the federation ops answer the uniform
-/// `not_found` whatever grants the principal holds.
+#[cfg(test)]
 async fn dispatch_route_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
@@ -1651,9 +1673,35 @@ async fn dispatch_route_request(
     caller: federation::RouteCaller,
     remote_watch: Option<federation::home_watch::PendingOpen>,
 ) -> Result<(), ModuleError> {
-    let header = frame.header;
-    let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
-    if let Some(request) = &method {
+    dispatch_request(
+        RouteRequest::decode(frame),
+        writer,
+        surface,
+        admin,
+        caller,
+        remote_watch,
+    )
+    .await
+}
+
+/// Serve one data-plane request according to who its bind speaks for.
+///
+/// The one dispatch hook for federation: a federation channel reaches only the
+/// federation ops (`federation::HomeVault::serve` enforces the closed allowlist), a
+/// refused channel answers every op with the uniform `not_found`, and every other
+/// channel is the read surface as before, where the federation ops answer the uniform
+/// `not_found` whatever grants the principal holds.
+async fn dispatch_request(
+    decoded: RouteRequest,
+    writer: &mpsc::Sender<Frame>,
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    caller: federation::RouteCaller,
+    remote_watch: Option<federation::home_watch::PendingOpen>,
+) -> Result<(), ModuleError> {
+    let header = decoded.header;
+    let method = decoded.body.as_ref().ok();
+    if let Some(request) = method {
         if fleet_ops::is_op(&request.method)
             && !matches!(&caller, federation::RouteCaller::Principal(context) if fleet_ops::admitted(context.as_ref(), &request.method))
         {
@@ -1682,8 +1730,8 @@ async fn dispatch_route_request(
         .as_ref()
         .is_some_and(|request| connectors::is_op(&request.method))
     {
-        return handle_read_request(
-            frame,
+        return serve_read_request(
+            decoded,
             writer,
             surface,
             admin,
@@ -1787,7 +1835,7 @@ async fn dispatch_route_request(
             }) {
                 return send_route_result(writer, header, uniform_not_found()).await;
             }
-            handle_read_request(frame, writer, surface, admin, principal).await
+            serve_read_request(decoded, writer, surface, admin, principal).await
         }
         federation::RouteCaller::Refused => {
             send_route_result(writer, header, uniform_not_found()).await
@@ -1950,6 +1998,7 @@ async fn serve_secret_call(
     }
 }
 
+#[cfg(test)]
 async fn handle_read_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
@@ -1957,16 +2006,27 @@ async fn handle_read_request(
     admin: &Arc<admin_surface::AdminSurface>,
     caller: federation::ingress::ScopedCaller,
 ) -> Result<(), ModuleError> {
+    serve_read_request(RouteRequest::decode(frame), writer, surface, admin, caller).await
+}
+
+async fn serve_read_request(
+    decoded: RouteRequest,
+    writer: &mpsc::Sender<Frame>,
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    caller: federation::ingress::ScopedCaller,
+) -> Result<(), ModuleError> {
+    let RouteRequest { header, body } = decoded;
     let principal = caller.principal.clone();
-    let channel = frame.header.channel;
+    let channel = header.channel;
     // Echo the validated ingress epoch on every frame of this route (wire v2:
     // a response must carry the epoch of the binding it answers for).
-    let epoch = frame.header.epoch;
-    let corr = frame.header.corr;
-    let ver = frame.header.ver;
+    let epoch = header.epoch;
+    let corr = header.corr;
+    let ver = header.ver;
     let connection_id = route_connection_id(channel, epoch);
 
-    let request: ReadRequest = match serde_json::from_slice(&frame.body) {
+    let request = match body {
         Ok(r) => r,
         Err(e) => {
             return send_route_error(
@@ -2021,7 +2081,7 @@ async fn handle_read_request(
         }
         method if manifest::is_op(method) => {
             return manifest::serve(
-                frame.header,
+                header,
                 writer,
                 surface,
                 principal.as_ref(),
@@ -2054,15 +2114,8 @@ async fn handle_read_request(
             }
         }
         method @ ("connectors.list" | "connectors.watch") => {
-            return connectors::serve(
-                frame.header,
-                writer,
-                surface,
-                admin,
-                method,
-                &request.params,
-            )
-            .await;
+            return connectors::serve(header, writer, surface, admin, method, &request.params)
+                .await;
         }
         method @ ("secret.use"
         | "secret.ssh_sign"
@@ -2119,7 +2172,7 @@ async fn handle_read_request(
             if !surface.watches.open(
                 Arc::clone(surface),
                 writer.clone(),
-                frame.header,
+                header,
                 caller.clone(),
                 params,
             ) {
@@ -2127,7 +2180,7 @@ async fn handle_read_request(
                 tokio::spawn(async move {
                     let _ = watch_scoped::refusal(
                         &writer,
-                        frame.header,
+                        header,
                         FrameType::Response,
                         read_surface::ReadError::NotFound,
                     )
@@ -3795,6 +3848,18 @@ mod tests {
         std::path::PathBuf,
         TestTempDir,
     ) {
+        tmp_surface_with_seeded_store(seed, |_| {})
+    }
+
+    fn tmp_surface_with_seeded_store(
+        seed: u8,
+        seed_settings: impl FnOnce(&std::path::Path),
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<EncryptedStore>,
+        std::path::PathBuf,
+        TestTempDir,
+    ) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = TestTempDir::new(format!(
@@ -3813,6 +3878,7 @@ mod tests {
         };
         let store = open_sqlite(&descriptor).expect("open");
         EncryptedStore::migrate(&store).expect("migrate");
+        seed_settings(&db_path);
         let store = EncryptedStore::open(store, MasterKey::from_bytes([seed; MASTER_KEY_LEN]))
             .expect("open vault");
         // Seed one active + one needs_reauth so health is Degraded (never Failing).
@@ -6485,6 +6551,60 @@ mod tests {
             admin_surface::AdminOutcome::Refused(_)
         ));
         assert!(store.secret_phone_mapping().unwrap());
+    }
+
+    #[tokio::test]
+    async fn phone_gate_off_refuses_the_next_ingress_request() {
+        let (surface, admin, store) = scoped_rig(23);
+        let routes = Arc::new(RouteEpochs::default());
+        phone_attestation_bind(&surface, &admin, &routes, 90, 1, Some(json!("production"))).await;
+        set_member_mapping(&store, true);
+        let set_phone_gate = |enabled| {
+            assert_eq!(
+                credentials_core::admin_ops::apply(
+                    &store,
+                    credentials_core::AdminOpBody::SecretPhoneGateSet {
+                        v: credentials_core::ADMIN_OP_SCHEMA_V2,
+                        enabled,
+                    },
+                    "offline-cli",
+                )
+                .unwrap()["changed"],
+                true
+            );
+        };
+        set_phone_gate(true);
+        let (control, _control_rx) = mpsc::channel(1);
+        let (route, mut replies) = mpsc::channel(1);
+        let egress = Egress { control, route };
+        let request = |corr| {
+            Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                90,
+                1,
+                corr,
+                serde_json::to_vec(&json!({"method":"secret.list","params":{}})).unwrap(),
+            )
+            .unwrap()
+        };
+        handle_frame(request(1), &egress, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        let on = replies.recv().await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&on.body).unwrap()["result"]["error"]
+                ["code"],
+            "pairing_unavailable"
+        );
+        set_phone_gate(false);
+        handle_frame(request(2), &egress, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        let off = replies.recv().await.unwrap();
+        assert_eq!(off.header.ty, FrameType::Response);
+        assert_eq!(off.body, serde_json::to_vec(&uniform_not_found()).unwrap());
     }
 
     #[tokio::test]
@@ -18050,6 +18170,45 @@ mod tests {
                  the limiter runs inside resolve_key_address, before resolution"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ingress_decodes_the_route_body_once() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(23, "callosum");
+        bind_reserved_route(&surface, &admin, &routes, 9, 2, "callosum", "local").await;
+        let (control, _control_rx) = mpsc::channel(1);
+        let (route, mut replies) = mpsc::channel(1);
+        let request = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            9,
+            2,
+            52,
+            serde_json::to_vec(
+                &json!({"method":OP_GET_SCOPED, "params":{"credential_id":FORWARDED_TEST_ID}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ROUTE_DECODE_COUNT.with(|count| count.set(0));
+        handle_frame(
+            request,
+            &Egress { control, route },
+            &surface,
+            &admin,
+            &routes,
+        )
+        .await
+        .unwrap();
+        let reply = replies.recv().await.unwrap();
+        assert_eq!(reply.header.ty, FrameType::Response);
+        assert_eq!(reply.header.corr, 52);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["result"]["error"]
+                .is_null()
+        );
+        ROUTE_DECODE_COUNT.with(|count| assert_eq!(count.get(), 1));
     }
 
     /// Wire v2 layer-2 validation (spec §3.3): a route frame whose epoch does not

@@ -780,7 +780,6 @@ fn usage_short() -> String {
      \n\
      verbs:\n\
            login               OAuth/device/API-key login; picker also enrolls gateways\n\
-     \x20                    --id must match any credential selected in the picker\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\

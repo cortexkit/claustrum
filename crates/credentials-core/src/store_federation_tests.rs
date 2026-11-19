@@ -79,8 +79,9 @@ mod remote_watch {
                     &["oauth:retained".into()],
                 )
                 .unwrap();
-            // Both passes probe the incoming set once per row and the retained set
-            // only for the two absent ids.
+            // The apply checks removals twice: in a read-only preflight and again
+            // inside the fenced write. Each check probes the incoming set once per row
+            // and the retained set only for the two absent ids.
             assert_eq!(
                 WATCH_REMOVAL_PROBES.with(|count| count.get()),
                 2 * (size + 4)

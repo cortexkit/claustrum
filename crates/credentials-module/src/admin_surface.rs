@@ -450,8 +450,8 @@ impl AdminSurface {
     /// Snapshot who a route bind speaks for, through the federation ingress mapping
     /// (`federation::map_route_caller`). This is the one place the request path reads a
     /// channel's principal and harness, so the mapping covers every operation. With the
-    /// member-mapping gate off the answer is vault release 1's: callosum relaying
-    /// another computer's call (a `fed-` harness) gets no principal. The gate is read
+    /// member-mapping gate off, callosum relaying another computer's call (a `fed-`
+    /// harness) gets no principal. The gate is read
     /// from the store's committed snapshot, and only for callosum's routes, so the
     /// next request observes a completed gate change without waiting on SQLite.
     ///

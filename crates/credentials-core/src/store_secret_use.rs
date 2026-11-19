@@ -82,8 +82,9 @@ pub struct ReleaseRequest<'a> {
 }
 
 impl ReleaseRequest<'_> {
-    // Revocation uses the same writer, so the member grant cannot disappear between
-    // this check and returning a receipt or making a new release.
+    // Call inside the release's fenced write. Revoking a member grant is also a
+    // fenced write, and SQLite runs one write transaction at a time, so the grant
+    // cannot disappear between this check and returning a receipt or a new release.
     fn member_grant_is_live(&self, tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
         tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM member_grants WHERE member_id=?1 AND pairing_id=?2 \

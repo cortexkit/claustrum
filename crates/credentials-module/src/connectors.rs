@@ -5,9 +5,8 @@ use std::sync::Arc;
 use credentials_core::{
     catalog::connector_metadata,
     plan_detection::{effective_plan, DetectedPlan},
-    record::{RecordIdentity, RecordState},
+    record::RecordIdentity,
     store::{Condition, EncryptedStore},
-    CredentialKind,
 };
 use serde_json::{json, Value};
 use subc_protocol::{EnvelopeHeader, Frame, FrameType};
@@ -260,76 +259,39 @@ fn attach_condition(row: &mut Value, condition: Option<Condition>) {
 }
 
 pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
-    let error = |_| ReadError::StoreError;
-    let runtime = store.connector_runtime_ids().map_err(error)?;
+    let inventory = store
+        .connector_inventory()
+        .map_err(|_| ReadError::StoreError)?;
     let mut rows = Vec::new();
-    for (id, record) in store.connector_records().map_err(error)? {
-        let kind = match record.kind {
-            CredentialKind::Oauth
-                if record.refresh_adapter.as_deref().is_some_and(|adapter| {
-                    adapter != credentials_core::refresh_adapters::github_app::ADAPTER_NAME
-                }) =>
-            {
-                "account"
-            }
-            CredentialKind::Cookie => "account",
-            CredentialKind::ApiKey if record.refresh_adapter.is_none() => "api_key",
-            _ => continue,
-        };
-        if record.kind.is_vault_held_key() || runtime.contains(&id) {
-            continue;
-        }
-        let meta = store.meta(&id).map_err(error)?;
-        let incarnation = meta.incarnation.as_deref().ok_or(ReadError::StoreError)?;
-        let permissions = store
-            .connector_permission_ids(&id, &meta.categories)
-            .map_err(error)?;
-        let reason = if meta.state == RecordState::Active {
-            None
-        } else {
-            store.connector_auth_reason(&id).map_err(error)?
-        };
+    for entry in inventory.local {
+        let record = entry.record;
         let mut value = row(
-            &id,
-            kind,
-            incarnation,
-            &meta.categories,
-            (meta.state.as_str(), reason),
-            permissions,
+            &record.id,
+            record.kind,
+            &record.incarnation,
+            &record.categories,
+            (record.state.as_str(), entry.auth_reason),
+            entry.permissions,
             None,
         );
         labels(
             &mut value,
             &record.identity,
-            meta.plan_tier,
+            record.plan_tier,
             record.detected_plan.as_ref(),
         );
-        attach_condition(
-            &mut value,
-            store
-                .credential_condition(&id, incarnation)
-                .map_err(error)?,
-        );
+        attach_condition(&mut value, entry.condition);
         rows.push(value);
     }
-    for entry in store.remote_inventory().map_err(error)? {
-        let record = entry.record;
-        if runtime.contains(&record.credential_id) {
-            continue;
-        }
-        let permissions = store
-            .connector_permission_ids(&record.credential_id, &entry.categories)
-            .map_err(error)?;
-        let reason = store
-            .connector_auth_reason(&record.credential_id)
-            .map_err(error)?;
+    for entry in inventory.remote {
+        let record = entry.record.record;
         let mut value = row(
             &record.credential_id,
             "account",
             &record.incarnation,
-            &entry.categories,
-            (record.last_home_state.as_str(), reason),
-            permissions,
+            &entry.record.categories,
+            (record.last_home_state.as_str(), entry.auth_reason),
+            entry.permissions,
             Some(
                 json!({"step":"home", "state":match record.last_fetch_outcome.as_deref() {None => "unknown", Some("ok") => "done", Some(_) => "needed"}, "where":"computer"}),
             ),
@@ -337,15 +299,10 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
         labels(
             &mut value,
             &record.identity,
-            entry.plan_tier,
+            entry.record.plan_tier,
             record.detected_plan.as_ref(),
         );
-        attach_condition(
-            &mut value,
-            store
-                .remote_record_condition(&record.credential_id, &record.incarnation)
-                .map_err(error)?,
-        );
+        attach_condition(&mut value, entry.condition);
         rows.push(value);
     }
     rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -358,7 +315,7 @@ pub(crate) fn list(store: &EncryptedStore) -> Result<Value, ReadError> {
     .map(|byte| format!("{byte:02x}"))
     .collect();
     let mut reply = json!({"version":version,"watch":true,"rows":rows});
-    if let Some(computer) = store.federation_self_member().map_err(error)? {
+    if let Some(computer) = inventory.computer {
         reply["computer"] = json!(computer);
     }
     Ok(reply)

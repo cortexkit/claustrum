@@ -6,7 +6,7 @@ pub(super) mod desktop;
 
 #[path = "store_secret_phone.rs"]
 mod phone;
-pub(super) use phone::local_programs_enabled;
+pub(super) use phone::{local_programs_enabled, mapping_gates_from_conn};
 pub use phone::{
     secret_basic_auth_status_read_only, secret_local_programs_status_read_only,
     secret_multi_host_status_read_only, secret_phone_gate_status_read_only, PhoneDeposit,

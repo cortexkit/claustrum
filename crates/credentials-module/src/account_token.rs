@@ -6,7 +6,7 @@ use credentials_core::{
     audit::AuthEventKind,
     engine::RefreshEngine,
     refresh_adapters::HttpTransport,
-    store::{AuthEventPrincipal, AuthObservation, GrantOperation},
+    store::{AccountMachineKey, AuthEventPrincipal, AuthObservation, GrantOperation},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -74,11 +74,22 @@ struct Entry {
     flight: Option<Flight>,
 }
 
+impl Entry {
+    fn token(&self, now: i64, minimum: u64) -> Option<AccountTokenResult> {
+        self.cached
+            .as_ref()
+            .filter(|token| token.expires_at_ms.saturating_sub(now) as i128 > minimum as i128)
+            .cloned()
+    }
+}
+
 pub(super) struct AccountTokens {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
     machine_path: Option<PathBuf>,
     transport: Option<Arc<dyn HttpTransport>>,
     clock: Option<i64>,
+    #[cfg(test)]
+    signer_opens: std::sync::atomic::AtomicUsize,
 }
 
 impl AccountTokens {
@@ -88,6 +99,8 @@ impl AccountTokens {
             machine_path: None,
             transport: None,
             clock: None,
+            #[cfg(test)]
+            signer_opens: 0.into(),
         }
     }
     fn now(&self) -> i64 {
@@ -148,6 +161,11 @@ struct Signer {
     credential_id: String,
     key_id: String,
     pem: credentials_core::secret::Secret<Vec<u8>>,
+}
+struct Candidate {
+    machine: Machine,
+    key_id: String,
+    row: AccountMachineKey,
     identity: String,
 }
 
@@ -157,12 +175,10 @@ fn canonical_id(s: &str) -> bool {
         && s.bytes()
             .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
 }
-fn machine_number(id: &str) -> Option<u64> {
-    let text = id.strip_prefix("signing:ck-account-machine:")?;
-    let n: u64 = text.parse().ok()?;
-    (n > 0 && n.to_string() == text).then_some(n)
-}
-fn signer(engine: &RefreshEngine, path: &std::path::Path) -> Result<Signer, AccountTokenError> {
+fn candidate(
+    engine: &RefreshEngine,
+    path: &std::path::Path,
+) -> Result<Candidate, AccountTokenError> {
     let bytes = credentials_core::resolver::read_owner_only_file(path, 8192)
         .map_err(|_| AccountTokenError::login())?;
     let machine: Machine =
@@ -183,19 +199,45 @@ fn signer(engine: &RefreshEngine, path: &std::path::Path) -> Result<Signer, Acco
     {
         return Err(AccountTokenError::login());
     }
-    let id = engine
+    let row = engine
         .store()
-        .list_meta()
-        .map_err(|_| AccountTokenError::login())?
-        .into_iter()
-        .filter(|(_, meta)| meta.state == credentials_core::record::RecordState::Active)
-        .filter_map(|(id, _)| machine_number(&id).map(|n| (n, id)))
-        .max_by_key(|(n, _)| *n)
-        .map(|(_, id)| id)
-        .ok_or_else(AccountTokenError::login)?;
-    let record = engine
+        .active_account_machine_key()
+        .map_err(|_| AccountTokenError::login())?;
+    let (id, incarnation, version, digest) = row.identity();
+    if machine.vault_key_id.as_deref().is_some_and(|v| v != id) {
+        return Err(AccountTokenError::login());
+    }
+    // Match the machine file's account and public key to the selected vault row.
+    // Include its incarnation and version, and digest the envelope to catch damage
+    // that did not bump the version.
+    let identity = format!(
+        "{}|{key_id}|{id}|{incarnation}|{version}|{digest}|{}",
+        machine.account, machine.public_key_hex
+    );
+    Ok(Candidate {
+        machine,
+        key_id,
+        row,
+        identity,
+    })
+}
+
+fn signer(surface: &ReadSurface, candidate: Candidate) -> Result<Signer, AccountTokenError> {
+    #[cfg(test)]
+    surface
+        .account_tokens
+        .signer_opens
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let Candidate {
+        machine,
+        key_id,
+        row,
+        ..
+    } = candidate;
+    let record = surface
+        .engine
         .store()
-        .get(&id)
+        .open_account_machine_key(&row)
         .map_err(|_| AccountTokenError::login())?;
     if record.kind != credentials_core::record::CredentialKind::SigningKey {
         return Err(AccountTokenError::login());
@@ -204,21 +246,14 @@ fn signer(engine: &RefreshEngine, path: &std::path::Path) -> Result<Signer, Acco
         std::str::from_utf8(record.payload.expose()).map_err(|_| AccountTokenError::login())?;
     let public = credentials_core::signing::public_key_ed25519(pem)
         .map_err(|_| AccountTokenError::login())?;
-    if public.public_key_hex != machine.public_key_hex
-        || machine.vault_key_id.as_ref().is_some_and(|v| v != &id)
-    {
+    if public.public_key_hex != machine.public_key_hex {
         return Err(AccountTokenError::login());
     }
-    let identity = format!(
-        "{}|{key_id}|{}|{}",
-        machine.account, public.public_key_hex, record.record_version
-    );
     Ok(Signer {
         machine,
-        credential_id: id,
+        credential_id: row.identity().0.to_owned(),
         key_id,
         pem: record.payload,
-        identity,
     })
 }
 
@@ -311,11 +346,14 @@ async fn post(
         )
         .await
         .map_err(|_| (0, AccountTokenError::network()))?;
-    let body: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+    let body = serde_json::from_slice(&reply.body);
     if reply.status != 200 {
-        return Err((reply.status, refusal(reply.status, &body)));
+        return Err((
+            reply.status,
+            refusal(reply.status, &body.unwrap_or(Value::Null)),
+        ));
     }
-    Ok(body)
+    body.map_err(|_| (reply.status, AccountTokenError::network()))
 }
 
 async fn mint(
@@ -323,7 +361,7 @@ async fn mint(
     signer: &Signer,
     audience: &str,
     engine: &RefreshEngine,
-    principal: AuthEventPrincipal<'_>,
+    principal: (&'static str, &str),
     clock: Option<i64>,
 ) -> Mint {
     for attempt in 0..2 {
@@ -359,17 +397,7 @@ async fn mint(
             if error.class == ErrorClass::Permanent {
                 tracing::warn!("account worker exchange refused permanently; signer or contract vector may be wrong");
             }
-            let _ = engine.store().record_auth_event(
-                audience,
-                AuthObservation {
-                    kind: AuthEventKind::ScopedReadRefusal.as_str(),
-                    provider_status: (*status != 0).then_some(*status),
-                    detail: Some(error.code),
-                    reporter_source: None,
-                    principal: Some(principal),
-                },
-                None,
-            );
+            observe_refusal(engine, audience, principal, *status, error.code).await;
         }
         match exchange {
             Err((409, _)) if attempt == 0 => continue,
@@ -380,45 +408,111 @@ async fn mint(
     unreachable!()
 }
 
+async fn observe_refusal(
+    engine: &RefreshEngine,
+    audience: &str,
+    (kind, id): (&'static str, &str),
+    status: u16,
+    code: &'static str,
+) {
+    let store = Arc::clone(engine.store());
+    let audience = audience.to_owned();
+    let id = id.to_owned();
+    let _ = tokio::task::spawn_blocking(move || {
+        let principal = if kind == "reserved" {
+            AuthEventPrincipal::Reserved(&id)
+        } else {
+            AuthEventPrincipal::Enrolled(&id)
+        };
+        store.record_auth_event(
+            &audience,
+            AuthObservation {
+                kind: AuthEventKind::ScopedReadRefusal.as_str(),
+                provider_status: (status != 0).then_some(status),
+                detail: Some(code),
+                reporter_source: None,
+                principal: Some(principal),
+            },
+            None,
+        )
+    })
+    .await;
+}
+
+async fn wait_for_flight(mut flight: Flight) -> Mint {
+    loop {
+        if let Some(outcome) = flight.borrow().clone() {
+            return outcome;
+        }
+        flight
+            .changed()
+            .await
+            .map_err(|_| AccountTokenError::network())?;
+    }
+}
+
 impl ReadSurface {
     pub async fn account_token(
-        &self,
+        self: &Arc<Self>,
         caller: &crate::federation::ingress::ScopedCaller,
         params: &AccountTokenParams,
     ) -> Mint {
-        let (kind, id) = self
-            .authorize_scoped_as(
-                caller,
-                params.enrollment_token.as_deref(),
-                &params.audience,
-                GrantOperation::AccountToken,
-            )
-            .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?;
-        if !AUDIENCES.contains(&params.audience.as_str())
-            || (params.audience == "cortexkit-hub" && (kind != "reserved" || id != "ckbus"))
-        {
-            return Err(AccountTokenError::new("not_found", ErrorClass::Permanent));
-        }
         let config = &self.account_tokens;
-        let signer = signer(&self.engine, &config.path()?)?;
+        // Queue preflights ahead of exchange completion, so requests already
+        // checking the same key can share even a failed exchange. Release the
+        // guard before waiting on HTTP or on another request's result.
         let mut entries = config.entries.lock().await;
-        let entry = entries.entry(params.audience.clone()).or_default();
-        if entry.identity != signer.identity {
-            *entry = Entry {
-                identity: signer.identity.clone(),
-                ..Entry::default()
-            };
-        }
+        let surface = Arc::clone(self);
+        let caller = caller.clone();
+        let audience = params.audience.clone();
+        let enrollment_token = params.enrollment_token.clone();
+        let (kind, id, candidate) = tokio::task::spawn_blocking(move || {
+            let (kind, id) = surface
+                .authorize_scoped_as(
+                    &caller,
+                    enrollment_token.as_deref(),
+                    &audience,
+                    GrantOperation::AccountToken,
+                )
+                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?;
+            if !AUDIENCES.contains(&audience.as_str())
+                || (audience == "cortexkit-hub" && (kind != "reserved" || id != "ckbus"))
+            {
+                return Err(AccountTokenError::new("not_found", ErrorClass::Permanent));
+            }
+            let key = candidate(&surface.engine, &surface.account_tokens.path()?)?;
+            Ok((kind, id, key))
+        })
+        .await
+        .map_err(|_| AccountTokenError::network())??;
         let minimum = params.min_ttl_ms.unwrap_or(0).max(60_000);
-        if let Some(token) = &entry.cached {
-            if token.expires_at_ms.saturating_sub(config.now()) as i128 > minimum as i128 {
-                return Ok(token.clone());
+        if let Some(entry) = entries
+            .get(&params.audience)
+            .filter(|entry| entry.identity == candidate.identity)
+        {
+            if let Some(token) = entry.token(config.now(), minimum) {
+                return Ok(token);
+            }
+            if let Some(flight) = entry.flight.clone() {
+                drop(entries);
+                return wait_for_flight(flight).await;
             }
         }
-        let mut flight = if let Some(flight) = &entry.flight {
-            flight.clone()
-        } else {
+        let identity = candidate.identity.clone();
+        let surface = Arc::clone(self);
+        let signer = tokio::task::spawn_blocking(move || signer(&surface, candidate))
+            .await
+            .map_err(|_| AccountTokenError::network())??;
+
+        let flight = {
             let (sender, receiver) = watch::channel(None);
+            let entry = entries.entry(params.audience.clone()).or_default();
+            if entry.identity != identity {
+                *entry = Entry {
+                    identity: identity.clone(),
+                    ..Entry::default()
+                };
+            }
             entry.flight = Some(receiver.clone());
             let audience = params.audience.clone();
             let engine = Arc::clone(&self.engine);
@@ -428,11 +522,7 @@ impl ReadSurface {
             // Detached from the request so cancellation cannot strand waiters or
             // start a second mint while the first is still spending its challenge.
             tokio::spawn(async move {
-                let principal = if kind == "reserved" {
-                    AuthEventPrincipal::Reserved(&id)
-                } else {
-                    AuthEventPrincipal::Enrolled(&id)
-                };
+                let principal = (kind, id.as_str());
                 let outcome = match transport {
                     Some(http) => {
                         mint(http.as_ref(), &signer, &audience, &engine, principal, clock).await
@@ -443,17 +533,7 @@ impl ReadSurface {
                         }
                         Err(_) => {
                             let error = AccountTokenError::network();
-                            let _ = engine.store().record_auth_event(
-                                &audience,
-                                AuthObservation {
-                                    kind: AuthEventKind::ScopedReadRefusal.as_str(),
-                                    provider_status: None,
-                                    detail: Some(error.code),
-                                    reporter_source: None,
-                                    principal: Some(principal),
-                                },
-                                None,
-                            );
+                            observe_refusal(&engine, &audience, principal, 0, error.code).await;
                             Err(error)
                         }
                     },
@@ -462,7 +542,7 @@ impl ReadSurface {
                 if let Some(entry) = entries.get_mut(&audience) {
                     // A re-login can replace the identity while an older exchange is
                     // in flight; its result belongs only to the original waiters.
-                    if entry.identity == signer.identity {
+                    if entry.identity == identity {
                         if let Ok(token) = &outcome {
                             entry.cached = Some(token.clone());
                         }
@@ -474,15 +554,7 @@ impl ReadSurface {
             receiver
         };
         drop(entries);
-        loop {
-            if let Some(outcome) = flight.borrow().clone() {
-                return outcome;
-            }
-            flight
-                .changed()
-                .await
-                .map_err(|_| AccountTokenError::network())?;
-        }
+        wait_for_flight(flight).await
     }
 }
 

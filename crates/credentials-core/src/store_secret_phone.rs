@@ -8,6 +8,11 @@ pub const BASIC_AUTH_SETTING: &str = "secret.basic_auth";
 pub const LOCAL_PROGRAMS_SETTING: &str = "secret.local_programs";
 pub const DEV_DESKTOP_APPROVALS_SETTING: &str = "secret.dev_desktop_approvals";
 
+#[cfg(test)]
+thread_local! {
+    static MAPPING_GATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The audit payload of an extended scope names its stored `scope_json`. Encoding an
 /// extended scope always yields it, so a missing value is a store error, never a panic
 /// inside the write transaction.
@@ -91,6 +96,24 @@ pub(super) fn feature_status_read_only(
         _ => "unreadable",
     }
     .to_owned())
+}
+
+pub(in crate::store) fn mapping_gates_from_conn(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<(bool, Option<bool>)> {
+    #[cfg(test)]
+    MAPPING_GATE_READS.with(|count| count.set(count.get() + 1));
+    let (member, phone): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT (SELECT value FROM settings WHERE name=?1), (SELECT value FROM settings WHERE name=?2)",
+        [crate::federation::MEMBER_MAPPING_SETTING, PHONE_MAPPING_SETTING],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let phone = match phone.as_deref() {
+        None | Some("false") => Some(false),
+        Some("true") => Some(true),
+        _ => None,
+    };
+    Ok((member.as_deref() == Some("true"), phone))
 }
 
 /// Read persisted gates without taking the writer lease or loading any secret material.
@@ -255,15 +278,33 @@ impl EncryptedStore {
         }).map_err(StoreOpError::from)
     }
 
-    /// Both mapping gates come from one SQLite snapshot, so concurrent gate changes
-    /// cannot combine a past member setting with a later phone setting.
+    /// Read the persisted gate values for diagnostics, including external store damage.
     pub fn secret_phone_mapping_gates(&self) -> Result<(bool, Option<bool>), StoreOpError> {
-        self.store.with_conn(|conn| {
-            let (member,phone):(Option<String>,Option<String>)=conn.query_row(
-                "SELECT (SELECT value FROM settings WHERE name='federation.member_mapping'), (SELECT value FROM settings WHERE name='secret.phone_mapping')",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            let phone=match phone.as_deref() {None|Some("false")=>Some(false),Some("true")=>Some(true),_=>None};
-            Ok((member.as_deref()==Some("true"),phone))
-        }).map_err(StoreOpError::from)
+        self.store
+            .with_conn(mapping_gates_from_conn)
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read the last committed pair for admission without waiting for SQLite.
+    pub fn cached_mapping_gates(&self) -> Option<(bool, Option<bool>)> {
+        *self.mapping_gates.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(in crate::store) fn write_mapping_gates<T>(
+        &self,
+        write: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        // Serialize gate writers through publication so a slower writer cannot
+        // overwrite the snapshot of a later commit. Readers never take this lock.
+        let _writer = self
+            .mapping_gate_writes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.fenced_write_after_commit(
+            |tx| Ok((write(tx)?, mapping_gates_from_conn(tx).ok())),
+            |(_, gates)| *self.mapping_gates.lock().unwrap_or_else(|p| p.into_inner()) = *gates,
+        )
+        .map(|(value, _)| value)
     }
 
     pub fn secret_phone_mapping(&self) -> Result<bool, StoreOpError> {
@@ -290,7 +331,7 @@ impl EncryptedStore {
         enabled: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
-        self.fenced_write(|tx| {
+        self.write_mapping_gates(|tx| {
             let wanted = if enabled { "true" } else { "false" };
             let old: Option<String> = tx.query_row("SELECT value FROM settings WHERE name = ?1", [PHONE_MAPPING_SETTING], |r| r.get(0)).optional()?;
             if old.as_deref() == Some(wanted) { return Ok(false); }

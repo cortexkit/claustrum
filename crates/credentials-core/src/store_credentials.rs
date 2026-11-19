@@ -826,6 +826,67 @@ impl EncryptedStore {
         )
     }
 
+    /// Only the active account machine-key namespace participates in key selection.
+    /// The binary primary-key range excludes unrelated credentials and the winning
+    /// row's identity and envelope are read in the same transaction.
+    pub fn active_account_machine_key(&self) -> Result<AccountMachineKey, StoreOpError> {
+        const PREFIX: &str = "signing:ck-account-machine:";
+        self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let id = {
+                let mut stmt = tx.prepare(
+                    "SELECT credential_id FROM credentials
+                     WHERE credential_id >= ?1 AND credential_id < ?2 AND state='active'
+                     ORDER BY length(credential_id) DESC, credential_id DESC",
+                )?;
+                let mut rows = stmt.query([PREFIX, "signing:ck-account-machine;"])?;
+                let mut selected = None;
+                while let Some(row) = rows.next()? {
+                    let id: String = row.get(0)?;
+                    if id.strip_prefix(PREFIX).is_some_and(|suffix| {
+                        suffix.parse::<u64>().is_ok_and(|n| n > 0 && n.to_string() == suffix)
+                    }) {
+                        selected = Some(id);
+                        break;
+                    }
+                }
+                selected
+            };
+            let key = id.map(|credential_id| {
+                tx.query_row(
+                    "SELECT incarnation, record_version, envelope FROM credentials WHERE credential_id=?1",
+                    [&credential_id],
+                    |row| {
+                        let envelope: Vec<u8> = row.get(2)?;
+                        Ok(AccountMachineKey {
+                            incarnation: row.get(0)?,
+                            record_version: row.get(1)?,
+                            envelope_digest: sha256_hex_of_bytes(&envelope),
+                            credential_id: credential_id.clone(),
+                            envelope,
+                        })
+                    },
+                )
+            }).transpose()?;
+            tx.commit()?;
+            Ok(key)
+        }).map_err(StoreOpError::from)?.ok_or(StoreOpError::NotFound)
+    }
+
+    pub fn open_account_machine_key(
+        &self,
+        key: &AccountMachineKey,
+    ) -> Result<VaultRecord, StoreOpError> {
+        self.decode_record_row(
+            &key.credential_id,
+            (key.record_version as i64, &key.incarnation),
+            "active",
+            0,
+            &key.envelope,
+        )
+        .map(|(record, _)| record)
+    }
+
     /// Read and decrypt a record. Fails closed: a quarantined (`corrupt`) row is
     /// [`StoreOpError::Quarantined`]; `needs_reauth` and `retired` rows are both
     /// [`StoreOpError::NeedsReauth`] so consumers need no new recovery branch; a row

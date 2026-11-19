@@ -109,10 +109,27 @@ pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 /// lifecycle states for which ordinary credential reads must not return material.
 #[derive(Clone, Debug)]
 pub struct ConnectorRecordMetadata {
-    pub kind: CredentialKind,
-    pub refresh_adapter: Option<String>,
+    pub id: String,
+    pub incarnation: String,
+    pub state: record::RecordState,
+    pub categories: Vec<String>,
+    pub kind: &'static str,
     pub identity: record::RecordIdentity,
     pub detected_plan: Option<plan_detection::DetectedPlan>,
+    pub plan_tier: Option<String>,
+}
+
+pub struct ConnectorRow<T> {
+    pub record: T,
+    pub permissions: Vec<String>,
+    pub auth_reason: Option<String>,
+    pub condition: Option<store::Condition>,
+}
+
+pub struct ConnectorInventory {
+    pub local: Vec<ConnectorRow<ConnectorRecordMetadata>>,
+    pub remote: Vec<ConnectorRow<federation::RemoteInventoryRow>>,
+    pub computer: Option<String>,
 }
 pub use refresh_adapters::anthropic::AnthropicAdapter;
 pub use refresh_adapters::antigravity::AntigravityAdapter;

@@ -411,9 +411,9 @@ impl AdminSurface {
             if !matches!(mapped, crate::federation::RouteCaller::Phone(_)) {
                 return Admission::Denied;
             }
-            return match self.engine.store().secret_phone_mapping_gates() {
-                Ok((true, Some(true))) => Admission::Allowed,
-                Ok((true, Some(false))) => Admission::PhoneOff,
+            return match self.engine.store().cached_mapping_gates() {
+                Some((true, Some(true))) => Admission::Allowed,
+                Some((true, Some(false))) => Admission::PhoneOff,
                 _ => Admission::PhoneRefused,
             };
         }
@@ -452,8 +452,8 @@ impl AdminSurface {
     /// channel's principal and harness, so the mapping covers every operation. With the
     /// member-mapping gate off the answer is vault release 1's: callosum relaying
     /// another computer's call (a `fed-` harness) gets no principal. The gate is read
-    /// from the store on each call, and only for callosum's routes, so turning it on or
-    /// off takes effect without a restart.
+    /// from the store's committed snapshot, and only for callosum's routes, so the
+    /// next request observes a completed gate change without waiting on SQLite.
     ///
     /// The route dispatcher captures this before spawning a request so a later channel
     /// rebind cannot change which caller authorized an already-accepted frame. An
@@ -492,8 +492,8 @@ impl AdminSurface {
     fn map_caller(&self, principal: &Principal, harness: &str) -> crate::federation::RouteCaller {
         use crate::federation::MappingGate;
         let (gate, phone_gate) = if crate::federation::ingress::is_callosum(principal) {
-            match self.engine.store().secret_phone_mapping_gates() {
-                Ok((member, phone)) => (
+            match self.engine.store().cached_mapping_gates() {
+                Some((member, phone)) => (
                     if member {
                         MappingGate::On
                     } else {
@@ -505,7 +505,7 @@ impl AdminSurface {
                         None => MappingGate::Unreadable,
                     },
                 ),
-                Err(_) => (MappingGate::Unreadable, MappingGate::Unreadable),
+                None => (MappingGate::Unreadable, MappingGate::Unreadable),
             }
         } else {
             // Not read for anyone else: their harness is ignored in every gate state.

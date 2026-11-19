@@ -6024,10 +6024,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
     // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
     // additions include sign, the four federation verbs (transfer, remote, member,
-    // federation), secret, ssh-key, provider-report and module-secret.
+    // federation), secret, ssh-key, provider-report, module-secret and
+    // clear-condition.
     assert_eq!(
         verbs.len(),
-        43,
+        44,
         "the rendered verb-table scan narrowed; ssh-key is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

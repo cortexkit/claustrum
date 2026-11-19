@@ -787,12 +787,18 @@ fn inventory_json_rows(
                     .copied()
                     .flatten()
                     .map(|method| method.as_str());
+                // A row with no condition, and a condition with no link, omit the
+                // member: unmarked rows keep the bytes they had before conditions
+                // existed, as the scoped listing and connectors rows do.
                 let condition = entry.and_then(|row| row["condition"].as_object()).map(|condition| {
-                    serde_json::json!({
+                    let mut value = serde_json::json!({
                         "reason": condition.get("reason"),
                         "since_ms": condition.get("since_ms"),
-                        "action_url": condition.get("action_url"),
-                    })
+                    });
+                    if let Some(link) = condition.get("action_url").filter(|link| !link.is_null()) {
+                        value["action_url"] = link.clone();
+                    }
+                    value
                 });
                 let mut row = serde_json::json!({
                     "id": id,
@@ -808,8 +814,10 @@ fn inventory_json_rows(
                     "plan_tier_observed_at_ms": entry.and_then(|row| row.get("plan_tier_observed_at_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "plan_tier_since_ms": entry.and_then(|row| row.get("plan_tier_since_ms")).cloned().unwrap_or(serde_json::Value::Null),
                     "creator": creator,
-                    "condition": condition,
                 });
+                if let Some(condition) = condition {
+                    row["condition"] = condition;
+                }
                 if let Some(gateway) = entry.filter(|row| row.get("base_url").is_some()) {
                     row["base_url"] = gateway["base_url"].clone();
                     row["headers"] = gateway["headers"].clone();

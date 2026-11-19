@@ -184,8 +184,9 @@ fn every_cli_command_runs_in_the_isolated_home() {
 
 /// The keys every `--json` row carries. Pinned
 /// literally so a later field (a handle, a token, an email) cannot slip into
-/// the script surface without reddening here first.
-const JSON_ROW_KEYS: [&str; 14] = [
+/// the script surface without reddening here first. A marked login adds one
+/// more, `condition`, which unmarked rows omit so their bytes stay unchanged.
+const JSON_ROW_KEYS: [&str; 13] = [
     "id",
     "state",
     "record_version",
@@ -199,7 +200,6 @@ const JSON_ROW_KEYS: [&str; 14] = [
     "incarnation",
     "plan_tier_observed_at_ms",
     "plan_tier_since_ms",
-    "condition",
 ];
 
 #[test]
@@ -300,7 +300,7 @@ fn login_condition_inventory_and_clear_condition_work_without_daemon() {
     .unwrap();
     assert_eq!(
         vault.list_json()[0]["condition"],
-        json!({"reason":"provider_verification_required", "since_ms":since, "action_url":null})
+        json!({"reason":"provider_verification_required", "since_ms":since})
     );
 
     for (id, error) in [
@@ -320,10 +320,7 @@ fn login_condition_inventory_and_clear_condition_work_without_daemon() {
         );
         assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
     }
-    assert_eq!(
-        vault.list_json()[0].get("condition"),
-        Some(&serde_json::Value::Null)
-    );
+    assert_eq!(vault.list_json()[0].get("condition"), None);
 }
 
 #[test]
@@ -347,7 +344,7 @@ fn login_condition_inventory_reads_schema_before_condition_tables_without_migrat
     let rows = vault.list_json();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "oauth:anthropic");
-    assert_eq!(rows[0].get("condition"), Some(&serde_json::Value::Null));
+    assert_eq!(rows[0].get("condition"), None);
     assert_eq!(
         db.query_row(
             "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = 'credentials'",

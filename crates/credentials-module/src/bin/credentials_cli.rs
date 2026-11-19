@@ -1112,9 +1112,10 @@ fn help_verb(verb: &str) -> String {
               provider_ids, auth_method, plan_tier, plan_tier_source and creator.\n\
               Rows also carry provider (service name), incarnation and\n\
               plan_tier_observed_at_ms and plan_tier_since_ms (null when unknown).\n\
-             JSON lists local rows only. condition is null when unset, otherwise an\n\
-             object with reason, since_ms and action_url (null when absent). The human\n\
-             table also shows conditions on shared copies.\n\
+             JSON lists local rows only. A login with a condition also carries\n\
+             condition: an object with reason, since_ms and, when there is one,\n\
+             action_url; other rows omit it. The human table also shows conditions\n\
+             on shared copies.\n\
              auth_method is apikey, chatgpt, antigravity, oauth or gateway, and null when the\n\
              credential has no subscription or API plane. plan_tier and plan_tier_source\n\
              are null when unset; creator is null when none. No payloads, tokens,\n\

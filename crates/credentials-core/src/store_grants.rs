@@ -290,9 +290,11 @@ pub fn list_read_grants_read_only_with_schema(
     store_path: &std::path::Path,
 ) -> Result<(Vec<ReadGrant>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
     read_grants_from_conn(&conn, None, None, schema_version)
         .map(|grants| (grants, schema_version))

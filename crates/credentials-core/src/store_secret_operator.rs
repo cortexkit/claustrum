@@ -610,9 +610,11 @@ pub fn list_agent_secrets_read_only(
     store_path: &std::path::Path,
 ) -> Result<Option<OperatorSecretListing>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
     if schema_version < AGENT_SECRET_SCHEMA_VERSION {
         return Ok(None);

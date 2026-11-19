@@ -126,9 +126,11 @@ pub fn verify_audit_chain_read_only(
     key: &MasterKey,
 ) -> Result<Option<i64>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
 
     // Unseal the audit key. Its absence is NOT an empty chain: it means this store was
     // never opened by a build that provisions one, and reporting "verified" for a store
@@ -196,9 +198,11 @@ pub fn auth_events_at_cap_read_only(
     store_path: &std::path::Path,
 ) -> Result<Vec<String>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
 
     let mut stmt = conn
         .prepare(
@@ -239,9 +243,11 @@ pub fn read_audit_read_only(
     limit: Option<usize>,
 ) -> Result<Vec<AuditEntry>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
 
     // Newest-first with the cap, then reversed into chain order -- the same shape as
     // the leased reader, so a capped read returns the RECENT entries rather than the
@@ -283,9 +289,11 @@ pub fn read_auth_events_read_only(
     limit: u32,
 ) -> Result<Vec<AuthEvent>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn =
-        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        store_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(map)?;
 
     // A MISSING TABLE IS NOT AN EMPTY ONE, and the caller has to be able to tell them
     // apart. The table arrived in a later migration, so a store written by an older

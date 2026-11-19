@@ -351,7 +351,10 @@ async fn imported_github_app_without_client_id_latches_needs_reauth() {
 
         let error = engine.get(id, None, false).await.unwrap_err();
         assert!(
-            matches!(error, EngineError::RefreshFailed(RefreshError::InvalidGrant(_))),
+            matches!(
+                error,
+                EngineError::RefreshFailed(RefreshError::InvalidGrant(_))
+            ),
             "a missing App client ID is not recoverable by retry: {error:?}"
         );
         assert!(matches!(
@@ -369,7 +372,10 @@ async fn imported_github_app_without_client_id_latches_needs_reauth() {
                 )
             })
             .unwrap();
-        assert_eq!(opened, 1, "only the first read should open a refresh intent");
+        assert_eq!(
+            opened, 1,
+            "only the first read should open a refresh intent"
+        );
     }
     assert!(http.requests().is_empty());
 }

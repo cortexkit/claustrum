@@ -102,7 +102,7 @@ impl EncryptedStore {
         bytes: &[u8],
         card_ref: Option<&str>,
         manifest: bool,
-        now: i64,
+        clock: impl FnOnce() -> i64,
     ) -> Result<Value, SecretError> {
         self.fenced_write(|tx| {
             if !phone::setting_enabled(tx, phone::DEV_DESKTOP_APPROVALS_SETTING) {
@@ -111,6 +111,7 @@ impl EncryptedStore {
             if let Some(refusal) = operator::secret_home_role_conn(tx).phone_deposit_refusal() {
                 return Ok(refusal);
             }
+            let now = clock();
             let authority = ApprovalAuthority::DevelopmentDesktop;
             if manifest {
                 self.gh_manifest_approval_tx(tx, DEV_DESKTOP_FINGERPRINT, authority, bytes, now)

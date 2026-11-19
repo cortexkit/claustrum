@@ -54,6 +54,7 @@ pub fn manifest_one_tap_status_read_only(path: &std::path::Path) -> Result<Strin
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhManifestProposalError {
+    OneTapDisabled,
     ManifestSetupIncomplete,
     AlreadyBound {
         version: i64,
@@ -273,6 +274,8 @@ impl EncryptedStore {
             if let Some(pending) = &pending {
                 if now < pending.expires_at_ms { return Ok(Ok(pending.clone())); }
             }
+            // External checks may finish after the operator turns off new proposals.
+            if one_tap_status(tx) != "on" { return Ok(Err(Error::OneTapDisabled)); }
             // Build before changing an expired row: every refusal must leave all
             // manifest tables and the audit chain unchanged.
             let proposal = match build_proposal(prepared, now) {

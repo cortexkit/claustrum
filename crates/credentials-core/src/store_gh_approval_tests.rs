@@ -87,6 +87,9 @@ fn ready(label: &str) -> (crate::test_support::TestTempDir, EncryptedStore, Vec<
         NOW,
     )
     .unwrap();
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
     (dir, store, public)
 }
 
@@ -156,12 +159,13 @@ fn desktop_dev_manifest_approval_uses_shared_commitments_and_emits_vector() {
     let mut wrong = e.clone();
     wrong.device_fingerprint = FP.into();
     assert_eq!(
-        store.secret_dev_desktop_approval(&wrong.canonical_bytes().unwrap(), None, true, NOW + 10),
+        store.secret_dev_desktop_approval(&wrong.canonical_bytes().unwrap(), None, true, || NOW
+            + 10),
         Err(SecretError::ApprovalInvalid)
     );
     assert_eq!(snapshot(&store), before);
     let reply = store
-        .secret_dev_desktop_approval(&bytes, None, true, NOW + 10)
+        .secret_dev_desktop_approval(&bytes, None, true, || NOW + 10)
         .unwrap();
     assert_eq!(
         reply,
@@ -419,6 +423,40 @@ fn gh_manifest_approval_expiry_checks_now_and_issue_time_at_the_exact_boundary()
         old.expires_at_ms,
         SecretError::Expired,
     );
+}
+
+#[test]
+fn desktop_manifest_approval_samples_expiry_with_the_writer_held() {
+    let (root, store, _) = ready("desktop-approval-expiry");
+    store
+        .set_secret_dev_desktop_approvals_audited(
+            true,
+            AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+        )
+        .unwrap();
+    let proposal = propose(&store, "Octo/New", NOW);
+    let mut e = envelope(&proposal, proposal.expires_at_ms - 1);
+    e.device_fingerprint =
+        crate::store::store_agent_secrets::desktop::DEV_DESKTOP_FINGERPRINT.into();
+    let before = snapshot(&store);
+    let mut probe = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    probe.busy_timeout(std::time::Duration::ZERO).unwrap();
+    // The clock crosses the expiry boundary once this operation holds the writer.
+    let clock = || match probe.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+        Ok(tx) => {
+            tx.rollback().unwrap();
+            proposal.expires_at_ms - 1
+        }
+        Err(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {
+            proposal.expires_at_ms
+        }
+        Err(error) => panic!("writer probe: {error}"),
+    };
+    assert_eq!(
+        store.secret_dev_desktop_approval(&e.canonical_bytes().unwrap(), None, true, clock),
+        Err(SecretError::Expired)
+    );
+    assert_eq!(snapshot(&store), before);
 }
 
 #[test]

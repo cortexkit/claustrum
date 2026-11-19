@@ -294,6 +294,32 @@ async fn propose(rig: &Rig, identity: &IdentityStub, http: &HttpStub) -> Propose
     )
     .await
 }
+
+#[tokio::test]
+async fn manifest_propose_rechecks_one_tap_after_preflight_before_inserting() {
+    let rig = rig("");
+    let Ok(params) = preflight(&rig.store, Some(&plexus()), &params()) else {
+        panic!("proposal must pass preflight while one-tap is on");
+    };
+    rig.store
+        .set_manifest_one_tap_audited(false, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    let before = snapshot(&rig);
+    let identity = IdentityStub::good();
+    let http = HttpStub::good();
+    let answer = checked_proposal(
+        Arc::clone(&rig.store),
+        params,
+        &identity,
+        Ok(&http),
+        Instant::now() + PROPOSE_DEADLINE,
+        || NOW,
+    )
+    .await;
+    assert_refusal(answer, "one_tap_disabled", "transient");
+    assert_eq!(http.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(snapshot(&rig), before);
+}
 fn reply(answer: ProposeAnswer) -> Value {
     match answer {
         ProposeAnswer::Reply(reply) => reply,

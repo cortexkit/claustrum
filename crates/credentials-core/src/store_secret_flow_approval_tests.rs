@@ -305,7 +305,7 @@ fn desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors() {
         let bytes = serde_json::to_vec(&e).unwrap();
         let before = store.audit_tip().unwrap();
         assert_eq!(
-            store.secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW),
+            store.secret_dev_desktop_approval(&bytes, Some("card-1"), false, || NOW),
             Err(SecretError::NotFound)
         );
         assert_eq!(store.audit_tip().unwrap(), before);
@@ -335,7 +335,7 @@ fn desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors() {
                 &serde_json::to_vec(&wrong).unwrap(),
                 None,
                 false,
-                NOW
+                || NOW
             ),
             Err(SecretError::ApprovalInvalid)
         );
@@ -345,12 +345,12 @@ fn desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors() {
             0
         );
         let reply = store
-            .secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW)
+            .secret_dev_desktop_approval(&bytes, Some("card-1"), false, || NOW)
             .unwrap();
         assert_eq!(reply, json!({"results":[granted(&request)]}));
         assert_eq!(
             store
-                .secret_dev_desktop_approval(&bytes, Some("card-1"), false, NOW)
+                .secret_dev_desktop_approval(&bytes, Some("card-1"), false, || NOW)
                 .unwrap(),
             reply
         );

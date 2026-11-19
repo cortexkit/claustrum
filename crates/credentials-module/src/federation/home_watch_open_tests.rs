@@ -303,6 +303,45 @@ async fn remote_watch_correlation_cancel_route_close_and_drain_preserve_other_en
 }
 
 #[tokio::test]
+async fn remote_watch_open_refuses_a_repair_during_first_send() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let (_root, home, _conn) = rig();
+    let home = paired(home);
+    setup(&home);
+    let store = home.engine.store();
+    store.create("oauth:watch", &login()).unwrap();
+    store
+        .create_member_grant_audited(
+            MEMBER,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Exact("oauth:watch".into()),
+            "pair-1",
+        )
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    let occupied = writer.reserve().await.unwrap();
+    let mut opening = Box::pin(open(&home, &writer, 1, 1, MEMBER, json!({})));
+    assert!(poll_fn(|cx| Poll::Ready(opening.as_mut().poll(cx)))
+        .await
+        .is_pending());
+    home.remote_watches.paired_devices(vec![(
+        MEMBER.strip_prefix("fed-computer:").unwrap().into(),
+        "pair-new".into(),
+    )]);
+    drop(occupied);
+    opening.await;
+    let first = rx.try_recv().unwrap();
+    assert_eq!(
+        body(first, FrameType::Error),
+        error("not_found", "permanent")
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(home.remote_watches.entry_count(), 0);
+}
+
+#[tokio::test]
 async fn remote_watch_cancel_during_first_send_and_reused_correlation_are_silent() {
     use std::future::{poll_fn, Future};
     use std::task::Poll;

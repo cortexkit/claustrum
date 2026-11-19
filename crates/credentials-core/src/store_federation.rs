@@ -292,18 +292,30 @@ fn remote_provider_ids_conn(
     rows
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static WATCH_REMOVAL_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn watch_removal_contains(ids: &BTreeSet<&str>, id: &str) -> bool {
+    #[cfg(test)]
+    WATCH_REMOVAL_PROBES.with(|count| count.set(count.get() + 1));
+    ids.contains(id)
+}
+
 fn remote_watch_diff_conn<'a>(
     conn: &rusqlite::Connection,
     home: &str,
     pairing: &str,
     rows: &'a [RemoteWatchRow],
     mode: RemoteWatchApplyMode,
-    retained_ids: &[String],
+    incoming_ids: &BTreeSet<&str>,
+    retained_ids: &BTreeSet<&str>,
 ) -> rusqlite::Result<RemoteWatchDiff<'a>> {
     let mut diff = RemoteWatchDiff::default();
     for row in rows {
         let id = &row.credential_id;
-        if retained_ids.contains(id) {
+        if retained_ids.contains(id.as_str()) {
             continue;
         }
         let current = conn
@@ -362,10 +374,8 @@ fn remote_watch_diff_conn<'a>(
     if mode == RemoteWatchApplyMode::Full {
         for record in remote_watch_records_conn(conn, home)? {
             if record.home_pairing_id.as_deref() == Some(pairing)
-                && !rows
-                    .iter()
-                    .any(|row| row.credential_id == record.credential_id)
-                && !retained_ids.contains(&record.credential_id)
+                && !watch_removal_contains(incoming_ids, &record.credential_id)
+                && !watch_removal_contains(retained_ids, &record.credential_id)
             {
                 diff.removals.push(record);
             }
@@ -874,28 +884,38 @@ impl EncryptedStore {
     ) -> Result<RemoteWatchApplyResult, StoreOpError> {
         check_member_id(home_member)?;
         check_pairing_id(pairing_id)?;
-        let mut ids = BTreeSet::new();
+        let mut incoming_ids = BTreeSet::new();
         for row in rows {
             validate_remote_watch_row(home_member, row)?;
-            if !ids.insert(&row.credential_id) {
+            if !incoming_ids.insert(row.credential_id.as_str()) {
                 return Err(StoreOpError::Encode(
                     "duplicate home-watch credential id".into(),
                 ));
             }
         }
+        let retained_ids = retained_ids.iter().map(String::as_str).collect();
         let preflight = self.store.with_conn(|conn| {
             if !login_sharing_conn(conn)? {
                 return Ok((true, RemoteWatchApplyResult::default()));
             }
-            let diff =
-                remote_watch_diff_conn(conn, home_member, pairing_id, rows, mode, retained_ids)?;
+            let diff = remote_watch_diff_conn(
+                conn,
+                home_member,
+                pairing_id,
+                rows,
+                mode,
+                &incoming_ids,
+                &retained_ids,
+            )?;
             Ok((diff.is_empty(), diff.result()))
         })?;
         if preflight.0 {
             return Ok(preflight.1);
         }
         self.fenced_write(|tx| {
-            let diff = remote_watch_diff_conn(tx, home_member, pairing_id, rows, mode, retained_ids)?;
+            let diff = remote_watch_diff_conn(
+                tx, home_member, pairing_id, rows, mode, &incoming_ids, &retained_ids,
+            )?;
             if !login_sharing_conn(tx)? {
                 return Ok(RemoteWatchApplyResult::default());
             }

@@ -602,6 +602,48 @@ async fn fleet_tombstones_persist_from_the_existing_watch_but_local_unpair_does_
 }
 
 #[tokio::test]
+async fn fleet_removal_retries_after_a_failed_write_on_a_quiet_watch() {
+    use std::time::Duration;
+
+    let mut rig = Rig::new("fleet-sharing-local-retry", snapshot("empty")).await;
+    rig.start().await;
+    tokio::time::pause();
+    let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_removal_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'fleet_removal' BEGIN SELECT RAISE(ABORT, 'fleet removal failure'); END;").unwrap();
+    let mut changed = snapshot("all_classes");
+    changed["tombstones"] =
+        json!([{"fingerprint":&MEMBER[13..],"removal_id":"opaque:account-removal"}]);
+    rig.callosum.watch_snapshot(Some(changed)).await;
+    rig.grants(2).await;
+    let removal_count = || {
+        rig.home
+            .store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|a| a.op == "fleet_removal")
+            .count()
+    };
+    assert_eq!(removal_count(), 0);
+    conn.execute_batch("DROP TRIGGER fail_removal_audit")
+        .unwrap();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    wait_until(|| removal_count() == 1).await;
+    assert_eq!(
+        rig.callosum
+            .methods("callosum")
+            .iter()
+            .filter(|method| *method == WATCH)
+            .count(),
+        1
+    );
+    assert_eq!(rig.home.store.verify_audit_chain().unwrap(), None);
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn fleet_removal_write_failure_does_not_block_sharing_and_retries_on_next_snapshot_without_self(
 ) {
     let mut rig = Rig::new("fleet-sharing-failure", snapshot("empty")).await;

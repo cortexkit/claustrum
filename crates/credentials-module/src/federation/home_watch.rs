@@ -99,6 +99,13 @@ struct Pairings {
     devices: HashMap<String, String>,
 }
 
+impl Pairings {
+    fn lost(&self, pending: &PendingOpen, watch: &PreparedWatch) -> bool {
+        self.generation > pending.pairing_generation
+            && self.devices.get(&watch.member) != Some(&watch.pairing)
+    }
+}
+
 pub struct RemoteWatchHub {
     registry: Arc<Mutex<Registry>>,
     // Serialize admission and terminal publication, never the pairing/store checks.
@@ -159,6 +166,10 @@ fn epoch() -> &'static str {
 
 fn unavailable() -> HomeAnswer {
     HomeAnswer::Reply(json!({"error":{"code":"home_unavailable","class":"transient"}}))
+}
+
+fn pairing_refusal() -> HomeAnswer {
+    HomeAnswer::Reply(json!({"error":{"code":"not_found","class":"permanent"}}))
 }
 
 fn frame(header: EnvelopeHeader, ty: FrameType, body: Vec<u8>) -> Result<Frame, String> {
@@ -407,7 +418,7 @@ impl RemoteWatchHub {
             prepared
                 .as_ref()
                 .ok()
-                .filter(|_| !registry.draining)
+                .filter(|watch| !registry.draining && !self.pairings.borrow().lost(pending, watch))
                 .and_then(|watch| {
                     let live: Vec<_> = registry
                         .entries
@@ -440,7 +451,10 @@ impl RemoteWatchHub {
                 .entries
                 .get(&key)
                 .is_some_and(|entry| Arc::ptr_eq(&entry.identity, &identity));
-            if !registry.draining && same_stream {
+            let pairing_current = prepared
+                .as_ref()
+                .is_ok_and(|watch| !self.pairings.borrow().lost(pending, watch));
+            if !registry.draining && same_stream && pairing_current {
                 registry.entries.remove(&key);
                 if let Ok(permit) = permit {
                     permit.send(end);
@@ -460,7 +474,13 @@ impl RemoteWatchHub {
         let prepared = if registry.draining {
             Err(unavailable())
         } else {
-            prepared
+            prepared.and_then(|watch| {
+                if self.pairings.borrow().lost(pending, &watch) {
+                    Err(pairing_refusal())
+                } else {
+                    Ok(watch)
+                }
+            })
         };
         match prepared {
             Err(answer) => {
@@ -545,9 +565,7 @@ impl Drop for Subscription {
 
 impl Subscription {
     fn pairing_lost(&self) -> bool {
-        let latest = self.pairings.borrow();
-        latest.generation > self.pending.pairing_generation
-            && latest.devices.get(&self.watch.member) != Some(&self.watch.pairing)
+        self.pairings.borrow().lost(&self.pending, &self.watch)
     }
 
     async fn project(&self) -> Result<Option<Projection>, ()> {
@@ -614,10 +632,7 @@ impl Subscription {
             )?,
             None => {
                 registry.entries.remove(&self.pending.key);
-                refusal(
-                    self.header,
-                    HomeAnswer::Reply(json!({"error":{"code":"not_found","class":"permanent"}})),
-                )?
+                refusal(self.header, pairing_refusal())?
             }
         };
         permit.send(next);

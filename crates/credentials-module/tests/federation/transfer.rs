@@ -579,6 +579,44 @@ async fn replaying_an_accepted_envelope_as_a_new_delivery_answers_accepted_and_w
 /// A same-hash resend after the sender's grant is revoked answers the uniform
 /// `not_found`, and the sender drops its row.
 #[tokio::test]
+async fn identical_delivery_waiting_for_a_key_answers_the_concurrent_rejection() {
+    let rig = Rig::new("transfer-decided-during-key-lookup").await;
+    let transfer_id = tid(1);
+    let payload = body(API_ID, "api_key", b"test-record");
+    let envelope = rig.a.hand_seal(&rig.b, &transfer_id, API_ID, &payload);
+    let key_lookup = Held::new();
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        "callosum.peer_keys_read",
+        Reply::Hold(key_lookup.clone()),
+    );
+    let mut delayed = Box::pin(rig.serve_b(&rig.a.member, &envelope));
+    key_lookup.arrived_before(&mut delayed).await;
+    rig.heal_lookups();
+    assert_eq!(rig.serve_b(&rig.a.member, &envelope).await, "pending");
+    assert_eq!(
+        rig.b.transfers.reject(&transfer_id, &rig.a.member).unwrap(),
+        IncomingTransferState::Rejected,
+    );
+    key_lookup.release(Reply::Ok(json!({"peers": [{
+        "fingerprint": rig.a.member.split_once(':').unwrap().1,
+        "key_record": {"keys": {"vault_transfer_x25519": {"pub": hex(&rig.a.public), "version": "1"}}},
+    }]})));
+    assert_eq!(delayed.await, "rejected");
+    assert_eq!(rig.serve_b(&rig.a.member, &envelope).await, "rejected");
+    let different = rig.a.hand_seal(
+        &rig.b,
+        &transfer_id,
+        API_ID,
+        &body(API_ID, "api_key", b"different"),
+    );
+    assert_eq!(
+        rig.serve_b(&rig.a.member, &different).await,
+        "transfer_conflict"
+    );
+}
+
+#[tokio::test]
 async fn a_same_hash_resend_after_the_grant_is_revoked_answers_not_found() {
     let rig = Rig::new("transfer-revoked").await;
     rig.api_key_on_a(API_ID, b"sk-revoked");

@@ -383,7 +383,7 @@ pub enum SubscriptionEvent {
 pub struct Subscription {
     link: Arc<Link>,
     key: WaiterKey,
-    epoch: u32,
+    binding: Arc<Binding>,
     replies: mpsc::UnboundedReceiver<Result<Frame, String>>,
 }
 
@@ -412,7 +412,12 @@ pub(super) async fn subscription_for_test(
         Subscription {
             link,
             key: WaiterKey::Control(1),
-            epoch: 1,
+            binding: Arc::new(Binding {
+                channel: 1,
+                epoch: 1,
+                link: 1,
+                closures: 0,
+            }),
             replies,
         },
     )
@@ -482,7 +487,7 @@ impl Drop for Subscription {
             return;
         };
         let link = Arc::clone(&self.link);
-        let epoch = self.epoch;
+        let epoch = self.binding.epoch;
         // Cancelling a watch must not close the shared connection or block shutdown.
         tokio::spawn(async move {
             if let Ok(frame) = Frame::build(
@@ -515,7 +520,7 @@ struct Inner {
     /// Guards the "connect if absent" step so two concurrent calls cannot both dial.
     /// Held only for the handshake, which is bounded by its own deadline.
     connector: AsyncMutex<()>,
-    bindings: Mutex<HashMap<String, Binding>>,
+    bindings: Mutex<HashMap<String, Arc<Binding>>>,
     next_corr: std::sync::atomic::AtomicU64,
 }
 
@@ -674,6 +679,20 @@ impl OutboundClient {
             .remove(route_key);
     }
 
+    pub(super) fn invalidate_subscription(&self, route_key: &str, subscription: &Subscription) {
+        let mut bindings = self
+            .inner
+            .bindings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if bindings
+            .get(route_key)
+            .is_some_and(|current| Arc::ptr_eq(current, &subscription.binding))
+        {
+            bindings.remove(route_key);
+        }
+    }
+
     fn next_corr(&self) -> u64 {
         self.inner
             .next_corr
@@ -803,7 +822,7 @@ impl OutboundClient {
         route_key: &str,
         call: &RouteCall,
         budget: tokio::time::Instant,
-    ) -> Result<Binding, LinkFailure> {
+    ) -> Result<Arc<Binding>, LinkFailure> {
         // A cached binding counts only if its route is still open on this very
         // connection: one opened on a connection that has since closed, or closed by a
         // route `Goodbye`, is reopened instead of written into a route nobody serves.
@@ -833,7 +852,7 @@ impl OutboundClient {
                 if reply.header.ty == FrameType::Error {
                     return Err(failure(control_refusal(&reply.body)));
                 }
-                let opened = parse_open(&reply.body, link)?;
+                let opened = Arc::new(parse_open(&reply.body, link)?);
                 self.inner
                     .bindings
                     .lock()
@@ -872,7 +891,16 @@ impl OutboundClient {
         call: RouteCall,
         deadline: Duration,
     ) -> Result<Subscription, OutboundError> {
-        let budget = tokio::time::Instant::now() + deadline;
+        self.subscribe_until(route_key, call, tokio::time::Instant::now() + deadline)
+            .await
+    }
+
+    pub(super) async fn subscribe_until(
+        &self,
+        route_key: &str,
+        call: RouteCall,
+        budget: tokio::time::Instant,
+    ) -> Result<Subscription, OutboundError> {
         let link = self.link(budget).await?;
         let binding = self
             .route_binding(&link, route_key, &call, budget)
@@ -888,7 +916,7 @@ impl OutboundClient {
         let subscription = Subscription {
             link: Arc::clone(&link),
             key,
-            epoch: binding.epoch,
+            binding: Arc::clone(&binding),
             replies,
         };
         if !link.holds(&binding) {
@@ -896,13 +924,18 @@ impl OutboundClient {
                 "watch route closed before subscription".into(),
             ));
         }
-        self.write(
-            &link,
-            &self.route_request(&binding, corr, &call)?,
-            budget,
-            "watch",
-        )
-        .await?;
+        if let Err(error) = self
+            .write(
+                &link,
+                &self.route_request(&binding, corr, &call)?,
+                budget,
+                "watch",
+            )
+            .await
+        {
+            self.invalidate_subscription(route_key, &subscription);
+            return Err(error);
+        }
         Ok(subscription)
     }
 

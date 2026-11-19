@@ -100,6 +100,8 @@ fn seal_epoch(key: &MasterKey, epoch: u32, secret: &[u8]) -> Result<Vec<u8>, Fle
     .map_err(|_| FleetError::StoreError)
 }
 fn open_epoch(key: &MasterKey, row: &EpochRow) -> Result<Zeroizing<Vec<u8>>, FleetError> {
+    #[cfg(test)]
+    EPOCH_OPENS.with(|count| count.set(count.get() + 1));
     let bytes = envelope::open(
         key,
         &row.blob,
@@ -115,18 +117,25 @@ fn open_epoch(key: &MasterKey, row: &EpochRow) -> Result<Zeroizing<Vec<u8>>, Fle
     Ok(Zeroizing::new(bytes.to_vec()))
 }
 
-fn open_record(
+#[cfg(test)]
+thread_local! {
+    static EPOCH_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn open_record_key(
     master_key: &MasterKey,
     rows: &[EpochRow],
-    sealer: FleetSealer,
-    item: &FleetOpenInput<'_>,
-) -> FleetOpenResult {
+    epoch: u32,
+) -> Result<Zeroizing<Vec<u8>>, FleetError> {
     let row = rows
         .iter()
-        .find(|r| r.epoch == item.epoch && r.state != "pending")
+        .find(|r| r.epoch == epoch && r.state != "pending")
         .ok_or(FleetError::EpochUnavailable)?;
-    let key = open_epoch(master_key, row)?;
-    XChaCha20Poly1305::new_from_slice(&key)
+    open_epoch(master_key, row)
+}
+
+fn open_record(key: &[u8], sealer: FleetSealer, item: &FleetOpenInput<'_>) -> FleetOpenResult {
+    XChaCha20Poly1305::new_from_slice(key)
         .map_err(|_| FleetError::StoreError)?
         .decrypt(
             XNonce::from_slice(item.nonce),
@@ -355,7 +364,8 @@ impl EncryptedStore {
         self.fleet_read(|conn| {
             self_member(conn)?;
             let rows = rows(conn)?;
-            open_record(&self.key, &rows, sealer, &item)
+            let key = open_record_key(&self.key, &rows, item.epoch)?;
+            open_record(&key, sealer, &item)
         })
     }
 
@@ -368,10 +378,16 @@ impl EncryptedStore {
         self.fleet_read(|conn| {
             self_member(conn)?;
             let rows = rows(conn)?;
+            let mut keys = BTreeMap::new();
             items
                 .iter()
                 .map(|item| {
-                    let result = open_record(&self.key, &rows, sealer, item);
+                    let result = keys
+                        .entry(item.epoch)
+                        .or_insert_with(|| open_record_key(&self.key, &rows, item.epoch))
+                        .as_ref()
+                        .map_err(|error| *error)
+                        .and_then(|key| open_record(key, sealer, item));
                     // A storage failure invalidates the shared read, not just one item.
                     if matches!(result, Err(FleetError::StoreError)) {
                         Err(FleetError::StoreError)
@@ -996,6 +1012,54 @@ mod tests {
                 .unwrap_err(),
             FleetError::EpochUnavailable
         );
+    }
+
+    #[test]
+    fn fleet_open_batch_unwraps_each_requested_epoch_once() {
+        let (_root, store) = rig("fleet-open-batch-unwraps", 1);
+        let mut records = Vec::new();
+        for plaintext in [b"first", b"later"] {
+            let epoch = commit(&store, &[id(1)], &[]).epoch;
+            let record = store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", plaintext)
+                .unwrap();
+            records.push((
+                epoch,
+                decode(&record.nonce, 24).unwrap(),
+                decode(&record.ciphertext, MAX_BYTES + 16).unwrap(),
+            ));
+        }
+        let mut bad_tag = records[0].2.clone();
+        *bad_tag.last_mut().unwrap() ^= 1;
+        let item = |index: usize, bad| {
+            let (epoch, nonce, ciphertext) = &records[index];
+            FleetOpenInput {
+                epoch: *epoch,
+                nonce,
+                ciphertext: if bad { &bad_tag } else { ciphertext },
+                aad: b"",
+            }
+        };
+        let before = EPOCH_OPENS.with(|count| count.get());
+        let results = store
+            .fleet_epoch_open_batch(
+                FleetSealer::Entorhinal,
+                &[
+                    item(0, true),
+                    item(1, false),
+                    item(0, false),
+                    item(1, false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(EPOCH_OPENS.with(|count| count.get()) - before, 2);
+        assert_eq!(
+            results[0].as_ref().unwrap_err(),
+            &FleetError::EpochOpenFailed
+        );
+        assert_eq!(results[1].as_ref().unwrap().expose(), b"later");
+        assert_eq!(results[2].as_ref().unwrap().expose(), b"first");
+        assert_eq!(results[3].as_ref().unwrap().expose(), b"later");
     }
 
     #[test]

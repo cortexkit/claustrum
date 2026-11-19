@@ -3,12 +3,13 @@
 //! has decoded, and each snapshot's grant changes commit with their audits together.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use credentials_core::federation::{
     is_lower_hex_16_bytes, is_lower_hex_sha256, VaultSharingMember,
 };
+use credentials_core::fleet::FleetRemoval;
 use credentials_core::store::EncryptedStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -151,6 +152,7 @@ async fn apply(
     store: Arc<EncryptedStore>,
     body: Value,
     retries: &mut RetryState,
+    removals: &Arc<PendingRemovals>,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
     member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) -> Result<(), String> {
@@ -162,19 +164,9 @@ async fn apply(
     if let Some(pairings) = member_pairings {
         pairings.send_replace(Some(snapshot.computers));
     }
+    let removals = Arc::clone(removals);
     tokio::task::spawn_blocking(move || {
-        if !snapshot.tombstones.is_empty() {
-            let removals: Vec<_> = snapshot.tombstones.into_iter().map(|item| {
-                credentials_core::fleet::FleetRemoval {
-                    member_id: item.member_id, removal_id: item.removal_id,
-                }
-            }).collect();
-            // Fleet persistence must not hold back the shipped login-sharing path.
-            // Callosum repeats tombstones in subsequent snapshots, so failures retry.
-            if store.fleet_record_removals(&removals, super::transfer::wall_now_ms()).is_err() {
-                tracing::warn!(target: "federation", "fleet removals not recorded; retrying on the next paired-device snapshot");
-            }
-        }
+        removals.record(&store, snapshot.tombstones);
         if snapshot.enabled {
             super::transfer::ensure_transfer_key(&store, "vault")?;
         }
@@ -224,6 +216,90 @@ impl RetryState {
     }
 }
 
+#[derive(Default)]
+struct PendingRemovals {
+    items: Mutex<BTreeSet<(String, String)>>,
+    observed: tokio::sync::Notify,
+}
+
+impl PendingRemovals {
+    fn record(&self, store: &EncryptedStore, tombstones: Vec<SharingTombstone>) {
+        if tombstones.is_empty() {
+            return;
+        }
+        let batch: Vec<_> = tombstones
+            .into_iter()
+            .map(|item| FleetRemoval {
+                member_id: item.member_id,
+                removal_id: item.removal_id,
+            })
+            .collect();
+        if store
+            .fleet_record_removals(&batch, super::transfer::wall_now_ms())
+            .is_ok()
+        {
+            let mut pending = self.items.lock().expect("pending fleet removals");
+            for item in batch {
+                pending.remove(&(item.member_id, item.removal_id));
+            }
+        } else {
+            let mut pending = self.items.lock().expect("pending fleet removals");
+            pending.extend(
+                batch
+                    .into_iter()
+                    .map(|item| (item.member_id, item.removal_id)),
+            );
+            self.observed.notify_one();
+        }
+    }
+
+    async fn run(&self, store: Arc<EncryptedStore>) {
+        let mut failures = 1u32;
+        loop {
+            if self
+                .items
+                .lock()
+                .expect("pending fleet removals")
+                .is_empty()
+            {
+                failures = 1;
+                self.observed.notified().await;
+                continue;
+            }
+            if failures == 1 {
+                tracing::warn!(target: "federation", "fleet removals not recorded; retrying");
+            }
+            tokio::time::sleep(retry_delay(failures)).await;
+            let pending = self.items.lock().expect("pending fleet removals").clone();
+            if pending.is_empty() {
+                continue;
+            }
+            let store = Arc::clone(&store);
+            let result = tokio::task::spawn_blocking(move || {
+                let batch: Vec<_> = pending
+                    .iter()
+                    .map(|(member_id, removal_id)| FleetRemoval {
+                        member_id: member_id.clone(),
+                        removal_id: removal_id.clone(),
+                    })
+                    .collect();
+                store.fleet_record_removals(&batch, super::transfer::wall_now_ms())?;
+                Ok::<_, credentials_core::fleet::FleetError>(pending)
+            })
+            .await;
+            if let Ok(Ok(committed)) = result {
+                let mut items = self.items.lock().expect("pending fleet removals");
+                for item in committed {
+                    items.remove(&item);
+                }
+                failures = 1;
+            } else {
+                failures = failures.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// Run until cancelled by the daemon's task guard. Every reopen starts with a full
 /// read; the watch's initial snapshot closes the read/subscribe race.
 pub async fn run(store: Arc<EncryptedStore>, client: OutboundClient) {
@@ -244,6 +320,21 @@ pub async fn run_with_reconcilers(
     home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
     member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) {
+    let removals = Arc::new(PendingRemovals::default());
+    // Keep the removal queue alive across reconnects and login-sharing changes.
+    tokio::select! {
+        _ = removals.run(Arc::clone(&store)) => {},
+        _ = reconcile(store, client, home_watches, member_pairings, &removals) => {},
+    }
+}
+
+async fn reconcile(
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
+    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    removals: &Arc<PendingRemovals>,
+) {
     let mut retries = RetryState::default();
     let mut writes = store.subscribe_writes();
     let mut enabled = store.login_sharing().unwrap_or(false);
@@ -253,6 +344,7 @@ pub async fn run_with_reconcilers(
                 Arc::clone(&store),
                 &client,
                 &mut retries,
+                removals,
                 home_watches.as_deref(),
                 member_pairings.as_ref(),
             );
@@ -288,6 +380,7 @@ async fn watch(
     store: Arc<EncryptedStore>,
     client: &OutboundClient,
     retries: &mut RetryState,
+    removals: &Arc<PendingRemovals>,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
     member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) -> Result<(), String> {
@@ -303,6 +396,7 @@ async fn watch(
         Arc::clone(&store),
         snapshot,
         retries,
+        removals,
         home_watches,
         member_pairings,
     )
@@ -324,6 +418,7 @@ async fn watch(
             Arc::clone(&store),
             snapshot,
             retries,
+            removals,
             home_watches,
             member_pairings,
         )

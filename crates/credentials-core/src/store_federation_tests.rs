@@ -56,6 +56,42 @@ mod remote_watch {
     }
 
     #[test]
+    fn remote_watch_removal_membership_probes_scale_with_existing_rows() {
+        use super::super::federation_store::WATCH_REMOVAL_PROBES;
+
+        for size in [16, 32] {
+            let (_root, store) = rig("watch-removal-probes", 240);
+            let mut rows: Vec<_> = (0..size)
+                .map(|i| row(&format!("oauth:watch-{i}")))
+                .collect();
+            rows.push(row("oauth:retained"));
+            rows.push(row("oauth:obsolete"));
+            assert_eq!(full(&store, &rows).inserted, size + 2);
+            rows.truncate(size);
+            rows[0].identity.org_name = Some("changed".into());
+            WATCH_REMOVAL_PROBES.with(|count| count.set(0));
+            let result = store
+                .remote_watch_apply_audited(
+                    HOME,
+                    "pair",
+                    &rows,
+                    RemoteWatchApplyMode::Full,
+                    &["oauth:retained".into()],
+                )
+                .unwrap();
+            // Both passes probe the incoming set once per row and the retained set
+            // only for the two absent ids.
+            assert_eq!(
+                WATCH_REMOVAL_PROBES.with(|count| count.get()),
+                2 * (size + 4)
+            );
+            assert_eq!((result.updated, result.removed), (1, 1));
+            assert!(store.remote_record("oauth:retained").unwrap().is_some());
+            assert!(store.remote_record("oauth:obsolete").unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn remote_condition_reason_accepts_64_bytes_and_refuses_65() {
         let mut input = row("oauth:watch");
         input.condition = Some(condition(&"r".repeat(64), 9_007_199_254_740_991));

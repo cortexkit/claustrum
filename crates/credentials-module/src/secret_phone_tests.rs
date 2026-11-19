@@ -719,6 +719,9 @@ async fn pending_manifest(
         .await,
         json!({"status":"stored"})
     );
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
     let prepared = store
         .prepare_gh_manifest_proposal(GhManifestProposalInput {
             agent_id: "agent_4444444444444444".into(),

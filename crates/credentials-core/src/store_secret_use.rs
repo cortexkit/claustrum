@@ -65,13 +65,15 @@ const RECEIPT_DENIED: &str = "release_receipt";
 
 /// One forwarded release request as the home received it.
 ///
-/// A paired computer sends one AAD (one nonce) for every transport retry of a single
-/// sender call. The home answers a retry with exactly the same AAD bytes from its
-/// release receipt instead of releasing again.
+/// A paired computer sends the same additional authenticated data (AAD), including
+/// the nonce, for every transport retry of a sender call. The home answers a retry
+/// with the stored release receipt instead of releasing again.
 pub struct ReleaseRequest<'a> {
     /// The paired computer that asked (`fed-computer:<fp>`). The caller must have
     /// authenticated it; it is also the asking member every grant is matched against.
     pub requester: &'a str,
+    /// The pairing under which the caller checked the member's forwarding grant.
+    pub pairing_id: &'a str,
     /// The AAD's `nonce`: 16 random bytes in lower hex.
     pub nonce: &'a str,
     /// The exact AAD bytes received. Only a retry with identical bytes, not merely an
@@ -80,6 +82,17 @@ pub struct ReleaseRequest<'a> {
 }
 
 impl ReleaseRequest<'_> {
+    // Revocation uses the same writer, so the member grant cannot disappear between
+    // this check and returning a receipt or making a new release.
+    fn member_grant_is_live(&self, tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM member_grants WHERE member_id=?1 AND pairing_id=?2 \
+             AND operation='secret_use' AND selector_kind='none' AND selector='')",
+            [self.requester, self.pairing_id],
+            |row| row.get(0),
+        )
+    }
+
     fn validate(&self) -> Result<(), SecretError> {
         if crate::federation::valid_member_id(self.requester)
             && crate::federation::is_lower_hex_16_bytes(self.nonce)
@@ -400,6 +413,9 @@ impl EncryptedStore {
         }
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
+            if let Some(request) = request {
+                if !request.member_grant_is_live(tx)? { return Ok(Forwarded::Answer(Err(SecretError::NotFound))); }
+            }
             let now = clock();
             if !phone::local_programs_enabled(tx) { return Ok(Forwarded::Answer(Err(SecretError::SecretLocalProgramsDisabled))); }
             let Some(record) = self.enrolled_ssh(tx, &ssh.key, &ssh.local_use, Some(ssh.data.public_key()))? else { return Ok(Forwarded::Refused(Refusal { detail: "ssh_key", addressed: true })); };
@@ -750,6 +766,9 @@ impl EncryptedStore {
         }
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
+            if !request.member_grant_is_live(tx)? {
+                return Ok(Forwarded::Answer(Err(SecretError::NotFound)));
+            }
             self.secret_use_sealed_tx(tx, call, request, seal, &mut seal_failure, clock())
         });
         if let Some(error) = seal_failure {
@@ -776,6 +795,9 @@ impl EncryptedStore {
         let mut selected = None;
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
+            if !request.member_grant_is_live(tx)? {
+                return Ok(Forwarded::Answer(Err(SecretError::NotFound)));
+            }
             let named = match self.select_basic_auth(tx, call)? {
                 Ok(named) => named,
                 Err(error) => return Ok(Forwarded::Answer(Err(error))),
@@ -1414,6 +1436,7 @@ mod receipt_tests {
     const SEED: u8 = 67;
     const MEMBER: &str = "fed-computer:22222222222222222222222222222222";
     const ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    const PAIRING: &str = "pair-A";
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
     const FIRST: &str = "00000000000000000000000000000001";
     const SECOND: &str = "00000000000000000000000000000002";
@@ -1503,6 +1526,14 @@ mod receipt_tests {
             )
             .unwrap();
         seed(&store, FIRST);
+        store
+            .create_member_grant_audited(
+                ASKER,
+                crate::federation::MemberGrantOperation::SecretUse,
+                &crate::federation::MemberGrantSelector::None,
+                PAIRING,
+            )
+            .unwrap();
         (root, store)
     }
 
@@ -1563,6 +1594,7 @@ mod receipt_tests {
     fn request(aad: &[u8]) -> ReleaseRequest<'_> {
         ReleaseRequest {
             requester: ASKER,
+            pairing_id: PAIRING,
             nonce: NONCE,
             aad,
         }
@@ -1875,6 +1907,7 @@ mod receipt_tests {
         for (requester, nonce) in [("", NONCE), (ASKER, "0123"), (ASKER, upper.as_str())] {
             let request = ReleaseRequest {
                 requester,
+                pairing_id: PAIRING,
                 nonce,
                 aad: &aad,
             };
@@ -1941,6 +1974,7 @@ mod receipt_tests {
         let flow_aad = aad().iter().rev().copied().collect::<Vec<_>>();
         let flow_request = ReleaseRequest {
             requester: ASKER,
+            pairing_id: PAIRING,
             nonce: SECOND,
             aad: &flow_aad,
         };

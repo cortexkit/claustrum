@@ -110,6 +110,9 @@ fn ready(label: &str) -> (crate::test_support::TestTempDir, EncryptedStore) {
     add_root(&store);
     add_member(&store);
     store_bytes(&store, 28, V28);
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
     (root, store)
 }
 
@@ -517,10 +520,6 @@ fn gh_manifest_proposal_refuses_non_reproducible_bytes_without_writes() {
 #[test]
 fn gh_manifest_proposal_stores_exact_build_full_name_jcs_permissions_and_commitments() {
     let (_root, store) = ready("manifest-proposal-fields");
-    assert!(
-        !store.manifest_one_tap_enabled(),
-        "the module, not this storage primitive, applies the gate"
-    );
     let before = snapshot(&store);
     let proposal = propose(&store, NOW);
     assert_eq!(proposal.agent_id, AGENT);

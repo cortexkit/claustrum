@@ -137,12 +137,7 @@ pub async fn serve_dev_desktop(
     let manifest = method == "manifest.approve";
     answer(
         tokio::task::spawn_blocking(move || {
-            store.secret_dev_desktop_approval(
-                &envelope,
-                card_ref.as_deref(),
-                manifest,
-                wall_now_ms(),
-            )
+            store.secret_dev_desktop_approval(&envelope, card_ref.as_deref(), manifest, wall_now_ms)
         })
         .await
         .unwrap_or(Err(SecretError::StoreError)),

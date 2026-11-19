@@ -1361,15 +1361,11 @@ impl HomeVault {
         {
             return Ok(None);
         }
-        let latest = store.latest_gh_manifest().map_err(|_| ())?;
+        let latest = store.latest_gh_manifest_metadata().map_err(|_| ())?;
         let value = match latest {
             None => json!({"version":null,"manifest_sha256":null}),
-            Some(latest) => {
-                let status = store
-                    .gh_manifest_active_status(latest.version)
-                    .map_err(|_| ())?
-                    .ok_or(())?;
-                json!({"version":latest.version,"manifest_sha256":status.manifest_sha256})
+            Some((version, manifest_sha256)) => {
+                json!({"version":version,"manifest_sha256":manifest_sha256})
             }
         };
         Ok(Some(value))
@@ -1697,6 +1693,7 @@ impl HomeVault {
         // transaction, over the received aad bytes.
         let release = ReleaseRequest {
             requester: member,
+            pairing_id: &pairing_id,
             nonce: &aad.nonce,
             aad: request.aad.as_bytes(),
         };

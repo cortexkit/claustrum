@@ -1313,6 +1313,35 @@ async fn secret_home_request_and_replies_match_the_contract() {
     );
 }
 
+#[tokio::test]
+async fn phone_list_refused_as_elsewhere_does_not_write_an_observation() {
+    let flow = SecretFlow::new(213).await;
+    flow.store
+        .set_secret_home_audited(
+            Some("fed-computer:44444444444444444444444444444444"),
+            AuditCtx::admin(AuditOp::SecretHomeSet),
+        )
+        .unwrap();
+    let conn = rusqlite::Connection::open(flow._root.join("store.db")).unwrap();
+    conn.execute("UPDATE secret_phone_observations SET observed_at_ms=1", [])
+        .unwrap();
+    let observations = || -> Vec<(String, String, i64)> {
+        conn.prepare("SELECT fingerprint,pairing_id,observed_at_ms FROM secret_phone_observations ORDER BY fingerprint")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let before = observations();
+    assert_eq!(before.len(), 1, "phone registration recorded a baseline");
+    assert_eq!(
+        flow.phone("secret.list", secret_golden("list.request")).await,
+        secret_golden("home.refused.elsewhere")
+    );
+    assert_eq!(observations(), before);
+}
+
 /// The `federation.secret_use` goldens in §14: the request and aad field order, the sealed
 /// reply shape, and a real seal opened over the golden aad bytes.
 #[tokio::test]
@@ -1540,6 +1569,14 @@ async fn forwarded_statements_are_v2_and_match_the_pinned_vectors() {
     const ASKER: &str = "fed-computer:11111111111111111111111111111111";
     let flow = SecretFlow::new(215).await;
     flow.deposit_both().await;
+    flow.store
+        .create_member_grant_audited(
+            ASKER,
+            credentials_core::federation::MemberGrantOperation::SecretUse,
+            &credentials_core::federation::MemberGrantSelector::None,
+            HOME_ASKER_PAIRING,
+        )
+        .unwrap();
     let api = secret_golden("use.request.api_key");
     let aad = secret_golden_string("federation.secret_use.aad");
     let aad_value: serde_json::Value = serde_json::from_str(&aad).unwrap();
@@ -1551,6 +1588,7 @@ async fn forwarded_statements_are_v2_and_match_the_pinned_vectors() {
         &api,
         &credentials_core::store::ReleaseRequest {
             requester: ASKER,
+            pairing_id: HOME_ASKER_PAIRING,
             nonce: "0123456789abcdef0123456789abcdef",
             aad: aad.as_bytes(),
         },
@@ -2689,6 +2727,129 @@ async fn local_ops_forwarded_ssh_once_lost_reply_replays_one_signature_without_c
         "approval_required",
         "new nonce needs a new card"
     );
+}
+
+async fn assert_late_member_revoke_blocks_release(sender: &str, ssh: bool) {
+    use credentials_core::federation::{MemberGrantOperation, MemberGrantSelector};
+    use federation::ingress::{OP_SECRET_REQUEST_FLOW_APPROVAL, OP_SECRET_SSH_SIGN, OP_SECRET_USE};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let home = SecretHome::new(230, Some("self")).await;
+    let flow = sender == "basal";
+    let (op, name_field, call) = if ssh {
+        sc_programs(&home.flow.store, true);
+        let call = sc_ssh_call(&sc_ssh_seed(&home.flow.store));
+        (OP_SECRET_SSH_SIGN, "key", call)
+    } else {
+        home.flow.deposit_both().await;
+        let call = if flow {
+            sf_run(false)
+        } else {
+            secret_golden("use.request.api_key")
+        };
+        (OP_SECRET_USE, "name", call)
+    };
+    let aad = home.aad_with(
+        call[name_field].as_str().unwrap(),
+        HOME_ASKER,
+        SC_MEMBER,
+        "0123456789abcdef0123456789abcdef",
+        &home.asker_key_id,
+        &federation::ingress::secret_call_sha256(sender, &call).unwrap(),
+    );
+    let params = json!({"aad":aad,"sender":sender,"call":call});
+    let asked = if flow {
+        home.serve(OP_SECRET_REQUEST_FLOW_APPROVAL, sf_install(false))
+            .await
+    } else {
+        home.serve(op, params.clone()).await
+    };
+    let approved = if flow {
+        home.flow.approve(&asked, "version", false).await
+    } else {
+        sc_approve_once(&home.flow, &asked).await
+    };
+    assert_eq!(approved["results"][0]["outcome"], "granted");
+
+    let store = &home.flow.store;
+    let operation = MemberGrantOperation::SecretUse;
+    let answers = Arc::clone(&home.callosum);
+    let revoking = Arc::clone(store);
+    let engine = Arc::new(RefreshEngine::new(
+        Arc::clone(store),
+        Vec::new(),
+        Arc::new(crate::test_support::NoHttp),
+    ));
+    let replaying = AtomicBool::new(false);
+    let late_revoke = federation::HomeVault::new(engine)
+        .with_secret_clock(Arc::new(sc_now_ms))
+        .with_callosum_stub(Arc::new(move |method| {
+            if method == "callosum.peer_keys_read" {
+                // The early member check has already passed when the home asks for the key.
+                if replaying.swap(true, Ordering::Relaxed) {
+                    revoking
+                        .create_member_grant_audited(
+                            HOME_ASKER, operation, &MemberGrantSelector::None, "replacement-pairing",
+                        )
+                        .unwrap();
+                } else {
+                    revoking
+                        .revoke_member_grant_audited(HOME_ASKER, operation, &MemberGrantSelector::None)
+                        .unwrap();
+                }
+            }
+            answers.lock().unwrap().get(method).cloned()
+        }));
+    let counts = || {
+        let (pending, grants, receipts, audit) = sc_local_counts(&home.flow);
+        let conn = rusqlite::Connection::open(home.flow._root.join("store.db")).unwrap();
+        let flow_grants: i64 = conn
+            .query_row("SELECT count(*) FROM secret_flow_grants WHERE first_released=0", [], |row| row.get(0))
+            .unwrap();
+        (pending, grants, receipts, audit, flow_grants)
+    };
+    let mut first = None;
+    for replaying in [false, true] {
+        let (pending, grants, receipts, audit, flow_grants) = counts();
+        let answer = late_revoke.serve(HOME_ASKER, op, &params).await;
+        let federation::HomeAnswer::Reply(reply) = answer else {
+            panic!("expected a uniform refusal");
+        };
+        assert_eq!(reply, sh_not_found(), "replaying={replaying}");
+        assert_eq!(
+            counts(), (pending, grants, receipts, audit + 1, flow_grants),
+            "only the member grant change should be audited"
+        );
+
+        // Both an absent grant and a grant under another pairing fail the recheck.
+        // Restore the authorized pairing to prove the same release is otherwise valid.
+        store
+            .create_member_grant_audited(HOME_ASKER, operation, &MemberGrantSelector::None, HOME_ASKER_PAIRING)
+            .unwrap();
+        let sealed = home.serve(op, params.clone()).await;
+        assert_eq!(sealed["status"], "sealed");
+        assert_eq!(counts().2, if replaying { receipts } else { receipts + 1 });
+        if let Some(first) = &first {
+            assert_eq!(&sealed, first, "restoring the pairing allows the same receipt to replay");
+        } else {
+            first = Some(sealed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn late_member_revoke_fences_forwarded_agent_release_and_replay() {
+    assert_late_member_revoke_blocks_release("aft", false).await;
+}
+
+#[tokio::test]
+async fn late_member_revoke_fences_forwarded_flow_release_and_replay() {
+    assert_late_member_revoke_blocks_release("basal", false).await;
+}
+
+#[tokio::test]
+async fn late_member_revoke_fences_forwarded_ssh_sign_and_replay() {
+    assert_late_member_revoke_blocks_release("aft", true).await;
 }
 
 #[tokio::test]

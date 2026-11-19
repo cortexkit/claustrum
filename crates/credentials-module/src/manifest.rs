@@ -67,16 +67,10 @@ pub(crate) fn watch_snapshot(store: &EncryptedStore) -> Value {
     if let Some(reply) = role_refusal(store, false) {
         return reply;
     }
-    match store.latest_gh_manifest() {
+    match store.latest_gh_manifest_metadata() {
         Ok(None) => json!({"version":null, "manifest_sha256":null}),
-        Ok(Some(latest)) => {
-            // Versions are immutable, so the hash cannot change between these reads.
-            match store.gh_manifest_active_status(latest.version) {
-                Ok(Some(status)) => {
-                    json!({"version":latest.version, "manifest_sha256":status.manifest_sha256})
-                }
-                _ => refusal("store_error", "transient"),
-            }
+        Ok(Some((version, manifest_sha256))) => {
+            json!({"version":version, "manifest_sha256":manifest_sha256})
         }
         Err(_) => refusal("store_error", "transient"),
     }

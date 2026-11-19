@@ -7,6 +7,10 @@ const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const OTHER_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn store_version(store: &EncryptedStore, version: i64) {
+    store_version_with_hash(store, version, HASH);
+}
+
+fn store_version_with_hash(store: &EncryptedStore, version: i64, hash: &str) {
     let bytes =
         format!("{{\n  \"manifest_version\": {version},\n  \"note\": \"café \\\"line\\\"\"\n}}\n");
     store
@@ -14,7 +18,7 @@ fn store_version(store: &EncryptedStore, version: i64) {
             &GhManifestVersion {
                 version,
                 manifest_bytes: bytes.as_bytes(),
-                manifest_sha256: HASH,
+                manifest_sha256: hash,
                 key_id: "0123456789abcdef",
                 signature: &[251; 64],
                 signed_at_ms: 10,
@@ -131,6 +135,62 @@ fn snapshot(store: &EncryptedStore) -> Vec<Vec<Vec<Value>>> {
             .collect()
         })
         .unwrap()
+}
+
+#[test]
+fn gh_manifest_watch_metadata_reads_one_query_and_only_metadata_columns() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Reads {
+        selects: usize,
+        columns: Vec<(String, String)>,
+    }
+
+    let (_root, store) = taxonomy_tests::rig("gh-watch-metadata", 201);
+    assert_eq!(store.latest_gh_manifest_metadata().unwrap(), None);
+    store_version_with_hash(&store, 27, OTHER_HASH);
+    store_version(&store, 28);
+    record(&store, &report("member"));
+    let reads = Arc::new(Mutex::new(Reads::default()));
+    let counts = Arc::clone(&reads);
+    store
+        .with_raw_conn(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                let mut reads = counts.lock().unwrap();
+                match context.action {
+                    AuthAction::Select => reads.selects += 1,
+                    AuthAction::Read {
+                        table_name,
+                        column_name,
+                    } => {
+                        reads
+                            .columns
+                            .push((table_name.to_owned(), column_name.to_owned()));
+                    }
+                    _ => {}
+                }
+                Authorization::Allow
+            }));
+            Ok(())
+        })
+        .unwrap();
+    let metadata = store.latest_gh_manifest_metadata();
+
+    assert_eq!(metadata.unwrap(), Some((28, HASH.to_owned())));
+    let mut reads = reads.lock().unwrap();
+    assert_eq!(reads.selects, 1);
+    // SQLite can visit a column more than once in a statement (SELECT and ORDER BY).
+    reads.columns.sort_unstable();
+    reads.columns.dedup();
+    assert_eq!(
+        reads.columns,
+        [
+            ("gh_manifests".to_owned(), "manifest_sha256".to_owned()),
+            ("gh_manifests".to_owned(), "version".to_owned()),
+        ]
+    );
 }
 
 #[test]

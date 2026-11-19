@@ -892,6 +892,18 @@ mod v2_approval_tests {
         use super::*;
         use agent_secret::{LocalUse, SecretSshSign, SshUserauth, UseTarget};
         const KEY: &str = "signing:local-login";
+        const MEMBER_PAIRING: &str = "pair-M";
+
+        fn grant_forwarding(store: &EncryptedStore) {
+            store
+                .create_member_grant_audited(
+                    V2_ASKER,
+                    crate::federation::MemberGrantOperation::SecretUse,
+                    &crate::federation::MemberGrantSelector::None,
+                    MEMBER_PAIRING,
+                )
+                .unwrap();
+        }
 
         fn setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
             let (root, store) = v2_setup(tag);
@@ -1482,10 +1494,12 @@ console.log('2 Node Ed25519 verification checks passed');
         #[test]
         fn lost_once_signature_after_deny_and_reallow_cannot_consume_new_grant() {
             let (_root, store) = setup("local-ssh-lost-once");
+            grant_forwarding(&store);
             let call = ssh(&store, "ssh", "u", "ssh.test", 22);
             let aad = b"authenticated-signature-aad";
             let receipt = use_secret::ReleaseRequest {
                 requester: V2_ASKER,
+                pairing_id: MEMBER_PAIRING,
                 nonce: "0123456789abcdef0123456789abcdef",
                 aad,
             };
@@ -1842,6 +1856,7 @@ console.log('2 Node Ed25519 verification checks passed');
         #[test]
         fn local_audit_fields_and_sealing_failure_are_transactional() {
             let (_root, store) = setup("local-audit-fields");
+            grant_forwarding(&store);
             let call = ssh(&store, "ssh", "u", "ssh.test", 22);
             let pending = store
                 .secret_ssh_sign_from(&call, V2_ASKER, || V2_NOW)
@@ -1858,6 +1873,7 @@ console.log('2 Node Ed25519 verification checks passed');
                 .unwrap();
             let receipt = use_secret::ReleaseRequest {
                 requester: V2_ASKER,
+                pairing_id: MEMBER_PAIRING,
                 nonce: "0123456789abcdef0123456789abcdef",
                 aad: b"signed-aad",
             };

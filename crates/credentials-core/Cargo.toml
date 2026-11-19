@@ -141,4 +141,5 @@ tokio = { workspace = true }
 proptest = { workspace = true }
 # Direct sqlite access for the §13 corrupt-envelope conformance test (tamper with a
 # row's ciphertext on disk, then prove the read path quarantines fail-closed).
-rusqlite = { workspace = true }
+# Hooks let the manifest-watch test count its queries and projected columns.
+rusqlite = { workspace = true, features = ["hooks"] }

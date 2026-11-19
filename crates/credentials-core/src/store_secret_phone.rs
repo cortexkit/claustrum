@@ -330,24 +330,21 @@ impl EncryptedStore {
             if matches!(op, PhoneOperation::Deposit(d) if matches!(d.scope, SecretScope::LocalProgram { .. })) && !local_programs_enabled(tx) {
                 return Ok(Err(SecretError::SecretLocalProgramsDisabled));
             }
-            if !matches!(op, PhoneOperation::DepositKeys) {
+            // A vault that refuses the operation based on its role must not change the
+            // phone observation. A remote vault can still answer home discovery.
+            let role = super::operator::secret_home_role_conn(tx);
+            let discovering_remote_home = matches!(op, PhoneOperation::Home)
+                && matches!(role, super::operator::SecretHomeRole::Remote { .. });
+            let role_refusal = if discovering_remote_home { None } else { role.phone_deposit_refusal() };
+            if !matches!(op, PhoneOperation::DepositKeys) && role_refusal.is_none() {
                 observation(tx, fingerprint, pairing, observed_at_ms)?;
             }
             if !admitted { return Ok(Err(SecretError::PairingUnavailable)); }
             let op_now = clock();
             if matches!(op, PhoneOperation::DepositKeys) {
-                if let Some(refusal) = super::operator::secret_home_role_conn(tx).phone_deposit_refusal() {
-                    return Ok(refusal);
-                }
-                return Ok(self.deposit_keys_tx(tx));
+                return Ok(role_refusal.unwrap_or_else(|| self.deposit_keys_tx(tx)));
             }
             let Some(pairing) = pairing else { return Ok(Err(SecretError::PhoneNotRegistered)); };
-            // The role is read in this transaction, so a concurrent `home set` either sees
-            // what this op writes or refuses it here.
-            let role = super::operator::secret_home_role_conn(tx);
-            if matches!(op, PhoneOperation::Home) {
-                return Ok(home_reply(role));
-            }
             // A vault whose secrets live on another member's vault serves no phone op, so
             // a stray phone profile cannot build a second Secrets page here. The refusal
             // names the home and comes before the registration check, so even a phone
@@ -356,8 +353,11 @@ impl EncryptedStore {
             // names a code only, while this refusal must also name the home, so the full
             // refusal body is returned as the reply; the transport passes it through
             // unchanged, exactly as it would `SecretError::body()`.
-            if let Some(refusal) = role.phone_deposit_refusal() {
+            if let Some(refusal) = role_refusal {
                 return Ok(refusal);
+            }
+            if matches!(op, PhoneOperation::Home) {
+                return Ok(home_reply(role));
             }
             let keys: Option<(Vec<u8>, Vec<u8>)> = tx.query_row(
                 "SELECT deposit_pub, approval_pub FROM secret_phone_keys WHERE fingerprint=?1 AND pairing_id=?2",

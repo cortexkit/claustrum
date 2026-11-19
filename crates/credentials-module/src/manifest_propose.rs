@@ -86,6 +86,7 @@ fn store_refusal(error: GhManifestProposalError) -> ProposeAnswer {
         } => ProposeAnswer::Reply(json!({
             "error":{"code":"already_bound","class":"permanent","version":version,"manifest_sha256":manifest_sha256}
         })),
+        Error::OneTapDisabled => refusal("one_tap_disabled", "transient"),
         Error::ManifestSetupIncomplete => refusal("manifest_setup_incomplete", "permanent"),
         Error::BoundToOtherAgent => refusal("bound_to_other_agent", "permanent"),
         Error::StaleBase => refusal("stale_base", "transient"),

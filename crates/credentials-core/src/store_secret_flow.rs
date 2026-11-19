@@ -213,6 +213,9 @@ impl EncryptedStore {
         let aad_sha256 = phone::hex(&payload_hash(request.aad));
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
+            if !request.member_grant_is_live(tx)? {
+                return Ok(Forwarded::Answer(Err(SecretError::NotFound)));
+            }
             let now = clock();
             let record = match self.check_secret_target(
                 tx,

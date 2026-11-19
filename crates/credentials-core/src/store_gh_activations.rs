@@ -213,6 +213,18 @@ impl EncryptedStore {
         }).map_err(StoreOpError::from)
     }
 
+    /// Read the latest version and its stored SHA-256 without loading the signed payload.
+    pub fn latest_gh_manifest_metadata(&self) -> Result<Option<(i64, String)>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                conn.query_row(
+            "SELECT version, manifest_sha256 FROM gh_manifests ORDER BY version DESC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Return the retained bytes without reserializing the manifest. None means
     /// nothing has been stored; signatures use standard, padded base64.
     pub fn latest_gh_manifest(&self) -> Result<Option<GhManifestLatest>, StoreOpError> {

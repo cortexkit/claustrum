@@ -20199,7 +20199,7 @@ mod tests {
         );
         assert_eq!(output_site_arguments(sources[15], &shapes), vec![
             ("info".into(), "target: \"federation\", \"vault sharing snapshot reconciliation recovered\"".into()),
-            ("warn".into(), "target: \"federation\", \"fleet removals not recorded; retrying on the next paired-device snapshot\"".into()),
+            ("warn".into(), "target: \"federation\", \"fleet removals not recorded; retrying\"".into()),
             ("warn".into(), "target: \"federation\", %error, \"vault sharing unchanged until Callosum supplies a valid snapshot\"".into()),
         ]);
         assert_eq!(output_site_arguments(sources[13], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![

@@ -4194,6 +4194,17 @@ mod tests {
         method: &str,
         params: serde_json::Value,
     ) -> serde_json::Value {
+        let response = scoped_route_reply_utf8(surface, admin, channel, method, params).await;
+        serde_json::from_str(&response).expect("decode response")
+    }
+
+    async fn scoped_route_reply_utf8(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        method: &str,
+        params: serde_json::Value,
+    ) -> String {
         let (writer, mut responses) = mpsc::channel(1);
         let frame = Frame::build_with_version(
             PROTOCOL_VERSION,
@@ -4220,7 +4231,7 @@ mod tests {
         .await
         .expect("serve request");
         let response = responses.recv().await.expect("route response");
-        serde_json::from_slice(&response.body).expect("decode response")
+        String::from_utf8(response.body.to_vec()).expect("response body is UTF-8")
     }
 
     struct DepositCookieTestStore {
@@ -11037,6 +11048,175 @@ mod tests {
             status[1],
             "{regenerate}"
         );
+    }
+
+    #[tokio::test]
+    async fn bus_seal_open_samples_are_producer_generated_and_pinned() {
+        use base64::Engine as _;
+        use credentials_core::{fleet::BUS_KEY_ID, kem};
+        use sha2::{Digest, Sha256};
+
+        let (surface, admin, store) = scoped_rig(22);
+        let bytes = |start: u8| std::array::from_fn::<_, 32, _>(|i| start + i as u8);
+        let pem = kem::pem_from_scalar(&bytes(32));
+        let (public, key_id) = kem::public_half(&pem).unwrap();
+        store
+            .create(
+                BUS_KEY_ID,
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        store
+            .set_categories_audited(
+                BUS_KEY_ID,
+                credentials_core::store::SetCategoryMode::Set,
+                &["bus-test-keys".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ckbus",
+                SelectorKind::Category,
+                "bus-test-keys",
+                GrantOperation::Open,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        admin.record_bind(23, reserved("ckbus"));
+        let probe = json!({
+            "credential_id": BUS_KEY_ID, "enc_b64": "", "ciphertext_b64": "",
+            "info_b64": "", "aad_b64": "",
+        });
+        let denied = scoped_route_request(&surface, &admin, 23, OP_OPEN, probe.clone()).await;
+        assert_eq!(
+            denied["result"]["error"],
+            json!({"code": "not_found", "class": "permanent"})
+        );
+
+        for (channel, principal, operation) in [
+            (22, "engram", GrantOperation::Open),
+            (23, "ckbus", GrantOperation::Open),
+            (24, "callosum", GrantOperation::Read),
+        ] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    principal,
+                    SelectorKind::Exact,
+                    BUS_KEY_ID,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+            admin.record_bind(channel, reserved(principal));
+        }
+        let announce = scoped_route_request(
+            &surface,
+            &admin,
+            24,
+            OP_PUBLIC_KEY,
+            json!({"credential_id": BUS_KEY_ID}),
+        )
+        .await;
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let public_hex = hex(&public);
+        assert_eq!(announce["result"]["public_key_hex"], public_hex);
+        assert_eq!(announce["result"]["key_id"], key_id);
+
+        let archive_key = bytes(64);
+        let engram = (
+            b"ck-bus-seal/v1/engram/A|B|cut_id".as_slice(),
+            archive_key.as_slice(),
+            128,
+        );
+        let ckbus = (
+            b"ck-bus-seal/v1/ckbus/A|B".as_slice(),
+            b"sample handoff".as_slice(),
+            160,
+        );
+        let bare = (b"ck-bus-seal/v1/ckbus/".as_slice(), ckbus.1, 192);
+        let aad = b"bus-seal-v1 sample";
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for (info, code) in [(engram.0, "bus_seal_info_domain"), (ckbus.0, "open_failed")] {
+            let mut request = probe.clone();
+            request["info_b64"] = b64(info).into();
+            let reply = scoped_route_request(&surface, &admin, 23, OP_OPEN, request).await;
+            assert_eq!(
+                reply["result"]["error"],
+                json!({"code": code, "class": "permanent"})
+            );
+        }
+        let mut cases = Vec::new();
+        for (name, principal, channel, (info, plaintext, start), succeeds) in [
+            ("engram_open", "engram", 22, engram, true),
+            ("ckbus_open", "ckbus", 23, ckbus, true),
+            ("ckbus_with_engram_info", "ckbus", 23, engram, false),
+            ("engram_with_ckbus_info", "engram", 22, ckbus, false),
+            ("bare_prefix", "ckbus", 23, bare, false),
+        ] {
+            let ikm = bytes(start);
+            let (enc, ciphertext) =
+                kem::seal_base_with_ephemeral_ikm(&public, plaintext, info, aad, ikm)
+                    .expect("seal deterministic base-mode sample");
+            let request = json!({
+                "credential_id": BUS_KEY_ID,
+                "enc_b64": b64(&enc),
+                "ciphertext_b64": b64(&ciphertext),
+                "info_b64": b64(info),
+                "aad_b64": b64(aad),
+            });
+            let request_utf8 = serde_json::to_string(&request).unwrap();
+            let reply_utf8 =
+                scoped_route_reply_utf8(&surface, &admin, channel, OP_OPEN, request).await;
+            let reply: serde_json::Value = serde_json::from_str(&reply_utf8).unwrap();
+            let expected = if succeeds {
+                json!({"result": {"key_id": key_id, "plaintext_b64": b64(plaintext)}})
+            } else {
+                json!({"result": {"error": {"code": "bus_seal_info_domain", "class": "permanent"}}})
+            };
+            assert_eq!(reply, expected, "{name}");
+            cases.push(json!({
+                "name": name,
+                "principal": format!("reserved:{principal}"),
+                "recipient_public_key_hex": public_hex,
+                "ephemeral_ikm_hex": hex(&ikm),
+                "enc_hex": hex(&enc),
+                "ciphertext_hex": hex(&ciphertext),
+                "info_hex": hex(info),
+                "aad_hex": hex(aad),
+                "plaintext_hex": hex(plaintext),
+                "request_utf8": request_utf8,
+                "reply_utf8": reply_utf8,
+            }));
+        }
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bus-seal-v1");
+        let contents = serde_json::to_string_pretty(&json!({"cases": cases})).unwrap() + "\n";
+        let readme = std::fs::read(path.join("README.md")).unwrap();
+        let sums = format!(
+            "{:x}  README.md\n{:x}  cases.json\n",
+            Sha256::digest(readme),
+            Sha256::digest(contents.as_bytes()),
+        );
+        for (file, generated) in [("cases.json", contents), ("SHA256SUMS", sums)] {
+            if std::env::var("CK_EMIT_BUS_SEAL_VECTORS").as_deref() == Ok("1") {
+                std::fs::write(path.join(file), generated).unwrap();
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(path.join(file)).unwrap(),
+                    generated,
+                    "{file}"
+                );
+            }
+        }
     }
 
     /// Pin successful key and scoped replies from the real request dispatcher. Only the

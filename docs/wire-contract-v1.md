@@ -51,6 +51,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `kind_not_gettable` | permanent | `credential.get` on a `SigningKey`; use `credential.sign` or `credential.public_key` |
 | `kind_not_signable` | permanent | `credential.sign` on a record that is not a `SigningKey` |
 | `kind_not_openable` | permanent | authorized `credential.open` on a record that is not a `KemKey` |
+| `bus_seal_info_domain` | permanent | authorized bus-seal open with a missing, wrong or bare caller-specific `info` prefix |
 | `open_failed` | permanent | KEM payload or HPKE opening failed; all crypto faults have the same reply |
 | `open_rate_limited` | transient | this connection has reached the scoped-open refusal threshold |
 | `malformed_encoding` | permanent | a `credential.sign` payload or a `credential.open` or `credential.seal` byte field failed strict standard base64 decoding |
@@ -1702,7 +1703,31 @@ consumer's side can distinguish them.
 
 `credential.open` accepts `{credential_id, enc_b64, ciphertext_b64, info_b64, aad_b64, enrollment_token?}` with no extra fields (including `handle`). All byte fields use `base64::engine::general_purpose::STANDARD`, the same strict, padded standard-alphabet decoder as `credential.sign`. The reply is `{result:{plaintext_b64,key_id}}`; `key_id` equals the same record's `credential.public_key` reply, derived by `credentials_core::signing::key_id_for_public`. A KEM public-key reply has `algorithm: "x25519"` and `public_key_hex`.
 
-Checks run in order: (1) shape decode (a transport `Error` frame with code `invalid_params` and **no class**, per §1a); (2) combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`, then standard base64 decode (malformed byte field: the in-result code `malformed_encoding`, class permanent); (3) combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise `sign_payload_too_large`, context_overflow; (4) connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect); (5) scoped authorization for `open` (`not_found` on unknown or ungranted id); (6) KEM kind fence (`kind_not_openable`, permanent); (7) PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient, modified ciphertext, wrong aad or wrong info and corrupt stored payload). Each step runs only after its predecessors pass. Refusals at step 5 alone increment the connection counter; it recovers after 60 seconds. Authorized opens do not increment it. `info_b64` and `aad_b64` are uninterpreted associated bytes: the vault does not inspect machine identity or verify a signature inside the plaintext.
+Checks run in order:
+
+1. Shape decode (a transport `Error` frame with code `invalid_params` and **no class**, per §1a).
+2. Combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`,
+   then standard base64 decode (malformed byte field: `malformed_encoding`, permanent).
+3. Combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise
+   `sign_payload_too_large`, context_overflow.
+4. Connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect).
+5. Scoped authorization for `open` (`not_found` on unknown or unauthorized id).
+6. KEM kind fence (`kind_not_openable`, permanent).
+7. For `kem:bus-seal:<n>` only, check the decoded `info` domain (`bus_seal_info_domain`, permanent).
+8. PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero
+   (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient,
+   modified ciphertext, mismatched aad or info, and invalid stored key material).
+
+Each step runs only after its predecessors pass. `not_found` refusals at step 5
+alone increment the connection counter; it recovers after 60 seconds.
+
+For bus-seal keys, the vault chooses the required ASCII prefix from the resolved
+principal, never from the request: `reserved:ckbus` must use `ck-bus-seal/v1/ckbus/`,
+and `reserved:engram` must use `ck-bus-seal/v1/engram/`. At least one byte must
+follow that prefix. The vault passes the entire decoded `info` to HPKE unchanged.
+Other KEM keys leave `info` uninterpreted. For all keys, `aad` and any bytes after a
+required prefix are uninterpreted: the vault does not inspect machine identity or
+verify a signature inside the plaintext. See §18 for the bus-seal grant rules.
 
 Example request and reply, taken from the producer's
 `crates/credentials-module/tests/fixtures/enrollment_wire_contract.json`:
@@ -1729,6 +1754,10 @@ tests::key_and_scoped_wire_fixture_pins_real_success_replies -- --exact`, and ve
 the independent receiver and sender with `python3 scripts/hpke-independent-open.py`.
 The entry's `refusal_cases`, `refusal_requests` and `refusals` arrays correspond by
 index and pin the real dispatcher's permanent error replies.
+
+The producer's [`bus-seal-v1` samples](../crates/credentials-module/tests/fixtures/bus-seal-v1/README.md)
+also pin successful opens for each principal, refusals when the callers exchange
+their `info` domains, and a refusal for a bare prefix.
 
 ## 11. Cookie deposit (`credential.deposit_cookie`)
 
@@ -5451,8 +5480,10 @@ chooses the domain solely from the attested caller:
 There is no domain parameter. Under the same epoch key, nonce, ciphertext and
 caller aad, opening in a different caller's domain refuses `fleet_epoch_open_failed`.
 `open` accepts any held epoch (current or retired), a 24-byte nonce, ciphertext
-of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. Unknown epochs and bad
-tags both refuse `fleet_epoch_open_failed`, without distinguishing them.
+of 16 through 1 MiB + 16 bytes, and at most 1 MiB of aad. If the vault has no row
+for the requested epoch or holds it only as pending, opening refuses
+`fleet_epoch_unavailable` (transient). For a held epoch, a bad tag, wrong aad or
+different caller's domain refuses `fleet_epoch_open_failed` (permanent).
 Pending epochs are never used to seal, open or export history.
 
 Both batch operations require 1 through 256 items. Each item obeys the single
@@ -5467,10 +5498,10 @@ input order. The same caller-domain rule applies to every item in a batch.
 with a separate fresh random 24-byte nonce per item. A missing usable epoch, pending
 removal or store failure refuses the whole call with the same body as single seal;
 no items are returned. `open_batch` returns a plaintext or the single open's exact
-error code and class for each item. Tampering, a wrong domain or an unknown/pending
-epoch affects only that item. A shared failure (missing Self, no fleet state, a
-failed store read, or a store error even after processing has begun) refuses the
-whole call with the corresponding single open body, never a partial list.
+error code and class for each item. If the vault has no epoch rows at all, each
+item returns `fleet_epoch_unavailable`. An unset self member ID still refuses the
+whole call with `fleet_epoch_unavailable`. A failed store read or a store error
+after processing has begun also refuses the whole call, never a partial list.
 Single and batch seal/open write no audit rows.
 
 `status` returns `current: int|null`, ascending `held` including current,
@@ -5574,8 +5605,14 @@ Callosum and Entorhinal; held-version announcements admit only Callosum, and
 signing admits only Entorhinal. Other accesses, including handles, are
 `not_found`. Operator grants are required: wrap-key read to Callosum; record-key
 read to Callosum and Entorhinal and sign to Entorhinal. Other grants refuse
-`fleet_key_reserved`. Bus-seal grants remain operator steps (Callosum read,
-ckbus open); rotations use new numbered keys alongside existing ones.
+`fleet_key_reserved`.
+
+For every `kem:bus-seal:<n>` key, the only admitted operator grants are exact
+`read` to `reserved:callosum` (public-key and held-version announcements) and
+exact `open` to `reserved:ckbus` and `reserved:engram` (caller-specific domains
+in §10). Other grants and handle minting refuse `fleet_key_reserved`. At runtime,
+bearer handles and category grants do not authorize access, and unauthorized
+calls receive `not_found`. Rotations use new numbered keys alongside existing ones.
 
 ## 19. Module-owned secrets (`module_secret.*`)
 

@@ -59,7 +59,7 @@ pub fn schema() -> serde_json::Value {
         "type": "object", "unevaluatedProperties": false,
         "properties": {"login_sharing": {
             "type": "boolean", "default": true,
-            "description": "Share logins with this computer's paired vaults.",
+            "description": "Set to false to stop sharing this computer's logins with paired computers and drop automatic copies of their logins.",
             "x-ck-apply": "live", "x-ck-layers": ["user"]
         }}
     })

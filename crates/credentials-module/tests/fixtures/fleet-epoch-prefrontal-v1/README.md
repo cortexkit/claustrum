@@ -13,6 +13,8 @@ are separate and unchanged.
   in `record_aad_utf8`, and the successful single open on two stores sharing the
   epoch key. `cross_domain_open` reuses those exact epoch, nonce, ciphertext and
   caller AAD bytes as Entorhinal and pins the open refusal.
+- `unheld_epoch_open` sends the same request to a vault without the epoch and
+  pins the transient `fleet_epoch_unavailable` refusal.
 - `batch` records two Prefrontal seal inputs and outputs, each with a fresh nonce
   under the same epoch and its exact AEAD AAD bytes. Each output opens through
   single open. Its two-item open batch contains the first Prefrontal ciphertext
@@ -39,8 +41,8 @@ cargo test --locked -p credentials-module --features credentials-core/test-suppo
 
 The test replays every committed ciphertext through real open calls, regenerates
 and compares every file byte for byte, and exercises fresh single and batch seals.
-Production draws each nonce once at emission; normal runs replay that nonce rather
-than adding a deterministic-nonce hook. Deliberate regeneration sets
+Regeneration reuses existing sealed samples; if `cases.json` is absent, production
+draws fresh nonces. Deliberate regeneration sets
 `CK_EMIT_PREFRONTAL_FLEET_VECTORS=1` on the command above and returns all three
 folder files from the build-server job. The test generates `README.md` and
 `SHA256SUMS` along with `cases.json`; never hand-edit generated sample files.

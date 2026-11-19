@@ -31,16 +31,17 @@ the real fleet management adapter, and the existing Callosum wire stand-in.
   sealer. Each sample records its ephemeral input key material (IKM). All three
   wraps pass the real import path, and their import responses are pinned in
   `import_responses`.
-- `refusals` covers all 12 codes: `invalid_params`, `not_found`,
+- `refusals` covers `invalid_params`, `not_found`,
   `fleet_epoch_unavailable`, `fleet_epoch_pending`,
   `fleet_peer_keys_unavailable`, `fleet_members_mismatch`,
-  `fleet_epoch_not_pending`, `fleet_epoch_open_failed`, `fleet_wrap_refused`,
+  `fleet_epoch_not_pending`, `fleet_wrap_refused`,
   `fleet_epoch_capacity`, `corrupt`, and `store_error`. The test drives the real
   adapter for every refusal. `not_found` uses caller `reserved:other`; all other
   calls use `reserved:entorhinal`. Causes include an unknown parameter, no current
   epoch, an existing pending mint, no Callosum client, a mismatched live set, an
-  absent pending mint, an unknown opening epoch, a damaged HPKE ciphertext, 65
-  proposed members, a damaged stored envelope, and a missing database table.
+  absent pending mint, an unheld opening epoch (`fleet_epoch_unavailable`), a
+  damaged HPKE ciphertext, 65 proposed members, a damaged stored envelope, and a
+  missing database table.
   `response` is the adapter result body except `invalid_params`, where
   `transport_error` identifies the protocol Error payload: the adapter returns
   `Answer::InvalidParams` rather than an in-result refusal. That payload is
@@ -109,8 +110,9 @@ cargo test --locked -p credentials-module --features credentials-core/test-suppo
 The test compares the full generated JSON bytes to `cases.json`. To regenerate
 deliberately, set `CK_EMIT_FLEET_VECTORS=1` on the same command and return
 `crates/credentials-module/tests/fixtures/fleet-epoch-v1/cases.json` from the
-build-server job. This emits a newly drawn seal nonce/ciphertext; the three
-deterministic HPKE wraps remain byte-identical. Review the generated differences,
+build-server job. Regeneration reuses the existing sealed sample; if `cases.json`
+is absent, production draws a fresh nonce. The three deterministic HPKE wraps
+remain byte-identical. Review the generated differences,
 then run the pin check without the environment variable and the independent
 HPKE verifier. Never hand-edit `cases.json`.
 

@@ -609,12 +609,15 @@ pub(super) fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
         .map_err(CliError::Usage)?;
-    selector_kind
-        .validate_operation(operation)
-        .map_err(CliError::Usage)?;
+    if selector_kind != SelectorKind::Exact
+        || !credentials_core::federation::is_bus_seal_key_id(&selector)
+    {
+        selector_kind
+            .validate_operation(operation)
+            .map_err(CliError::Usage)?;
+    }
     // The CLI refuses before it contacts the daemon, so an operator gets the reason as
-    // usage text instead of a daemon refusal, and the same rule is applied here as in
-    // the store: one announce read to callosum, nothing else.
+    // usage text instead of a daemon refusal, using the same allowlist as the store.
     if selector_kind == SelectorKind::Exact {
         credentials_core::federation::transfer_key_admits_grant(
             &selector,

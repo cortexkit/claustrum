@@ -2068,6 +2068,42 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
     assert_eq!(rows, 5, "every grant needs its own row: {stdout}");
 }
 
+#[test]
+fn bus_seal_grants_use_the_same_allowlist_offline() {
+    let vault = GrantCliVault::new("bus-seal-grants");
+    vault.bootstrap();
+    for (principal, operation, allowed) in [
+        ("reserved:callosum", "read", true),
+        ("reserved:ckbus", "open", true),
+        ("reserved:engram", "open", true),
+        ("reserved:callosum", "open", false),
+        ("reserved:other", "open", false),
+        ("reserved:engram", "seal", false),
+        ("reserved:ckbus", "account_token", false),
+    ] {
+        let output = vault.run(&[
+            "grant",
+            "--principal",
+            principal,
+            "--selector-kind",
+            "exact",
+            "--selector",
+            "kem:bus-seal:1",
+            "--operation",
+            operation,
+        ]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            allowed,
+            "{principal} {operation}: {stderr}"
+        );
+        if !allowed {
+            assert!(stderr.contains("fleet_key_reserved"), "{stderr}");
+        }
+    }
+}
+
 /// Running the same `grant` twice is a no-op that succeeds, so setup scripts can re-run.
 /// It used to exit 1 with "credential already exists", which named the wrong object and
 /// forced callers to list grants to tell an existing grant from a real failure.

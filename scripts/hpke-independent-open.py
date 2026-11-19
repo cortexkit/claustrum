@@ -22,10 +22,10 @@ WHAT IT CHECKS, in order, and it exits non-zero on the first failure:
   3. Tamper controls: flipping one bit of the ciphertext, of the encapsulated key, or
      of the sender public key must each make the open fail.
   4. The base-mode receiver opens every published mode-0 encryption, then opens the
-     credential.open sample with the synthetic vault scalar (bytes 32..63). A separate
-     sender derives its fixed ephemeral key from input keying material (IKM) bytes
-     128..159 and reproduces the request ciphertext. These publicly known test keys
-     are never real credentials.
+     credential.open sample and both successful bus-seal-v1 samples with the synthetic
+     vault scalar (bytes 32..63). A separate sender derives the fixed ephemeral key
+     from each sample's input keying material (IKM) and reproduces its request
+     ciphertext. These publicly known test keys are never real credentials.
 
 Usage:
   python3 scripts/hpke-independent-open.py
@@ -45,6 +45,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VECTOR = ROOT / "crates/credentials-core/tests/fixtures/rfc9180-a2-auth.json"
 WIRE_FIXTURE = ROOT / "crates/credentials-module/tests/fixtures/enrollment_wire_contract.json"
+BUS_SEAL_FIXTURES = WIRE_FIXTURE.with_name("bus-seal-v1")
 
 KEM_ID, KDF_ID, AEAD_ID = 0x0020, 0x0001, 0x0003
 MODE_AUTH = 0x02
@@ -159,6 +160,16 @@ def open_base(recipient_secret: bytes, enc: bytes, ciphertext: bytes, info: byte
     return ChaCha20Poly1305(key).decrypt(nonce, ciphertext, aad)
 
 
+def seal_base(recipient_public: bytes, ephemeral_ikm: bytes, plaintext: bytes, info: bytes, aad: bytes) -> tuple[bytes, bytes]:
+    # RFC 9180 section 7.1.3 DeriveKeyPair for X25519, followed by Encap and Seal at seq 0.
+    dkp_prk = labeled_extract(KEM_SUITE, b"", b"dkp_prk", ephemeral_ikm)
+    ephemeral_secret = labeled_expand(KEM_SUITE, dkp_prk, b"sk", b"", 32)
+    enc = public_of(ephemeral_secret)
+    shared = base_shared_secret(enc, recipient_public, dh(ephemeral_secret, recipient_public))
+    key, nonce = key_schedule(shared, info, MODE_BASE)
+    return enc, ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad)
+
+
 def check_vector(mode: int = MODE_AUTH) -> int:
     path = VECTOR if mode == MODE_AUTH else VECTOR.with_name("rfc9180-a2-base.json")
     v = json.loads(path.read_text(encoding="utf-8"))
@@ -239,18 +250,43 @@ def check_open_sample() -> None:
     if open_base(recipient_secret, enc, ciphertext, info, aad) != plaintext or b64(reply["plaintext_b64"]) != plaintext:
         raise SystemExit("REFUSING: credential.open ciphertext or reply has a different plaintext")
 
-    # RFC 9180 section 7.1.3 DeriveKeyPair for X25519, followed by Encap and Seal at seq 0.
     ephemeral_ikm = bytes.fromhex(metadata["ephemeral_ikm_hex"])
     if ephemeral_ikm != bytes(range(128, 160)):
         raise SystemExit("REFUSING: credential.open does not use the synthetic ephemeral IKM")
-    dkp_prk = labeled_extract(KEM_SUITE, b"", b"dkp_prk", ephemeral_ikm)
-    ephemeral_secret = labeled_expand(KEM_SUITE, dkp_prk, b"sk", b"", 32)
-    expected_enc = public_of(ephemeral_secret)
-    shared = base_shared_secret(expected_enc, recipient_public, dh(ephemeral_secret, recipient_public))
-    key, nonce = key_schedule(shared, info, MODE_BASE)
-    if enc != expected_enc or ciphertext != ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad):
+    if (enc, ciphertext) != seal_base(recipient_public, ephemeral_ikm, plaintext, info, aad):
         raise SystemExit("REFUSING: independent base-mode sender does not reproduce the request")
     print(f"vault open: independently opened and resealed {len(plaintext)} bytes (key_id {reply['key_id']})")
+
+
+def check_bus_seal_samples() -> None:
+    fixture = json.loads((BUS_SEAL_FIXTURES / "cases.json").read_text(encoding="utf-8"))
+    recipient_secret = bytes(range(32, 64))
+    recipient_public = public_of(recipient_secret)
+    key_id = hashlib.sha256(recipient_public).hexdigest()[:16]
+    for name, expected_info in (
+        ("engram_open", b"ck-bus-seal/v1/engram/A|B|cut_id"),
+        ("ckbus_open", b"ck-bus-seal/v1/ckbus/A|B"),
+    ):
+        case, = [case for case in fixture["cases"] if case["name"] == name]
+        request = json.loads(case["request_utf8"])
+        reply = json.loads(case["reply_utf8"])["result"]
+        enc, ciphertext, info, aad = (
+            base64.b64decode(request[f"{field}_b64"], validate=True)
+            for field in ("enc", "ciphertext", "info", "aad")
+        )
+        if tuple(value.hex() for value in (enc, ciphertext, info, aad)) != tuple(
+            case[f"{field}_hex"] for field in ("enc", "ciphertext", "info", "aad")
+        ):
+            raise SystemExit(f"REFUSING: {name} metadata differs from the request bytes")
+        if info != expected_info or case["recipient_public_key_hex"] != recipient_public.hex() or reply["key_id"] != key_id:
+            raise SystemExit(f"REFUSING: {name} has the wrong info or recipient key")
+        plaintext = bytes.fromhex(case["plaintext_hex"])
+        if open_base(recipient_secret, enc, ciphertext, info, aad) != plaintext or base64.b64decode(reply["plaintext_b64"], validate=True) != plaintext:
+            raise SystemExit(f"REFUSING: {name} ciphertext or reply has a different plaintext")
+        ikm = bytes.fromhex(case["ephemeral_ikm_hex"])
+        if (enc, ciphertext) != seal_base(recipient_public, ikm, plaintext, info, aad):
+            raise SystemExit(f"REFUSING: independent base-mode sender does not reproduce {name}")
+        print(f"bus-seal {name}: independently opened and resealed {len(plaintext)} bytes")
 
 
 def main() -> int:
@@ -286,6 +322,7 @@ def main() -> int:
     published_base = check_vector(MODE_BASE)
     print(f"independent receiver: opened all {published_base} published RFC 9180 mode-0 encryptions")
     check_open_sample()
+    check_bus_seal_samples()
     return 0
 
 

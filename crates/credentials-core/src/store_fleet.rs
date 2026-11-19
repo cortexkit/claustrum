@@ -124,7 +124,7 @@ fn open_record(
     let row = rows
         .iter()
         .find(|r| r.epoch == item.epoch && r.state != "pending")
-        .ok_or(FleetError::EpochOpenFailed)?;
+        .ok_or(FleetError::EpochUnavailable)?;
     let key = open_epoch(master_key, row)?;
     XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|_| FleetError::StoreError)?
@@ -368,9 +368,6 @@ impl EncryptedStore {
         self.fleet_read(|conn| {
             self_member(conn)?;
             let rows = rows(conn)?;
-            if rows.is_empty() {
-                return Err(FleetError::EpochOpenFailed);
-            }
             items
                 .iter()
                 .map(|item| {
@@ -965,6 +962,110 @@ mod tests {
     }
 
     #[test]
+    fn fleet_open_distinguishes_an_absent_epoch_from_a_bad_tag() {
+        let (_root, store) = rig("fleet-open-absent", 1);
+        let mint = commit(&store, &[id(1)], &[]);
+        let sealed = store
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"record")
+            .unwrap();
+        let nonce = decode(&sealed.nonce, 24).unwrap();
+        let ciphertext = decode(&sealed.ciphertext, MAX_BYTES + 16).unwrap();
+        let mut bad_tag = ciphertext.clone();
+        *bad_tag.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            store
+                .fleet_epoch_open(
+                    FleetSealer::Entorhinal,
+                    mint.epoch,
+                    &nonce,
+                    &bad_tag,
+                    b"context"
+                )
+                .unwrap_err(),
+            FleetError::EpochOpenFailed
+        );
+        assert_eq!(
+            store
+                .fleet_epoch_open(
+                    FleetSealer::Entorhinal,
+                    mint.epoch + 1,
+                    &nonce,
+                    &ciphertext,
+                    b"context"
+                )
+                .unwrap_err(),
+            FleetError::EpochUnavailable
+        );
+    }
+
+    #[test]
+    fn fleet_open_batch_reports_absent_and_pending_epochs_per_item() {
+        let (_root, store) = rig("fleet-open-batch-mixed", 1);
+        let held = commit(&store, &[id(1)], &[]);
+        let pending = store.fleet_epoch_mint(&[id(1)], &[]).unwrap();
+        let sealed = store
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"record")
+            .unwrap();
+        let nonce = decode(&sealed.nonce, 24).unwrap();
+        let ciphertext = decode(&sealed.ciphertext, MAX_BYTES + 16).unwrap();
+        let mut bad_tag = ciphertext.clone();
+        *bad_tag.last_mut().unwrap() ^= 1;
+        let item = |epoch, ciphertext| FleetOpenInput {
+            epoch,
+            nonce: &nonce,
+            ciphertext,
+            aad: b"context",
+        };
+        let results = store
+            .fleet_epoch_open_batch(
+                FleetSealer::Entorhinal,
+                &[
+                    item(held.epoch, &bad_tag),
+                    item(pending.epoch + 1, &ciphertext),
+                    item(pending.epoch, &ciphertext),
+                    item(held.epoch, &ciphertext),
+                ],
+            )
+            .unwrap();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[3].as_ref().unwrap().expose(), b"record");
+        let errors: Vec<_> = results[..3]
+            .iter()
+            .map(|result| *result.as_ref().unwrap_err())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                FleetError::EpochOpenFailed,
+                FleetError::EpochUnavailable,
+                FleetError::EpochUnavailable
+            ]
+        );
+    }
+
+    #[test]
+    fn fleet_open_batch_on_empty_epoch_table_refuses_each_item_once_self_is_set() {
+        let (_root, store) = taxonomy_tests::rig("fleet-open-batch-empty", 1);
+        let item = |epoch| FleetOpenInput {
+            epoch,
+            nonce: &[0; 24],
+            ciphertext: &[0; 16],
+            aad: b"",
+        };
+        let open = || store.fleet_epoch_open_batch(FleetSealer::Entorhinal, &[item(1), item(2)]);
+        assert_eq!(open().unwrap_err(), FleetError::EpochUnavailable);
+        set_self(&store, 1);
+        assert_eq!(
+            open()
+                .unwrap()
+                .into_iter()
+                .map(Result::unwrap_err)
+                .collect::<Vec<_>>(),
+            [FleetError::EpochUnavailable; 2]
+        );
+    }
+
+    #[test]
     fn fleet_mint_receipts_survive_restart_and_delayed_retries() {
         let (root, store) = rig("fleet-receipts", 1);
         let mint = store.fleet_epoch_mint(&[id(1)], &[]).unwrap();
@@ -978,7 +1079,7 @@ mod tests {
             store
                 .fleet_epoch_open(FleetSealer::Entorhinal, 1, &[0; 24], &[0; 16], b"")
                 .unwrap_err(),
-            FleetError::EpochOpenFailed
+            FleetError::EpochUnavailable
         );
         let count = audit_len(&store);
         drop(store);
@@ -1738,6 +1839,67 @@ mod tests {
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn bus_seal_grants_and_handles_use_the_fleet_fence() {
+        let (_root, store) = rig("bus-seal-grant-store", 1);
+        for key in [BUS_KEY_ID, "kem:bus-seal:2"] {
+            let grant = |kind, principal, operation| {
+                store.create_read_grant_audited(
+                    kind,
+                    principal,
+                    SelectorKind::Exact,
+                    key,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+            };
+            for (principal, operation) in [
+                ("callosum", GrantOperation::Read),
+                ("ckbus", GrantOperation::Open),
+                ("engram", GrantOperation::Open),
+            ] {
+                assert!(grant("reserved", principal, operation).is_ok());
+            }
+            for (kind, principal) in [
+                ("reserved", "other"),
+                ("enrolled", "ckbus"),
+                ("enrolled", "engram"),
+                ("enrolled", "callosum"),
+                ("reserved", "callosum"),
+                ("reserved", "ckbus"),
+                ("reserved", "engram"),
+            ] {
+                for operation in [
+                    GrantOperation::Open,
+                    GrantOperation::Read,
+                    GrantOperation::Sign,
+                    GrantOperation::Seal,
+                    GrantOperation::List,
+                    GrantOperation::Deposit,
+                    GrantOperation::AccountToken,
+                ] {
+                    if matches!(
+                        (kind, principal, operation),
+                        ("reserved", "callosum", GrantOperation::Read)
+                            | ("reserved", "ckbus" | "engram", GrantOperation::Open)
+                    ) {
+                        continue;
+                    }
+                    let result = grant(kind, principal, operation);
+                    assert_eq!(
+                        result.as_ref().err().and_then(|error| error.wire_code()),
+                        Some("fleet_key_reserved"),
+                        "{key} admitted or misclassified {kind}:{principal} {operation:?}: {result:?}"
+                    );
+                }
+            }
+            let error = store
+                .put_handle_hash("canary", key, AuditCtx::admin(AuditOp::MintHandle))
+                .unwrap_err();
+            assert_eq!(error.wire_code(), Some("fleet_key_reserved"));
+        }
     }
 
     #[test]

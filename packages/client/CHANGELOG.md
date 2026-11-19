@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.21.0
+
+A vault without login conditions lists no `condition` and answers both new
+calls `unknown_method`.
 
 - `listScoped` exposes an optional `condition` with `reason` and `sinceMs`.
   Future reason strings decode without an update to the client.

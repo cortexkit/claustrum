@@ -2072,8 +2072,8 @@ Grants are exact-only, and the CLI and the store both refuse a category or audie
 selector:
 
 ```sh
-ck auth grant --principal reserved:prefrontal-core --selector-kind exact --selector kem:push --operation seal
-ck auth revoke-grant --principal reserved:prefrontal-core --selector-kind exact --selector kem:push --operation seal
+ck auth grant --principal reserved:prefrontal --selector-kind exact --selector kem:push --operation seal
+ck auth revoke-grant --principal reserved:prefrontal --selector-kind exact --selector kem:push --operation seal
 ```
 
 The grant operation arrives with store migration 18. A binary older than that
@@ -3313,8 +3313,8 @@ Other top-level stamp keys are ignored, as subc's decoder does. A stamp missing 
 field answers the uniform `not_found`; a stamp whose fields are present but malformed is
 `invalid_params`. Mapping uses only the stamp: a Head or Worker maps to itself; an
 Ephemeral maps to its parent (as a Head) only when `parent.owner` is
-`reserved:prefrontal` or, until the build after that module's rename,
-`reserved:prefrontal-core`, `parent_state` is `linked` and `parent.scope_epoch` equals the
+`reserved:prefrontal` (the module's id before its rename, `reserved:prefrontal-core`, maps
+to nothing), `parent_state` is `linked` and `parent.scope_epoch` equals the
 stamp's `scope_epoch`; anything else, and every flow-read scope, maps to nothing (uniform
 `not_found`). A Worker is also served by an `agent_and_workers` grant on Head H when its
 stamp's parent has H's owner and ref, `parent_state` `linked` and an equal epoch.

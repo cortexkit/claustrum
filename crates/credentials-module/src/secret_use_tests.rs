@@ -108,7 +108,7 @@ fn secret_federated_scope_maps_to_nothing_and_is_refused() {
 
 #[test]
 fn secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch() {
-    let parent = ScopeParent::new(principal("prefrontal-core"), "parent-H", 7);
+    let parent = ScopeParent::new(principal("prefrontal"), "parent-H", 7);
     let base = stamp(ScopeKind::Ephemeral)
         .with_parent(Some(parent))
         .with_parent_state(Some(ParentState::Linked));
@@ -120,17 +120,15 @@ fn secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch() {
             mapped.scope_ref.as_str(),
             mapped.epoch
         ),
-        ("reserved:prefrontal-core", "head", "parent-H", 7)
+        ("reserved:prefrontal", "head", "parent-H", 7)
     );
     assert!(worker.is_none());
-    // The renamed owner maps the same way, and a look-alike doesn't.
-    let mut renamed = base.clone();
-    renamed.parent.as_mut().unwrap().owner = principal("prefrontal");
-    let (mapped, _) = asking(&renamed).expect("renamed prefrontal parent maps");
-    assert_eq!(mapped.owner, "reserved:prefrontal");
-    let mut lookalike = base.clone();
-    lookalike.parent.as_mut().unwrap().owner = principal("prefrontal-core-x");
-    assert!(asking(&lookalike).is_none());
+    // The module's id before its rename no longer maps, nor does a look-alike.
+    for owner in ["prefrontal-core", "prefrontal-x"] {
+        let mut other = base.clone();
+        other.parent.as_mut().unwrap().owner = principal(owner);
+        assert!(asking(&other).is_none(), "{owner} must not map");
+    }
     for mode in [
         "no-parent",
         "no-state",
@@ -234,7 +232,7 @@ fn secret_worker_under_head_requires_owner_ref_live_state_and_equal_epoch() {
     );
     p["stamp"] = json!(stamp(ScopeKind::Ephemeral)
         .with_parent(Some(ScopeParent::new(
-            principal("prefrontal-core"),
+            principal("prefrontal"),
             "parent-H",
             7
         )))

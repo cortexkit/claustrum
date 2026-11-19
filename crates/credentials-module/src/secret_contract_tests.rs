@@ -1658,6 +1658,9 @@ async fn secret_head_and_ephemeral_agent_attribution_and_head_coverage_are_uncha
     let mut ephemeral = secret_worker_call(json!({"agent_id":"ephemeral-agent"}));
     ephemeral["stamp"]["kind"] = json!("ephemeral");
     ephemeral["stamp"]["parent"]["ref"] = json!("ephemeral-H");
+    // The golden call's owner is the module's id before its rename, which an Ephemeral
+    // parent may no longer name.
+    ephemeral["stamp"]["parent"]["owner"] = json!({"kind":"reserved","module_id":"prefrontal"});
     let statement = secret_asking_statement(&flow.use_secret("aft", &ephemeral));
     assert_eq!(statement["agent_id"], "ephemeral-agent");
     assert_eq!(statement["scope"]["kind"], "head");

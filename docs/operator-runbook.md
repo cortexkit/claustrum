@@ -268,7 +268,8 @@ port held by another program could catch their code. If their local listener can
 bind, they stop before the authorization URL is shown. Retry with `--approve-on other` or
 `--no-listener` for a paste-only flow. DigitalOcean waits for its bound listener first,
 then offers paste if no callback arrives. Pasted values are read from stdin only,
-never argv, and never logged.
+never argv, and never logged. The DigitalOcean paste prompt reads terminal input
+without echo, as do the Devin and Snowflake prompts that use the same reader.
 
 Cursor login polling uses the shared HTTP transport: success and error response bodies,
 including chunked responses, are limited to 1 MiB. Oversized responses fail as transport

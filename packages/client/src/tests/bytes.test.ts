@@ -66,6 +66,27 @@ test('text get methods still refuse non-UTF-8 payloads', async () => {
   }
 })
 
+test('text get methods preserve a leading U+FEFF in credential material', async () => {
+  const payload = [0xef, 0xbb, 0xbf, 0x61]
+  const client = await ClaustrumClient.connect({
+    logger: () => {},
+    connector: async () => ({
+      call: async () => ({ result: { ...reply.result, payload } }),
+      close: () => {},
+    }) as never,
+  })
+  try {
+    const byHandle = await client.getCredential('handle')
+    const byId = await client.getScoped({ credentialId: 'cookie:binary' })
+    for (const { material } of [byHandle, byId]) {
+      expect(material).toBe('\uFEFFa')
+      expect([...new TextEncoder().encode(material)]).toEqual(payload)
+    }
+  } finally {
+    client.close()
+  }
+})
+
 test('byte get methods still refuse malformed payload arrays', async () => {
   for (const payload of [[], [256], [-1], [1.5], ['1']]) {
     const client = await ClaustrumClient.connect({

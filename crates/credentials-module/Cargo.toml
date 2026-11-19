@@ -87,8 +87,11 @@ chrono = { workspace = true }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 
 [target.'cfg(unix)'.dependencies]
-# Effective uid/gid for ancestor checks; the CLI forbids unsafe code.
-rustix = { version = "1.1.4", features = ["process"] }
+# Effective uid/gid for ancestor checks and echo control for pasted callbacks.
+rustix = { version = "1.1.4", features = ["process", "termios"] }
+
+[target.'cfg(not(unix))'.dependencies]
+console = "0.16.4"
 
 [dev-dependencies]
 # Integration tests link the probe library without cfg(test); enable its seams only

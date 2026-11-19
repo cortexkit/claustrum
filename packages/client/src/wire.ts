@@ -205,7 +205,7 @@ export function decodeCredential(
 ): ServedCredential {
   const credential = decodeCredentialBytes(response, logUnknownClass)
   let material: string
-  try { material = new TextDecoder('utf-8', { fatal: true }).decode(credential.material) } catch {
+  try { material = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(credential.material) } catch {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
   return { ...credential, material }
@@ -617,7 +617,7 @@ export class ClaustrumClient {
    * token needs a fresh ceremony, not a second poll.
    */
   async enrollPoll(input: { requestId: string; requestSecret: string }): Promise<EnrollmentPollOutcome> {
-    const response = await this.#call('auth.enroll_poll', {
+    const response = await this.#callOnce('auth.enroll_poll', {
       request_id: input.requestId,
       request_secret: input.requestSecret,
     })
@@ -638,7 +638,7 @@ export class ClaustrumClient {
     token: string
     expectedTokenGeneration: number
   }): Promise<{ token: string; tokenGeneration: number }> {
-    const response = await this.#call('auth.enroll_rotate', {
+    const response = await this.#callOnce('auth.enroll_rotate', {
       token: input.token,
       expected_token_generation: input.expectedTokenGeneration,
     })

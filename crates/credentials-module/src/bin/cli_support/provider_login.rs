@@ -348,12 +348,58 @@ fn open_and_capture(
     if let Some(captured) = captured {
         return Ok(captured);
     }
-    println!("{paste_prompt}");
+    read_pasted_callback(paste_prompt).map_err(|e| format!("reading callback: {e}"))
+}
+
+fn read_pasted_callback(prompt: &str) -> std::io::Result<String> {
+    use std::io::{IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return read_hidden_callback(&stdin, prompt);
+    }
+
+    writeln!(std::io::stdout(), "{prompt}")?;
     let mut pasted = String::new();
-    std::io::stdin()
-        .read_line(&mut pasted)
-        .map_err(|e| format!("reading callback: {e}"))?;
+    stdin.read_line(&mut pasted)?;
     Ok(pasted)
+}
+
+#[cfg(unix)]
+fn read_hidden_callback(stdin: &std::io::Stdin, prompt: &str) -> std::io::Result<String> {
+    use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions};
+    use std::io::Write;
+
+    let original = tcgetattr(stdin)?;
+    let mut hidden = original.clone();
+    hidden
+        .local_modes
+        .remove(LocalModes::ECHO | LocalModes::ECHONL);
+    tcsetattr(stdin, OptionalActions::Now, &hidden)?;
+    // The callback may contain a bearer. Disable echo before inviting the paste,
+    // and restore the terminal even if printing the prompt or reading fails.
+    let mut pasted = String::new();
+    let read = writeln!(std::io::stdout(), "{prompt}").and_then(|_| stdin.read_line(&mut pasted));
+    tcsetattr(stdin, OptionalActions::Now, &original)?;
+    read?;
+    writeln!(std::io::stdout())?;
+    Ok(pasted)
+}
+
+#[cfg(not(unix))]
+fn read_hidden_callback(_stdin: &std::io::Stdin, prompt: &str) -> std::io::Result<String> {
+    // The console reader uses non-echoing input events on Windows but requires a
+    // terminal output handle. Do not fall back to an echoed read if both are pipes.
+    let mut terminal = console::Term::stdout();
+    if !terminal.is_term() {
+        terminal = console::Term::stderr();
+    }
+    if !terminal.is_term() {
+        return Err(std::io::Error::other(
+            "hidden callback input needs a console output; run this command in a terminal window",
+        ));
+    }
+    terminal.write_line(prompt)?;
+    terminal.read_secure_line()
 }
 
 fn login_id_is_valid(default_id: &str, id: &str) -> bool {

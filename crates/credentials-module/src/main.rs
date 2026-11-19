@@ -863,9 +863,7 @@ async fn build_surface(
     // it binds the admin-op transcript to THIS vault.
     let vault_id = credentials_core::vault_id_for(&data_dir)
         .ok_or_else(|| ModuleError::Message("cannot derive vault id from data dir".into()))?;
-    let kimi_device_id = credentials_core::refresh_adapters::kimi::read_device_id_or_unknown(
-        &data_dir.join("kimi-device-id"),
-    );
+    let kimi_device_id_file = credentials_core::refresh_adapters::kimi::device_id_path(&data_dir);
     let resolver_config = resolver_config_from_env(data_dir)?;
 
     // Open the store, resolve the master key from its plaintext fingerprint, then
@@ -941,7 +939,7 @@ async fn build_surface(
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
-    let adapters = registered_refresh_adapters(kimi_device_id);
+    let adapters = registered_refresh_adapters(kimi_device_id_file);
     // A remote record's home names its refresh adapter; this vault lists only one it
     // registers itself, so the remote read validates against exactly this set.
     let adapter_names: Vec<String> = adapters
@@ -992,7 +990,7 @@ async fn build_surface(
 /// `credentials_core::list_auth_method` and listed in the expected map of
 /// `every_registered_refresh_adapter_has_an_explicit_auth_method` below, which fails
 /// naming any registered adapter the map does not list.
-fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAdapter>> {
+fn registered_refresh_adapters(kimi_device_id_file: PathBuf) -> Vec<Arc<dyn RefreshAdapter>> {
     vec![
         Arc::new(AnthropicAdapter::new()),
         Arc::new(CursorAdapter::new()),
@@ -1009,7 +1007,7 @@ fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAda
         Arc::new(GithubCopilotAdapter::new()),
         Arc::new(GithubAppAdapter::new()),
         Arc::new(credentials_core::refresh_adapters::meta::MetaAdapter),
-        Arc::new(KimiAdapter::new(kimi_device_id)),
+        Arc::new(KimiAdapter::from_device_id_file(kimi_device_id_file)),
         // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
         // from the gemini-cli client the google adapter uses.
         Arc::new(AntigravityAdapter::new()),
@@ -8944,7 +8942,7 @@ mod tests {
     /// the canonical shape is served, so a new adapter cannot ship unexamined.
     #[test]
     fn the_projection_refuses_a_refresh_component_payload_for_every_registered_adapter() {
-        let adapters = registered_refresh_adapters(String::new());
+        let adapters = registered_refresh_adapters(PathBuf::new());
         assert!(!adapters.is_empty());
         for adapter in adapters {
             let name = adapter.name();

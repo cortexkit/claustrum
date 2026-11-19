@@ -780,6 +780,7 @@ fn usage_short() -> String {
      \n\
      verbs:\n\
            login               OAuth/device/API-key login; picker also enrolls gateways\n\
+     \x20                    --id must match any credential selected in the picker\n\
        logout              stop serving (picker with no flags at a terminal)\n\
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
@@ -1001,8 +1002,8 @@ fn help_verb(verb: &str) -> String {
              \n\
              \x20 --provider <name>      pick a provider; omit for an interactive picker of\n\
              \x20                        every provider\n\
-             \x20 --id <id>              use the provider default id or its own freely chosen\n\
-             \x20                        labeled id\n\
+             \x20 --id <id>              use the provider default id or a labeled id; must\n\
+             \x20                        match any id chosen in the interactive picker\n\
              \x20 --account <id>         required for Snowflake (id oauth:snowflake:<account>)\n\
              \x20 --provider-id <id>     add a catalog provider id after deposit (repeatable)\n\
              \x20 --client-id <id>       gmail only: your Google Cloud Desktop OAuth client id\n\

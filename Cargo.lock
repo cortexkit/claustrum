@@ -597,6 +597,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "console",
  "cortexkit-claustrum-client",
  "cortexkit-lease",
  "cortexkit-log",

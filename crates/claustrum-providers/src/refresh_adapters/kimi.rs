@@ -5,6 +5,7 @@
 //! constructs this adapter.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -25,6 +26,7 @@ pub const ADAPTER_NAME: &str = "kimi";
 /// The stable user agent required by the Kimi CLI wire.
 pub const USER_AGENT: &str = concat!("cortexkit-credentials/", env!("CARGO_PKG_VERSION"));
 pub const PLATFORM: &str = "kimi_cli";
+const UNKNOWN_DEVICE_ID: &str = "unknown";
 
 /// Return the per-vault device-id path.
 pub fn device_id_path(data_dir: &Path) -> PathBuf {
@@ -38,7 +40,7 @@ pub fn read_device_id_or_unknown(path: &Path) -> String {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| is_device_id(value))
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| UNKNOWN_DEVICE_ID.to_string())
 }
 
 /// Create the device id on first CLI use and keep it mode 0600 on Unix.
@@ -114,25 +116,46 @@ struct ErrorResponse {
 /// omits a rotated value.
 #[derive(Debug, Clone)]
 pub struct KimiAdapter {
-    device_id: String,
+    device_id: OnceLock<String>,
+    device_id_file: Option<PathBuf>,
 }
 
 impl KimiAdapter {
     pub fn new(device_id: impl Into<String>) -> Self {
+        let device_id: String = device_id.into();
         Self {
-            device_id: device_id.into(),
+            device_id: OnceLock::from(device_id),
+            device_id_file: None,
+        }
+    }
+
+    /// Load the vault's device id when needed, without caching a missing file.
+    pub fn from_device_id_file(path: PathBuf) -> Self {
+        Self {
+            device_id: OnceLock::new(),
+            device_id_file: Some(path),
         }
     }
 
     pub fn device_id(&self) -> &str {
-        &self.device_id
+        if let Some(id) = self.device_id.get() {
+            return id;
+        }
+        if let Some(path) = &self.device_id_file {
+            let id = read_device_id_or_unknown(path);
+            // The first CLI login may create this file after the daemon starts.
+            if id != UNKNOWN_DEVICE_ID {
+                return self.device_id.get_or_init(|| id);
+            }
+        }
+        UNKNOWN_DEVICE_ID
     }
 
     fn headers(&self) -> [(&str, &str); 3] {
         [
             ("User-Agent", USER_AGENT),
             ("X-Msh-Platform", PLATFORM),
-            ("X-Msh-Device-Id", self.device_id.as_str()),
+            ("X-Msh-Device-Id", self.device_id()),
         ]
     }
 
@@ -263,6 +286,25 @@ mod tests {
         assert!(request.headers.iter().any(|(name, value)| {
             name == "X-Msh-Device-Id" && value == "0123456789abcdef0123456789abcdef"
         }));
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_device_id_created_after_the_adapter_started() {
+        let root = TestTempDir::new(format!("ck-kimi-late-device-{}", std::process::id()));
+        let path = device_id_path(&root);
+        let adapter = KimiAdapter::from_device_id_file(path.clone());
+        assert_eq!(adapter.device_id(), "unknown");
+
+        let login_device_id = ensure_device_id(&path).unwrap();
+        let http = FixtureTransport::ok(200, br#"{"access_token":"new-access"}"#.to_vec());
+        adapter.refresh(&cred(), &http).await.unwrap();
+        let request = &http.requests()[0];
+        let refresh_device_id = request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "X-Msh-Device-Id")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(refresh_device_id, Some(login_device_id.as_str()));
     }
 
     #[tokio::test]

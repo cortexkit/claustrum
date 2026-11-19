@@ -56,18 +56,19 @@ use credentials_core::federation::{
 use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
 use credentials_core::store::{
-    AuthEventPrincipal, AuthObservation, EncryptedStore, GrantOperation, ReadGrant, ScopedListRow,
-    SecretHomeRole, SelectorKind, StoreOpError, SECRET_RELEASE_RECEIPT_LIFETIME_MS,
+    AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
+    ReadGrant, ScopedListRow, SecretHomeRole, SelectorKind, StoreOpError,
+    SECRET_RELEASE_RECEIPT_LIFETIME_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use super::ingress::{
-    decode_peer_transfer_key, secret_call_sha256, Lookup, CALLOSUM_MODULE_ID, OP_REMOTE_TOKEN,
-    OP_REPORT_AUTH_FAILURE, OP_SECRET_REQUEST_FLOW_APPROVAL, OP_SECRET_REVOKE_FLOW_GRANTS,
-    OP_SECRET_SSH_SIGN, OP_SECRET_USE, REMOTE_TOKEN_INFO, SECRET_RELEASE_INFO,
-    SSH_SIGN_RELEASE_INFO,
+    decode_peer_transfer_key, secret_call_sha256, Lookup, CALLOSUM_MODULE_ID, OP_CLEAR_CONDITION,
+    OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE, OP_REPORT_CONDITION, OP_SECRET_REQUEST_FLOW_APPROVAL,
+    OP_SECRET_REVOKE_FLOW_GRANTS, OP_SECRET_SSH_SIGN, OP_SECRET_USE, REMOTE_TOKEN_INFO,
+    SECRET_RELEASE_INFO, SSH_SIGN_RELEASE_INFO,
 };
 use super::outbound::{
     is_permanent_callosum_class, management_surface, OutboundClient, OutboundError, RouteCall,
@@ -1294,7 +1295,78 @@ fn map_report_reply(reply: &Value, home: &str) -> Result<(), RemoteRefusal> {
     Err(Failure::home_unavailable().refusal)
 }
 
+fn map_condition_reply(reply: &Value, field: &str) -> Result<bool, RemoteRefusal> {
+    if let Some(error) = reply.get("error") {
+        let code = match error.get("code").and_then(Value::as_str) {
+            Some("not_found") => "not_found",
+            Some("condition_not_admitted") => "condition_not_admitted",
+            Some("condition_status_refused") => "condition_status_refused",
+            Some("condition_link_refused") => "condition_link_refused",
+            _ => return Err(Failure::home_unavailable().refusal),
+        };
+        return Err(RemoteRefusal::new(code, "permanent"));
+    }
+    if let Some(code) = reply.get("code").and_then(Value::as_str) {
+        return Err(map_frame_code(code).refusal);
+    }
+    reply
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Failure::home_unavailable().refusal)
+}
+
 impl RemoteReader {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cached_generation_for_test(&self, id: &str) -> Option<(u64, bool)> {
+        self.lock()
+            .get(id)
+            .map(|state| (state.generation, state.cache.is_some()))
+    }
+
+    /// Dispatch one condition mutation for a copy whose scoped caller and report inputs
+    /// have already been checked. A lost reply is ambiguous, so never resend it.
+    pub async fn forward_condition(
+        &self,
+        record: &RemoteRecord,
+        record_version: u64,
+        report: Option<ConditionReport<'_>>,
+    ) -> Result<bool, RemoteRefusal> {
+        let id = record.credential_id.as_str();
+        let home = record.home_member.as_str();
+        let mut params = json!({ "credential_id": id, "record_version": record_version });
+        let (method, field) = if let Some(report) = report {
+            params["reason"] = json!(report.reason);
+            params["provider_status"] = json!(report.provider_status);
+            if let Some(link) = report.action_url {
+                params["action_url"] = json!(link);
+            }
+            (OP_REPORT_CONDITION, "accepted")
+        } else {
+            (OP_CLEAR_CONDITION, "cleared")
+        };
+        let call = RouteCall {
+            target: management_surface(&fed_provider_module(home)),
+            prelude: None,
+            request: json!({ "method": method, "params": params }),
+        };
+        // The outgoing request is admitted against this lifetime and home. The
+        // connection may wait, but it must never resolve the copy again.
+        match self.store.remote_record(id) {
+            Ok(Some(current))
+                if current.incarnation == record.incarnation && current.home_member == home => {}
+            Ok(_) => return Err(RemoteRefusal::new("not_found", "permanent")),
+            Err(_) => return Err(Failure::store_error().refusal),
+        }
+        let Some(client) = self.outbound.get() else {
+            return Err(Failure::home_unreachable().refusal);
+        };
+        let reply = client
+            .call(&home_route_key(home), call, self.deadline)
+            .await
+            .map_err(|error| map_outbound_error(error).refusal)?;
+        map_condition_reply(&reply, field)
+    }
+
     /// Forward a consumer's failure report on the remote record `record`, already
     /// authorized by the caller's grants.
     ///

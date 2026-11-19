@@ -84,6 +84,7 @@ impl Rig {
                     provider_ids: None,
                     detected_plan: None,
                     home_version: 1,
+                    condition: None,
                 }],
                 RemoteWatchApplyMode::Full,
                 &[],

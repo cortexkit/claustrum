@@ -538,6 +538,7 @@ fn condition_removed_from_operator_and_watch_copies_with_foreign_keys_off() {
         provider_ids: None,
         detected_plan: None,
         home_version: 1,
+        condition: None,
     };
     store
         .remote_watch_apply_audited(HOME, "pair", &[row], RemoteWatchApplyMode::Full, &[])

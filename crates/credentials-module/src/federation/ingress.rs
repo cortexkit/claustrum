@@ -15,7 +15,7 @@
 //!    so neither can stand in for a member grant. The federation ops answer the uniform
 //!    `not_found` on every other channel.
 //! 3. **The home-side ops** ([`HomeVault::serve`]): `federation.remote_token`,
-//!    `federation.report_auth_failure` and the three `federation.secret_*` ops, each
+//!    the federation report/clear and secret operations, each
 //!    running its fixed order of checks and stopping at the first refusal.
 //!
 //! Every credential-shaped refusal is the same `not_found` body a local scoped read
@@ -45,8 +45,8 @@ use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, RecordState, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, AuthObservation, EncryptedStore, GrantOperation, ReleaseRequest,
-    SealedRelease, SecretHomeRole, StoreOpError,
+    AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
+    ReleaseRequest, SealedRelease, SecretHomeRole, StoreOpError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -62,6 +62,8 @@ pub const OP_REMOTE_TOKEN: &str = "federation.remote_token";
 pub const OP_REMOTE_WATCH: &str = "federation.remote_watch";
 /// A peer forwards its consumer's report that a token was refused upstream.
 pub const OP_REPORT_AUTH_FAILURE: &str = "federation.report_auth_failure";
+pub const OP_REPORT_CONDITION: &str = "federation.report_condition";
+pub const OP_CLEAR_CONDITION: &str = "federation.clear_condition";
 /// A peer delivers a sealed static-key transfer.
 pub const OP_TRANSFER_DELIVER: &str = "federation.transfer_deliver";
 
@@ -79,9 +81,11 @@ pub const OP_MANIFEST_WATCH: &str = "federation.manifest_watch";
 pub const OP_MANIFEST_REPORT_ACTIVE: &str = "federation.manifest_report_active";
 
 /// The closed allowlist of a federation channel. Nothing else is dispatched there.
-pub const FEDERATION_OPS: [&str; 11] = [
+pub const FEDERATION_OPS: [&str; 13] = [
     OP_REMOTE_TOKEN,
     OP_REPORT_AUTH_FAILURE,
+    OP_REPORT_CONDITION,
+    OP_CLEAR_CONDITION,
     OP_TRANSFER_DELIVER,
     OP_SECRET_USE,
     OP_SECRET_SSH_SIGN,
@@ -732,6 +736,23 @@ struct ReportParams {
     reporter_source: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportConditionParams {
+    credential_id: String,
+    record_version: u64,
+    reason: String,
+    provider_status: u16,
+    action_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearConditionParams {
+    credential_id: String,
+    record_version: u64,
+}
+
 /// The sealed plaintext of a token reply. Exactly these fields: no refresh token and
 /// no `oauth` struct can be expressed here.
 #[derive(Debug, Serialize)]
@@ -759,7 +780,7 @@ struct TokenReply<'a> {
 pub fn remote_watch_logins_wire(rows: &[RemoteWatchRow]) -> Vec<Value> {
     rows.iter()
         .map(|row| {
-            json!({
+            let mut wire = json!({
                 "credential_id": row.credential_id,
                 "state": row.state,
                 "refresh_adapter": row.refresh_adapter,
@@ -768,7 +789,16 @@ pub fn remote_watch_logins_wire(rows: &[RemoteWatchRow]) -> Vec<Value> {
                 "provider_ids": row.provider_ids.as_deref().unwrap_or_default(),
                 "detected_plan": row.detected_plan,
                 "home_version": row.home_version,
-            })
+            });
+            if let Some(condition) = &row.condition {
+                let mut value =
+                    json!({ "reason": condition.reason, "since_ms": condition.since_ms });
+                if let Some(link) = &condition.action_url {
+                    value["action_url"] = json!(link);
+                }
+                wire["condition"] = value;
+            }
+            wire
         })
         .collect()
 }
@@ -784,6 +814,7 @@ pub fn remote_watch_lists_equal(left: &[RemoteWatchRow], right: &[RemoteWatchRow
                 && left.identity == right.identity
                 && left.categories == right.categories
                 && left.provider_ids == right.provider_ids
+                && left.condition == right.condition
                 && left
                     .detected_plan
                     .as_ref()
@@ -1146,6 +1177,9 @@ impl HomeVault {
                     OP_REPORT_AUTH_FAILURE => {
                         self.report_auth_failure(member, params, budget).await
                     }
+                    OP_REPORT_CONDITION | OP_CLEAR_CONDITION => {
+                        self.mutate_condition(member, method, params, budget).await
+                    }
                     // A sealed transfer delivery runs its own order of checks, under
                     // the same member mapping and the same budget as the other ops.
                     OP_TRANSFER_DELIVER => super::transfer::deliver(
@@ -1174,8 +1208,14 @@ impl HomeVault {
         match outcome {
             Ok(reply) => HomeAnswer::Reply(reply),
             Err(Refusal::InvalidParams(detail)) => HomeAnswer::InvalidParams(detail),
-            Err(refusal) if method == OP_REPORT_AUTH_FAILURE => HomeAnswer::Reply(json!({
-                "accepted": false,
+            Err(refusal) if matches!(method, OP_REPORT_AUTH_FAILURE | OP_REPORT_CONDITION) => {
+                HomeAnswer::Reply(json!({
+                    "accepted": false,
+                    "error": refusal.body(),
+                }))
+            }
+            Err(refusal) if method == OP_CLEAR_CONDITION => HomeAnswer::Reply(json!({
+                "cleared": false,
                 "error": refusal.body(),
             })),
             Err(refusal) => HomeAnswer::Reply(json!({ "error": refusal.body() })),
@@ -1485,6 +1525,88 @@ impl HomeVault {
             )
             .map_err(|error| map_store_error(&error))?;
         Ok(json!({ "accepted": true }))
+    }
+
+    async fn mutate_condition(
+        &self,
+        member: &str,
+        method: &str,
+        params: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<Value, Refusal> {
+        let pairing_id = self.current_pairing(member, method, budget).await?;
+        // A Serde error can echo values or field names supplied by the peer.
+        let invalid = |_| Refusal::InvalidParams("invalid condition parameters".into());
+        let (id, version, report) = if method == OP_REPORT_CONDITION {
+            let params: ReportConditionParams =
+                serde_json::from_value(params.clone()).map_err(invalid)?;
+            (
+                params.credential_id,
+                params.record_version,
+                Some((params.reason, params.provider_status, params.action_url)),
+            )
+        } else {
+            let params: ClearConditionParams =
+                serde_json::from_value(params.clone()).map_err(invalid)?;
+            (params.credential_id, params.record_version, None)
+        };
+        let incarnation = self.require_grant(member, &pairing_id, &id)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(gate) = self.authorization_gate.as_ref() {
+            gate().await;
+        }
+        if is_vault_transfer_id(&id) {
+            self.note_refusal(&id, member, "transfer_key");
+            return Err(Refusal::NotFound);
+        }
+        // Unlike a token read, reporting or clearing a mark does not require an
+        // active login. The store checks admission and version against the same stored row.
+        let store = self.engine.store();
+        let principal = AuthEventPrincipal::Member(member);
+        let audit = |op| AuditCtx {
+            op,
+            actor: member,
+            alarm: None,
+        };
+        if let Some((reason, provider_status, link)) = report {
+            store
+                .report_condition_in_incarnation(
+                    &id,
+                    version,
+                    &incarnation,
+                    ConditionReport {
+                        reason: &reason,
+                        provider_status,
+                        action_url: link.as_deref(),
+                    },
+                    audit(AuditOp::ReportCondition),
+                    principal,
+                )
+                .map_err(|error| match error {
+                    StoreOpError::ConditionNotAdmitted => {
+                        Refusal::Local("condition_not_admitted", "permanent")
+                    }
+                    StoreOpError::ConditionStatusRefused => {
+                        Refusal::Local("condition_status_refused", "permanent")
+                    }
+                    StoreOpError::ConditionLinkRefused => {
+                        Refusal::Local("condition_link_refused", "permanent")
+                    }
+                    other => map_store_error(&other),
+                })?;
+            Ok(json!({ "accepted": true }))
+        } else {
+            let cleared = store
+                .clear_condition_in_incarnation(
+                    &id,
+                    version,
+                    &incarnation,
+                    audit(AuditOp::ClearCondition),
+                    principal,
+                )
+                .map_err(|error| map_store_error(&error))?;
+            Ok(json!({ "cleared": cleared }))
+        }
     }
 
     /// `federation.secret_use`: a paired computer's local sender asks for a secret this
@@ -1866,6 +1988,7 @@ impl HomeVault {
                 provider_ids,
                 detected_plan: candidate.detected_plan,
                 home_version: candidate.record_version,
+                condition: candidate.condition,
             });
         }
         rows.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));

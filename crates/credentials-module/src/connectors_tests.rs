@@ -974,6 +974,8 @@ mod connectors_contract {
                 | federation::ingress::OP_REMOTE_TOKEN
                 | federation::ingress::OP_REMOTE_WATCH
                 | federation::ingress::OP_REPORT_AUTH_FAILURE
+                | federation::ingress::OP_REPORT_CONDITION
+                | federation::ingress::OP_CLEAR_CONDITION
                 | federation::ingress::OP_TRANSFER_DELIVER
                 | federation::ingress::OP_SECRET_USE
                 | federation::ingress::OP_SECRET_SSH_SIGN

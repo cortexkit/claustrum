@@ -258,7 +258,7 @@ pub(super) fn home_watch_candidates_from_conn(
     key: &MasterKey,
 ) -> rusqlite::Result<Vec<HomeWatchCandidate>> {
     let mut stmt = conn.prepare(
-        "SELECT credential_id, state, record_version, envelope FROM credentials \
+        "SELECT credential_id, state, record_version, envelope, incarnation FROM credentials \
          WHERE state IN ('active', 'needs_reauth') ORDER BY credential_id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -267,11 +267,12 @@ pub(super) fn home_watch_candidates_from_conn(
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)? as u64,
             row.get::<_, Vec<u8>>(3)?,
+            row.get::<_, String>(4)?,
         ))
     })?;
     let mut candidates = Vec::new();
     for row in rows {
-        let (id, state, version, envelope) = row?;
+        let (id, state, version, envelope, incarnation) = row?;
         let Some(record) = envelope::open(
             key,
             &envelope,
@@ -285,6 +286,7 @@ pub(super) fn home_watch_candidates_from_conn(
             continue;
         };
         let is_refreshable = record.is_refreshable();
+        let condition = super::conditions::local_condition_conn(conn, &id, &incarnation)?;
         candidates.push(HomeWatchCandidate {
             credential_id: id,
             state: RecordState::from_str(&state),
@@ -293,6 +295,7 @@ pub(super) fn home_watch_candidates_from_conn(
             refresh_adapter: record.refresh_adapter,
             identity: record.identity,
             detected_plan: record.detected_plan,
+            condition,
             is_refreshable,
         });
     }

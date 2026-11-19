@@ -6,6 +6,7 @@
 //! mutation, as everywhere else in the store. Settings are changed by audited admin
 //! operations or by the daemon's config-file reader.
 
+use super::conditions::{remote_condition_conn, write_remote_condition_tx};
 use super::*;
 use crate::federation::{
     check_member_id, federation_gate_payload_hash, federation_self_payload_hash,
@@ -337,6 +338,7 @@ fn remote_watch_diff_conn<'a>(
                     || current.refresh_adapter != row.refresh_adapter
                     || current.identity != row.identity
                     || current.last_home_state != row.state
+                    || remote_condition_conn(conn, id, &current.incarnation)? != row.condition
                 {
                     diff.updates
                         .push((current, row, categories_changed, provider_ids_changed));
@@ -646,6 +648,7 @@ impl EncryptedStore {
                 provider_ids: None,
                 detected_plan: new.detected_plan.clone(),
                 home_version: new.home_version,
+                condition: None,
             },
         )?;
         let categories: BTreeSet<&String> = new.categories.iter().collect();
@@ -718,9 +721,9 @@ impl EncryptedStore {
 
     /// Convert a row created by the specified home's watch to operator ownership
     /// without fetching from the home.
-    /// The incarnation and all metadata are retained. The source check, the update and
-    /// a RemoteAdd audit row (the same row an operator `remote add` writes) commit in
-    /// one fenced transaction, so a refusal leaves nothing behind.
+    /// The incarnation and metadata are retained except for the condition: an operator
+    /// copy will no longer receive the home's clears. The source check, update and
+    /// RemoteAdd audit row run in one transaction; an audit failure rolls back the conversion.
     pub fn remote_convert_home_watch_audited(
         &self,
         credential_id: &str,
@@ -754,6 +757,7 @@ impl EncryptedStore {
                  WHERE credential_id = ?1 AND home_member = ?2 AND source = 'home_watch'",
                 rusqlite::params![credential_id, home_member],
             )?;
+            write_remote_condition_tx(tx, credential_id, &record.incarnation, None)?;
             append_audit_tx(
                 tx,
                 &self.audit_key,
@@ -912,6 +916,9 @@ impl EncryptedStore {
                         row.identity.org_name, row.home_version as i64, row.state.as_str(), now,
                         row.detected_plan.as_ref().filter(|p| p.tier.is_some()).map(|p| p.observed_at_ms)],
                 )?;
+                if row.condition.is_some() {
+                    write_remote_condition_tx(tx, &row.credential_id, &incarnation, row.condition.as_ref())?;
+                }
                 let categories: BTreeSet<_> = row.categories.iter().collect();
                 for category in &categories {
                     tx.execute("INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
@@ -977,6 +984,7 @@ impl EncryptedStore {
                             rusqlite::params![row.credential_id, provider_id])?;
                     }
                 }
+                write_remote_condition_tx(tx, &row.credential_id, &current.incarnation, row.condition.as_ref())?;
                 audit_remote_watch_tx(tx, &self.audit_key, home_member, &row.credential_id,
                     &current.incarnation, AuditOp::RemoteUpdate)?;
             }

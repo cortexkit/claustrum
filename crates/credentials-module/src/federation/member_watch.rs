@@ -13,7 +13,7 @@ use credentials_core::{
     },
     plan_detection::DetectedPlan,
     record::RecordIdentity,
-    store::EncryptedStore,
+    store::{Condition, EncryptedStore, StoreOpError},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -335,6 +335,32 @@ struct Login {
     provider_ids: Option<Vec<String>>,
     detected_plan: Option<DetectedPlan>,
     home_version: u64,
+    #[serde(default, deserialize_with = "present_condition")]
+    condition: Option<Value>,
+}
+
+fn present_condition<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(de).map(Some)
+}
+
+fn decode_condition(value: Value) -> Result<Condition, StoreOpError> {
+    let malformed = || StoreOpError::Encode("malformed home-watch condition".into());
+    let value = value.as_object().ok_or_else(malformed)?;
+    Ok(Condition {
+        reason: value
+            .get("reason")
+            .and_then(Value::as_str)
+            .ok_or_else(malformed)?
+            .to_owned(),
+        since_ms: value
+            .get("since_ms")
+            .and_then(Value::as_u64)
+            .ok_or_else(malformed)?,
+        action_url: value
+            .get("action_url")
+            .map(|link| link.as_str().map(str::to_owned).ok_or_else(malformed))
+            .transpose()?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -359,7 +385,7 @@ fn decode_notice(home: &str, body: Value, logged: &Logged) -> Option<Snapshot> {
         if login.state == RemoteHomeState::Corrupt || !ids.insert(login.credential_id.clone()) {
             return None;
         }
-        let row = RemoteWatchRow {
+        let mut row = RemoteWatchRow {
             credential_id: login.credential_id,
             state: login.state,
             refresh_adapter: login.refresh_adapter,
@@ -368,8 +394,17 @@ fn decode_notice(home: &str, body: Value, logged: &Logged) -> Option<Snapshot> {
             provider_ids: login.provider_ids,
             detected_plan: login.detected_plan,
             home_version: login.home_version,
+            condition: None,
         };
-        if let Err(error) = validate_remote_watch_row(home, &row) {
+        let result = login
+            .condition
+            .map(decode_condition)
+            .transpose()
+            .and_then(|condition| {
+                row.condition = condition;
+                validate_remote_watch_row(home, &row)
+            });
+        if let Err(error) = result {
             if logged.first(home, &row.credential_id) {
                 tracing::warn!(target: "federation", home, id = %row.credential_id, %error, "home watch row rejected; existing row unchanged");
             }

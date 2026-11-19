@@ -396,6 +396,7 @@ mod scoped_watch {
             provider_ids: Some(vec!["anthropic".into()]),
             detected_plan: None,
             home_version: 1,
+            condition: None,
         };
         assert_eq!(
             rig.store

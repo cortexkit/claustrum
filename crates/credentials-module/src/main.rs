@@ -1615,7 +1615,10 @@ impl std::fmt::Debug for ReadRequest {
         request.field("method", &self.method);
         if matches!(
             self.method.as_str(),
-            OP_REPORT_CONDITION | OP_CLEAR_CONDITION
+            OP_REPORT_CONDITION
+                | OP_CLEAR_CONDITION
+                | federation::ingress::OP_REPORT_CONDITION
+                | federation::ingress::OP_CLEAR_CONDITION
         ) {
             request.finish_non_exhaustive()
         } else {
@@ -2374,11 +2377,16 @@ async fn handle_read_request(
         }
         OP_REPORT_CONDITION | OP_CLEAR_CONDITION => {
             let reply = if request.method == OP_REPORT_CONDITION {
-                serde_json::from_value::<read_surface::ReportConditionParams>(request.params)
-                    .map(|params| surface.report_condition_reply(&caller, &params))
+                match serde_json::from_value::<read_surface::ReportConditionParams>(request.params)
+                {
+                    Ok(params) => Ok(surface.report_condition_reply(&caller, &params).await),
+                    Err(error) => Err(error),
+                }
             } else {
-                serde_json::from_value::<read_surface::ClearConditionParams>(request.params)
-                    .map(|params| surface.clear_condition_reply(&caller, &params))
+                match serde_json::from_value::<read_surface::ClearConditionParams>(request.params) {
+                    Ok(params) => Ok(surface.clear_condition_reply(&caller, &params).await),
+                    Err(error) => Err(error),
+                }
             };
             match reply {
                 Ok(reply) => wrap_result(reply),
@@ -2780,6 +2788,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             "operations": [
                 federation::ingress::OP_REMOTE_TOKEN,
                 federation::ingress::OP_REPORT_AUTH_FAILURE,
+                federation::ingress::OP_REPORT_CONDITION,
+                federation::ingress::OP_CLEAR_CONDITION,
                 federation::ingress::OP_TRANSFER_DELIVER,
                 federation::ingress::OP_SECRET_USE,
                 federation::ingress::OP_SECRET_SSH_SIGN,
@@ -3177,6 +3187,16 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 kind: ManagementOperationKind::Mutate,
             },
             ManagementOperation {
+                name: federation::ingress::OP_REPORT_CONDITION.to_string(),
+                description: Some("Accept a member vault's report of a login condition.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_CLEAR_CONDITION.to_string(),
+                description: Some("Clear a login condition on a member vault's report of success.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
                 name: federation::ingress::OP_TRANSFER_DELIVER.to_string(),
                 description: Some("Accept a sealed static-key transfer from a member vault into the pending queue.".to_string()),
                 kind: ManagementOperationKind::Mutate,
@@ -3530,6 +3550,14 @@ mod tests {
             ),
             (
                 federation::ingress::OP_REPORT_AUTH_FAILURE,
+                ManagementOperationKind::Mutate,
+            ),
+            (
+                federation::ingress::OP_REPORT_CONDITION,
+                ManagementOperationKind::Mutate,
+            ),
+            (
+                federation::ingress::OP_CLEAR_CONDITION,
                 ManagementOperationKind::Mutate,
             ),
             (

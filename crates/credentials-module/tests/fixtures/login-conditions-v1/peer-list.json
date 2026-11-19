@@ -1,0 +1,19 @@
+{
+  "peer_list_condition": {
+    "categories": [
+      "antigravity-native"
+    ],
+    "condition": {
+      "action_url": "https://accounts.google.com/check?account=condition-query-not-for-diagnostics&replacement=1",
+      "reason": "provider_verification_required",
+      "since_ms": 7
+    },
+    "credential_id": "oauth:antigravity:condition-fixture",
+    "detected_plan": null,
+    "home_version": 1,
+    "identity": {},
+    "provider_ids": [],
+    "refresh_adapter": "antigravity",
+    "state": "active"
+  }
+}

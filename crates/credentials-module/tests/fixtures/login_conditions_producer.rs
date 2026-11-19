@@ -5,6 +5,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+mod peer_conditions {
+    include!("login_conditions_peer.rs");
+}
+
 const ID: &str = "oauth:antigravity:condition-fixture";
 const VERIFY: &str = "provider_verification_required";
 const INELIGIBLE: &str = "provider_ineligible";

@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use claustrum_module_probe::federation::ingress::{
-    project_access_token, OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE, OP_TRANSFER_DELIVER,
-    REMOTE_TOKEN_INFO,
+    project_access_token, OP_CLEAR_CONDITION, OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE,
+    OP_REPORT_CONDITION, OP_TRANSFER_DELIVER, REMOTE_TOKEN_INFO,
 };
 use claustrum_module_probe::federation::{HomeAnswer, HomeVault, HOME_OP_DEADLINE};
 use credentials_core::audit::{AuditCtx, AuditOp};
@@ -857,6 +857,60 @@ fn stale_and_version(rig: &Rig, id: &str) -> (i64, i64) {
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn condition_mutations_refuse_the_transfer_key_even_with_a_member_grant() {
+    let rig = Rig::new("ingress-condition-transfer-key").await;
+    rig.grant_exact(VAULT_TRANSFER_ID);
+    let store = rig.store();
+    let before = store.meta(VAULT_TRANSFER_ID).unwrap();
+    let audit_before = store.read_audit(None).unwrap();
+    let events_before = store.recent_auth_events(100).unwrap().len();
+    let version = before.record_version;
+
+    let report = reply(
+        rig.call(
+            OP_REPORT_CONDITION,
+            json!({
+                "credential_id": VAULT_TRANSFER_ID, "record_version": version,
+                "reason": "provider_verification_required", "provider_status": 403,
+            }),
+        )
+        .await,
+    );
+    let clear = reply(
+        rig.call(
+            OP_CLEAR_CONDITION,
+            json!({"credential_id": VAULT_TRANSFER_ID, "record_version": version}),
+        )
+        .await,
+    );
+    assert_eq!(
+        [report, clear],
+        [
+            json!({"accepted": false, "error": not_found()["error"]}),
+            json!({"cleared": false, "error": not_found()["error"]}),
+        ]
+    );
+
+    assert_eq!(store.meta(VAULT_TRANSFER_ID).unwrap(), before);
+    assert_eq!(
+        store
+            .credential_condition(VAULT_TRANSFER_ID, before.incarnation.as_deref().unwrap())
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.read_audit(None).unwrap(), audit_before);
+    let events = store.recent_auth_events(100).unwrap();
+    assert_eq!(events.len(), events_before + 2);
+    let requester = rig.requester();
+    for event in &events[..2] {
+        assert_eq!(event.kind, "scoped_read_refusal");
+        assert_eq!(event.credential_id, VAULT_TRANSFER_ID);
+        assert_eq!(event.principal_id.as_deref(), Some(requester.as_str()));
+        assert_eq!(event.detail.as_deref(), Some("transfer_key"));
+    }
 }
 
 #[tokio::test]

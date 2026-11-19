@@ -410,6 +410,7 @@ pub struct HomeWatchCandidate {
     pub refresh_adapter: Option<String>,
     pub identity: RecordIdentity,
     pub detected_plan: Option<crate::plan_detection::DetectedPlan>,
+    pub condition: Option<Condition>,
     is_refreshable: bool,
 }
 

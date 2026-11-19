@@ -2104,6 +2104,7 @@ Each login row contains:
 | `provider_ids` | The home's stored provider ids, sorted and deduplicated; always present, `[]` when unset. |
 | `detected_plan` | The same detected-plan object as the token reply, or null. |
 | `home_version` | The home's record version. |
+| `condition` | When set, `{reason, since_ms, action_url?}`; otherwise omitted. The reporter is never sent. |
 
 Members ignore unknown login-row fields. Older homes omit `provider_ids`: members
 keep an existing copy's ids in that case, and seed an empty set for a new copy.
@@ -2113,9 +2114,26 @@ the existing per-credential cap reject only that row, retaining any existing cop
 other valid rows still apply. These updates move the member's `credential.list_scoped`
 view and `auth.watch_scoped` view just as category changes do.
 
+Condition changes, including a link-only replacement or removal, trigger a notice even
+without a new home version. A member accepts a reason of 1–64 bytes drawn from
+`[a-z0-9_]` (including unknown reasons without a link) and an integer `since_ms` in
+`0..=2^53−1`. A link is allowed only for a known reason whose adapter admits the host,
+and must pass the URL rules in §5b. `condition: null` and non-object values are malformed.
+A malformed condition rejects only its row: the copy is retained unchanged, the rejection
+log omits the link, and valid sibling rows apply. Older members ignore the new field.
+
+A newly inserted copy stores the condition in the snapshot, even on an insert-only replay.
+For an existing copy, a full snapshot applies the new condition or clears it when the key
+is absent; an insert-only replay never changes it. The change commits with the usual
+`remote_update` audit row. A failed list fetch leaves the copy unchanged. After a restart
+the copy's scoped and connectors projections read the locally stored condition without
+asking the home.
+
 Snapshots never change hand-added (`operator`) remote copies. The token reply used
 by `ck auth remote add` does not carry provider ids, so a hand-added copy starts
-without them and keeps its member-local set.
+without them and keeps its member-local set. Hand-added copies can forward condition
+mutations but do not display a condition from the home. Converting a watched copy to
+operator ownership removes its condition because it will not receive the home's clears.
 
 ### Computer-local login sharing opt-out
 
@@ -2167,13 +2185,15 @@ answer uniform `not_found`. Only a federation member channel can invoke these op
 |---|---|---|
 | `federation.remote_token` | Query | Fetch an Auth-sealed access-token projection; callosum must not persist query replies. |
 | `federation.report_auth_failure` | Mutate | Forward a version-checked 401/403 report to the home. |
+| `federation.report_condition` | Mutate | Report a version-checked login condition to the home. |
+| `federation.clear_condition` | Mutate | Clear a login condition at the home after a successful use. |
 | `federation.transfer_deliver` | Mutate | Deliver an Auth-sealed static credential for operator acceptance. |
 | `federation.secret_use` | Query | Forward a member vault's sender `secret.use` to the secret home; the release is Auth-sealed, so callosum must not persist query replies. |
 | `federation.secret_request_flow_approval` | Mutate | Record a member vault's flow consent request for a secret this vault holds. |
 | `federation.secret_revoke_flow_grants` | Mutate | Revoke a member vault's flow grants for one flow install. |
 
 Every other op on that channel is `not_found` before dispatch. `handle` or
-`enrollment_token` params are `invalid_params`, never resolved. The six federation ops
+`enrollment_token` params are `invalid_params`, never resolved. Federation ops
 on any non-federation channel (including `callosum-self`, a granted reserved module, or
 any channel with the gate off) are `not_found`. `secret.home` is declared beside the
 phone ops (§15) and is never on this allowlist: a member channel answers it `not_found`.
@@ -2346,6 +2366,34 @@ A same-version token returned during the per-credential 60 s refresh cooldown ca
 `recheck_in_ms`; B keeps `stale_pending` and refetches when it elapses, without a second
 report. An applied success above the reported version, one without `recheck_in_ms`, a home
 re-create or an authoritative non-success clears the mark. Transient outcomes leave it.
+
+### Forwarded login conditions
+
+`federation.report_condition` takes `{credential_id, record_version, reason,
+provider_status, action_url?}`; `federation.clear_condition` takes
+`{credential_id, record_version}`. They return the same `accepted` and `cleared`
+replies as in §5b. After the current-pairing check, malformed or unknown params
+give an `invalid_params` Error frame. No enrollment token or principal is forwarded.
+
+On a shared copy the member checks scoped Read authorization. For a report it also
+checks the adapter, reason, status and link against the copy; a clear makes no such
+checks. Just before sending either mutation it re-reads the copy. An absent copy or a
+different incarnation or home gives `not_found` and nothing is sent. Once admitted,
+the request goes only to that captured home, even if the copy changes during connection
+setup. The member makes one exchange and never retries after a lost reply.
+
+The home checks the current pairing, the member's `remote_read` grant and the transfer-key
+fence. Reports repeat checks 2–6 on the home login in one transaction; clears check the
+incarnation and record version, not the serving state or adapter. The authenticated
+member is the reporter, audit actor and diagnostic principal at the home. The forward
+writes no condition audit row or diagnostic at the member, and leaves its token cache,
+fetch generation and reported version unchanged.
+
+The member passes the home's success boolean and the `not_found`,
+`condition_not_admitted`, `condition_status_refused` and `condition_link_refused`
+refusals through (all `permanent`). Other home refusals and Error frames from the home,
+including an older home's `unknown_method`, give `home_unavailable` (`transient`).
+Connection loss or no reply gives `home_unreachable` (`transient`), with no replay.
 
 ### Forwarded agent secrets: `federation.secret_use`
 

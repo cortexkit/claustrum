@@ -78,11 +78,9 @@ pub fn other_live_handles_read_only(
     exclude_hash: &str,
 ) -> Result<Vec<(String, i64)>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
     let mut stmt = conn
         .prepare(
             "SELECT handle_hash, created_at_ms FROM handles \

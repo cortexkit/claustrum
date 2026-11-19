@@ -117,7 +117,7 @@ pub(super) fn load_or_create_audit_key(
 ///
 /// The verification itself is a pure read: fetch the entries, recompute each MAC over
 /// its predecessor. It needs the master key only to unseal the stored audit key, never
-/// to write. `mode=ro` rather than `immutable=1`, so the newest entries -- still in the
+/// to write. Open read-only, not immutable, so the newest entries -- still in the
 /// WAL on a live store, and the ones an operator is usually asking about -- are seen.
 ///
 /// Returns the seq of the first broken entry, or `None` when the chain verifies.
@@ -126,11 +126,9 @@ pub fn verify_audit_chain_read_only(
     key: &MasterKey,
 ) -> Result<Option<i64>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
 
     // Unseal the audit key. Its absence is NOT an empty chain: it means this store was
     // never opened by a build that provisions one, and reporting "verified" for a store
@@ -198,11 +196,9 @@ pub fn auth_events_at_cap_read_only(
     store_path: &std::path::Path,
 ) -> Result<Vec<String>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
 
     let mut stmt = conn
         .prepare(
@@ -243,11 +239,9 @@ pub fn read_audit_read_only(
     limit: Option<usize>,
 ) -> Result<Vec<AuditEntry>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
 
     // Newest-first with the cap, then reversed into chain order -- the same shape as
     // the leased reader, so a capped read returns the RECENT entries rather than the
@@ -281,7 +275,7 @@ pub fn read_audit_read_only(
 /// key), and the connection is read-only, which also leaves the WAL untouched -- a
 /// read-write open would checkpoint on close and rewrite the file being inspected.
 ///
-/// `mode=ro` rather than `immutable=1`: immutable skips the write-ahead log, and
+/// Open read-only, not immutable: immutable skips the write-ahead log, and
 /// against a live store the newest events -- the ones being asked about -- are exactly
 /// what is still in the WAL.
 pub fn read_auth_events_read_only(
@@ -289,11 +283,9 @@ pub fn read_auth_events_read_only(
     limit: u32,
 ) -> Result<Vec<AuthEvent>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
 
     // A MISSING TABLE IS NOT AN EMPTY ONE, and the caller has to be able to tell them
     // apart. The table arrived in a later migration, so a store written by an older
@@ -636,11 +628,26 @@ impl EncryptedStore {
         let credential_id = credential_auth_subject(credential_id);
         self.store
             .with_conn(|c| {
+                let kind = AuthEventKind::ScopedFirstUse.as_str();
+                let operation = operation.as_str();
+                // The credential index bounds this probe to one credential's events.
+                // A hit needs no writer lock; on a miss the insert rechecks for races.
+                let already_recorded: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM auth_events \
+                     WHERE credential_id = ?1 AND kind = ?2 AND detail = ?3 \
+                       AND principal_kind = ?4 AND principal_id IS ?5)",
+                    rusqlite::params![credential_id, kind, operation, principal_kind, principal_id],
+                    |row| row.get(0),
+                )?;
+                if already_recorded {
+                    return Ok(());
+                }
+
                 let tx = c.unchecked_transaction()?;
                 // The operation rides in `detail` rather than a new column: it is the
                 // same shape the refusal path uses for its reason, and a migration for a
                 // diagnostic field would cost more than it buys.
-                tx.execute(
+                let inserted = tx.execute(
                     "INSERT INTO auth_events \
                      (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
                      SELECT ?1, ?2, ?3, NULL, ?4, NULL, 1, ?5, ?6 \
@@ -653,13 +660,15 @@ impl EncryptedStore {
                     rusqlite::params![
                         now_ms(),
                         credential_id,
-                        AuthEventKind::ScopedFirstUse.as_str(),
-                        operation.as_str(),
+                        kind,
+                        operation,
                         principal_kind,
                         principal_id,
                     ],
                 )?;
-                trim_auth_events_tx(&tx, credential_id)?;
+                if inserted != 0 {
+                    trim_auth_events_tx(&tx, credential_id)?;
+                }
                 tx.commit()
             })
             .map_err(StoreOpError::from)

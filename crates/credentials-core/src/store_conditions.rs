@@ -173,11 +173,9 @@ pub fn condition_read_only(
     incarnation: &str,
 ) -> Result<Option<Condition>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
     match condition_in_incarnation(&conn, id, incarnation, Location::Local).map_err(map)? {
         Some(condition) => Ok(Some(condition)),
         None => condition_in_incarnation(&conn, id, incarnation, Location::Remote).map_err(map),

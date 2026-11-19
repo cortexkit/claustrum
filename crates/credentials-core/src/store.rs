@@ -339,6 +339,8 @@ pub struct StoredRead {
     /// Internal row identity, stable across refresh and replacement but not removal.
     pub incarnation: String,
     pub(crate) mark: StaleMark,
+    /// Whether a refresh intent was present in the same snapshot as the record.
+    pub(crate) has_refresh_intent: bool,
     /// Lowercase-hex SHA-256 of the stored envelope bytes this read decrypted.
     pub(crate) stored_digest_hex: String,
 }

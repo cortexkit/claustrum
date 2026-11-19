@@ -445,12 +445,9 @@ pub fn declared_grant_sets_read_only(
     if !path.exists() {
         return Ok(DeclaredGrantListing::default());
     }
-    // `mode=ro` through a URI, as `list_read_grants_read_only_with_schema` opens it, so
-    // closing this connection can never checkpoint or truncate the daemon's WAL.
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|error| error.to_string())?;
+    // Closing a read-only connection cannot checkpoint or truncate the daemon's WAL.
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
     declared_sets_from_conn(&conn).map_err(|error| error.to_string())
 }

@@ -604,18 +604,15 @@ pub struct OperatorSecretListing {
 /// fact from an empty vault: the CLI says "no agent-secret tables yet" for the first and
 /// lists nothing for the second.
 ///
-/// `mode=ro` rather than `immutable=1`, like every other lease-free reader here: the
-/// table may be brand new and still sitting in the write-ahead log, and skipping the WAL
-/// would report a secret the vault has already stored as missing.
+/// Open read-only, not immutable: the table may still be in the write-ahead log.
+/// Skipping the WAL would report a secret the vault has already stored as missing.
 pub fn list_agent_secrets_read_only(
     store_path: &std::path::Path,
 ) -> Result<Option<OperatorSecretListing>, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
     if schema_version < AGENT_SECRET_SCHEMA_VERSION {
         return Ok(None);

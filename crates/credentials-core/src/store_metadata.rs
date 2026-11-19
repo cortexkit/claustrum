@@ -525,11 +525,9 @@ pub fn list_meta_read_only_with_schema(
     store_path: &std::path::Path,
 ) -> Result<(Vec<(String, RecordMeta)>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
     #[cfg(all(windows, debug_assertions, feature = "test-support"))]
     crate::test_support::windows_runtime_pause("reader")
@@ -561,11 +559,9 @@ pub fn count_refresh_intents_read_only(
     store_path: &std::path::Path,
 ) -> Result<usize, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
 
     conn.query_row("SELECT COUNT(*) FROM refresh_intent", [], |row| {
         row.get::<_, i64>(0)
@@ -595,16 +591,26 @@ pub fn restore_resurrection_read_only(
     store_path: &std::path::Path,
 ) -> Result<RestoreResurrection, StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    // NOT `?mode=ro`, which every other read-only helper in this file uses.
-    //
-    // A freshly restored file carries a WAL-mode header with NO `-wal` companion, and
-    // mode=ro refuses exactly that with SQLite error 14 -- so the house form cannot open
-    // the one artifact this function exists to inspect. `immutable=1` is right HERE and
-    // nowhere else in this file: with no sidecar present there is no uncheckpointed tail
-    // for it to skip, which is the hazard that makes immutable=1 wrong on a live store
-    // (measured in August: immutable=1 read 20 credentials where mode=ro read 21).
+    // A restored file can have a WAL-mode header but no accompanying WAL files.
+    // It needs the immutable URI option; a live store must read its uncheckpointed WAL.
+    // Encode the path before adding the option so SQLite treats path bytes literally.
+    use std::fmt::Write as _;
+    let path = store_path.as_os_str().as_encoded_bytes();
+    let mut uri = String::from("file:");
+    for (index, &byte) in path.iter().enumerate() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':')
+            // A leading double slash is a path, not a URI authority.
+            || (byte == b'/' && (index != 0 || !path.starts_with(b"//")))
+        {
+            uri.push(char::from(byte));
+        } else {
+            write!(uri, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    uri.push_str("?immutable=1");
     let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?immutable=1", store_path.display()),
+        uri,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;

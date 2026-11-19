@@ -417,6 +417,13 @@ impl RefreshAdapter for GithubAppAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
+        // Retrying an import with no App client ID cannot supply it. InvalidGrant
+        // makes the engine mark the record needs_reauth until an operator repairs it.
+        if cred.client_id.as_deref().is_none_or(str::is_empty) {
+            return Err(RefreshError::InvalidGrant(
+                "GitHub App record has no client_id".into(),
+            ));
+        }
         match mint_installation_token_inner(record_id, cred, http).await {
             Ok(InstallationMintOutcome::Minted(token)) => Ok(RefreshedTokens {
                 access_token: token.access_token,

@@ -1080,8 +1080,8 @@ impl EncryptedStore {
         let map =
             |error: rusqlite::Error| StoreOpError::from(StoreError::Backend(error.to_string()));
         let conn = rusqlite::Connection::open_with_flags(
-            format!("file:{}?mode=ro", store_path.display()),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            store_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(map)?;
         Self::remote_inventory_from_conn(&conn).map_err(map)

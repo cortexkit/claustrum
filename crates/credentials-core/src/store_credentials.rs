@@ -884,7 +884,8 @@ impl EncryptedStore {
             .store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT record_version, state, stale_pending, envelope, updated_at_ms, incarnation \
+                    "SELECT record_version, state, stale_pending, envelope, updated_at_ms, incarnation, \
+                            EXISTS(SELECT 1 FROM refresh_intent WHERE credential_id = ?1) \
                      FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |r| {
@@ -894,7 +895,16 @@ impl EncryptedStore {
                         let blob: Vec<u8> = r.get(3)?;
                         let updated_at_ms: i64 = r.get(4)?;
                         let incarnation: String = r.get(5)?;
-                        Ok((version, state, stale_pending, blob, updated_at_ms, incarnation))
+                        let has_refresh_intent: bool = r.get(6)?;
+                        Ok((
+                            version,
+                            state,
+                            stale_pending,
+                            blob,
+                            updated_at_ms,
+                            incarnation,
+                            has_refresh_intent,
+                        ))
                     },
                 )
                 .map(Some)
@@ -905,7 +915,7 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?;
 
-        let (version, state, stale_pending, blob, updated_at_ms, incarnation) =
+        let (version, state, stale_pending, blob, updated_at_ms, incarnation, has_refresh_intent) =
             row.ok_or(StoreOpError::NotFound)?;
         if expected_incarnation.is_some_and(|expected| expected != incarnation) {
             return Err(StoreOpError::NotFound);
@@ -924,6 +934,7 @@ impl EncryptedStore {
                 pending,
                 record_written_at_ms: updated_at_ms,
             },
+            has_refresh_intent,
             stored_digest_hex: sha256_hex_of_bytes(&blob),
         })
     }

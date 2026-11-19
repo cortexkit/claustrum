@@ -2,6 +2,11 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static SCOPED_ENVELOPE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn validate_read_grant(
     principal_kind: &str,
     principal_id: &str,
@@ -285,11 +290,9 @@ pub fn list_read_grants_read_only_with_schema(
     store_path: &std::path::Path,
 ) -> Result<(Vec<ReadGrant>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
-    let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", store_path.display()),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(map)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
     read_grants_from_conn(&conn, None, None, schema_version)
         .map(|grants| (grants, schema_version))
@@ -650,22 +653,76 @@ impl EncryptedStore {
                 grants.retain(|grant| grant.selector_kind != SelectorKind::Exact
                     || !crate::agent_secret::is_deposit_key(&grant.selector));
                 after_grants()?;
+
+                // Resolve coverage without fetching envelopes. A row reached by both
+                // an exact and a category grant is fetched only once.
+                let mut covered = BTreeMap::<String, BTreeSet<GrantOperation>>::new();
+                let mut by_category = BTreeMap::<&str, BTreeSet<GrantOperation>>::new();
+                for grant in &grants {
+                    if grant.operation == GrantOperation::Deposit {
+                        continue;
+                    }
+                    match grant.selector_kind {
+                        SelectorKind::Exact => {
+                            covered
+                                .entry(grant.selector.clone())
+                                .or_default()
+                                .insert(grant.operation);
+                        }
+                        SelectorKind::Category => {
+                            by_category
+                                .entry(grant.selector.as_str())
+                                .or_default()
+                                .insert(grant.operation);
+                        }
+                        SelectorKind::Audience => {}
+                    }
+                }
+                if !by_category.is_empty() {
+                    let mut stmt =
+                        tx.prepare("SELECT credential_id, category FROM credential_categories")?;
+                    let mut categories = stmt.query([])?;
+                    while let Some(row) = categories.next()? {
+                        let category: String = row.get(1)?;
+                        if let Some(operations) = by_category.get(category.as_str()) {
+                            let id: String = row.get(0)?;
+                            if !crate::agent_secret::is_deposit_key(&id) {
+                                covered
+                                    .entry(id)
+                                    .or_default()
+                                    .extend(operations.iter().copied());
+                            }
+                        }
+                    }
+                }
+                if covered.is_empty() {
+                    tx.commit()?;
+                    return Ok((
+                        ScopedListSnapshot { rows: Vec::new(), grants },
+                        Vec::new(),
+                    ));
+                }
                 let mut stmt = tx.prepare(&format!(
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
-                         SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                      )), ''), {}, {}, {}, {}, {} FROM credentials ORDER BY credential_id",
+                          SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
+                       )), ''), {}, {}, {}, {}, {} FROM credentials WHERE credential_id = ?1",
                     provider_ids_column(schema_version), plan_tier_column(schema_version),
                     if schema_version >= 33 { "incarnation" } else { "''" },
                     plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version)
                 ))?;
-                let candidates = stmt
-                    .query_map([], |row| {
+
+                let mut rows = Vec::new();
+                let mut keys = Vec::new();
+                for (id, operations) in covered {
+                    let candidate = stmt.query_row([&id], |row| {
+                        let envelope_bytes = row.get::<_, Vec<u8>>(3)?;
+                        #[cfg(test)]
+                        SCOPED_ENVELOPE_COPIES.with(|count| count.set(count.get() + 1));
                         Ok((
-                            row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)? as u64,
                             RecordState::from_str(&row.get::<_, String>(2)?),
-                            row.get::<_, Vec<u8>>(3)?,
+                            envelope_bytes,
                             split_categories(row.get::<_, String>(4)?),
                             split_provider_ids(row.get::<_, String>(5)?),
                             row.get::<_, Option<String>>(6)?,
@@ -673,33 +730,21 @@ impl EncryptedStore {
                             row.get::<_, Option<i64>>(8)?,
                             row.get::<_, Option<i64>>(9)?,
                         ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                drop(stmt);
-
-                let mut rows = Vec::new();
-                let mut keys = Vec::new();
-                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier, incarnation, operator_observed_at_ms, operator_since_ms) in
-                    candidates
-                {
-                    if crate::agent_secret::is_deposit_key(&id) {
+                    }).optional()?;
+                    let Some((
+                        record_version,
+                        state,
+                        envelope_bytes,
+                        categories,
+                        provider_ids,
+                        plan_tier,
+                        incarnation,
+                        operator_observed_at_ms,
+                        operator_since_ms,
+                    )) = candidate else {
+                        // An exact selector can name a row that is not stored locally.
                         continue;
-                    }
-                    let operations: BTreeSet<GrantOperation> = grants
-                        .iter()
-                        .filter(|grant| grant.operation != GrantOperation::Deposit)
-                        .filter(|grant| match grant.selector_kind {
-                            SelectorKind::Exact => id == grant.selector,
-                            SelectorKind::Audience => false,
-                            SelectorKind::Category => categories
-                                .iter()
-                                .any(|category| grant.selector == category.as_str()),
-                        })
-                        .map(|grant| grant.operation)
-                        .collect();
-                    if operations.is_empty() {
-                        continue;
-                    }
+                    };
                     // `read` and `list` both authorize the row's identity and adapter;
                     // a row reached only by `sign` or `open` stays sealed. Unsealing here
                     // serves metadata only, and no payload leaves this function.
@@ -785,6 +830,7 @@ impl EncryptedStore {
                         auth_method,
                     });
                 }
+                drop(stmt);
                 tx.commit()?;
                 Ok((ScopedListSnapshot { rows, grants }, keys))
             })

@@ -53,21 +53,6 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 impl EncryptedStore {
     // ---- refresh intent log (crash-safe rotation) -----------------------
 
-    /// Whether a refresh has not yet committed or been reconciled. A read that
-    /// observes an intent rechecks under its per-credential lock, allowing a live
-    /// exchange to finish before treating the intent as unresolved.
-    pub(crate) fn has_refresh_intent(&self, credential_id: &str) -> Result<bool, StoreOpError> {
-        self.store
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM refresh_intent WHERE credential_id = ?1)",
-                    [credential_id],
-                    |row| row.get(0),
-                )
-            })
-            .map_err(StoreOpError::from)
-    }
-
     /// Durably open a refresh intent (txn1 of the refresh state machine): the
     /// fsynced marker written BEFORE the provider's rotating endpoint is called.
     ///

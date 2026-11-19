@@ -366,13 +366,11 @@ impl RefreshEngine {
                 hook();
             }
         }
-        // Fresh reads need no per-credential lock unless they observe an intent.
-        // An intent may still belong to a live exchange, so wait for its holder
-        // before deciding whether the stored tokens are safe to serve or reuse.
-        let has_intent = self.store.has_refresh_intent(credential_id)?;
+        // Use the intent from the record snapshot: a later lookup could observe it
+        // cleared by a refresh that just invalidated the record we read.
         let wants_refresh =
             force_refresh || initial.mark.pending || self.is_stale(&initial.record, min_ttl_ms);
-        if !has_intent && !wants_refresh {
+        if !initial.has_refresh_intent && !wants_refresh {
             return Ok(GetWithRefreshStatus {
                 incarnation,
                 record: initial.record,
@@ -388,7 +386,7 @@ impl RefreshEngine {
         let initial = self.store.get_snapshot(credential_id, &incarnation)?;
         // An intent surviving the prior holder is unresolved just as it would be
         // at boot; a fresh access token cannot prove its refresh token survived.
-        if self.store.has_refresh_intent(credential_id)? {
+        if initial.has_refresh_intent {
             return Err(StoreOpError::NeedsReauth.into());
         }
         // A prior holder already refreshed or an admin replaced the row. Preserve
@@ -1019,7 +1017,7 @@ mod lock_registry_tests {
             let _ = release_rx.await;
         });
         entered_rx.await.unwrap();
-        assert!(!engine.store.has_refresh_intent("oauth:fresh").unwrap());
+        assert!(engine.store.read_intent("oauth:fresh").unwrap().is_none());
         let read = engine.get("oauth:fresh", None, false);
         tokio::pin!(read);
         // A ready first poll proves this read never queued behind the held lock.

@@ -314,6 +314,67 @@ fn github_app_record() -> VaultRecord {
 }
 
 #[tokio::test]
+async fn imported_github_app_without_client_id_latches_needs_reauth() {
+    use crate::refresh_adapters::fixture::FixtureTransport;
+    use crate::refresh_adapters::github_app::{GithubAppAdapter, ADAPTER_NAME};
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 97);
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE opened_refreshes (credential_id TEXT);
+                 CREATE TEMP TRIGGER count_refreshes AFTER INSERT ON main.refresh_intent
+                 BEGIN INSERT INTO opened_refreshes VALUES (NEW.credential_id); END;",
+            )
+        })
+        .unwrap();
+    let http = Arc::new(FixtureTransport::ok(200, Vec::new()));
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(GithubAppAdapter::new())],
+        http.clone(),
+    );
+    for (id, client_id) in [
+        ("github_app:missing-app", None),
+        ("github_app:empty-app", Some(String::new())),
+    ] {
+        let mut oauth = OAuthCredential::import(
+            "pi",
+            br#"{"access":"old-access","refresh":"imported-refresh","expires":0}"#,
+        )
+        .unwrap();
+        assert_eq!(oauth.client_id, None);
+        oauth.client_id = client_id;
+        let record = VaultRecord::new_oauth("pi", ADAPTER_NAME, oauth, b"old-access".to_vec());
+        engine.store().create(id, &record).unwrap();
+
+        let error = engine.get(id, None, false).await.unwrap_err();
+        assert!(
+            matches!(error, EngineError::RefreshFailed(RefreshError::InvalidGrant(_))),
+            "a missing App client ID is not recoverable by retry: {error:?}"
+        );
+        assert!(matches!(
+            engine.get(id, None, false).await,
+            Err(EngineError::Store(StoreOpError::NeedsReauth))
+        ));
+        assert!(engine.store().read_intent(id).unwrap().is_none());
+        let opened: i64 = engine
+            .store()
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM opened_refreshes WHERE credential_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(opened, 1, "only the first read should open a refresh intent");
+    }
+    assert!(http.requests().is_empty());
+}
+
+#[tokio::test]
 async fn github_app_engine_passes_record_id_and_latches_slug_mismatch() {
     use crate::refresh_adapters::fixture::FixtureTransport;
     use crate::refresh_adapters::github_app::GithubAppAdapter;
@@ -1109,6 +1170,68 @@ async fn invalid_grant_marks_needs_reauth() {
     }
     assert!(eng.store().read_intent("id").unwrap().is_none());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 3);
+    let id = "oauth:stub";
+    let mut record = stale_oauth_record();
+    record.oauth.as_mut().unwrap().expires_at_ms = Some(i64::MAX);
+    store.create(id, &record).unwrap();
+    let incarnation = store.credential_incarnation(id).unwrap();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("invalid_grant");
+    let (engine, calls) = engine(store, adapter);
+    let engine = Arc::new(engine);
+    assert_eq!(
+        engine.get(id, None, false).await.unwrap().payload.expose(),
+        b"old-access"
+    );
+
+    // Poll through the durable intent write, but leave the adapter at its first yield.
+    let forced = engine.get(id, None, true);
+    tokio::pin!(forced);
+    poll_fn(|cx| {
+        assert!(forced.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(engine.store().read_intent(id).unwrap().is_some());
+
+    let (snapshot_tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    engine.set_after_snapshot_hook(move || {
+        snapshot_tx.send(()).unwrap();
+        resume_rx.recv().unwrap();
+    });
+    let reader = Arc::clone(&engine);
+    let ordinary = tokio::spawn(async move {
+        reader
+            .get_in_incarnation(id, &incarnation, None, false)
+            .await
+    });
+    snapshot_rx.await.unwrap();
+    let refusal = forced.await;
+    resume_tx.send(()).unwrap();
+    assert!(matches!(
+        refusal,
+        Err(EngineError::RefreshFailed(RefreshError::InvalidGrant(_)))
+    ));
+    assert!(engine.store().read_intent(id).unwrap().is_none());
+    assert!(
+        matches!(
+            ordinary.await.unwrap(),
+            Err(EngineError::Store(StoreOpError::NeedsReauth))
+        ),
+        "a read that saw the intent must not return the old token after refusal"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

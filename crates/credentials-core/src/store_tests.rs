@@ -163,6 +163,45 @@ fn a_scoped_first_use_is_recorded_once_however_many_times_it_is_exercised() {
     );
 }
 
+#[test]
+fn repeated_scoped_first_use_makes_no_attempt_to_acquire_the_writer() {
+    thread_local! {
+        static WRITER_CONTENTION: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    let (root, store) = tmp_store(0x77);
+    let id = "apikey:first-use-probe";
+    store
+        .record_scoped_first_use(id, "direct", None, GrantOperation::Read)
+        .unwrap();
+    let mut writer = rusqlite::Connection::open(root.join("store.db")).unwrap();
+    let reservation = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.busy_handler(Some(|_| {
+                WRITER_CONTENTION.with(|count| count.set(count.get() + 1));
+                false
+            }))
+        })
+        .unwrap();
+
+    // A first use for a different operation is a write and must hit the reservation.
+    assert!(store
+        .record_scoped_first_use(id, "direct", None, GrantOperation::Sign)
+        .is_err());
+    assert_eq!(WRITER_CONTENTION.with(|count| count.replace(0)), 1);
+    for _ in 0..4 {
+        store
+            .record_scoped_first_use(id, "direct", None, GrantOperation::Read)
+            .expect("a repeated use does not need the writer");
+    }
+    assert_eq!(WRITER_CONTENTION.with(std::cell::Cell::get), 0);
+    assert_eq!(store.recent_auth_events(5).unwrap().len(), 1);
+    reservation.rollback().unwrap();
+}
+
 /// The scrub shape leaves a WRITABLE store, which was the one claim in the restore
 /// contract I had only read at source rather than exercised.
 ///
@@ -266,6 +305,63 @@ fn scratch_db(label: &str) -> (TestTempDir, std::path::PathBuf) {
     ));
     let path = root.join("store.db");
     (root, path)
+}
+
+#[test]
+fn offline_readers_accept_literal_uri_characters_and_see_the_live_wal() {
+    let (root, _) = scratch_db("literal-path");
+    for folder in ["vault#daily", "vault%20daily"] {
+        let path = root.join(folder).join("store.db");
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let store = store_at(&path, 0x77);
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch("PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);")
+            })
+            .unwrap();
+        let id = "apikey:offline-wal-probe";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"dummy".to_vec(), None);
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store.open_intent(id, 1, "dummy-hash").unwrap();
+
+        let (rows, _) =
+            list_meta_read_only_with_schema(&path).expect("read live store by literal path");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, id);
+        assert_eq!(count_refresh_intents_read_only(&path).unwrap(), 1);
+        assert_eq!(
+            verify_audit_chain_read_only(&path, &MasterKey::from_bytes([0x77; MASTER_KEY_LEN]))
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn restore_report_accepts_a_literal_hash_and_percent_in_the_copy_path() {
+    let (root, source) = scratch_db("restore-literal-path");
+    {
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE handles (revoked INTEGER);
+             CREATE TABLE refresh_intent (credential_id TEXT);
+             CREATE TABLE read_grants (principal_id TEXT);
+             INSERT INTO handles VALUES (0);",
+        )
+        .unwrap();
+    }
+    let dir = root.join("vault#daily%20x");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("store.db");
+    std::fs::copy(source, &path).unwrap();
+    assert!(!dir.join("store.db-wal").exists());
+    let report =
+        restore_resurrection_read_only(&path).expect("read the restored copy by literal path");
+    assert_eq!(report.live_handles, 1);
 }
 
 /// The restore report answers on a file the house read-only form CANNOT open.
@@ -544,7 +640,11 @@ fn tmp_store(seed: u8) -> (TestTempDir, EncryptedStore) {
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    let db = root.join("store.db");
+    let store = store_at(&root.join("store.db"), seed);
+    (root, store)
+}
+
+fn store_at(db: &std::path::Path, seed: u8) -> EncryptedStore {
     let descriptor = StorageDescriptor {
         module_id: "cortexkit-credentials".into(),
         storage_namespace: "vault".into(),
@@ -556,7 +656,7 @@ fn tmp_store(seed: u8) -> (TestTempDir, EncryptedStore) {
     let store = open_sqlite(&descriptor).expect("open");
     EncryptedStore::migrate(&store).expect("migrate");
     let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
-    (root, EncryptedStore::open(store, key).expect("open vault"))
+    EncryptedStore::open(store, key).expect("open vault")
 }
 
 #[path = "store_ssh_enrollment_tests.rs"]

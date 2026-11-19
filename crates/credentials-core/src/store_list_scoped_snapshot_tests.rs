@@ -5,6 +5,84 @@ use crate::record::RecordIdentity;
 use crate::store::taxonomy_tests::{api_record, rig};
 
 #[test]
+fn list_scoped_copies_only_covered_envelopes() {
+    use super::grants::SCOPED_ENVELOPE_COPIES;
+
+    let (_root, store) = rig("list-copy-count", 89);
+    let covered_id = "apikey:zai";
+    store
+        .create_audited(covered_id, &api_record(), AuditCtx::admin(AuditOp::Put))
+        .unwrap();
+    let unrelated =
+        VaultRecord::new_static(CredentialKind::ApiKey, "test", vec![b'x'; 32 * 1024], None);
+    for i in 0..8 {
+        store
+            .create_audited(
+                &format!("operator:unrelated-{i}"),
+                &unrelated,
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+    }
+    for (kind, selector, operation) in [
+        (SelectorKind::Exact, covered_id, GrantOperation::Sign),
+        (SelectorKind::Category, "llm-provider", GrantOperation::Read),
+    ] {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                kind,
+                selector,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+
+    SCOPED_ENVELOPE_COPIES.with(|count| count.set(0));
+    let listed = store
+        .list_scoped_snapshot("reserved", "consumer", &DeclaredGrantSet::empty())
+        .unwrap();
+    assert_eq!(listed.rows.len(), 1);
+    assert_eq!(listed.rows[0].id, covered_id);
+    assert_eq!(listed.rows[0].operations.len(), 2);
+    assert!(listed.rows[0].operations.contains(&GrantOperation::Read));
+    assert!(listed.rows[0].operations.contains(&GrantOperation::Sign));
+    assert_eq!(SCOPED_ENVELOPE_COPIES.with(std::cell::Cell::get), 1);
+}
+
+#[test]
+fn list_scoped_with_only_an_audience_grant_does_not_query_local_rows() {
+    let (_root, store) = rig("list-no-local-grants", 89);
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "ckbus",
+            SelectorKind::Audience,
+            "cortexkit-hub",
+            GrantOperation::AccountToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+
+    // With neither local table available, even preparing a local query would fail.
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE credentials RENAME TO unused_credentials;
+                 ALTER TABLE credential_categories RENAME TO unused_categories;",
+            )
+        })
+        .unwrap();
+    let listed = store
+        .list_scoped_snapshot("reserved", "ckbus", &DeclaredGrantSet::empty())
+        .expect("audience coverage does not require local credential rows");
+    assert!(listed.rows.is_empty());
+    assert_eq!(listed.grants.len(), 1);
+}
+
+#[test]
 fn list_scoped_keeps_grants_candidates_and_categories_in_one_snapshot() {
     let (root, store) = rig("list-snapshot", 89);
     store

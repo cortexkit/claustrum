@@ -225,6 +225,66 @@ async fn member_watch_applies_full_snapshots_and_preserves_invalid_and_colliding
 }
 
 #[tokio::test]
+async fn member_watch_rebinds_when_the_first_snapshot_misses_the_open_budget() {
+    use crate::support::Held;
+    use claustrum_module_probe::federation::outbound::ADMIN_OP_BUDGET;
+
+    let rig = Rig::new("member-first-snapshot-timeout", Reply::SilentWatch).await;
+    seed(&rig, HOME, "pair-a", "oauth:retained");
+    tokio::time::pause();
+    let opening = Held::new();
+    rig.vaults.callosum.gate_open(TARGET, opening.clone());
+    rig.pairings.send_replace(paired());
+    opening.arrived().await;
+    tokio::time::advance(ADMIN_OP_BUDGET / 2).await;
+    opening.release(Reply::Ok(json!({})));
+    wait_until(|| rig.requests() == 1).await;
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP,
+        Reply::Watch(notice(vec![login("oauth:fresh")])),
+    );
+
+    tokio::time::advance(ADMIN_OP_BUDGET / 2 + Duration::from_millis(1)).await;
+    assert!(
+        crate::support::poll_until_ready(std::future::poll_fn(|_| {
+            if rig.vaults.callosum.cancelled_watches() == 1 {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        }))
+        .await
+        .is_some(),
+        "silent watch was not cancelled at the original open deadline"
+    );
+    assert!(rig
+        .home
+        .store
+        .remote_record("oauth:retained")
+        .unwrap()
+        .is_some());
+    tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+    rig.row("oauth:fresh").await;
+    assert_eq!(rig.vaults.callosum.opens(TARGET).len(), 2);
+    assert!(rig
+        .home
+        .store
+        .remote_record("oauth:retained")
+        .unwrap()
+        .is_none());
+
+    tokio::time::advance(ADMIN_OP_BUDGET * 2).await;
+    rig.vaults
+        .callosum
+        .watch_snapshot(Some(notice(vec![login("oauth:later")])))
+        .await;
+    rig.row("oauth:later").await;
+    assert_eq!(rig.requests(), 2, "an established stream must stay open");
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn member_watch_retries_bad_notices_clean_end_and_disconnect_without_deleting() {
     let rig = Rig::new("member-retry", Reply::Watch(notice(vec![login("oauth:x")]))).await;
     rig.pairings.send_replace(paired());

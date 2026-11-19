@@ -388,6 +388,7 @@ impl ReplyNote {
 pub enum Reply {
     /// Start a held discovery watch with a full initial snapshot.
     Watch(Value),
+    SilentWatch,
     /// A successful reply body.
     Ok(Value),
     /// A permanent callosum refusal class, as `fed_not_exposed` and friends arrive.
@@ -408,7 +409,10 @@ pub enum Reply {
     RouteRefusal(String),
     /// Send a subscription error on its route or on channel zero, retaining the
     /// supplied body so tests can check structured terminal details.
-    SubscriptionError { channel_zero: bool, body: Value },
+    SubscriptionError {
+        channel_zero: bool,
+        body: Value,
+    },
     /// Compute the reply from the request's params, on a task of its own. This is how
     /// a test puts a real home vault behind the stand-in: the handler calls the home
     /// and returns what it answered, so the requester's fetch crosses a real route.
@@ -1507,6 +1511,12 @@ async fn serve_one(
                     Some(&body),
                 );
                 let _ = write_frame(&mut *writer.lock().await, &reply).await;
+            }
+            Reply::SilentWatch => {
+                watches.insert(
+                    (frame.header.channel, frame.header.corr),
+                    frame.header.epoch,
+                );
             }
             Reply::Ok(body) => {
                 note.record(&body);

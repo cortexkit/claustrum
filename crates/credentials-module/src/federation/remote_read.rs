@@ -830,10 +830,19 @@ impl RemoteReader {
         let demand = home_demand(min_ttl_ms);
         let (mut done, joined_at) = {
             let mut ids = self.lock();
-            let state = Self::state_for(&mut ids, record);
             let now = (self.mono)();
+            // Do not retain token bytes that no consumer can use. Keep the per-id
+            // ordering state so the sweep cannot invalidate an in-flight verdict.
+            for state in ids.values_mut() {
+                if state.cache.as_ref().is_some_and(|entry| {
+                    !entry.resident(now) || !lifetime_ok(&entry.reply, entry.t0_mono, now, 0)
+                }) {
+                    state.cache = None;
+                }
+            }
+            let state = Self::state_for(&mut ids, record);
             if let Some(entry) = state.cache.as_ref() {
-                if entry.resident(now) && lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
+                if lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
                     return RemoteAnswer::Served(served(&entry.reply, entry.t0_wall));
                 }
             }
@@ -2193,6 +2202,76 @@ mod tests {
             refresh_adapter: Some("anthropic".into()),
             detected_plan: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_remote_read_releases_unusable_cached_replies() {
+        use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+        use credentials_core::{
+            federation::NewRemoteRecord, key::MasterKey, test_support::TestTempDir,
+        };
+
+        let root = TestTempDir::new("remote-read-cache-sweep");
+        let sqlite = open_sqlite(&StorageDescriptor {
+            module_id: "claustrum".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        EncryptedStore::migrate(&sqlite).unwrap();
+        let store =
+            Arc::new(EncryptedStore::open(sqlite, MasterKey::from_bytes([77; 32])).unwrap());
+        let active = store
+            .remote_add_audited(&NewRemoteRecord {
+                credential_id: "oauth:still-active".into(),
+                home_member: HOME.into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: RecordIdentity::default(),
+                home_version: 1,
+                categories: Vec::new(),
+            })
+            .unwrap();
+        let origin = tokio::time::Instant::now();
+        let reader = Arc::new(RemoteReader::new(store, ["anthropic".into()]).with_clocks(
+            real_wall(),
+            Arc::new(move || origin.elapsed().as_millis() as u64),
+        ));
+        let make_entry = |expires, recheck| CacheEntry {
+            reply: Arc::new(reply(expires, recheck)),
+            t0_mono: 0,
+            t0_wall: 0,
+        };
+        let mut expired_replies = Vec::new();
+        {
+            let mut ids = reader.lock();
+            RemoteReader::state_for(&mut ids, &active).cache = Some(make_entry(None, None));
+            for (id, entry) in [
+                ("oauth:short-recheck", make_entry(None, Some(1))),
+                ("oauth:expires", make_entry(Some(EXPIRY_SKEW_MS + 1), None)),
+            ] {
+                expired_replies.push(Arc::downgrade(&entry.reply));
+                let mut state = IdState::new("test-incarnation");
+                state.verdicts = 7;
+                state.cache = Some(entry);
+                ids.insert(id.into(), state);
+            }
+        }
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            reader.get(&active, None).await,
+            RemoteAnswer::Served(_)
+        ));
+        assert!(expired_replies
+            .iter()
+            .all(|reply| reply.upgrade().is_none()));
+        let ids = reader.lock();
+        assert_eq!(ids["oauth:short-recheck"].verdicts, 7);
+        assert!(ids[&active.credential_id].cache.is_some());
     }
 
     #[test]

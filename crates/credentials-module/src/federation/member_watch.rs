@@ -221,12 +221,13 @@ impl Worker {
             request: json!({"method": "federation.remote_watch", "params": {}}),
         };
         let route_key = format!("member-watch:{home}");
+        let budget = Instant::now() + ADMIN_OP_BUDGET;
         let opened = tokio::select! {
             biased;
             _ = self.stop.changed() => return None,
             // The daemon client's consumer identity attests reserved:claustrum.
             // Cache bindings separately for each home, not under that shared identity.
-            result = self.client.subscribe(&route_key, request, ADMIN_OP_BUDGET) => result,
+            result = self.client.subscribe_until(&route_key, request, budget) => result,
         };
         let mut subscription = match opened {
             Ok(subscription) => subscription,
@@ -242,6 +243,12 @@ impl Worker {
             let event = tokio::select! {
                 biased;
                 _ = self.stop.changed() => return None,
+                _ = tokio::time::sleep_until(budget), if !received => {
+                    self.client.invalidate_subscription(&route_key, &subscription);
+                    return Some(SessionEnd::Dropped(OutboundError::Unavailable(
+                        "first home watch snapshot timed out".into(),
+                    )));
+                },
                 event = subscription.next_event() => event,
                 _ = self.replays.changed() => { self.replay().await; continue; },
                 _ = self.wakes.changed(), if self.pending_apply => {

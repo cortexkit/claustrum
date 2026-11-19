@@ -721,7 +721,8 @@ fn cmd_gateway_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliErro
 
 pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let explicit_ids = provider_id_flags(args)?;
-    check_deposit_provider_flags(optional(args, "--id").as_deref(), &explicit_ids)?;
+    let explicit_id = optional(args, "--id");
+    check_deposit_provider_flags(explicit_id.as_deref(), &explicit_ids)?;
     use credentials_core::oauth_login::{
         decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
         extract_chatgpt_account_id, generate_pkce, generate_state,
@@ -755,6 +756,17 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     } else {
         None
     };
+    let picked_id = other
+        .as_ref()
+        .map(|choice| choice.key.id())
+        .or(interactive.id_override.as_deref());
+    if let (Some(explicit), Some(picked)) = (explicit_id.as_deref(), picked_id) {
+        if explicit != picked {
+            return Err(CliError::Usage(format!(
+                "login picker selected '{picked}', but --id names '{explicit}'"
+            )));
+        }
+    }
     let provider = match &other {
         Some(choice) => parse_credential_id(choice.key.id()).provider.to_string(),
         None => interactive.provider.clone(),
@@ -764,19 +776,18 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     // Resolve the target credential id BEFORE routing so the dispatch can key on the
     // credential METHOD, not the bare provider name. openai/xai/google each name both
     // an OAuth login (chatgpt:openai / oauth:xai / oauth:google) and an api-key row
-    // (apikey:*). Precedence: explicit --id > the interactive picker's chosen id > the
-    // provider's default. Other uses the id entered at its name prompt instead.
+    // (apikey:*). Use the supplied or picked id (which must agree when both are
+    // present), or the provider default when neither is set.
     // Route to the api-key branch when the provider has ONLY an
     // api-key login, OR it has both AND the resolved id is explicitly an `apikey:` id.
     // (Gating purely on the id's method would send a malformed `--id zai` for an
     // api-key-only provider to the "unknown provider" path instead of the helpful
     // id-rail error.)
-    let target_id = match &other {
-        Some(choice) => choice.key.id().to_string(),
-        None => optional(args, "--id")
-            .or_else(|| interactive.id_override.clone())
-            .unwrap_or_else(|| default_login_id(&provider)),
-    };
+    let target_id = explicit_id
+        .as_deref()
+        .or(picked_id)
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_login_id(&provider));
     let has_oauth_login =
         login_provider(&provider).is_some() || google_login::is_provider(&provider);
     let apikey_row = api_key_login::API_KEY_PROVIDERS

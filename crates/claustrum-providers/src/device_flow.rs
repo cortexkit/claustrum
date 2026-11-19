@@ -5,7 +5,8 @@
 //! drift from the same pending/slow-down/expiry behavior.
 
 use std::future::Future;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::Instant;
 
 use serde::Deserialize;
 
@@ -391,10 +392,11 @@ where
 {
     let mut consecutive_failures = 0u8;
     loop {
-        if Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(LoginError::Device("device authorization expired".into()));
         }
-        sleep(*interval).await;
+        sleep((*interval).min(remaining)).await;
         if Instant::now() >= deadline {
             return Err(LoginError::Device("device authorization expired".into()));
         }
@@ -931,6 +933,36 @@ mod tests {
 #[cfg(test)]
 mod expiry_rules {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn device_poll_wait_is_clamped_after_slow_down() {
+        let mut polls = 0;
+        let mut request = || {
+            polls += 1;
+            std::future::ready(Ok(HttpResponse {
+                status: 400,
+                body: br#"{"error":"slow_down"}"#.to_vec(),
+            }))
+        };
+        let lifetime = Duration::from_secs(7);
+        let result = tokio::time::timeout(
+            lifetime + Duration::from_millis(1),
+            run_poll_loop_typed(
+                &mut request,
+                &mut Duration::from_secs(5),
+                Instant::now() + lifetime,
+                &mut tokio::time::sleep,
+                parse_token_response,
+            ),
+        )
+        .await
+        .expect("device flow must return at expiry even after slow_down");
+        assert!(
+            matches!(result, Err(LoginError::Device(message)) if message == "device authorization expired")
+        );
+        assert_eq!(polls, 1, "must not poll again after expiry");
+    }
+
     #[test]
     fn device_tokens_without_lifetime_use_access_jwt_expiry() {
         let jwt = format!(

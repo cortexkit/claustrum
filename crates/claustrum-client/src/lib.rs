@@ -47,7 +47,9 @@ use subc_transport::{authenticate_client, connection_file, read_frame, write_fra
 #[cfg(feature = "transport")]
 use tokio::net::TcpStream;
 #[cfg(feature = "transport")]
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
+#[cfg(feature = "transport")]
+use tokio::time::Instant;
 
 #[cfg(feature = "consumer")]
 mod consumer;
@@ -1231,6 +1233,48 @@ impl LiveCredentialGetTarget {
         Ok(())
     }
 
+    async fn lock_scoped_read(
+        &self,
+        deadline: Instant,
+        operation: &str,
+    ) -> Result<
+        MutexGuard<'_, Option<Box<dyn CredentialConsumerConnection>>>,
+        CredentialResolverError,
+    > {
+        // A caller that times out in the queue has not used the held connection.
+        let consumer = tokio::time::timeout_at(deadline, self.consumer.lock())
+            .await
+            .map_err(|_| Self::deadline_error(operation))?;
+        // Tokio can grant a ready lock on the same poll as an expired timer.
+        if Instant::now() >= deadline {
+            return Err(Self::deadline_error(operation));
+        }
+        Ok(consumer)
+    }
+
+    async fn get_scoped(
+        &self,
+        credential_id: &str,
+        min_ttl_ms: Option<u64>,
+    ) -> Result<Value, CredentialResolverError> {
+        let deadline = Instant::now() + self.call_deadline;
+        let mut consumer = self
+            .lock_scoped_read(deadline, CREDENTIAL_GET_SCOPED_OP)
+            .await?;
+        let result = tokio::time::timeout_at(deadline, async {
+            self.connect_if_needed(&mut consumer).await?;
+            consumer
+                .as_mut()
+                .expect("credential consumer initialized")
+                .credential_get_scoped(credential_id, min_ttl_ms)
+                .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
+        Self::clear_failed_transport(&mut consumer, &result);
+        result
+    }
+
     async fn sensitive_request(
         &self,
         request: Secret<Vec<u8>>,
@@ -1337,21 +1381,7 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         &'a self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_get_scoped(credential_id, None),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(self.get_scoped(credential_id, None))
     }
 
     fn credential_get_scoped_with_min_ttl<'a>(
@@ -1359,21 +1389,7 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         credential_id: &'a str,
         min_ttl_ms: u64,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_get_scoped(credential_id, Some(min_ttl_ms)),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(self.get_scoped(credential_id, Some(min_ttl_ms)))
     }
 
     fn credential_report_auth_failure<'a>(
@@ -1440,15 +1456,18 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
         Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
+            let deadline = Instant::now() + self.call_deadline;
+            let mut consumer = self
+                .lock_scoped_read(deadline, CREDENTIAL_STATUS_OP)
+                .await?;
+            let result = tokio::time::timeout_at(deadline, async {
+                self.connect_if_needed(&mut consumer).await?;
                 consumer
                     .as_mut()
                     .expect("credential consumer initialized")
-                    .credential_status(credential_id),
-            )
+                    .credential_status(credential_id)
+                    .await
+            })
             .await
             .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_STATUS_OP)));
             Self::clear_failed_transport(&mut consumer, &result);
@@ -1524,15 +1543,18 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         &self,
     ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
         Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
+            let deadline = Instant::now() + self.call_deadline;
+            let mut consumer = self
+                .lock_scoped_read(deadline, CREDENTIAL_LIST_SCOPED_OP)
+                .await?;
+            let result = tokio::time::timeout_at(deadline, async {
+                self.connect_if_needed(&mut consumer).await?;
                 consumer
                     .as_mut()
                     .expect("credential consumer initialized")
-                    .credential_list_scoped(),
-            )
+                    .credential_list_scoped()
+                    .await
+            })
             .await
             .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_LIST_SCOPED_OP)));
             Self::clear_failed_transport(&mut consumer, &result);
@@ -2732,7 +2754,7 @@ mod tests {
     }
 
     #[cfg(feature = "transport")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn silent_call_deadline_is_transport_rebuilds_and_releases_mutex_mutation_proof() {
         let dials = Arc::new(AtomicUsize::new(0));
         let deadline = Duration::from_millis(20);
@@ -2742,18 +2764,16 @@ mod tests {
             }),
             deadline,
         ));
-        let first = tokio::spawn({
-            let target = Arc::clone(&target);
-            async move { target.credential_get_scoped("github_app:first").await }
-        });
-        tokio::time::timeout(deadline, async {
-            while dials.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
+        let first_error = tokio::time::timeout(
+            deadline.saturating_mul(3),
+            target.credential_get_scoped("github_app:first"),
+        )
         .await
-        .expect("first call must dial before the fixture deadline");
+        .expect("the scoped call's own timeout must fire")
+        .expect_err("the silent first consumer must reach the whole-call deadline");
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
 
+        // Start the recovery call after the timeout so it has its own full budget.
         let second = tokio::time::timeout(
             deadline.saturating_mul(3),
             target.credential_get_scoped("github_app:second"),
@@ -2761,11 +2781,6 @@ mod tests {
         .await
         .expect("a timed-out holder must release the consumer mutex")
         .expect("the rebuilt consumer must serve the second caller");
-        let first_error = first
-            .await
-            .expect("deadline task must join")
-            .expect_err("the silent first consumer must reach the whole-call deadline");
-
         assert_eq!(first_error.class, CredentialErrorClass::Transport);
         assert!(first_error.retryable());
         assert_eq!(
@@ -2778,6 +2793,82 @@ mod tests {
             2,
             "the deadline must clear the stale cached consumer before the next call"
         );
+    }
+
+    #[cfg(feature = "transport")]
+    #[tokio::test(start_paused = true)]
+    async fn scoped_read_deadlines_expire_in_the_queue_without_clearing_the_held_route() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let deadline = Duration::from_secs(5);
+        let target = LiveCredentialGetTarget::new(
+            Arc::new(DeadlineConnector {
+                dials: dials.clone(),
+            }),
+            deadline,
+        );
+        let mut holder = target.consumer.lock().await;
+        *holder = Some(Box::new(DeadlineConsumer { hangs: false }));
+
+        let results = tokio::time::timeout(deadline + Duration::from_millis(1), async {
+            tokio::join!(
+                target.credential_get_scoped("github_app:queued"),
+                target.credential_get_scoped_with_min_ttl("github_app:queued", 1),
+                target.credential_status("github_app:queued"),
+                target.credential_list_scoped(),
+            )
+        })
+        .await
+        .expect("queued reads must time out while another caller still holds the route");
+        for result in [results.0, results.1, results.2, results.3] {
+            assert!(result.unwrap_err().is_transport());
+        }
+        assert!(holder.is_some());
+        drop(holder);
+        target
+            .credential_get_scoped("github_app:later")
+            .await
+            .unwrap();
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "the holder's route must be reused"
+        );
+    }
+
+    #[cfg(feature = "transport")]
+    #[tokio::test(start_paused = true)]
+    async fn scoped_read_shares_one_deadline_between_connecting_and_calling() {
+        #[derive(Debug)]
+        struct SlowConnector(Duration);
+
+        impl CredentialConsumerConnector for SlowConnector {
+            fn connect(
+                &self,
+            ) -> CredentialResolverFuture<
+                '_,
+                Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
+            > {
+                Box::pin(async move {
+                    tokio::time::sleep(self.0).await;
+                    Ok(Box::new(DeadlineConsumer { hangs: true })
+                        as Box<dyn CredentialConsumerConnection>)
+                })
+            }
+        }
+
+        let deadline = Duration::from_secs(5);
+        for dial_time in [Duration::from_secs(3), Duration::from_secs(6)] {
+            let target = LiveCredentialGetTarget::new(Arc::new(SlowConnector(dial_time)), deadline);
+            let error = tokio::time::timeout(
+                deadline + Duration::from_millis(1),
+                target.credential_get_scoped("github_app:slow"),
+            )
+            .await
+            .expect("dial and request must share one deadline")
+            .unwrap_err();
+            assert!(error.is_transport());
+            assert!(target.consumer.lock().await.is_none());
+        }
     }
 
     #[cfg(feature = "transport")]

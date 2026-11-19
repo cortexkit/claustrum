@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { once } from 'node:events'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -258,6 +259,36 @@ test('a failed retry after a reconnect keeps the original code and class', async
       expect(vault.requests).toHaveLength(2)
     })
 })
+
+for (const operation of ['poll', 'rotate'] as const) {
+  test(`enrollment ${operation} is not replayed after losing its committed reply`, async () => {
+    const method = `auth.enroll_${operation}`
+    let committed = false
+    await withVault((requested) => {
+      if (requested === 'auth.enroll_propose') return { type: FrameType.Response, body: PROPOSED }
+      expect(requested).toBe(method)
+      if (committed) return { type: FrameType.Response, body: { result: {
+        error: { code: 'already_consumed', class: 'permanent' },
+      } } }
+      committed = true
+      return errorFrame('module_timeout')
+    }, async ({ client, vault, connects }) => {
+      const originalSocket = [...vault.sockets][0]!
+      const originalClosed = once(originalSocket, 'close')
+      const call = operation === 'poll'
+        ? client.enrollPoll({ requestId: 'request-id', requestSecret: 'fixture-request-secret' })
+        : client.enrollRotate({ token: 'a'.repeat(64), expectedTokenGeneration: 1 })
+      expect(await failureOf(call)).toMatchObject({ code: 'module_timeout', class: 'transient' })
+      expect(vault.requests.map(({ method }) => method)).toEqual([method])
+      expect(connects()).toBe(2)
+      // Reconnect swaps in the new transport before closing the old one.
+      await originalClosed
+      expect(await client.enrollPropose(PROPOSE)).toEqual({ requestId: 'request-id' })
+      expect(vault.requests.map(({ method }) => method)).toEqual([method, 'auth.enroll_propose'])
+      expect(connects()).toBe(2)
+    })
+  })
+}
 
 /**
  * The remaining definitive codes, which a real vault or daemon sends in other

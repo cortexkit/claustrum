@@ -1247,6 +1247,95 @@ fn seed_login_key(fixture: &Fixture, id: &str) {
     );
 }
 
+#[test]
+fn login_picker_cannot_replace_a_different_explicit_id() {
+    use credentials_core::{OAuthCredential, VaultRecord};
+
+    let fixture = Fixture::new();
+    let chosen = "oauth:digitalocean:a";
+    let explicit = "oauth:digitalocean:b";
+    let store = fixture.store();
+    for (id, value) in [(chosen, "original-a"), (explicit, "original-b")] {
+        store
+            .create(
+                id,
+                &VaultRecord::new_oauth(
+                    "fixture",
+                    "digitalocean",
+                    OAuthCredential {
+                        access_token: value.to_owned().into(),
+                        refresh_token: String::new().into(),
+                        expires_at_ms: Some(4_102_444_800_000),
+                        token_url: String::new(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: vec![],
+                    },
+                    value.as_bytes().to_vec(),
+                ),
+            )
+            .unwrap();
+    }
+    drop(store);
+    let (status, screen) = terminal_cli::run(
+        fixture.command(&[
+            "login",
+            "--id",
+            explicit,
+            "--approve-on",
+            "other",
+            "--browser",
+            "show",
+        ]),
+        &[
+            (LOGIN_PICKER, b"DigitalOcean GenAI\r", false),
+            ("This provider already has a credential", b"\x1b[B\r", false),
+            ("paste it here", b"invalid-callback\r", false),
+        ],
+    );
+    assert_eq!(status.code(), Some(1), "{screen}");
+    assert!(
+        screen.contains(&format!(
+            "login picker selected '{chosen}', but --id names '{explicit}'"
+        )),
+        "{screen}"
+    );
+    assert!(!screen.contains("Open this URL"), "{screen}");
+    let store = fixture.store();
+    assert_eq!(store.get(chosen).unwrap().payload.expose(), b"original-a");
+    assert_eq!(store.get(explicit).unwrap().payload.expose(), b"original-b");
+}
+
+#[test]
+fn digitalocean_reads_pasted_bearer_with_terminal_echo_disabled() {
+    let fixture = Fixture::new();
+    let (status, screen) = terminal_cli::run(
+        fixture.command(&[
+            "login",
+            "--provider",
+            "digitalocean",
+            "--approve-on",
+            "other",
+            "--browser",
+            "show",
+        ]),
+        &[(
+            "paste it here",
+            b"#access_token=paste-echo-canary&expires_in=60&state=wrong\r",
+            true,
+        )],
+    );
+    assert!(!status.success(), "wrong callback state must be refused");
+    assert!(
+        !screen.contains("paste-echo-canary"),
+        "pasted bearer was echoed"
+    );
+    assert!(
+        screen.contains("DigitalOcean callback state did not match"),
+        "{screen}"
+    );
+}
+
 const GATEWAY_KIND: &str = "Gateway kind";
 const GATEWAY_URL: &str = "Gateway base URL";
 const GATEWAY_HEADER: &str = "Fixed header (empty to finish)";

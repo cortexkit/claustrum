@@ -40,6 +40,7 @@ pub mod gateway;
 pub mod gh_manifest;
 pub use claustrum_providers::google_login;
 pub mod health;
+pub mod hub_counters;
 pub use claustrum_providers::http;
 pub mod kem;
 pub use claustrum_model::key;

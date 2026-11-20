@@ -84,60 +84,67 @@ impl EncryptedStore {
         report: &GhManifestActivationReport<'_>,
         ctx: AuditCtx<'_>,
     ) -> Result<GhManifestActivationOutcome, StoreOpError> {
-        Ok(self.fenced_write(|tx| {
-            let active: Option<i64> = tx
-                .query_row(
-                    "SELECT version FROM gh_manifest_activations WHERE member_id = ?1",
-                    [report.member_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            let lower_version_reported =
-                active
-                    .filter(|active| report.version < *active)
-                    .map(|active| GhManifestLowerVersionReported {
-                        reported: report.version,
-                        active,
-                    });
-            tx.execute(
-                "INSERT INTO gh_manifest_activations \
+        Ok(self.fenced_write(|tx| self.report_gh_manifest_active_tx(tx, report, ctx))?)
+    }
+
+    pub(super) fn report_gh_manifest_active_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        report: &GhManifestActivationReport<'_>,
+        ctx: AuditCtx<'_>,
+    ) -> rusqlite::Result<GhManifestActivationOutcome> {
+        let active: Option<i64> = tx
+            .query_row(
+                "SELECT version FROM gh_manifest_activations WHERE member_id = ?1",
+                [report.member_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let lower_version_reported =
+            active
+                .filter(|active| report.version < *active)
+                .map(|active| GhManifestLowerVersionReported {
+                    reported: report.version,
+                    active,
+                });
+        tx.execute(
+            "INSERT INTO gh_manifest_activations \
                  (member_id, version, payload_sha256, verdict, reason, reported_at_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(member_id) DO UPDATE SET version = excluded.version, \
                  payload_sha256 = excluded.payload_sha256, verdict = excluded.verdict, \
                  reason = excluded.reason, reported_at_ms = excluded.reported_at_ms",
-                params![
-                    report.member_id,
-                    report.version,
-                    report.payload_sha256,
-                    report.verdict.as_str(),
-                    report.reason,
-                    report.reported_at_ms
-                ],
-            )?;
-            let inserted = tx.execute(
-                "INSERT INTO gh_manifest_activation_audits (member_id, version, verdict) \
+            params![
+                report.member_id,
+                report.version,
+                report.payload_sha256,
+                report.verdict.as_str(),
+                report.reason,
+                report.reported_at_ms
+            ],
+        )?;
+        let inserted = tx.execute(
+            "INSERT INTO gh_manifest_activation_audits (member_id, version, verdict) \
                  SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM gh_manifests WHERE version = ?2) \
                  ON CONFLICT(member_id, version, verdict) DO NOTHING",
-                params![report.member_id, report.version, report.verdict.as_str()],
+            params![report.member_id, report.version, report.verdict.as_str()],
+        )?;
+        if inserted != 0 {
+            append_audit_tx(
+                tx,
+                &self.audit_key,
+                &GhManifestAudit::Activation {
+                    member_id: report.member_id,
+                    version: report.version,
+                    verdict: report.verdict.as_str(),
+                }
+                .record(ctx.actor, ctx.alarm),
             )?;
-            if inserted != 0 {
-                append_audit_tx(
-                    tx,
-                    &self.audit_key,
-                    &GhManifestAudit::Activation {
-                        member_id: report.member_id,
-                        version: report.version,
-                        verdict: report.verdict.as_str(),
-                    }
-                    .record(ctx.actor, ctx.alarm),
-                )?;
-            }
-            Ok(GhManifestActivationOutcome {
-                lower_version_reported,
-            })
-        })?)
+        }
+        Ok(GhManifestActivationOutcome {
+            lower_version_reported,
+        })
     }
 
     /// Retirement removes a member from readiness, not delivery. Reports leave
@@ -154,6 +161,9 @@ impl EncryptedStore {
                  ON CONFLICT(member_id) DO UPDATE SET retired_at_ms = excluded.retired_at_ms",
                 params![member_id, retired_at_ms],
             )?;
+            if super::read_schema_version(tx)? >= super::HUB_ENTRIES_SCHEMA_VERSION {
+                super::hub_entries::end_hub_manifest_membership_tx(tx, member_id)?;
+            }
             append_audit_tx(
                 tx,
                 &self.audit_key,
@@ -182,12 +192,16 @@ impl EncryptedStore {
             ).optional()?;
             let Some(manifest_sha256) = manifest_sha256 else { return Ok(None); };
             let computers = tx.prepare(
-                "SELECT expected.member_id, a.version, a.payload_sha256, a.verdict, a.reason, a.reported_at_ms \
-                 FROM (SELECT value AS member_id FROM settings WHERE name = ?1 AND value != '' \
-                       UNION SELECT member_id FROM member_grants WHERE operation = 'secret_use' \
-                       UNION SELECT member_id FROM gh_manifest_activations) AS expected \
-                 LEFT JOIN gh_manifest_activations AS a ON a.member_id = expected.member_id \
-                 WHERE a.retired_at_ms IS NULL ORDER BY expected.member_id COLLATE BINARY",
+                "WITH admitted AS (SELECT value AS member_id FROM settings WHERE name = ?1 AND value != '' \
+                    UNION SELECT member_id FROM member_grants WHERE operation = 'secret_use'), \
+                 expected AS (SELECT member_id FROM admitted \
+                    UNION SELECT member_id FROM gh_manifest_activations) \
+                 SELECT expected.member_id, a.version, a.payload_sha256, a.verdict, a.reason, a.reported_at_ms \
+                 FROM expected LEFT JOIN gh_manifest_activations AS a \
+                    ON a.member_id = expected.member_id AND a.member_id IN (SELECT member_id FROM admitted) \
+                 WHERE NOT EXISTS (SELECT 1 FROM gh_manifest_activations AS retired \
+                    WHERE retired.member_id = expected.member_id AND retired.retired_at_ms IS NOT NULL) \
+                 ORDER BY expected.member_id COLLATE BINARY",
             )?.query_map([crate::federation::SELF_MEMBER_SETTING], |row| {
                 let verdict: Option<String> = row.get(3)?;
                 let verdict = match verdict.as_deref() {

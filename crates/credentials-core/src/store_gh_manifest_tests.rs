@@ -566,13 +566,13 @@ fn manifest_schema_enforces_report_shapes_and_approval_state() {
     store.with_raw_conn(|conn| {
         conn.execute_batch(
             "INSERT INTO gh_manifest_activations VALUES ('retired-only', NULL, NULL, NULL, NULL, NULL, 1); \
+             INSERT INTO gh_manifest_activations VALUES ('not-yet-reported', NULL, NULL, NULL, NULL, NULL, NULL); \
              INSERT INTO gh_manifest_activations VALUES ('valid', 28, 'hash', 'valid', NULL, 1, NULL); \
              INSERT INTO gh_manifest_activations VALUES ('invalid', 28, 'hash', 'invalid', 'bad signature', 1, 2); \
              INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'valid'); \
              INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'invalid');"
         )?;
         for sql in [
-            "INSERT INTO gh_manifest_activations VALUES ('missing-retirement', NULL, NULL, NULL, NULL, NULL, NULL)",
             "INSERT INTO gh_manifest_activations VALUES ('partial', 28, NULL, 'valid', NULL, 1, NULL)",
             "INSERT INTO gh_manifest_activations VALUES ('invalid-without-reason', 28, 'hash', 'invalid', NULL, 1, NULL)",
             "INSERT INTO gh_manifest_activations VALUES ('unknown', 28, 'hash', 'unknown', NULL, 1, NULL)",

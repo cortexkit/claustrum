@@ -974,8 +974,12 @@ pub(super) const MIGRATIONS: &[Migration] = &[
             incarnation TEXT NOT NULL, \
             reason TEXT NOT NULL, \
             since_ms INTEGER NOT NULL CHECK (typeof(since_ms) = 'integer' AND since_ms BETWEEN 0 AND 9007199254740991), \
-            action_url TEXT\
+                         action_url TEXT\
         );",
+    },
+    Migration {
+        version: HUB_ENTRIES_SCHEMA_VERSION,
+        statements: include_str!("hub_entries.sql"),
     },
 ];
 

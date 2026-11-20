@@ -197,6 +197,7 @@ fn gh_manifest_watch_metadata_reads_one_query_and_only_metadata_columns() {
 fn reports_audit_each_stored_member_version_verdict_only_once() {
     let (_root, store) = taxonomy_tests::rig("gh-activation-audits", 201);
     store_version(&store, 28);
+    member_grant(&store, "member", "secret_use", "none", "");
     let mut report = report("member");
     assert_eq!(record(&store, &report).lower_version_reported, None);
     assert_eq!(audit_count(&store, "gh_manifest_activation"), 1);
@@ -277,6 +278,7 @@ fn reports_audit_each_stored_member_version_verdict_only_once() {
 fn lower_version_report_is_recorded_and_returns_warning_metadata() {
     let (_root, store) = taxonomy_tests::rig("gh-activation-lower", 202);
     store_version(&store, 28);
+    member_grant(&store, "member", "secret_use", "none", "");
     let mut report = report("member");
     report.version = 29;
     assert_eq!(record(&store, &report).lower_version_reported, None);
@@ -452,6 +454,7 @@ fn readiness_is_false_for_an_empty_population_and_unknown_versions_are_absent() 
     let status = store.gh_manifest_active_status(28).unwrap().unwrap();
     assert!(!status.ready);
     assert!(status.computers.is_empty());
+    self_member(&store, "home");
     record(&store, &report("home"));
     assert_eq!(store.gh_manifest_active_status(29).unwrap(), None);
     assert!(store.gh_manifest_active_status(28).unwrap().unwrap().ready);

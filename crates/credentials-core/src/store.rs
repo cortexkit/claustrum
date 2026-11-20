@@ -160,6 +160,8 @@ pub const MODULE_SECRET_SCHEMA_VERSION: u32 = 48;
 
 /// Provider login conditions, stored separately from local and remote record state.
 pub const CONDITION_SCHEMA_VERSION: u32 = 49;
+/// Durable state for login lists and activation reports exchanged over the hub.
+pub const HUB_ENTRIES_SCHEMA_VERSION: u32 = 50;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -1560,6 +1562,7 @@ mod plan_tier_store_tests;
 
 #[path = "store_federation.rs"]
 mod federation_store;
+pub use federation_store::{HubLoginApply, HubLoginApplyMode};
 
 #[cfg(test)]
 #[path = "store_federation_tests.rs"]
@@ -1591,6 +1594,9 @@ mod declared_grants_tests;
 
 #[path = "store_gh_activations.rs"]
 mod gh_activations;
+#[path = "store_hub_entries.rs"]
+mod hub_entries;
+pub use hub_entries::*;
 
 #[path = "store_gh_admin.rs"]
 mod gh_admin;

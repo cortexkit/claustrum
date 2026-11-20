@@ -1002,7 +1002,7 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 49);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 50);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
@@ -1010,6 +1010,11 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",
+        "hub_login_homes",
+        "hub_login_targets",
+        "hub_manifest_high_water",
+        "hub_own_report",
+        "hub_report_task",
         "module_secrets",
         "remote_record_conditions",
     ] {
@@ -1037,6 +1042,11 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",
+        "hub_login_homes",
+        "hub_login_targets",
+        "hub_manifest_high_water",
+        "hub_own_report",
+        "hub_report_task",
         "module_secrets",
         "remote_record_conditions",
     ] {
@@ -2181,6 +2191,58 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
                 column("member_id", "TEXT", true, None, true),
                 column("version", "INTEGER", true, None, true),
                 column("verdict", "TEXT", true, None, true),
+            ],
+        ),
+        (
+            "hub_login_targets",
+            vec![
+                column("member_id", "TEXT", true, None, true),
+                column("box_id", "TEXT", true, None, false),
+                column("transfer_public_key", "BLOB", true, None, false),
+                column("pairing_id", "TEXT", true, None, false),
+                column("generation", "INTEGER", true, None, false),
+                column("kind", "TEXT", true, None, false),
+                column("sealed_bytes", "BLOB", false, None, false),
+                column("stale", "INTEGER", true, None, false),
+                column("delivered", "INTEGER", true, None, false),
+            ],
+        ),
+        (
+            "hub_login_homes",
+            vec![
+                column("home_member", "TEXT", true, None, true),
+                column("generation", "INTEGER", true, None, false),
+                column("pairing_id", "TEXT", false, None, false),
+                column("skipped_ids_json", "TEXT", true, None, false),
+                column("reapply", "INTEGER", true, None, false),
+            ],
+        ),
+        (
+            "hub_own_report",
+            vec![
+                column("singleton", "INTEGER", true, None, true),
+                column("version", "INTEGER", true, None, false),
+                column("payload_sha256", "TEXT", true, None, false),
+                column("verdict", "TEXT", true, None, false),
+                column("reason", "TEXT", false, None, false),
+            ],
+        ),
+        (
+            "hub_report_task",
+            vec![
+                column("singleton", "INTEGER", true, None, true),
+                column("seq", "INTEGER", true, None, false),
+                column("signed_bytes", "BLOB", true, None, false),
+                column("sent", "INTEGER", true, None, false),
+            ],
+        ),
+        (
+            "hub_manifest_high_water",
+            vec![
+                column("member_id", "TEXT", true, None, true),
+                column("box_id", "TEXT", true, None, true),
+                column("pairing_id", "TEXT", true, None, false),
+                column("seq", "INTEGER", true, None, false),
             ],
         ),
     ] {

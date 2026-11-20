@@ -153,6 +153,10 @@ pub const MAX_SEAL_AAD: usize = 1024;
 /// An X25519 public key is exactly this many bytes (RFC 7748).
 pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 
+/// Leave room for base64 expansion and associated data in the hub value limit.
+pub const MAX_HUB_LOGINS_PLAINTEXT: usize = 184_320;
+pub const HUB_LOGINS_INFO: &[u8] = b"cortexkit/claustrum/hub-logins/v1";
+
 /// Why an auth-mode seal was refused. None of these carry key material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SealError {
@@ -252,6 +256,27 @@ pub fn seal_fleet_auth(
         plaintext,
         info,
         b"",
+        &mut SystemRng,
+    )
+}
+
+/// Seal a hub login list with the sender's transfer key. The larger plaintext cap
+/// is confined to this fixed domain; caller-directed `credential.seal` cannot use it.
+pub fn seal_hub_logins(
+    sender_pem: &str,
+    recipient_public_key: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), SealError> {
+    if plaintext.len() > MAX_HUB_LOGINS_PLAINTEXT || aad.len() > MAX_SEAL_AAD {
+        return Err(SealError::TooLarge);
+    }
+    seal_auth_inner(
+        sender_pem,
+        recipient_public_key,
+        plaintext,
+        HUB_LOGINS_INFO,
+        aad,
         &mut SystemRng,
     )
 }
@@ -413,6 +438,29 @@ pub fn open_auth(
         .map_err(|_| "HPKE open failed".to_string())
 }
 
+/// Open a hub login list with the recipient's transfer key and the sender key
+/// announced by the paired home, not a key taken from the hub value.
+pub fn open_hub_logins(
+    recipient_pem: &str,
+    sender_public_key: &[u8],
+    enc: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, String> {
+    // ChaCha20-Poly1305 appends a 16-byte tag to the plaintext.
+    if ciphertext.len() > MAX_HUB_LOGINS_PLAINTEXT + 16 || aad.len() > MAX_SEAL_AAD {
+        return Err("hub login list exceeds size limit".into());
+    }
+    open_auth(
+        recipient_pem,
+        sender_public_key,
+        enc,
+        ciphertext,
+        HUB_LOGINS_INFO,
+        aad,
+    )
+}
+
 /// Test-only: wrap a raw 32-byte X25519 scalar in the PKCS#8 PEM the vault stores, so a
 /// test can install a known key (a published vector's, or a fixed synthetic one).
 #[cfg(any(test, feature = "test-support"))]
@@ -428,6 +476,76 @@ pub fn pem_from_scalar(scalar: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_logins_auth_round_trips_at_184320_bytes_and_refuses_184321() {
+        let sender = pem_from_scalar(&[7; 32]);
+        let recipient = pem_from_scalar(&[8; 32]);
+        let wrong_sender = pem_from_scalar(&[9; 32]);
+        let (sender_pk, _) = public_half(&sender).unwrap();
+        let (recipient_pk, _) = public_half(&recipient).unwrap();
+        let (wrong_pk, _) = public_half(&wrong_sender).unwrap();
+        let aad = vec![3; MAX_SEAL_AAD];
+        let plaintext = vec![4; 184_320];
+        let (enc, ciphertext) = seal_hub_logins(&sender, &recipient_pk, &plaintext, &aad).unwrap();
+        assert_eq!(
+            open_hub_logins(&recipient, &sender_pk, &enc, &ciphertext, &aad).unwrap(),
+            plaintext
+        );
+        assert!(open_hub_logins(&recipient, &wrong_pk, &enc, &ciphertext, &aad).is_err());
+        assert!(open_hub_logins(&recipient, &sender_pk, &enc, &ciphertext, b"wrong aad").is_err());
+        assert!(open_auth(
+            &recipient,
+            &sender_pk,
+            &enc,
+            &ciphertext,
+            b"other info",
+            &aad
+        )
+        .is_err());
+        assert_eq!(
+            open_auth(
+                &recipient,
+                &sender_pk,
+                &enc,
+                &ciphertext,
+                b"cortexkit/claustrum/hub-logins/v1",
+                &aad
+            )
+            .unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            seal_hub_logins(&sender, &recipient_pk, &vec![4; 184_321], &aad),
+            Err(SealError::TooLarge)
+        );
+        assert_eq!(
+            seal_hub_logins(&sender, &recipient_pk, b"small", &vec![3; MAX_SEAL_AAD + 1]),
+            Err(SealError::TooLarge)
+        );
+        let (oversize_enc, oversize_ct) = seal_auth_inner(
+            &sender,
+            &recipient_pk,
+            &vec![4; 184_321],
+            HUB_LOGINS_INFO,
+            &aad,
+            &mut SystemRng,
+        )
+        .unwrap();
+        assert!(
+            open_hub_logins(&recipient, &sender_pk, &oversize_enc, &oversize_ct, &aad).is_err()
+        );
+        assert_eq!(
+            seal_auth(
+                &sender,
+                &recipient_pk,
+                &vec![4; 65_537],
+                HUB_LOGINS_INFO,
+                &aad
+            ),
+            Err(SealError::TooLarge)
+        );
+    }
 
     #[test]
     fn x25519_private_temporaries_have_zeroizing_ownership() {

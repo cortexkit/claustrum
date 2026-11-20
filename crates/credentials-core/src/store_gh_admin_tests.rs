@@ -467,8 +467,8 @@ fn gh_manifest_admin_list_includes_expected_and_retired_computers_without_writes
     )
     .unwrap();
     assert_eq!(listed["computers"][1]["expected"], false);
-    assert_eq!(listed["computers"][1]["version"], 28);
-    assert_eq!(listed["computers"][1]["reported_at_ms"], 45);
+    assert_eq!(listed["computers"][1]["version"], Value::Null);
+    assert_eq!(listed["computers"][1]["reported_at_ms"], Value::Null);
     assert!(listed["computers"][1]["retired_at_ms"].as_i64().is_some());
     assert_eq!(snapshot(&store), after_retire);
     assert_eq!(

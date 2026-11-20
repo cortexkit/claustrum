@@ -504,9 +504,9 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cortexkit-bus-client"
-version = "0.1.12"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93ca5d015baa65cc4f99fb892cb22e9adaff87e9061ae6556c03b9ebe1469ea0"
+checksum = "27a77df503ca3622b9759d3d7ff0b12792d42c348371ea3904db07d4b022d4de"
 dependencies = [
  "async-nats",
  "async-trait",

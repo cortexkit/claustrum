@@ -46,10 +46,14 @@ pub(crate) async fn connect() -> Result<Arc<dyn Hub>, Error> {
     }))
 }
 
-fn hub_box_id(_client: &HubClient) -> Result<String, Error> {
-    // bus-client 0.1.12 has no box_id accessor. Until it can provide the ID
-    // from the hub credential, do not start any hub tasks.
-    Err(Error::HubUnavailable)
+fn hub_box_id(client: &HubClient) -> Result<String, Error> {
+    // The box id comes only from the hub credential ck-bus issued; a module must
+    // never derive it. A valid hub credential always carries one, so `None` means
+    // there is no usable hub credential yet: retry like an unavailable hub.
+    client
+        .box_id()
+        .map(|box_id| box_id.as_str().to_owned())
+        .ok_or(Error::HubUnavailable)
 }
 
 struct NatsHub {
@@ -147,7 +151,7 @@ fn map_watch_item(item: Result<BucketItem, Error>) -> Result<HubEvent, HubError>
             revision,
             operation: HubOperation::Put,
         })),
-        // bus-client 0.1.12 reports both delete and purge as this tombstone.
+        // bus-client reports both delete and purge as this tombstone.
         Ok(BucketItem::Delete { key, revision }) => Ok(HubEvent::Entry(HubEntry {
             key,
             value: Vec::new(),

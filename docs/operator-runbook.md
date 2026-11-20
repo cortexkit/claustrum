@@ -1796,6 +1796,23 @@ and run `scripts/accept-deploy.sh` against the rev you rolled back to.
 
 ### Federation setup and recovery
 
+Automatic login sharing and GitHub permissions manifest version reports need the
+shared NATS hub and a ck-bus hub grant for `claustrum`. The vault obtains that grant
+using its identity on the supervisor's registration channel. Callosum still supplies
+pairing and peer keys and carries on-demand reads; it does not carry these two lists.
+
+The vault starts and serves local requests even when it cannot reach the hub. The
+federation log tells you why sharing has not started:
+
+| Log | What to do |
+| --- | --- |
+| `hub unavailable; retrying in the background` | Check that ck-bus and the shared hub are reachable. The vault retries without a restart and resumes publishing and reading the lists when connected. |
+| `hub sharing disabled: missing ck-bus hub grant for claustrum` | Make sure ck-bus supports the `claustrum` hub user and grant it hub access. Restart the vault after granting access; the refusal is not retried. |
+| `hub sharing needs the registration channel; disabled on the legacy launch path` | Upgrade the supervisor and launch the vault with a registration channel. The legacy launch nonce is not used for hub access. |
+
+A hub outage does not itself remove any previously stored login copies. Changes to
+shared login lists and remote manifest version reports cannot arrive during the outage.
+
 #### Keep this computer's vault separate
 
 Edit `<config home>/cortexkit/claustrum.jsonc` to opt this computer out of automatic
@@ -1839,8 +1856,8 @@ Invalid configuration never turns sharing on: startup applies off, while an inva
 edit keeps the last applied value. A WARN names the path and redacted reason once per
 distinct invalid content, never the file's contents.
 
-Federation needs Callosum on every computer, for the member ids, the pairing and the
-transport between vaults. Callosum is not in the public release index yet, so a public
+Federation needs Callosum on every computer, for member ids, pairing and on-demand
+calls between vaults. Callosum is not in the public release index yet, so a public
 install cannot federate. Until it is, run one vault per computer and sign in on each one
 with `ck auth login`, so each computer holds its own refresh token. Never copy
 `store.db`, the key file or a login's tokens to a second computer: providers that rotate

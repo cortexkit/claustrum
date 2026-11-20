@@ -21,6 +21,17 @@ struct Rig {
 
 impl Rig {
     async fn new(gated: bool, persisted: Option<bool>, disk: &str) -> Self {
+        Self::new_with_hub(gated, persisted, disk, std::future::ready(None)).await
+    }
+
+    async fn new_with_hub(
+        gated: bool,
+        persisted: Option<bool>,
+        disk: &str,
+        hub: impl std::future::Future<Output = Option<Arc<dyn crate::federation::hub::Hub>>>
+            + Send
+            + 'static,
+    ) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = TestTempDir::new(format!(
             "config-gate-{}-{}",
@@ -72,7 +83,7 @@ impl Rig {
         let config = ModuleConfig {
             connection_file_path: root.join("no-outbound-daemon"),
             module_id: credentials_core::MODULE_ID.into(),
-            registration: crate::Registration::Channel(None),
+            registration: crate::Registration::Channel(Default::default()),
             launch_nonce: None,
             launch_nonce_source: None,
         };
@@ -83,6 +94,8 @@ impl Rig {
                 Egress { control, route },
                 &config,
                 config_path,
+                |_| Ok(()),
+                hub,
             )
             .await
         });
@@ -210,6 +223,58 @@ impl Rig {
         self.writer.await.unwrap().unwrap();
         drop(self.root);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn daemon_serves_when_hub_is_unavailable_and_retries_in_the_background() {
+    use cortexkit_bus_client::Error;
+    let (attempts, mut observed) = mpsc::unbounded_channel();
+    let mut first = true;
+    let hub = crate::hub_nats::connect_with_retry(move || {
+        let first = std::mem::take(&mut first);
+        let attempts = attempts.clone();
+        async move {
+            attempts.send(()).unwrap();
+            if first {
+                Err(Error::HubUnavailable)
+            } else {
+                std::future::pending().await
+            }
+        }
+    });
+    let mut rig = Rig::new_with_hub(false, None, "{}", hub).await;
+    transport_support::wait_for_signal(observed.recv())
+        .await
+        .unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    transport_support::wait_for_signal(observed.recv())
+        .await
+        .unwrap();
+    rig.ping().await;
+    rig.finish().await;
+    assert!(transport_support::wait_for_signal(observed.recv())
+        .await
+        .is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn daemon_serves_when_hub_is_not_granted_and_does_not_retry() {
+    use cortexkit_bus_client::Error;
+    let (attempts, mut observed) = mpsc::unbounded_channel();
+    let hub = crate::hub_nats::connect_with_retry(move || {
+        attempts.send(()).unwrap();
+        std::future::ready(Err(Error::HubNotGranted))
+    });
+    let mut rig = Rig::new_with_hub(false, None, "{}", hub).await;
+    transport_support::wait_for_signal(observed.recv())
+        .await
+        .unwrap();
+    rig.ping().await;
+    // The connector must be dropped after the refusal, with the module still up.
+    assert!(transport_support::wait_for_signal(observed.recv())
+        .await
+        .is_none());
+    rig.finish().await;
 }
 
 fn body(frame: &Frame) -> Value {

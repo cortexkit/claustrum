@@ -29,15 +29,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use subc_client_rs::registration::{ClaimError, ClaimMinter};
 use subc_control::{
-    Claim, ClaimMintReply, ClaimMintRequest, ClaimPresentReply, ClaimPresentRequest, ClaimPurpose,
+    ClaimMintReply, ClaimMintRequest, ClaimPresentReply, ClaimPresentRequest, ClaimPurpose,
     ConsumerIdentity,
 };
-use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget};
+use subc_protocol::claim::ClaimRateLimitedDetail;
+use subc_protocol::{
+    error_codes, BindIdentity, ErrorBody, Flags, Frame, FrameType, Priority, RouteTarget,
+};
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify};
 
 /// A consumer-facing forwarded call (B's remote read, B's forwarded report) must
 /// finish end to end in this long, because the Rust client gives the reply frame 3 s.
@@ -70,19 +74,36 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(3);
 pub struct RegistrationClaims(Arc<RegistrationClaimsInner>);
 
 struct RegistrationClaimsInner {
-    writer: mpsc::Sender<Frame>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Frame>>>,
+    session: Mutex<ClaimSession>,
+    closed: Notify,
     // Config delivery uses the low correlation range on this same control lane.
     next_corr: std::sync::atomic::AtomicU64,
+}
+
+struct ClaimSession {
+    writer: Option<mpsc::Sender<Frame>>,
+    pending: HashMap<u64, oneshot::Sender<Frame>>,
 }
 
 impl RegistrationClaims {
     pub fn new(writer: mpsc::Sender<Frame>) -> Self {
         Self(Arc::new(RegistrationClaimsInner {
-            writer,
-            pending: Mutex::new(HashMap::new()),
+            session: Mutex::new(ClaimSession {
+                writer: Some(writer),
+                pending: HashMap::new(),
+            }),
+            closed: Notify::new(),
             next_corr: std::sync::atomic::AtomicU64::new(1 << 63),
         }))
+    }
+
+    /// The SDK keeps a process-wide reference. Release egress and wake pending
+    /// requests when the owner stops reading, even if the writer is still draining.
+    pub fn close(&self) {
+        let mut session = self.0.session.lock().unwrap();
+        session.writer = None;
+        session.pending.clear();
+        self.0.closed.notify_waiters();
     }
 
     /// Consume only a reply to an outstanding mint, not another control operation.
@@ -93,7 +114,13 @@ impl RegistrationClaims {
         {
             return false;
         }
-        let pending = self.0.pending.lock().unwrap().remove(&frame.header.corr);
+        let pending = self
+            .0
+            .session
+            .lock()
+            .unwrap()
+            .pending
+            .remove(&frame.header.corr);
         if let Some(pending) = pending {
             let _ = pending.send(frame.clone());
             true
@@ -102,25 +129,46 @@ impl RegistrationClaims {
         }
     }
 
-    async fn mint(&self) -> Result<Claim, OutboundError> {
+    async fn claim_call(&self, body: &Value) -> Result<Frame, ClaimError> {
         let corr = self.0.next_corr.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.0.pending.lock().unwrap().insert(corr, tx);
+        let (tx, mut rx) = oneshot::channel();
+        let writer = {
+            let mut session = self.0.session.lock().unwrap();
+            let writer = session.writer.clone().ok_or(ClaimError::Unavailable)?;
+            session.pending.insert(corr, tx);
+            writer
+        };
         let _waiter = ClaimWaiter { claims: self, corr };
-        let body = serde_json::to_value(ClaimMintRequest::new(ClaimPurpose::SelfConnection))
-            .map_err(|_| claim_failure())?;
-        self.0
-            .writer
-            .send(control_frame(corr, &body))
-            .await
-            .map_err(|_| claim_failure())?;
-        let reply = rx.await.map_err(|_| claim_failure())?;
-        if reply.header.ty != FrameType::Response {
-            return Err(claim_failure());
+        tokio::select! {
+            biased;
+            reply = &mut rx => return reply.map_err(|_| ClaimError::Unavailable),
+            sent = writer.send(control_frame(corr, body)) => sent.map_err(|_| ClaimError::Unavailable)?,
         }
-        serde_json::from_slice::<ClaimMintReply>(&reply.body)
-            .map(|reply| reply.claim)
-            .map_err(|_| claim_failure())
+        tokio::select! {
+            biased;
+            reply = rx => reply.map_err(|_| ClaimError::Unavailable),
+            () = writer.closed() => Err(ClaimError::Unavailable),
+        }
+    }
+
+    async fn wait_to_retry(&self, delay: Duration) -> Result<(), ClaimError> {
+        let closed = self.0.closed.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        let writer = self
+            .0
+            .session
+            .lock()
+            .unwrap()
+            .writer
+            .clone()
+            .ok_or(ClaimError::Unavailable)?;
+        tokio::select! {
+            biased;
+            () = closed => Err(ClaimError::Unavailable),
+            () = writer.closed() => Err(ClaimError::Unavailable),
+            () = tokio::time::sleep(delay) => Ok(()),
+        }
     }
 
     async fn bind_consumer(
@@ -129,7 +177,11 @@ impl RegistrationClaims {
         budget: tokio::time::Instant,
     ) -> Result<(), OutboundError> {
         tokio::time::timeout_at(budget, async {
-            let claim = self.mint().await?;
+            let claim = self
+                .mint(ClaimMintRequest::new(ClaimPurpose::SelfConnection))
+                .await
+                .map_err(|_| claim_failure())?
+                .claim;
             let body = serde_json::to_value(ClaimPresentRequest::new(claim))
                 .map_err(|_| claim_failure())?;
             write_frame(stream, &control_frame(1, &body))
@@ -155,6 +207,31 @@ impl RegistrationClaims {
     }
 }
 
+#[async_trait::async_trait]
+impl ClaimMinter for RegistrationClaims {
+    async fn mint(&self, request: ClaimMintRequest) -> Result<ClaimMintReply, ClaimError> {
+        let body = serde_json::to_value(request).map_err(|_| ClaimError::Protocol)?;
+        // Both the SDK and the vault's outbound client bound the entire mint,
+        // including any delay the daemon requests before a retry.
+        loop {
+            let reply = self.claim_call(&body).await?;
+            if reply.header.ty == FrameType::Response {
+                return serde_json::from_slice(&reply.body).map_err(|_| ClaimError::Protocol);
+            }
+            let error: ErrorBody =
+                serde_json::from_slice(&reply.body).map_err(|_| ClaimError::Protocol)?;
+            if error.code != error_codes::CLAIM_RATE_LIMITED {
+                return Err(ClaimError::Refused { code: error.code });
+            }
+            let delay: ClaimRateLimitedDetail =
+                serde_json::from_value(error.detail.ok_or(ClaimError::Protocol)?)
+                    .map_err(|_| ClaimError::Protocol)?;
+            self.wait_to_retry(Duration::from_millis(delay.retry_after_ms))
+                .await?;
+        }
+    }
+}
+
 fn claim_failure() -> OutboundError {
     // Do not include daemon-supplied bodies: they may contain the bearer claim.
     OutboundError::Unavailable("consumer claim binding unavailable".into())
@@ -167,7 +244,13 @@ struct ClaimWaiter<'a> {
 
 impl Drop for ClaimWaiter<'_> {
     fn drop(&mut self) {
-        self.claims.0.pending.lock().unwrap().remove(&self.corr);
+        self.claims
+            .0
+            .session
+            .lock()
+            .unwrap()
+            .pending
+            .remove(&self.corr);
     }
 }
 
@@ -1331,6 +1414,7 @@ pub fn bind_identity() -> BindIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use subc_control::Claim;
 
     #[test]
     fn the_deadlines_sit_below_the_consumers_that_wait_on_them() {
@@ -1363,6 +1447,42 @@ mod tests {
     #[tokio::test]
     async fn channel_consumers_bind_fresh_claims_and_omit_nonce_identity() {
         claim_connection_case(false, false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sdk_claim_minter_releases_pending_mints_and_refuses_after_registration_closes() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let claims = RegistrationClaims::new(tx);
+        let owner: Arc<dyn ClaimMinter> = Arc::new(claims.clone());
+        let pending = {
+            let owner = Arc::clone(&owner);
+            tokio::spawn(async move {
+                owner
+                    .mint(ClaimMintRequest::new(ClaimPurpose::SelfConnection))
+                    .await
+            })
+        };
+        assert!(
+            rx.recv().await.is_some(),
+            "mint uses the registration egress"
+        );
+        // Keep the SDK owner alive across shut down as the process-wide SDK does.
+        claims.close();
+        let result = tokio::time::timeout(CONNECT_DEADLINE, pending)
+            .await
+            .expect("close wakes the pending mint")
+            .unwrap();
+        assert!(matches!(result, Err(ClaimError::Unavailable)));
+        assert!(matches!(
+            owner
+                .mint(ClaimMintRequest::new(ClaimPurpose::SelfConnection))
+                .await,
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(
+            rx.recv().await.is_none(),
+            "closed registration egress was released"
+        );
     }
 
     #[tokio::test]
@@ -1561,7 +1681,7 @@ mod tests {
                     close_link(&link, "test reconnect").await;
                 }
             }
-            assert!(claims.0.pending.lock().unwrap().is_empty());
+            assert!(claims.0.session.lock().unwrap().pending.is_empty());
         }
         minting.await.unwrap();
         serving.await.unwrap();

@@ -41,6 +41,9 @@ mod sharing;
 #[path = "federation/fleet.rs"]
 mod fleet;
 
+#[path = "federation/two_vault_lifecycle.rs"]
+mod two_vault_lifecycle;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

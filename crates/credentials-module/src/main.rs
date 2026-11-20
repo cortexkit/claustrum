@@ -24,6 +24,10 @@ mod admin_surface;
 mod connectors;
 mod federation;
 mod fleet_ops;
+#[path = "federation/hub_nats.rs"]
+mod hub_nats;
+#[path = "federation/hub_tasks.rs"]
+mod hub_tasks;
 mod limiter;
 mod manifest;
 mod manifest_active_report;
@@ -57,8 +61,10 @@ use credentials_core::resolver::{self, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 #[cfg(test)]
 use credentials_core::store::SelectorKind;
+use hub_tasks::AbortOnDrop;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use subc_client_rs::{registration, ModuleStream};
 use subc_protocol::manifest::Concurrency;
 use subc_protocol::manifest::{
     build_provenance, LaunchNonceSource, ManifestProvenance, SelfSignalDeclaration,
@@ -185,9 +191,8 @@ impl ModuleConfig {
             .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
         // Adopt before spawning children so the inherited channel cannot leak to them.
         // A validated channel's adoption error is fatal, never a nonce fallback.
-        let channel = subc_os::take_registration_channel()
+        let registration_channel = registration::adopt_channel()
             .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
-        let registration_channel = channel.map(registration_stream).transpose()?;
         Self::with_registration_channel(connection_file_path, module_id, registration_channel)
     }
 
@@ -229,7 +234,7 @@ impl ModuleConfig {
             connection_file_path,
             module_id,
             registration: match registration_channel {
-                Some(stream) => Registration::Channel(Some(stream)),
+                Some(stream) => Registration::Channel(std::sync::Mutex::new(Some(stream))),
                 None => Registration::Legacy,
             },
             launch_nonce,
@@ -238,12 +243,11 @@ impl ModuleConfig {
     }
 }
 
-trait ModuleStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> ModuleStream for T {}
-
 enum Registration {
     Legacy,
-    Channel(Option<Box<dyn ModuleStream>>),
+    // The SDK stream is Send, not Sync. It is taken before sharing the config
+    // with the frame loop; the mutex is never locked during I/O.
+    Channel(std::sync::Mutex<Option<Box<dyn ModuleStream>>>),
 }
 
 impl Registration {
@@ -257,30 +261,13 @@ impl Registration {
         match self {
             Self::Legacy => Ok(None),
             Self::Channel(stream) => stream
+                .get_mut()
+                .unwrap()
                 .take()
                 .map(Some)
                 .ok_or_else(|| ModuleError::Message("registration channel already used".into())),
         }
     }
-}
-
-fn registration_stream(
-    channel: subc_os::RegistrationChannel,
-) -> Result<Box<dyn ModuleStream>, ModuleError> {
-    #[cfg(unix)]
-    let stream = {
-        let stream = channel.into_unix_stream();
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
-        tokio::net::UnixStream::from_std(stream)
-            .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?
-    };
-    #[cfg(windows)]
-    let stream = channel
-        .into_tokio_pipe_client()
-        .map_err(|e| ModuleError::Message(format!("registration channel: {e}")))?;
-    Ok(Box::new(stream))
 }
 
 /// The two egress lanes to the supervisor. Control-plane frames (HELLO, pong, route-bind
@@ -464,7 +451,15 @@ where
 {
     let config_path = credentials_core::login_sharing::config_path()
         .map_err(|_| ModuleError::Message("cannot resolve login sharing config path".into()))?;
-    module_loop_with_config_path(read_half, egress, config, config_path).await
+    module_loop_with_config_path(
+        read_half,
+        egress,
+        config,
+        config_path,
+        registration::install_claim_minter,
+        hub_nats::connect_with_retry(hub_nats::connect),
+    )
+    .await
 }
 
 async fn module_loop_with_config_path<R>(
@@ -472,6 +467,9 @@ async fn module_loop_with_config_path<R>(
     egress: Egress,
     config: &ModuleConfig,
     config_path: PathBuf,
+    install_claim_minter: impl FnOnce(Arc<dyn registration::ClaimMinter>) -> Result<(), registration::RegistrationError>
+        + Send,
+    hub: impl std::future::Future<Output = Option<Arc<dyn federation::hub::Hub>>> + Send + 'static,
 ) -> Result<(), ModuleError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -483,6 +481,11 @@ where
         .registration
         .is_channel()
         .then(|| federation::outbound::RegistrationClaims::new(egress.control.clone()));
+    let _claim_guard = claims.as_ref().cloned().map(CloseClaimsOnDrop);
+    if let Some(claims) = &claims {
+        install_claim_minter(Arc::new(claims.clone()))
+            .map_err(|e| ModuleError::Message(format!("registration claim minter: {e}")))?;
+    }
     // The frame decoder must not be cancelled mid-frame when startup completes.
     // A bounded inbox makes the startup readiness select cancellation-safe.
     let (incoming, mut ingress) = mpsc::channel(EGRESS_BUFFER);
@@ -567,13 +570,20 @@ where
     // Clones share one connection and one binding cache.
     admin.home().attach_outbound(outbound.clone());
     surface.remote().attach_outbound(outbound.clone());
-    let _sharing_guard = AbortOnDrop(tokio::spawn(
-        federation::sharing::run_with_manifest_watches(
-            Arc::clone(surface.store()),
-            outbound.clone(),
-            Some(Arc::clone(&admin.home().manifest_watches)),
-        ),
-    ));
+    let config_uses_channel = claims.is_some();
+    let _sharing_guards = hub_tasks::start(
+        Arc::clone(surface.store()),
+        outbound.clone(),
+        async move {
+            if config_uses_channel {
+                hub.await
+            } else {
+                tracing::info!(target: "federation", "hub sharing needs the registration channel; disabled on the legacy launch path");
+                None
+            }
+        },
+        Some(Arc::clone(&admin.home().manifest_watches)),
+    );
     let _usage_guard = AbortOnDrop(Arc::clone(&surface.usage).spawn(outbound));
     // `remote add` fetches through this same reader, so it validates a home reply
     // against exactly the adapter set and reply type a consumer read uses.
@@ -820,13 +830,11 @@ fn spawn_health_refresher(surface: Arc<ReadSurface>) -> tokio::task::JoinHandle<
     })
 }
 
-/// Aborts the wrapped task when dropped, so the health refresher stops when the
-/// serve loop returns (clean EOF or error) instead of outliving the connection.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+struct CloseClaimsOnDrop(federation::outbound::RegistrationClaims);
 
-impl Drop for AbortOnDrop {
+impl Drop for CloseClaimsOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        self.0.close();
     }
 }
 

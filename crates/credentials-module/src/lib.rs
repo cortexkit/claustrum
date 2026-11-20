@@ -13,6 +13,9 @@
 #[path = "federation/mod.rs"]
 pub mod federation;
 pub mod fleet_ops;
+#[cfg(feature = "test-support")]
+#[path = "federation/hub_tasks.rs"]
+mod hub_tasks;
 pub mod manifest_active_report;
 pub mod manifest_identity;
 #[cfg(not(test))]
@@ -49,5 +52,82 @@ pub async fn observe_hub_bindings_for_test(
                 observed.send_replace(mapped);
             }
         } => {},
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub mod hub_test_support {
+    use std::{future::ready, sync::Arc};
+
+    use credentials_core::store::EncryptedStore;
+
+    use crate::federation::{
+        hub::{
+            stand_in::{StandIn, StandInClient},
+            Hub, SHARED_LOGINS,
+        },
+        OutboundClient,
+    };
+    use crate::hub_tasks::{self, AbortOnDrop};
+
+    pub fn record_manifest_report(
+        store: &EncryptedStore,
+        member_id: &str,
+        body: &serde_json::Value,
+    ) -> serde_json::Value {
+        let report = crate::manifest_active_report::parse_active_report(body).unwrap();
+        crate::manifest_active_report::record_own_manifest_active_report(store, member_id, &report)
+    }
+
+    /// One shared hub, with a separate connection signal for each vault.
+    pub struct HubFixture(StandIn);
+
+    impl Default for HubFixture {
+        fn default() -> Self {
+            Self(StandIn::new())
+        }
+    }
+
+    impl HubFixture {
+        pub fn start_vault(
+            &self,
+            store: Arc<EncryptedStore>,
+            outbound: OutboundClient,
+            box_id: &str,
+        ) -> RunningVault {
+            let client = self.0.client(box_id);
+            let hub: Arc<dyn Hub> = Arc::new(client.clone());
+            let guards = hub_tasks::start(store, outbound, ready(Some(hub)), None);
+            RunningVault {
+                client,
+                _guards: guards,
+            }
+        }
+
+        pub fn set_online(&self, online: bool) {
+            self.0.set_online(online);
+        }
+
+        pub fn reset_shared_logins(&self) {
+            self.0.reset_bucket(SHARED_LOGINS, &[]);
+        }
+
+        pub fn has_login_list(&self, home_box: &str, member_box: &str) -> bool {
+            self.0
+                .entry(SHARED_LOGINS, &format!("{home_box}.{member_box}"))
+                .unwrap()
+                .is_some()
+        }
+    }
+
+    pub struct RunningVault {
+        client: StandInClient,
+        _guards: [AbortOnDrop; 2],
+    }
+
+    impl RunningVault {
+        pub fn replace_connection(&self) {
+            self.client.replace_connection();
+        }
     }
 }

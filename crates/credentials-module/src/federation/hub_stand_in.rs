@@ -128,6 +128,17 @@ impl StandIn {
         self.0.lock().unwrap().buckets[bucket].watch_opens
     }
 
+    pub(crate) fn entry(&self, bucket: &str, key: &str) -> Result<Option<HubEntry>, HubError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .bucket(bucket)?
+            .entries
+            .get(key)
+            .cloned())
+    }
+
     pub(crate) fn pause_delivery(&self, bucket: &str) {
         self.0
             .lock()
@@ -356,15 +367,7 @@ impl Hub for StandInClient {
     }
 
     async fn entry(&self, bucket: &str, key: &str) -> Result<Option<HubEntry>, HubError> {
-        Ok(self
-            .hub
-            .0
-            .lock()
-            .unwrap()
-            .bucket(bucket)?
-            .entries
-            .get(key)
-            .cloned())
+        self.hub.entry(bucket, key)
     }
 
     async fn create(&self, bucket: &str, key: &str, value: Vec<u8>) -> WriteResult {

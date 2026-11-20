@@ -347,8 +347,10 @@ impl MemberState {
             let at_max = current
                 .as_ref()
                 .is_some_and(|row| row.generation.checked_next().is_none());
-            // At the plaintext cap, base64 of the ciphertext and its tag leaves
-            // room for the encapsulation and the entire escaped AAD within 256 KiB.
+            // The hub refuses values over 256 KiB. At the plaintext cap, the
+            // base64 ciphertext and tag still leave room in that limit for the
+            // encapsulated key and the escaped `LoginAad` (the authenticated but
+            // unencrypted header that names sender, recipient and generation).
             if plaintext.len() > MAX_HUB_LOGINS_PLAINTEXT || at_max {
                 if let Some(row) = current.as_ref().filter(|row| !row.stale) {
                     store.mark_hub_login_target_stale(member, row.generation)?;

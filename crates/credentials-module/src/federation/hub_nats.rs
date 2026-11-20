@@ -47,9 +47,10 @@ pub(crate) async fn connect() -> Result<Arc<dyn Hub>, Error> {
 }
 
 fn hub_box_id(client: &HubClient) -> Result<String, Error> {
-    // The box id comes only from the hub credential ck-bus issued; a module must
-    // never derive it. A valid hub credential always carries one, so `None` means
-    // there is no usable hub credential yet: retry like an unavailable hub.
+    // The box id comes only from the hub credential issued by the computer's bus
+    // module (ck-bus); a module must never derive it. A valid hub credential always
+    // carries one, so `None` means there is no usable hub credential yet: retry
+    // like an unavailable hub.
     client
         .box_id()
         .map(|box_id| box_id.as_str().to_owned())

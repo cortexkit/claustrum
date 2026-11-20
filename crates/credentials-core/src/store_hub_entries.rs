@@ -137,7 +137,17 @@ fn own_report_conn(conn: &Connection) -> rusqlite::Result<Option<HubOwnReport>> 
 }
 
 const CLEAR_MANIFEST_FIELDS: &str = "UPDATE gh_manifest_activations SET version = NULL, \
-    payload_sha256 = NULL, verdict = NULL, reason = NULL, reported_at_ms = NULL";
+    payload_sha256 = NULL, verdict = NULL, reason = NULL, reported_at_ms = NULL, report_box_id = NULL";
+
+fn collector_is_home(conn: &Connection) -> rusqlite::Result<bool> {
+    let setting = super::federation_store::read_setting(conn, super::SECRET_HOME_SETTING)?;
+    // Home is the symbolic `self` setting, whether or not the self ID is set.
+    match super::resolve_secret_home_role(setting.as_deref(), None) {
+        super::SecretHomeRole::Home { .. } => Ok(true),
+        super::SecretHomeRole::StoreError => Err(rusqlite::Error::InvalidQuery),
+        _ => Ok(false),
+    }
+}
 
 pub(super) fn clear_hub_manifest_report_tx(
     tx: &Transaction<'_>,
@@ -308,6 +318,7 @@ impl EncryptedStore {
                 return Ok(Err(StoreOpError::NotFound));
             }
             let outcome = self.report_gh_manifest_active_tx(tx, report, ctx)?;
+            tx.execute("UPDATE gh_manifest_activations SET report_box_id = NULL WHERE member_id = ?1", [report.member_id])?;
             tx.execute("INSERT INTO hub_own_report (singleton, version, payload_sha256, verdict, reason) \
                 VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, \
                 payload_sha256 = excluded.payload_sha256, verdict = excluded.verdict, reason = excluded.reason",
@@ -401,14 +412,14 @@ impl EncryptedStore {
             return Err(StoreOpError::Encode("invalid hub box id".into()));
         }
         Ok(self.fenced_write(|tx| {
+            if !collector_is_home(tx)? || !still_current() {
+                return Ok(None);
+            }
             let admitted = tx.query_row("SELECT EXISTS (SELECT 1 FROM member_grants \
                 WHERE member_id = ?1 AND operation = 'secret_use' AND pairing_id = ?2) \
                 AND NOT EXISTS (SELECT 1 FROM gh_manifest_activations WHERE member_id = ?1 AND retired_at_ms IS NOT NULL) \
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE name = ?3 AND value = ?1)",
                 params![report.member_id, pairing_id, SELF_MEMBER_SETTING], |row| row.get::<_, bool>(0))?;
-            if !still_current() {
-                return Ok(None);
-            }
             reset_hub_manifest_pairing_tx(tx, report.member_id, pairing_id)?;
             if !admitted {
                 return Ok(None);
@@ -419,7 +430,10 @@ impl EncryptedStore {
             if !advanced {
                 return Ok(None);
             }
-            self.report_gh_manifest_active_tx(tx, report, ctx).map(Some)
+            let outcome = self.report_gh_manifest_active_tx(tx, report, ctx)?;
+            tx.execute("UPDATE gh_manifest_activations SET report_box_id = ?1 WHERE member_id = ?2",
+                params![box_id, report.member_id])?;
+            Ok(Some(outcome))
         })?)
     }
 
@@ -447,10 +461,38 @@ impl EncryptedStore {
         Ok(self.fenced_write(|tx| clear_hub_manifest_report_tx(tx, member_id))?)
     }
 
+    /// Clear a hub-derived slot only if the collector's binding is still current.
+    /// If `keep_box` is set, a report already accepted from that box stays recorded.
+    pub fn reconcile_hub_manifest_box(
+        &self,
+        member_id: &str,
+        keep_box: Option<&str>,
+        still_current: impl FnOnce() -> bool,
+    ) -> Result<(), StoreOpError> {
+        self.fenced_write(|tx| {
+            if !collector_is_home(tx)? || !still_current() {
+                return Ok(());
+            }
+            tx.execute(
+                &format!(
+                    "{CLEAR_MANIFEST_FIELDS} WHERE member_id = ?1 AND version IS NOT NULL
+                    AND (?2 IS NULL OR report_box_id IS NOT ?2)
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE name = ?3 AND value = ?1)"
+                ),
+                params![member_id, keep_box, SELF_MEMBER_SETTING],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// When the hub recreates the report bucket, clear peer fields before reading the
     /// new contents. Keep the expected members and their last accepted sequences.
     pub fn clear_peer_hub_manifest_reports(&self) -> Result<usize, StoreOpError> {
         Ok(self.fenced_write(|tx| {
+            if !collector_is_home(tx)? {
+                return Ok(0);
+            }
             tx.execute(
                 &format!(
                     "{CLEAR_MANIFEST_FIELDS} WHERE version IS NOT NULL \
@@ -463,10 +505,15 @@ impl EncryptedStore {
 
     /// Clear fields that local facts alone rule out, even before Callosum is ready.
     pub fn clear_ungranted_hub_manifest_reports(&self) -> Result<usize, StoreOpError> {
-        Ok(self.fenced_write(|tx| tx.execute(&format!("{CLEAR_MANIFEST_FIELDS} WHERE version IS NOT NULL \
+        Ok(self.fenced_write(|tx| {
+            if !collector_is_home(tx)? {
+                return Ok(0);
+            }
+            tx.execute(&format!("{CLEAR_MANIFEST_FIELDS} WHERE version IS NOT NULL \
             AND NOT EXISTS (SELECT 1 FROM settings WHERE name = ?1 AND value = member_id) \
             AND (retired_at_ms IS NOT NULL OR NOT EXISTS (SELECT 1 FROM member_grants AS g \
-                WHERE g.member_id = gh_manifest_activations.member_id AND g.operation = 'secret_use'))"), [SELF_MEMBER_SETTING]))?)
+                WHERE g.member_id = gh_manifest_activations.member_id AND g.operation = 'secret_use'))"), [SELF_MEMBER_SETTING])
+        })?)
     }
 
     /// On unpair, drop all high-waters; on re-pair, do so only if they belonged to
@@ -475,10 +522,16 @@ impl EncryptedStore {
         &self,
         member_id: &str,
         pairing_id: Option<&str>,
+        still_current: impl FnOnce() -> bool,
     ) -> Result<bool, StoreOpError> {
-        Ok(self.fenced_write(|tx| match pairing_id {
-            Some(current) => reset_hub_manifest_pairing_tx(tx, member_id, current),
-            None => end_hub_manifest_membership_tx(tx, member_id),
+        Ok(self.fenced_write(|tx| {
+            if !collector_is_home(tx)? || !still_current() {
+                return Ok(false);
+            }
+            match pairing_id {
+                Some(current) => reset_hub_manifest_pairing_tx(tx, member_id, current),
+                None => end_hub_manifest_membership_tx(tx, member_id),
+            }
         })?)
     }
 }

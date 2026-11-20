@@ -52,6 +52,7 @@ crates/credentials-core/src/store.rs cortexkit-credentials/refresh-token-hash/v1
 crates/credentials-core/src/store_credential_permissions.rs claustrum-credential-permission/v1\0 claustrum-credential-permission/v1\0
 crates/credentials-core/src/store_handles.rs cortexkit-credentials/handle/v1 cortexkit-credentials/handle/v1
 crates/credentials-core/src/store_tests.rs cortexkit-credentials/audit-payload-key/v1 cortexkit-credentials/audit-payload-key/v1
+crates/credentials-module/src/federation/hub_manifest.rs ck-vault-hub/manifest-active/v1\0 ck-vault-hub/manifest-active/v1\0
 crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/remote-token/v1 cortexkit/claustrum/remote-token/v1
 crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/secret-release/v1 cortexkit/claustrum/secret-release/v1
 crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/ssh-sign-release/v1 cortexkit/claustrum/ssh-sign-release/v1

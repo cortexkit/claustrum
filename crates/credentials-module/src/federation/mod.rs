@@ -19,6 +19,20 @@ pub(crate) mod hub_binding;
 pub(crate) mod hub_home_writer;
 #[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
 pub(crate) mod hub_logins;
+#[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
+mod hub_manifest;
+#[allow(
+    dead_code,
+    reason = "started by the daemon when the hub transport is available"
+)]
+pub(crate) mod hub_manifest_collector;
+#[allow(
+    dead_code,
+    reason = "started by the daemon when the hub transport is available"
+)]
+pub(crate) mod hub_manifest_reporter;
+#[cfg(test)]
+mod hub_manifest_tests;
 #[allow(
     dead_code,
     reason = "started by the daemon when the hub transport is available"

@@ -1,4 +1,4 @@
-//! Manifest delivery and activation reporting, local or forwarded to the secret home.
+//! Manifest delivery from the secret home and local activation reporting.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use subc_protocol::{EnvelopeHeader, Frame, FrameType, Principal};
 use tokio::sync::mpsc;
 
 use crate::{
-    manifest_active_report::{parse_active_report, record_manifest_active_report},
+    manifest_active_report::{parse_active_report, record_own_manifest_active_report},
     read_surface::ReadSurface,
     ModuleError,
 };
@@ -39,11 +39,14 @@ fn refusal(code: &str, class: &str) -> Value {
     json!({"error":{"code":code,"class":class}})
 }
 
-fn role_refusal(store: &EncryptedStore, status: bool) -> Option<Value> {
+fn role_refusal(store: &EncryptedStore, method: &str) -> Option<Value> {
     match store.secret_home_role() {
         SecretHomeRole::Single | SecretHomeRole::Home { .. } => None,
         SecretHomeRole::StoreError => Some(refusal("store_error", "transient")),
-        SecretHomeRole::Remote { .. } | SecretHomeRole::RemoteSetupIncomplete { .. } if status => {
+        SecretHomeRole::Remote { .. } if method == OP_REPORT_ACTIVE => None,
+        SecretHomeRole::Remote { .. } | SecretHomeRole::RemoteSetupIncomplete { .. }
+            if method == OP_ACTIVE_STATUS =>
+        {
             Some(refusal("not_found", "permanent"))
         }
         SecretHomeRole::Remote { .. } => Some(refusal("home_unavailable", "transient")),
@@ -64,7 +67,7 @@ struct VersionParams {
 }
 
 pub(crate) fn watch_snapshot(store: &EncryptedStore) -> Value {
-    if let Some(reply) = role_refusal(store, false) {
+    if let Some(reply) = role_refusal(store, OP_WATCH) {
         return reply;
     }
     match store.latest_gh_manifest_metadata() {
@@ -133,13 +136,12 @@ pub(crate) async fn serve(
         }
         return Ok(());
     }
-    let forwarded_method = match method {
-        OP_LATEST => Some(crate::federation::ingress::OP_MANIFEST_LATEST),
-        OP_REPORT_ACTIVE => Some(crate::federation::ingress::OP_MANIFEST_REPORT_ACTIVE),
-        _ => None,
-    };
-    if let Some(method) = forwarded_method {
-        if let Some(answer) = surface.remote().route_manifest_call(method, params).await {
+    if method == OP_LATEST {
+        if let Some(answer) = surface
+            .remote()
+            .route_manifest_call(crate::federation::ingress::OP_MANIFEST_LATEST, params)
+            .await
+        {
             return match answer {
                 crate::federation::remote_read::SecretForwardAnswer::Reply(reply) => {
                     crate::send_route_result(writer, header, crate::wrap_result(reply)).await
@@ -161,7 +163,7 @@ pub(crate) async fn serve(
     let store = Arc::clone(surface.store());
     let method = method.to_owned();
     let reply = tokio::task::spawn_blocking(move || {
-        if let Some(reply) = role_refusal(&store, method == OP_ACTIVE_STATUS) {
+        if let Some(reply) = role_refusal(&store, &method) {
             return reply;
         }
         match method.as_str() {
@@ -177,7 +179,7 @@ pub(crate) async fn serve(
             },
             OP_REPORT_ACTIVE => match store.federation_self_member() {
                 Ok(Some(member)) => {
-                    record_manifest_active_report(&store, &member, &report.unwrap())
+                    record_own_manifest_active_report(&store, &member, &report.unwrap())
                 }
                 Ok(None) => refusal("secret_setup_incomplete", "permanent"),
                 Err(_) => refusal("store_error", "transient"),

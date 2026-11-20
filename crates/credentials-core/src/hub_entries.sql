@@ -53,6 +53,7 @@ CREATE TABLE gh_manifest_activations_v50 (
     reason TEXT,
     reported_at_ms INTEGER,
     retired_at_ms INTEGER,
+    report_box_id TEXT CHECK (report_box_id IS NULL OR version IS NOT NULL),
     CHECK ((version IS NULL AND payload_sha256 IS NULL AND verdict IS NULL
             AND reason IS NULL AND reported_at_ms IS NULL)
         OR (version IS NOT NULL AND payload_sha256 IS NOT NULL AND verdict IS NOT NULL

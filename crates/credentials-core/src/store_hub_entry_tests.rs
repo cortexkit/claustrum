@@ -578,6 +578,9 @@ fn hub_collector_keeps_per_box_high_water_until_membership_ends() {
     let (_root, store) = rig("hub-collector", 186);
     seed_self_and_manifest(&store);
     store
+        .set_secret_home_audited(Some("self"), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    store
         .record_hub_own_report(&report(HOME), ACTIVATION)
         .unwrap();
     let seq = |n| HubReportSeq::new(n).unwrap();
@@ -694,4 +697,46 @@ fn hub_collector_keeps_per_box_high_water_until_membership_ends() {
     assert!(store.list_hub_manifest_high_waters().unwrap().is_empty());
     assert!(record(BOX_1, "missed-pair", 2).unwrap().is_none());
     assert!(store.gh_manifest_active_status(28).unwrap().unwrap().ready);
+}
+
+#[test]
+fn hub_collector_refuses_record_if_home_role_changed_before_the_store_fence() {
+    let (_root, store) = rig("hub-collector-role", 186);
+    seed_self_and_manifest(&store);
+    grant_peer(&store, "pair");
+    store
+        .set_secret_home_audited(Some("self"), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    assert!(matches!(
+        store.secret_home_role(),
+        crate::store::SecretHomeRole::Home { .. }
+    ));
+    // The work was queued while Home. The role update wins the writer fence.
+    store
+        .set_secret_home_audited(None, AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    let before = store.read_audit(None).unwrap();
+    assert!(store
+        .record_hub_manifest_report(
+            &report(PEER),
+            BOX_1,
+            "pair",
+            HubReportSeq::FIRST,
+            || true,
+            ACTIVATION
+        )
+        .unwrap()
+        .is_none());
+    assert!(store.list_hub_manifest_high_waters().unwrap().is_empty());
+    let status = store.gh_manifest_active_status(28).unwrap().unwrap();
+    assert_eq!(
+        status
+            .computers
+            .iter()
+            .find(|row| row.member_id == PEER)
+            .unwrap()
+            .version,
+        None
+    );
+    assert_eq!(store.read_audit(None).unwrap(), before);
 }

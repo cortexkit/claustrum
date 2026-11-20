@@ -2183,6 +2183,7 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
                 column("reason", "TEXT", false, None, false),
                 column("reported_at_ms", "INTEGER", false, None, false),
                 column("retired_at_ms", "INTEGER", false, None, false),
+                column("report_box_id", "TEXT", false, None, false),
             ],
         ),
         (

@@ -483,7 +483,7 @@ fn failed_manifest_insert_or_late_audit_leaves_all_five_tables_unchanged() {
     store.with_raw_conn(|conn| {
         proposal(conn, P1, "agent-A", "Owner/One", 28, "pending")?;
         proposal(conn, P2, "agent-B", "Owner/Two", 28, "pending")?;
-        conn.execute_batch("INSERT INTO gh_manifest_activations VALUES ('member', 28, 'digest', 'valid', NULL, 99, NULL); \
+        conn.execute_batch("INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reason, reported_at_ms, retired_at_ms) VALUES ('member', 28, 'digest', 'valid', NULL, 99, NULL); \
             INSERT INTO gh_manifest_activation_audits VALUES ('member', 28, 'valid');")
     }).unwrap();
     let before = snapshot(&store);
@@ -565,17 +565,18 @@ fn manifest_schema_enforces_report_shapes_and_approval_state() {
     let (_root, store) = taxonomy_tests::rig("gh-report-shape", 176);
     store.with_raw_conn(|conn| {
         conn.execute_batch(
-            "INSERT INTO gh_manifest_activations VALUES ('retired-only', NULL, NULL, NULL, NULL, NULL, 1); \
-             INSERT INTO gh_manifest_activations VALUES ('not-yet-reported', NULL, NULL, NULL, NULL, NULL, NULL); \
-             INSERT INTO gh_manifest_activations VALUES ('valid', 28, 'hash', 'valid', NULL, 1, NULL); \
-             INSERT INTO gh_manifest_activations VALUES ('invalid', 28, 'hash', 'invalid', 'bad signature', 1, 2); \
+            "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reason, reported_at_ms, retired_at_ms) VALUES \
+                 ('retired-only', NULL, NULL, NULL, NULL, NULL, 1), \
+                 ('not-yet-reported', NULL, NULL, NULL, NULL, NULL, NULL), \
+                 ('valid', 28, 'hash', 'valid', NULL, 1, NULL), \
+                 ('invalid', 28, 'hash', 'invalid', 'bad signature', 1, 2); \
              INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'valid'); \
              INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'invalid');"
         )?;
         for sql in [
-            "INSERT INTO gh_manifest_activations VALUES ('partial', 28, NULL, 'valid', NULL, 1, NULL)",
-            "INSERT INTO gh_manifest_activations VALUES ('invalid-without-reason', 28, 'hash', 'invalid', NULL, 1, NULL)",
-            "INSERT INTO gh_manifest_activations VALUES ('unknown', 28, 'hash', 'unknown', NULL, 1, NULL)",
+            "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reason, reported_at_ms) VALUES ('partial', 28, NULL, 'valid', NULL, 1)",
+            "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reason, reported_at_ms) VALUES ('invalid-without-reason', 28, 'hash', 'invalid', NULL, 1)",
+            "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reason, reported_at_ms) VALUES ('unknown', 28, 'hash', 'unknown', NULL, 1)",
             "INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'valid')",
             "INSERT INTO gh_manifest_activation_audits VALUES ('valid', 28, 'unknown')",
         ] {

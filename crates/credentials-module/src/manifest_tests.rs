@@ -1,5 +1,5 @@
 use super::*;
-use crate::manifest_active_report::ReportParams;
+use crate::manifest_active_report::{record_manifest_active_report, ReportParams};
 use credentials_core::{
     admin_auth::AdminMacKey,
     audit::{AuditCtx, AuditOp},
@@ -787,9 +787,9 @@ impl FederationRig {
 }
 
 #[tokio::test(start_paused = true)]
-async fn manifest_federation_latest_recovers_missed_notice_and_report_retry_deduplicates() {
+async fn manifest_federation_latest_recovers_missed_notice_and_report_commits_locally() {
     use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
-    use federation_support::{wait_for_signal, Held, Reply};
+    use federation_support::wait_for_signal;
     let mut rig = FederationRig::new().await;
     rig.store_version(28);
     rig.store_version(29);
@@ -801,36 +801,19 @@ async fn manifest_federation_latest_recovers_missed_notice_and_report_retry_dedu
         "{\n  \"manifest_version\": 29\n}\n"
     );
     assert!(rig.member.store.latest_gh_manifest().unwrap().is_none());
-    let held = Held::new();
-    rig.route(OP_MANIFEST_REPORT_ACTIVE, Some(held.clone()));
-    let losing = async {
-        held.arrived().await;
-        wait_for_signal(rig.vaults.callosum.close_connections(false)).await;
-        held.release(Reply::Stall);
-    };
-    let (lost, ()) = tokio::join!(rig.member.call("aft", OP_REPORT_ACTIVE, report(29)), losing);
-    assert_eq!(lost, refusal("home_unavailable", "transient"));
-    let audits = || {
-        rig.home_store
-            .store
-            .read_audit(None)
-            .unwrap()
-            .into_iter()
-            .filter(|row| row.op == "gh_manifest_activation")
-            .count()
-    };
+    let before = rig.home_store.store.read_audit(None).unwrap();
+    wait_for_signal(rig.vaults.callosum.close_connections(false)).await;
+    let recorded = wait_for_signal(rig.member.call("aft", OP_REPORT_ACTIVE, report(29))).await;
     assert_eq!(
-        audits(),
-        1,
-        "the home committed before its reply was dropped"
-    );
-    let retried = wait_for_signal(rig.member.call("aft", OP_REPORT_ACTIVE, report(29))).await;
-    assert_eq!(
-        retried,
+        recorded,
         json!({"status":"recorded","member_id":rig.vaults.requester_member(),"version":29})
     );
-    assert_eq!(audits(), 1);
-    let conn = Connection::open(rig.vaults.a.store_path()).unwrap();
+    assert_eq!(rig.home_store.store.read_audit(None).unwrap(), before);
+    assert_eq!(
+        rig.member.store.hub_own_report().unwrap().unwrap().version,
+        29
+    );
+    let conn = Connection::open(&rig.member.path).unwrap();
     let member: String = conn
         .query_row("SELECT member_id FROM gh_manifest_activations", [], |row| {
             row.get(0)
@@ -844,7 +827,7 @@ async fn manifest_federation_latest_recovers_missed_notice_and_report_retry_dedu
             .iter()
             .filter(|method| method.as_str() == OP_MANIFEST_REPORT_ACTIVE)
             .count(),
-        2
+        0
     );
 }
 
@@ -939,16 +922,15 @@ async fn manifest_federation_missing_grant_and_nonmember_watch_are_not_found() {
         .execute("DELETE FROM member_grants", [])
         .unwrap();
     let before = rig.home_store.store.read_audit(None).unwrap();
-    for (local, forwarded, params) in [
-        (OP_LATEST, OP_MANIFEST_LATEST, json!({})),
-        (OP_REPORT_ACTIVE, OP_MANIFEST_REPORT_ACTIVE, report(28)),
-    ] {
-        rig.route(forwarded, None);
-        assert_eq!(
-            wait_for_signal(rig.member.call("aft", local, params)).await,
-            refusal("not_found", "permanent")
-        );
-    }
+    rig.route(OP_MANIFEST_LATEST, None);
+    assert_eq!(
+        wait_for_signal(rig.member.call("aft", OP_LATEST, json!({}))).await,
+        refusal("not_found", "permanent")
+    );
+    assert!(
+        matches!(wait_for_signal(rig.home.serve(rig.vaults.requester_member(), OP_MANIFEST_REPORT_ACTIVE, &report(28))).await,
+        claustrum_module_probe::federation::HomeAnswer::Reply(reply) if reply == refusal("not_found", "permanent"))
+    );
     let relay = HomeWatchRelay::new(Arc::clone(&rig.home), rig.vaults.requester_member());
     rig.vaults.callosum.answer(
         "claustrum",
@@ -999,21 +981,16 @@ async fn manifest_federation_missing_grant_and_nonmember_watch_are_not_found() {
 
 #[tokio::test(start_paused = true)]
 async fn manifest_federation_setup_and_unreachable_refusals_are_explicit() {
-    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
+    use crate::federation::ingress::OP_MANIFEST_LATEST;
     use federation_support::{wait_for_signal, Reply};
     let mut rig = FederationRig::new().await;
-    for (local, forwarded, params) in [
-        (OP_LATEST, OP_MANIFEST_LATEST, json!({})),
-        (OP_REPORT_ACTIVE, OP_MANIFEST_REPORT_ACTIVE, report(28)),
-    ] {
-        rig.vaults
-            .callosum
-            .answer("claustrum", forwarded, Reply::Drop);
-        assert_eq!(
-            wait_for_signal(rig.member.call("aft", local, params)).await,
-            refusal("home_unavailable", "transient")
-        );
-    }
+    rig.vaults
+        .callosum
+        .answer("claustrum", OP_MANIFEST_LATEST, Reply::Drop);
+    assert_eq!(
+        wait_for_signal(rig.member.call("aft", OP_LATEST, json!({}))).await,
+        refusal("home_unavailable", "transient")
+    );
     rig.member.sql(&format!(
         "UPDATE settings SET value='{}' WHERE name='secrets.home_member'",
         rig.vaults.requester_member()

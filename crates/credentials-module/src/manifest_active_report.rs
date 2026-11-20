@@ -1,4 +1,4 @@
-//! Manifest report grammar and the shared committed-report path for every transport.
+//! Manifest report grammar and the local report commit path.
 
 use credentials_core::{
     audit::{AuditCtx, AuditOp},
@@ -47,15 +47,6 @@ pub fn parse_active_report(params: &Value) -> Option<ReportParams> {
         .filter(ReportParams::valid)
 }
 
-/// The legacy federation route does not commit the caller's report as this vault's own.
-pub fn record_manifest_active_report(
-    store: &EncryptedStore,
-    member_id: &str,
-    params: &ReportParams,
-) -> Value {
-    record(store, member_id, params, false)
-}
-
 #[allow(
     dead_code,
     reason = "the library probe does not serve the local manifest route"
@@ -65,7 +56,26 @@ pub(crate) fn record_own_manifest_active_report(
     member_id: &str,
     params: &ReportParams,
 ) -> Value {
-    record(store, member_id, params, true)
+    let report = GhManifestActivationReport {
+        member_id,
+        version: params.version,
+        payload_sha256: &params.payload_sha256,
+        verdict: params.verdict,
+        reason: params.reason.as_str(),
+        reported_at_ms: report_time_ms(),
+    };
+    let ctx = AuditCtx {
+        actor: member_id,
+        op: AuditOp::GhManifestActivation,
+        alarm: None,
+    };
+    match store.record_hub_own_report(&report, ctx) {
+        Ok(outcome) => {
+            warn_on_downgrade(member_id, outcome);
+            json!({"status":"recorded", "member_id":member_id, "version":params.version})
+        }
+        Err(_) => json!({"error":{"code":"store_error","class":"transient"}}),
+    }
 }
 
 pub(crate) fn report_time_ms() -> i64 {
@@ -83,33 +93,5 @@ pub(crate) fn warn_on_downgrade(member_id: &str, outcome: GhManifestActivationOu
             active = lower.active,
             "lower manifest version reported"
         );
-    }
-}
-
-fn record(store: &EncryptedStore, member_id: &str, params: &ReportParams, own: bool) -> Value {
-    let report = GhManifestActivationReport {
-        member_id,
-        version: params.version,
-        payload_sha256: &params.payload_sha256,
-        verdict: params.verdict,
-        reason: params.reason.as_str(),
-        reported_at_ms: report_time_ms(),
-    };
-    let ctx = AuditCtx {
-        actor: member_id,
-        op: AuditOp::GhManifestActivation,
-        alarm: None,
-    };
-    let outcome = if own {
-        store.record_hub_own_report(&report, ctx)
-    } else {
-        store.report_gh_manifest_active(&report, ctx)
-    };
-    match outcome {
-        Ok(outcome) => {
-            warn_on_downgrade(member_id, outcome);
-            json!({"status":"recorded", "member_id":member_id, "version":params.version})
-        }
-        Err(_) => json!({"error":{"code":"store_error","class":"transient"}}),
     }
 }

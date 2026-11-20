@@ -1973,6 +1973,8 @@ pub enum ReadError {
     KindNotSignable,
     /// `credential.sign` was asked to sign more bytes than the cap allows.
     SignPayloadTooLarge,
+    /// Fleet-record signing cannot sign payloads reserved for vault hub entries.
+    ReservedPayloadPrefix,
     KindNotOpenable,
     BusSealInfoDomain,
     OpenFailed,
@@ -2043,6 +2045,7 @@ impl ReadError {
             | ReadError::RefreshUnsupported
             | ReadError::KindNotGettable
             | ReadError::KindNotSignable
+            | ReadError::ReservedPayloadPrefix
             | ReadError::KindNotOpenable
             | ReadError::BusSealInfoDomain
             | ReadError::OpenFailed
@@ -2919,6 +2922,12 @@ impl ReadSurface {
         let payload = base64::engine::general_purpose::STANDARD
             .decode(params.payload_b64.as_bytes())
             .map_err(|_| ReadError::MalformedEncoding)?;
+        // Only the vault's hub publisher may sign in this domain.
+        if credential_id.starts_with("signing:fleet-record:")
+            && payload.starts_with(b"ck-vault-hub/")
+        {
+            return Err(ReadError::ReservedPayloadPrefix.into());
+        }
         credentials_core::signing::validate_signing_input(&credential_id, &payload)
             .map_err(|_| SignError::InvalidParams)?;
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
@@ -5643,6 +5652,7 @@ mod error_class_tests {
         KindNotGettable => "kind_not_gettable", "permanent";
         KindNotSignable => "kind_not_signable", "permanent";
         SignPayloadTooLarge => "sign_payload_too_large", "context_overflow";
+        ReservedPayloadPrefix => "reserved_payload_prefix", "permanent";
         KindNotOpenable => "kind_not_openable", "permanent";
         BusSealInfoDomain => "bus_seal_info_domain", "permanent";
         OpenFailed => "open_failed", "permanent";

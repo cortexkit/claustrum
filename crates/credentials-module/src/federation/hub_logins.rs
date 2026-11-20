@@ -34,7 +34,7 @@ pub(crate) struct LoginEnvelope {
     pub(crate) aad: String,
 }
 
-pub(super) fn seal(
+pub(crate) fn seal(
     aad: &LoginAad,
     sender_pem: &str,
     recipient_public: &[u8; 32],

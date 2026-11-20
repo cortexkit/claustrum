@@ -230,7 +230,7 @@ fn verify_latest(latest: &Value, public: &[u8]) {
 }
 
 async fn reports(rig: &Rig, hash: &str, public: &[u8]) -> (Value, Value, Value) {
-    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
+    use crate::federation::ingress::OP_MANIFEST_LATEST;
     use crate::tests::federation_fixture_support::{temp_root, TwoVaults};
     use claustrum_module_probe::federation::{HomeAnswer, HomeVault};
     let root = temp_root("manifest-binding-activation");
@@ -280,8 +280,7 @@ async fn reports(rig: &Rig, hash: &str, public: &[u8]) -> (Value, Value, Value) 
     assert_eq!(missing["result"]["ready"], false);
     assert_eq!(missing["result"]["computers"][1]["member_id"], OTHER);
     assert!(missing["result"]["computers"][1]["version"].is_null());
-    // A second AFT reads and reports through the paired-member home ingress. Its
-    // attested member is a separate argument, never part of the report params.
+    // A second AFT reads through the paired-member home ingress.
     let HomeAnswer::Reply(latest) = home.serve(OTHER, OP_MANIFEST_LATEST, &json!({})).await else {
         panic!("expected latest")
     };
@@ -296,14 +295,20 @@ async fn reports(rig: &Rig, hash: &str, public: &[u8]) -> (Value, Value, Value) 
         ),
         hash
     );
-    let HomeAnswer::Reply(recorded) = home.serve(OTHER, OP_MANIFEST_REPORT_ACTIVE, &request).await
-    else {
-        panic!("expected report reply")
-    };
-    assert_eq!(
-        recorded,
-        json!({"status":"recorded","member_id":OTHER,"version":29})
-    );
+    // Seed the readiness state that a verified hub report leaves in the store.
+    rig.store
+        .report_gh_manifest_active(
+            &credentials_core::store::GhManifestActivationReport {
+                member_id: OTHER,
+                version: 29,
+                payload_sha256: hash,
+                verdict: credentials_core::store::GhManifestVerdict::Valid,
+                reason: None,
+                reported_at_ms: 1,
+            },
+            AuditCtx::admin(AuditOp::GhManifestActivation),
+        )
+        .unwrap();
     let ready = call(
         rig,
         "plexus",

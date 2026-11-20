@@ -1600,8 +1600,9 @@ home. An older home answers forwarded manifest calls with uniform `not_found`,
 which a member's AFT cannot distinguish from an empty manifest store.
 
 After deploy, read Callosum's effective operations for the test Mac and confirm
-that `federation.manifest_latest`, `federation.manifest_watch` and
-`federation.manifest_report_active` are present. Existing vault shares use
+that `federation.manifest_latest` and `federation.manifest_watch` are present.
+Active reports are committed locally and published through the hub, not forwarded
+to the home through Callosum. Existing vault shares use
 `all_declared`, so newly declared operations are exposed on the next catalog read.
 
 Keep `manifest.one_tap` off (its default) until the phone has the app build that reads
@@ -1825,12 +1826,14 @@ local file's resolved value without a daemon or vault key, not the gate's approv
 value.
 
 Off removes all `sharing_switch` member grants and `home_watch` automatic copies in
-one audited transaction with the applied setting. Open and new remote login watches
-receive the existing `not_found` refusal; peers remove automatic copies of this home's
-logins. Receiving watches close too. Operator grants and hand-added remote records
+one audited transaction with the applied setting. The home publishes an authenticated
+`ended` value to the hub for affected members, which then remove only automatic copies
+of that home's logins. A member that cannot reach the hub keeps its copies until it
+receives `ended` or learns of an unpair or re-pair from Callosum. A vault does not apply
+received hub lists while its own sharing is off. Operator grants and hand-added remote records
 remain, as do local logins; operator-granted token reads and secret use still work.
-Turning the setting on triggers a fresh Callosum read and reopens receiving watches;
-grants and copies return from live state, without manual recreation.
+Turning the setting on triggers a fresh Callosum read. Grants and copies return from
+live state, with login lists read from the hub, without manual recreation.
 
 Invalid configuration never turns sharing on: startup applies off, while an invalid
 edit keeps the last applied value. A WARN names the path and redacted reason once per

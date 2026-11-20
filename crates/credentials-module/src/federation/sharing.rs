@@ -155,18 +155,14 @@ async fn apply(
     body: Value,
     retries: &mut RetryState,
     removals: &Arc<PendingRemovals>,
-    home_watches: Option<&super::home_watch::RemoteWatchHub>,
-    member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    manifest_watches: Option<&super::manifest_watch_ingress::ManifestWatchHub>,
     hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
     let snapshot = Arc::new(
         decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?,
     );
-    if let Some(hub) = home_watches {
+    if let Some(hub) = manifest_watches {
         hub.paired_devices(snapshot.devices.clone());
-    }
-    if let Some(pairings) = member_pairings {
-        pairings.send_replace(Some(snapshot.computers.clone()));
     }
     if let Some(pairings) = hub_pairings {
         pairings.send_replace(Some(Arc::clone(&snapshot)));
@@ -310,46 +306,35 @@ impl PendingRemovals {
 /// Run until cancelled by the daemon's task guard. Every reopen starts with a full
 /// read; the watch's initial snapshot closes the read/subscribe race.
 pub async fn run(store: Arc<EncryptedStore>, client: OutboundClient) {
-    run_with_home_watches(store, client, None).await;
+    run_with_manifest_watches(store, client, None).await;
 }
 
-pub async fn run_with_home_watches(
+pub async fn run_with_manifest_watches(
     store: Arc<EncryptedStore>,
     client: OutboundClient,
-    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
+    manifest_watches: Option<Arc<super::manifest_watch_ingress::ManifestWatchHub>>,
 ) {
-    run_with_reconcilers(store, client, home_watches, None).await;
-}
-
-pub async fn run_with_reconcilers(
-    store: Arc<EncryptedStore>,
-    client: OutboundClient,
-    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
-    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
-) {
-    run_with_pairing_snapshots(store, client, home_watches, member_pairings, None).await;
+    run_with_pairing_snapshots(store, client, manifest_watches, None).await;
 }
 
 pub(crate) async fn run_with_pairing_snapshots(
     store: Arc<EncryptedStore>,
     client: OutboundClient,
-    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
-    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    manifest_watches: Option<Arc<super::manifest_watch_ingress::ManifestWatchHub>>,
     hub_pairings: Option<PairingSnapshots>,
 ) {
     let removals = Arc::new(PendingRemovals::default());
     // Keep the removal queue alive across reconnects and login-sharing changes.
     tokio::select! {
         _ = removals.run(Arc::clone(&store)) => {},
-        _ = reconcile(store, client, home_watches, member_pairings, hub_pairings, &removals) => {},
+        _ = reconcile(store, client, manifest_watches, hub_pairings, &removals) => {},
     }
 }
 
 async fn reconcile(
     store: Arc<EncryptedStore>,
     client: OutboundClient,
-    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
-    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    manifest_watches: Option<Arc<super::manifest_watch_ingress::ManifestWatchHub>>,
     hub_pairings: Option<PairingSnapshots>,
     removals: &Arc<PendingRemovals>,
 ) {
@@ -363,8 +348,7 @@ async fn reconcile(
                 &client,
                 &mut retries,
                 removals,
-                home_watches.as_deref(),
-                member_pairings.as_ref(),
+                manifest_watches.as_deref(),
                 hub_pairings.as_ref(),
             );
             tokio::pin!(attempt);
@@ -408,8 +392,7 @@ async fn watch(
     client: &OutboundClient,
     retries: &mut RetryState,
     removals: &Arc<PendingRemovals>,
-    home_watches: Option<&super::home_watch::RemoteWatchHub>,
-    member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    manifest_watches: Option<&super::manifest_watch_ingress::ManifestWatchHub>,
     hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
     let snapshot = client
@@ -425,8 +408,7 @@ async fn watch(
         snapshot,
         retries,
         removals,
-        home_watches,
-        member_pairings,
+        manifest_watches,
         hub_pairings,
     )
     .await?;
@@ -448,8 +430,7 @@ async fn watch(
             snapshot,
             retries,
             removals,
-            home_watches,
-            member_pairings,
+            manifest_watches,
             hub_pairings,
         )
         .await?;

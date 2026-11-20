@@ -1,17 +1,16 @@
-//! Home-side remote inventory streams, including opens still checking their pairing.
+//! Home-side manifest streams, including opens still checking their pairing.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use credentials_core::federation::RemoteWatchRow;
 use credentials_core::store::EncryptedStore;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{json, Value};
 use subc_protocol::{EnvelopeHeader, Flags, Frame, FrameType, Priority};
 use tokio::sync::{mpsc, watch, Semaphore};
 
-use super::ingress::{remote_watch_lists_equal, remote_watch_logins_wire, HomeAnswer, HomeVault};
+use super::ingress::{HomeAnswer, HomeVault};
 
 const COALESCE: Duration = Duration::from_millis(250);
 const RECHECK: Duration = Duration::from_secs(60);
@@ -23,48 +22,24 @@ async fn send(writer: &mpsc::Sender<Frame>, frame: Frame) -> Result<(), String> 
         .map_err(|_| "egress channel closed".to_owned())
 }
 
-pub(crate) const MAX_REMOTE_WATCHES_PER_MEMBER: usize = 4;
+pub(crate) const MAX_MANIFEST_WATCHES_PER_MEMBER: usize = 4;
 type Key = (u16, u64);
 
 pub(crate) struct PreparedWatch {
     pub member: String,
     pub pairing: String,
-    pub home: String,
-    pub projection: Projection,
+    pub projection: Value,
     pub store: Arc<EncryptedStore>,
     pub writes: watch::Receiver<()>,
     pub budget: Duration,
 }
 
-pub(crate) enum Projection {
-    Logins(Vec<RemoteWatchRow>),
-    Manifest(Value),
-}
-
-impl Projection {
-    fn notice(&self, home: &str, seq: u64) -> Value {
-        match self {
-            Self::Logins(rows) => json!({
-                "kind":"snapshot", "home":home, "epoch":epoch(), "seq":seq,
-                "logins":remote_watch_logins_wire(rows),
-            }),
-            Self::Manifest(value) => {
-                let mut value = value.clone();
-                value["kind"] = json!("changed");
-                value["epoch"] = json!(epoch());
-                value["seq"] = json!(seq);
-                value
-            }
-        }
-    }
-
-    fn same(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Logins(a), Self::Logins(b)) => remote_watch_lists_equal(a, b),
-            (Self::Manifest(a), Self::Manifest(b)) => a == b,
-            _ => false,
-        }
-    }
+fn notice(value: &Value, seq: u64) -> Value {
+    let mut value = value.clone();
+    value["kind"] = json!("changed");
+    value["epoch"] = json!(epoch());
+    value["seq"] = json!(seq);
+    value
 }
 
 pub struct PendingOpen {
@@ -106,7 +81,7 @@ impl Pairings {
     }
 }
 
-pub struct RemoteWatchHub {
+pub struct ManifestWatchHub {
     registry: Arc<Mutex<Registry>>,
     // Serialize admission and terminal publication, never the pairing/store checks.
     publication: Arc<tokio::sync::Mutex<()>>,
@@ -116,31 +91,23 @@ pub struct RemoteWatchHub {
     pub(crate) before_checks: OnceLock<super::ingress::IssueAuditGate>,
     #[cfg(test)]
     pub(crate) completed: tokio::sync::Notify,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) waking: Arc<tokio::sync::Notify>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) refreshed: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
+    #[cfg(feature = "test-support")]
+    waking: Arc<tokio::sync::Notify>,
 }
 
-impl Default for RemoteWatchHub {
+impl Default for ManifestWatchHub {
     fn default() -> Self {
         Self {
             registry: Arc::default(),
             publication: Arc::default(),
             pairings: watch::channel(Arc::new(Pairings::default())).0,
-            snapshots: Arc::new(Semaphore::new(MAX_REMOTE_WATCHES_PER_MEMBER)),
+            snapshots: Arc::new(Semaphore::new(MAX_MANIFEST_WATCHES_PER_MEMBER)),
             #[cfg(test)]
             before_checks: OnceLock::new(),
             #[cfg(test)]
             completed: tokio::sync::Notify::new(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             waking: Arc::default(),
-            #[cfg(any(test, feature = "test-support"))]
-            refreshed: Arc::default(),
-            #[cfg(test)]
-            before_projection: Arc::default(),
         }
     }
 }
@@ -225,25 +192,11 @@ impl Registry {
     }
 }
 
-impl RemoteWatchHub {
-    /// Observe cancellation reaching the home, rather than waiting on elapsed time.
-    #[cfg(feature = "test-support")]
-    pub fn registered_for_test(&self) -> usize {
-        self.registry.lock().expect("remote watches").entries.len()
-    }
-
-    /// Let socket integration tests wait until a stream has woken for a change. A
-    /// woken stream then sleeps through its 250 ms coalescing window before it
-    /// re-reads, so a test advances its paused clock only after this returns.
+impl ManifestWatchHub {
+    /// Wait until the stream has woken, before advancing a test's coalescing clock.
     #[cfg(feature = "test-support")]
     pub async fn waking_for_test(&self) {
         self.waking.notified().await;
-    }
-
-    /// Let integration tests observe an inventory re-read even if nothing changed.
-    #[cfg(feature = "test-support")]
-    pub async fn refreshed_for_test(&self) {
-        self.refreshed.notified().await;
     }
 
     /// No I/O: the frame loop installs this before it can read a following Cancel.
@@ -334,35 +287,6 @@ impl RemoteWatchHub {
         member: &str,
         params: &Value,
     ) -> Result<(), String> {
-        self.open_kind(home, pending, writer, header, member, params, false)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn open_manifest(
-        &self,
-        home: &HomeVault,
-        pending: PendingOpen,
-        writer: &mpsc::Sender<Frame>,
-        header: EnvelopeHeader,
-        member: &str,
-        params: &Value,
-    ) -> Result<(), String> {
-        self.open_kind(home, pending, writer, header, member, params, true)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn open_kind(
-        &self,
-        home: &HomeVault,
-        pending: PendingOpen,
-        writer: &mpsc::Sender<Frame>,
-        header: EnvelopeHeader,
-        member: &str,
-        params: &Value,
-        manifest: bool,
-    ) -> Result<(), String> {
         #[cfg(test)]
         let _completed = Completed(&self.completed);
         let draining = {
@@ -381,7 +305,7 @@ impl RemoteWatchHub {
         let prepared = if draining {
             Err(unavailable())
         } else {
-            home.prepare_remote_watch(member, params, manifest).await
+            home.prepare_manifest_watch(member, params).await
         };
         let result = self.publish(&pending, writer, header, prepared).await;
         if result.is_err() {
@@ -405,7 +329,7 @@ impl RemoteWatchHub {
             .as_ref()
             .ok()
             .map(|watch| {
-                serde_json::to_vec(&watch.projection.notice(&watch.home, 1))
+                serde_json::to_vec(&notice(&watch.projection, 1))
                     .map_err(|error| error.to_string())
                     .and_then(|body| frame(header, FrameType::StreamData, body))
             })
@@ -431,7 +355,7 @@ impl RemoteWatchHub {
                                 .map(|live| (*key, Arc::clone(&entry.identity), live))
                         })
                         .collect();
-                    (live.len() >= MAX_REMOTE_WATCHES_PER_MEMBER).then(|| {
+                    (live.len() >= MAX_MANIFEST_WATCHES_PER_MEMBER).then(|| {
                         let (key, identity, live) = live
                             .into_iter()
                             .min_by_key(|(_, _, live)| live.order)
@@ -515,12 +439,8 @@ impl RemoteWatchHub {
                     writer: writer.clone(),
                     header,
                     watch,
-                    #[cfg(any(test, feature = "test-support"))]
+                    #[cfg(feature = "test-support")]
                     waking: Arc::clone(&self.waking),
-                    #[cfg(any(test, feature = "test-support"))]
-                    refreshed: Arc::clone(&self.refreshed),
-                    #[cfg(test)]
-                    before_projection: Arc::clone(&self.before_projection),
                 };
                 tokio::spawn(subscription.run());
             }
@@ -529,6 +449,10 @@ impl RemoteWatchHub {
     }
 
     #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "only the daemon's route tests inspect pending registrations"
+    )]
     pub(crate) fn entry_count(&self) -> usize {
         self.registry.lock().expect("remote watches").entries.len()
     }
@@ -544,12 +468,8 @@ struct Subscription {
     writer: mpsc::Sender<Frame>,
     header: EnvelopeHeader,
     watch: PreparedWatch,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     waking: Arc<tokio::sync::Notify>,
-    #[cfg(any(test, feature = "test-support"))]
-    refreshed: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    before_projection: Arc<OnceLock<super::ingress::IssueAuditGate>>,
 }
 
 impl Drop for Subscription {
@@ -568,18 +488,13 @@ impl Subscription {
         self.pairings.borrow().lost(&self.pending, &self.watch)
     }
 
-    async fn project(&self) -> Result<Option<Projection>, ()> {
+    async fn project(&self) -> Result<Option<Value>, ()> {
         let store = Arc::clone(&self.watch.store);
         let member = self.watch.member.clone();
         let pairing = self.watch.pairing.clone();
-        let manifest = matches!(self.watch.projection, Projection::Manifest(_));
         let snapshots = Arc::clone(&self.snapshots);
         let deadline = tokio::time::Instant::now() + self.watch.budget;
         let result = tokio::time::timeout_at(deadline, async {
-            #[cfg(test)]
-            if let Some(gate) = self.before_projection.get() {
-                gate().await;
-            }
             let permit = snapshots.acquire_owned().await.map_err(|_| ())?;
             tokio::task::spawn_blocking(move || {
                 // A timed-out SQLite read still owns its slot until the worker exits.
@@ -587,18 +502,7 @@ impl Subscription {
                 if !store.federation_member_mapping().map_err(|_| ())? {
                     return Ok(None);
                 }
-                if manifest {
-                    HomeVault::project_manifest_watch(&store, &member, &pairing)
-                        .map(|value| value.map(Projection::Manifest))
-                        .map_err(|_| ())
-                } else {
-                    if !store.login_sharing().map_err(|_| ())? {
-                        return Ok(None);
-                    }
-                    HomeVault::project_remote_watch(&store, &member, &pairing)
-                        .map(|rows| Some(Projection::Logins(rows)))
-                        .map_err(|_| ())
-                }
+                HomeVault::project_manifest_watch(&store, &member, &pairing)
             })
             .await
             .map_err(|_| ())?
@@ -611,7 +515,7 @@ impl Subscription {
         result
     }
 
-    async fn publish(&self, rows: Option<&Projection>, seq: u64) -> Result<(), String> {
+    async fn publish(&self, projection: Option<&Value>, seq: u64) -> Result<(), String> {
         let _publication = self.publication.lock().await;
         let permit = self.writer.reserve().await.map_err(|e| e.to_string())?;
         let Some(registry) = self.registry.upgrade() else {
@@ -622,13 +526,12 @@ impl Subscription {
             return Ok(());
         }
         // A pairing snapshot can arrive while the projection or writer is waiting.
-        let rows = rows.filter(|_| !self.pairing_lost());
-        let next = match rows {
-            Some(rows) => frame(
+        let projection = projection.filter(|_| !self.pairing_lost());
+        let next = match projection {
+            Some(value) => frame(
                 self.header,
                 FrameType::StreamData,
-                serde_json::to_vec(&rows.notice(&self.watch.home, seq))
-                    .map_err(|e| e.to_string())?,
+                serde_json::to_vec(&notice(value, seq)).map_err(|e| e.to_string())?,
             )?,
             None => {
                 registry.entries.remove(&self.pending.key);
@@ -656,7 +559,7 @@ impl Subscription {
                     _ = timer.tick() => {}
                 }
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             self.waking.notify_one();
             tokio::select! {
                 biased;
@@ -674,13 +577,13 @@ impl Subscription {
                 }
                 match self.project().await {
                     Ok(None) => self.publish(None, seq).await,
-                    Ok(Some(rows)) if !self.watch.projection.same(&rows) => {
-                        self.publish(Some(&rows), seq + 1).await?;
-                        self.watch.projection = rows;
+                    Ok(Some(value)) if self.watch.projection != value => {
+                        self.publish(Some(&value), seq + 1).await?;
+                        self.watch.projection = value;
                         seq += 1;
                         Ok(())
                     }
-                    // Failures retain the last list. They must never look like revocation.
+                    // A projection failure must never look like revocation.
                     _ => Ok(()),
                 }
             };
@@ -692,8 +595,6 @@ impl Subscription {
                 result = pairings.changed() => { if result.is_err() { break; } else { continue; } }
                 result = cycle => { if result.is_err() { break; } }
             }
-            #[cfg(any(test, feature = "test-support"))]
-            self.refreshed.notify_one();
         }
     }
 }

@@ -1,4 +1,4 @@
-mod home_watch_routes {
+mod manifest_watch_routes {
     use super::*;
     use tokio::sync::Notify;
 
@@ -20,15 +20,12 @@ mod home_watch_routes {
                 released.notified().await;
             })
         });
-        assert!(home.remote_watches.before_checks.set(gate).is_ok());
+        assert!(home.manifest_watches.before_checks.set(gate).is_ok());
         (entered, release)
     }
 
     async fn lifecycle(rig: &Rig, ty: FrameType, channel: u16, corr: u64) {
-        lifecycle_for(rig, ty, channel, corr, federation::ingress::OP_REMOTE_WATCH).await;
-    }
-
-    async fn lifecycle_for(rig: &Rig, ty: FrameType, channel: u16, corr: u64, method: &str) {
+        let method = federation::ingress::OP_MANIFEST_WATCH;
         let (surface, admin, routes, egress) = rig;
         let request = Frame::build_with_version(
             PROTOCOL_VERSION,
@@ -56,86 +53,76 @@ mod home_watch_routes {
     }
 
     #[tokio::test]
-    async fn remote_watch_pending_cancel_and_route_goodbye_send_nothing() {
-        for method in [
-            federation::ingress::OP_REMOTE_WATCH,
-            federation::ingress::OP_MANIFEST_WATCH,
-        ] {
-            for ty in [FrameType::Cancel, FrameType::Goodbye] {
-                let (surface, admin, store, routes) = granted_scoped_rig(216, "callosum");
-                set_member_mapping(&store, true);
-                bind_reserved_route(
-                    &surface,
-                    &admin,
-                    &routes,
-                    119,
-                    1,
-                    "callosum",
-                    MEMBER_HARNESS,
-                )
-                .await;
-                let (control, _control) = mpsc::channel(8);
-                let (route, mut rx) = mpsc::channel(8);
-                let rig = (surface, admin, routes, Egress { control, route });
-                let (entered, release) = hold_checks(rig.1.home());
-                lifecycle_for(&rig, FrameType::Request, 119, 41, method).await;
-                // This assertion runs before the spawned open can be polled.
-                assert_eq!(rig.1.home().remote_watches.entry_count(), 1);
-                entered.notified().await;
-                lifecycle(&rig, ty, 119, 41).await;
-                assert_eq!(rig.1.home().remote_watches.entry_count(), 0);
-                release.notify_one();
-                rig.1.home().remote_watches.completed.notified().await;
-                assert_eq!(rig.1.home().remote_watches.entry_count(), 0);
-                assert!(matches!(
-                    rx.try_recv(),
-                    Err(mpsc::error::TryRecvError::Empty)
-                ));
-            }
+    async fn manifest_watch_pending_cancel_and_route_goodbye_send_nothing() {
+        for ty in [FrameType::Cancel, FrameType::Goodbye] {
+            let (surface, admin, store, routes) = granted_scoped_rig(216, "callosum");
+            set_member_mapping(&store, true);
+            bind_reserved_route(
+                &surface,
+                &admin,
+                &routes,
+                119,
+                1,
+                "callosum",
+                MEMBER_HARNESS,
+            )
+            .await;
+            let (control, _control) = mpsc::channel(8);
+            let (route, mut rx) = mpsc::channel(8);
+            let rig = (surface, admin, routes, Egress { control, route });
+            let (entered, release) = hold_checks(rig.1.home());
+            lifecycle(&rig, FrameType::Request, 119, 41).await;
+            // This assertion runs before the spawned open can be polled.
+            assert_eq!(rig.1.home().manifest_watches.entry_count(), 1);
+            entered.notified().await;
+            lifecycle(&rig, ty, 119, 41).await;
+            assert_eq!(rig.1.home().manifest_watches.entry_count(), 0);
+            release.notify_one();
+            rig.1.home().manifest_watches.completed.notified().await;
+            assert_eq!(rig.1.home().manifest_watches.entry_count(), 0);
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
         }
     }
 
     #[tokio::test]
-    async fn remote_watch_pending_drain_and_goodbye_are_transient() {
-        for method in [
-            federation::ingress::OP_REMOTE_WATCH,
-            federation::ingress::OP_MANIFEST_WATCH,
-        ] {
-            for ty in [FrameType::Push, FrameType::Goodbye] {
-                let (surface, admin, store, routes) = granted_scoped_rig(217, "callosum");
-                set_member_mapping(&store, true);
-                bind_reserved_route(
-                    &surface,
-                    &admin,
-                    &routes,
-                    120,
-                    1,
-                    "callosum",
-                    MEMBER_HARNESS,
-                )
-                .await;
-                let (control, _control) = mpsc::channel(8);
-                let (route, mut rx) = mpsc::channel(8);
-                let rig = (surface, admin, routes, Egress { control, route });
-                let (entered, release) = hold_checks(rig.1.home());
-                lifecycle_for(&rig, FrameType::Request, 120, 42, method).await;
-                entered.notified().await;
-                lifecycle(&rig, ty, 0, 0).await;
-                release.notify_one();
-                rig.1.home().remote_watches.completed.notified().await;
-                let answer = rx.try_recv().expect("draining open refusal");
-                assert_eq!(answer.header.ty, FrameType::Error);
-                assert_eq!(
-                    serde_json::from_slice::<serde_json::Value>(&answer.body).unwrap(),
-                    json!({"code":"home_unavailable","message":"home unavailable","detail":{"class":"transient"}})
-                );
-                assert_eq!(rig.1.home().remote_watches.entry_count(), 0);
-                if ty == FrameType::Push {
-                    lifecycle_for(&rig, FrameType::Request, 120, 43, method).await;
-                    rig.1.home().remote_watches.completed.notified().await;
-                    let answer = rx.try_recv().expect("new open after drain");
-                    assert_eq!(body_code(&answer), "home_unavailable");
-                }
+    async fn manifest_watch_pending_drain_and_goodbye_are_transient() {
+        for ty in [FrameType::Push, FrameType::Goodbye] {
+            let (surface, admin, store, routes) = granted_scoped_rig(217, "callosum");
+            set_member_mapping(&store, true);
+            bind_reserved_route(
+                &surface,
+                &admin,
+                &routes,
+                120,
+                1,
+                "callosum",
+                MEMBER_HARNESS,
+            )
+            .await;
+            let (control, _control) = mpsc::channel(8);
+            let (route, mut rx) = mpsc::channel(8);
+            let rig = (surface, admin, routes, Egress { control, route });
+            let (entered, release) = hold_checks(rig.1.home());
+            lifecycle(&rig, FrameType::Request, 120, 42).await;
+            entered.notified().await;
+            lifecycle(&rig, ty, 0, 0).await;
+            release.notify_one();
+            rig.1.home().manifest_watches.completed.notified().await;
+            let answer = rx.try_recv().expect("draining open refusal");
+            assert_eq!(answer.header.ty, FrameType::Error);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&answer.body).unwrap(),
+                json!({"code":"home_unavailable","message":"home unavailable","detail":{"class":"transient"}})
+            );
+            assert_eq!(rig.1.home().manifest_watches.entry_count(), 0);
+            if ty == FrameType::Push {
+                lifecycle(&rig, FrameType::Request, 120, 43).await;
+                rig.1.home().manifest_watches.completed.notified().await;
+                let answer = rx.try_recv().expect("new open after drain");
+                assert_eq!(body_code(&answer), "home_unavailable");
             }
         }
     }

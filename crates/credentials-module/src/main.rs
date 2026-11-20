@@ -567,18 +567,13 @@ where
     // Clones share one connection and one binding cache.
     admin.home().attach_outbound(outbound.clone());
     surface.remote().attach_outbound(outbound.clone());
-    let (member_pairings, paired_computers) = tokio::sync::watch::channel(None);
-    let _member_watch_guard = AbortOnDrop(tokio::spawn(federation::member_watch::run(
-        Arc::clone(surface.store()),
-        outbound.clone(),
-        paired_computers,
-    )));
-    let _sharing_guard = AbortOnDrop(tokio::spawn(federation::sharing::run_with_reconcilers(
-        Arc::clone(surface.store()),
-        outbound.clone(),
-        Some(Arc::clone(&admin.home().remote_watches)),
-        Some(member_pairings),
-    )));
+    let _sharing_guard = AbortOnDrop(tokio::spawn(
+        federation::sharing::run_with_manifest_watches(
+            Arc::clone(surface.store()),
+            outbound.clone(),
+            Some(Arc::clone(&admin.home().manifest_watches)),
+        ),
+    ));
     let _usage_guard = AbortOnDrop(Arc::clone(&surface.usage).spawn(outbound));
     // `remote add` fetches through this same reader, so it validates a home reply
     // against exactly the adapter set and reply type a consumer read uses.
@@ -1237,7 +1232,7 @@ async fn handle_frame(
         FrameType::Goodbye if frame.header.channel == 0 => {
             admin
                 .home()
-                .remote_watches
+                .manifest_watches
                 .finish_all()
                 .await
                 .map_err(ModuleError::Message)?;
@@ -1251,7 +1246,7 @@ async fn handle_frame(
             ) {
                 admin
                     .home()
-                    .remote_watches
+                    .manifest_watches
                     .finish_all()
                     .await
                     .map_err(ModuleError::Message)?;
@@ -1264,7 +1259,7 @@ async fn handle_frame(
             // limiter state, AND its admin bind state (principal + nonce).
             routes.remove(frame.header.channel);
             surface.watches.close(frame.header.channel);
-            admin.home().remote_watches.close(frame.header.channel);
+            admin.home().manifest_watches.close(frame.header.channel);
             surface
                 .drop_connection(route_connection_id(
                     frame.header.channel,
@@ -1291,14 +1286,12 @@ async fn handle_frame(
             let caller = admin.route_caller(frame.header.channel);
             let request = RouteRequest::decode(frame);
             let remote_watch = if matches!(&caller, federation::RouteCaller::Member(_))
-                && request.body.as_ref().is_ok_and(|request| {
-                    matches!(
-                        request.method.as_str(),
-                        federation::ingress::OP_REMOTE_WATCH
-                            | federation::ingress::OP_MANIFEST_WATCH
-                    )
-                }) {
-                Some(admin.home().remote_watches.register(request.header))
+                && request
+                    .body
+                    .as_ref()
+                    .is_ok_and(|request| request.method == federation::ingress::OP_MANIFEST_WATCH)
+            {
+                Some(admin.home().manifest_watches.register(request.header))
             } else {
                 None
             };
@@ -1347,7 +1340,7 @@ async fn handle_frame(
                 .cancel(frame.header.channel, frame.header.corr);
             admin
                 .home()
-                .remote_watches
+                .manifest_watches
                 .cancel(frame.header.channel, frame.header.corr);
             Ok(true)
         }
@@ -1671,7 +1664,7 @@ async fn dispatch_route_request(
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
     caller: federation::RouteCaller,
-    remote_watch: Option<federation::home_watch::PendingOpen>,
+    remote_watch: Option<federation::manifest_watch_ingress::PendingOpen>,
 ) -> Result<(), ModuleError> {
     dispatch_request(
         RouteRequest::decode(frame),
@@ -1697,10 +1690,29 @@ async fn dispatch_request(
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
     caller: federation::RouteCaller,
-    remote_watch: Option<federation::home_watch::PendingOpen>,
+    remote_watch: Option<federation::manifest_watch_ingress::PendingOpen>,
 ) -> Result<(), ModuleError> {
     let header = decoded.header;
     let method = decoded.body.as_ref().ok();
+    if let Some(retired) = method.filter(|request| {
+        matches!(
+            request.method.as_str(),
+            "federation.remote_watch" | "federation.manifest_report_active"
+        ) && !matches!(caller, federation::RouteCaller::Refused)
+    }) {
+        // Old members keep their login copies on an unknown method. A not_found
+        // stream refusal would tell them that the home revoked access.
+        return send_route_error(
+            writer,
+            header.ver,
+            header.channel,
+            header.epoch,
+            header.corr,
+            "unknown_method",
+            &format!("unknown method '{}'", retired.method),
+        )
+        .await;
+    }
     if let Some(request) = method {
         if fleet_ops::is_op(&request.method)
             && !matches!(&caller, federation::RouteCaller::Principal(context) if fleet_ops::admitted(context.as_ref(), &request.method))
@@ -1771,14 +1783,10 @@ async fn dispatch_request(
     {
         return send_route_result(writer, header, uniform_not_found()).await;
     }
-    if method.as_ref().is_some_and(|request| {
-        matches!(
-            request.method.as_str(),
-            federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
-        )
-    }) && !matches!(caller, federation::RouteCaller::Member(_))
+    if method.is_some_and(|request| request.method == federation::ingress::OP_MANIFEST_WATCH)
+        && !matches!(caller, federation::RouteCaller::Member(_))
     {
-        let refusal = federation::home_watch::refusal(
+        let refusal = federation::manifest_watch_ingress::refusal(
             header,
             federation::HomeAnswer::Reply(
                 json!({"error":{"code":"not_found","class":"permanent"}}),
@@ -1853,23 +1861,13 @@ async fn dispatch_request(
                 )
                 .await;
             };
-            if matches!(
-                request.method.as_str(),
-                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
-            ) {
+            if request.method == federation::ingress::OP_MANIFEST_WATCH {
                 let Some(pending) = remote_watch else {
                     return Ok(());
                 };
                 let home = admin.home();
-                if request.method == federation::ingress::OP_MANIFEST_WATCH {
-                    return home
-                        .remote_watches
-                        .open_manifest(home, pending, writer, header, &member, &request.params)
-                        .await
-                        .map_err(ModuleError::Message);
-                }
                 return home
-                    .remote_watches
+                    .manifest_watches
                     .open(home, pending, writer, header, &member, &request.params)
                     .await
                     .map_err(ModuleError::Message);
@@ -2846,18 +2844,13 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 federation::ingress::OP_SECRET_SSH_SIGN,
                 federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
-                federation::ingress::OP_REMOTE_WATCH,
                 federation::ingress::OP_MANIFEST_LATEST,
                 federation::ingress::OP_MANIFEST_WATCH,
-                federation::ingress::OP_MANIFEST_REPORT_ACTIVE,
             ],
             "peer_classes": ["computer"],
         }]))]),
     )]))
-    .operation_delivery(BTreeMap::from([(
-        federation::ingress::OP_REMOTE_WATCH.to_owned(),
-        OperationDelivery::WATCH,
-    ), ("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH), (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH)]))
+    .operation_delivery(BTreeMap::from([("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH), (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH)]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -3225,11 +3218,6 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation {
                 name: federation::ingress::OP_REMOTE_TOKEN.to_string(),
                 description: Some("Serve a member vault a short-lived access token for a login this vault holds. Never returns refresh material.".to_string()),
-                kind: ManagementOperationKind::Query,
-            },
-            ManagementOperation {
-                name: federation::ingress::OP_REMOTE_WATCH.to_string(),
-                description: Some("Subscribe to the non-secret inventory of logins a member vault's remote-read grants reach.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -6261,9 +6249,9 @@ mod tests {
         )
         .expect("build request");
         let caller = admin.route_caller(channel);
-        let pending = (method == federation::ingress::OP_REMOTE_WATCH
+        let pending = (method == federation::ingress::OP_MANIFEST_WATCH
             && matches!(&caller, federation::RouteCaller::Member(_)))
-        .then(|| admin.home().remote_watches.register(frame.header));
+        .then(|| admin.home().manifest_watches.register(frame.header));
         dispatch_route_request(frame, &writer, surface, admin, caller, pending)
             .await
             .expect("serve request");
@@ -8271,10 +8259,7 @@ mod tests {
         for channel in [91, 92, 93, 94] {
             for op in ops {
                 let reply = routed_reply(&surface, &admin, channel, op, json!({})).await;
-                let expected = if matches!(
-                    op,
-                    federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
-                ) {
+                let expected = if matches!(op, federation::ingress::OP_MANIFEST_WATCH) {
                     (FrameType::Error, watch_not_found.clone())
                 } else {
                     (FrameType::Response, not_found.clone())
@@ -8288,10 +8273,7 @@ mod tests {
         for op in ops {
             let params = json!({ "credential_id": FORWARDED_TEST_ID });
             let reply = routed_reply(&surface, &admin, 91, op, params).await;
-            let expected = if matches!(
-                op,
-                federation::ingress::OP_REMOTE_WATCH | federation::ingress::OP_MANIFEST_WATCH
-            ) {
+            let expected = if matches!(op, federation::ingress::OP_MANIFEST_WATCH) {
                 (FrameType::Error, watch_not_found.clone())
             } else {
                 (FrameType::Response, not_found.clone())
@@ -8301,51 +8283,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_watch_keeps_the_federation_not_found_boundary() {
+    async fn retired_federation_methods_are_unknown_except_on_refused_routes() {
         let (surface, admin, store, routes) = granted_scoped_rig(195, "callosum");
         bind_reserved_route(&surface, &admin, &routes, 97, 1, "callosum", MEMBER_HARNESS).await;
         bind_reserved_route(&surface, &admin, &routes, 98, 1, "broca", "").await;
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            99,
+            1,
+            "callosum",
+            "fed-misspelled",
+        )
+        .await;
+        set_member_mapping(&store, true);
+        assert!(matches!(
+            admin.route_caller(97),
+            federation::RouteCaller::Member(_)
+        ));
+        assert!(matches!(
+            admin.route_caller(98),
+            federation::RouteCaller::Principal(_)
+        ));
+        assert!(matches!(
+            admin.route_caller(99),
+            federation::RouteCaller::Refused
+        ));
         let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
-        for mapping_on in [false, true] {
-            set_member_mapping(&store, mapping_on);
-            for channel in [97, 98] {
-                if mapping_on && channel == 97 {
-                    continue;
-                }
-                let token = routed_reply(
-                    &surface,
-                    &admin,
-                    channel,
-                    federation::ingress::OP_REMOTE_TOKEN,
-                    json!({}),
-                )
-                .await;
-                assert_eq!(token, (FrameType::Response, not_found.clone()));
-                for params in [json!({}), json!({ "handle": "ckh_x" })] {
-                    let watch =
-                        routed_reply(&surface, &admin, channel, "federation.remote_watch", params)
-                            .await;
+        for method in [
+            "federation.remote_watch",
+            "federation.manifest_report_active",
+        ] {
+            assert!(!federation::is_federation_op(method));
+            for channel in [97, 98, 99] {
+                let reply = routed_reply(&surface, &admin, channel, method, json!({})).await;
+                if channel == 99 {
+                    assert_eq!(reply, (FrameType::Response, not_found.clone()));
+                } else {
+                    assert_eq!(reply.0, FrameType::Error);
                     assert_eq!(
-                        watch.0,
-                        FrameType::Error,
-                        "mapping {mapping_on}, channel {channel}"
-                    );
-                    let body: serde_json::Value = serde_json::from_slice(&watch.1).unwrap();
-                    assert_eq!(
-                        body,
-                        json!({"code":"not_found","message":"not found","detail":{"class":"permanent"}})
+                        serde_json::from_slice::<serde_json::Value>(&reply.1).unwrap(),
+                        json!({"code":"unknown_method","message":format!("unknown method '{method}'")})
                     );
                 }
             }
         }
-        let answer = admin
-            .home()
-            .serve(MEMBER_HARNESS, "federation.remote_watch", &json!({}))
-            .await;
-        let federation::HomeAnswer::Reply(reply) = answer else {
-            panic!("the single-reply home dispatcher must refuse remote_watch");
-        };
-        assert_eq!(serde_json::to_vec(&wrap_result(reply)).unwrap(), not_found);
+        assert_eq!(
+            routed_reply(&surface, &admin, 97, "federation.unlisted", json!({})).await,
+            (FrameType::Response, not_found)
+        );
     }
 
     /// The gate is read on every decision: switching it changes the same bound route's
@@ -8673,6 +8660,66 @@ mod tests {
             control_get["result"]["error"],
             json!({"code":"kind_not_gettable","class":"permanent"})
         );
+    }
+
+    #[tokio::test]
+    async fn vault_transfer_key_cannot_seal_even_with_a_persisted_exact_grant() {
+        use base64::Engine as _;
+        use credentials_core::federation::VAULT_TRANSFER_ID;
+        let (surface, store, db_path, _root) = tmp_surface_with_store(194);
+        federation::transfer::ensure_transfer_key(&store, "test").unwrap();
+        const CONTROL: &str = "kem:seal-control";
+        let pem = credentials_core::kem::generate_key().unwrap();
+        let (public, _) = credentials_core::kem::public_half(&pem).unwrap();
+        store
+            .create(
+                CONTROL,
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        for (connection, module) in [(1, "callosum"), (2, "broca")] {
+            assert!(matches!(
+                store.create_read_grant_audited(
+                    "reserved",
+                    module,
+                    SelectorKind::Exact,
+                    VAULT_TRANSFER_ID,
+                    GrantOperation::Seal,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                ),
+                Err(credentials_core::store::StoreOpError::TransferKeyReserved)
+            ));
+            // A grant left by an older database must not turn the vault into a
+            // caller-directed sealing oracle for this key.
+            for id in [VAULT_TRANSFER_ID, CONTROL] {
+                conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', ?1, 'exact', ?2, 'seal', 0)", rusqlite::params![module, id]).unwrap();
+            }
+            let caller = federation::ingress::ScopedCaller::hand_only(Some(
+                subc_protocol::Principal::Reserved {
+                    module_id: module.into(),
+                },
+            ));
+            let params = |id| {
+                serde_json::from_value(json!({
+                    "credential_id": id, "recipient_public_key_b64": b64.encode(&public),
+                    "plaintext_b64": b64.encode(b"test"), "info_b64": "", "aad_b64": "",
+                }))
+                .unwrap()
+            };
+            assert!(surface
+                .seal(connection, &caller, &params(CONTROL))
+                .await
+                .is_ok());
+            assert_eq!(
+                surface
+                    .seal(connection, &caller, &params(VAULT_TRANSFER_ID))
+                    .await
+                    .unwrap_err(),
+                read_surface::ReadError::NotFound
+            );
+        }
     }
 
     /// The store fences grants that NAME the transfer key, but nothing stops an
@@ -16230,6 +16277,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fleet_record_sign_refuses_the_vault_hub_payload_prefix() {
+        use base64::Engine as _;
+        const FLEET_ID: &str = "signing:fleet-record:1";
+        let (surface, admin, store) = scoped_rig(212);
+        store.ensure_fleet_keys(1).unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "entorhinal",
+                SelectorKind::Exact,
+                FLEET_ID,
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        admin.record_bind(
+            212,
+            subc_protocol::Principal::Reserved {
+                module_id: "entorhinal".into(),
+            },
+        );
+        let sign = |payload: &[u8]| {
+            let payload = base64::engine::general_purpose::STANDARD.encode(payload);
+            let surface = &surface;
+            let admin = &admin;
+            async move { scoped_sign_request(surface, admin, 212, FLEET_ID, &payload).await }
+        };
+        let audit = store.read_audit(None).unwrap();
+        let events = store.recent_auth_events(1000).unwrap().len();
+        for payload in [
+            b"ck-vault-hub/".as_slice(),
+            b"ck-vault-hub/manifest-active/v1\0{}",
+        ] {
+            let answer = sign(payload).await;
+            assert_eq!(
+                answer,
+                json!({"result":{"error":{"code":"reserved_payload_prefix","class":"permanent"}}})
+            );
+        }
+        assert_eq!(store.read_audit(None).unwrap(), audit);
+        assert_eq!(store.recent_auth_events(1000).unwrap().len(), events);
+        for payload in [
+            b"ck-fleet-record/v1\nrecord".as_slice(),
+            b"ck-vault-hub",
+            b"record:ck-vault-hub/",
+        ] {
+            assert!(sign(payload).await["result"]["signature_b64"].is_string());
+        }
+    }
+
+    #[tokio::test]
     async fn bus_signing_purpose_errors_are_classless_only_after_authorization() {
         use base64::Engine as _;
         let (surface, admin, store) = scoped_rig(212);
@@ -20253,10 +20351,8 @@ mod tests {
     ///   info!     unsigned desktop development admission for a connectors read:
     ///             fixed admission name only, never request or credential fields
     ///   info!     admitted development desktop approval: fixed text only, no ids
-    ///   warn/info! member watch failure/recovery: home member id and ending code or
-    ///             fixed kind only; repeated failures remain debug-only
-    ///   warn/debug! member watch reconciliation and disconnect diagnostics:
-    ///             existing fixed text, row/home ids, and error or ending values
+    ///   warn/debug! hub login reconciliation: fixed text and home/row ids only,
+    ///               never a login value, condition or underlying error
     ///   warn!     manifest activation downgrade: member id and two version integers,
     ///             never manifest bytes, hashes or the caller's reason
     ///   warn!     unmapped subscription plan: bounded escaped credential id and raw
@@ -20294,7 +20390,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connectors.rs")),
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/src/federation/member_watch.rs"
+                "/src/federation/hub_member_watcher.rs"
             )),
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -20328,7 +20424,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 28, 0),
+            (1, 2, 22, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -20372,15 +20468,9 @@ mod tests {
         assert_eq!(plan_sites, vec![("warn".into(), "target: \"claustrum.plan\", credential_id = %credential_id, provider = observation.provider, raw = %raw, \"provider reported a plan the vault cannot map\"".into())]);
         assert_eq!(output_site_arguments(sources[10], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![("warn".into(), "member_id, reported = lower.reported, active = lower.active, \"lower manifest version reported\"".into())]);
         assert_eq!(output_site_arguments(sources[9], &shapes), vec![
-            ("debug".into(), "target: \"federation\", ?ending, \"home watch ended; inventory retained\"".into()),
-            ("debug".into(), "target: \"federation\", ?error, \"home watch disconnected\"".into()),
-            ("info".into(), "target: \"federation\", home, \"home watch recovered\"".into()),
-            ("warn".into(), "target: \"federation\", home, ending = ending.kind(), \"home watch ended; retrying\"".into()),
-            ("warn".into(), "target: \"federation\", home, %id, \"home watch id already held; existing holder wins\"".into()),
-            ("warn".into(), "target: \"federation\", ?error, \"home watch apply failed; retaining snapshot for retry\"".into()),
-            ("warn".into(), "target: \"federation\", home, id = %row.credential_id, %error, \"home watch row rejected; existing row unchanged\"".into()),
-            ("warn".into(), "target: \"federation\", ?error, home = %fp, \"home watch removal failed; retaining removal for retry\"".into()),
-            ("warn".into(), "target: \"federation\", %error, \"home watch startup inventory unavailable\"".into()),
+            ("debug".into(), "target: \"federation\", home = %aad.home, %id, \"hub login row rejected; existing row unchanged\"".into()),
+            ("warn".into(), "target: \"federation\", %home, \"hub login pairing removal failed; retrying\"".into()),
+            ("warn".into(), "target: \"federation\", %home, \"hub login apply failed; retrying\"".into()),
         ]);
         assert_eq!(output_site_arguments(sources[8], &shapes), vec![("info".into(), "target: \"connectors\", \"unsigned_desktop_development_admission admitted connectors read\"".into())]);
         assert_eq!(account_sites, vec![("warn".into(), "\"account worker exchange refused permanently; signer or contract vector may be wrong\"".into())]);
@@ -20426,6 +20516,11 @@ mod tests {
                 7,
                 "secret_use.rs",
                 "//! The trusted sender boundary for secret release.",
+            ),
+            (
+                9,
+                "hub_member_watcher.rs",
+                "//! Apply authenticated login inventories",
             ),
             (14, "fleet_ops.rs", "//! Fleet boundary:"),
             (

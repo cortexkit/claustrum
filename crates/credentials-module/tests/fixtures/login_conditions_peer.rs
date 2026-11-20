@@ -1,8 +1,15 @@
 use super::*;
-use crate::federation::member_watch;
+use crate::federation::{
+    hub::{stand_in::StandIn, SHARED_LOGINS},
+    hub_binding::HubBindings,
+    hub_home_writer,
+    hub_logins::{seal, LoginAad},
+    hub_member_watcher,
+    sharing::{decode_snapshot, VaultSharingSnapshot},
+};
 use crate::tests::federation_fixture_support::{
-    fed_provider_name, temp_root, wait_for_signal, wait_until, Held, HomeStore, HomeWatchRelay,
-    Ledger, Reply, Responder, TwoVaults, TARGET_MODULE,
+    fed_provider_name, temp_root, wait_for_signal, wait_until, Held, HomeStore, Ledger, Reply,
+    Responder, TwoVaults, TARGET_MODULE,
 };
 use claustrum_module_probe::federation::{ingress as fed, outbound};
 use credentials_core::federation::{
@@ -11,6 +18,8 @@ use credentials_core::federation::{
 
 const PAIR: &str = "condition-pair";
 const OTHER_HOME: &str = "fed-computer:22223333444455556666777788889999";
+const HOME_BOX: &str = "11111111111111111111111111111111";
+const MEMBER_BOX: &str = "22222222222222222222222222222222";
 
 struct PeerRig {
     vaults: TwoVaults,
@@ -226,30 +235,79 @@ impl PeerRig {
             .collect()
     }
 
-    fn watch(
-        &self,
-    ) -> (
-        tokio::sync::watch::Sender<member_watch::PairedComputers>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let fp = self
-            .vaults
-            .home_member()
-            .strip_prefix("fed-computer:")
-            .unwrap();
-        let (tx, rx) = tokio::sync::watch::channel(Some(vec![(fp.into(), PAIR.into())]));
-        let client = crate::federation::OutboundClient::for_daemon(
-            self.vaults.b.connection_file.clone(),
-            "claustrum",
-            Some("harness-launch-nonce"),
+    fn watch(&self, hub: &StandIn, publish: bool) -> tokio::task::JoinHandle<()> {
+        for store in [&self.home.store, &self.member.store] {
+            store.set_login_sharing_audited(true, "test").unwrap();
+        }
+        let (member_pairs, member_view) = peer_binding(
+            MEMBER_BOX, HOME_BOX, self.vaults.home_member(), &transfer_public(&self.home.store),
         );
-        let task = tokio::spawn(member_watch::run(
-            Arc::clone(&self.member.store),
-            client,
-            rx,
-        ));
-        (tx, task)
+        let (_, home_view) = peer_binding(
+            HOME_BOX, MEMBER_BOX, self.vaults.requester_member(), &transfer_public(&self.member.store),
+        );
+        let (_pairs, pairs) = tokio::sync::watch::channel(Some(member_pairs));
+        let (_member_view, member_view) = tokio::sync::watch::channel(Some(member_view));
+        let (_home_view, home_view) = tokio::sync::watch::channel(Some(home_view));
+        let home = Arc::clone(&self.home.store);
+        let member = Arc::clone(&self.member.store);
+        let home_hub = Arc::new(hub.client(HOME_BOX));
+        let member_hub = Arc::new(hub.client(MEMBER_BOX));
+        tokio::spawn(async move {
+            let _binding_senders = (_pairs, _member_view, _home_view);
+            let watcher = hub_member_watcher::run(member, member_hub, member_view, pairs);
+            if publish {
+                tokio::select! {
+                    _ = watcher => {},
+                    _ = hub_home_writer::run(home, home_hub, home_view) => {},
+                }
+            } else {
+                watcher.await;
+            }
+        })
     }
+
+    fn publish_rows(&self, hub: &StandIn, generation: i64, rows: Vec<Value>) {
+        use credentials_core::{hub_counters::HubGeneration, signing::key_id_for_public};
+        let sender = self.home.store.get(VAULT_TRANSFER_ID).unwrap();
+        let recipient = transfer_public(&self.member.store);
+        let bytes = seal(
+            &LoginAad {
+                home: self.vaults.home_member().into(),
+                member: self.vaults.requester_member().into(),
+                home_box: HOME_BOX.into(),
+                member_box: MEMBER_BOX.into(),
+                generation: HubGeneration::new(generation).unwrap(),
+                sender_key_id: key_id_for_public(&transfer_public(&self.home.store)),
+                recipient_key_id: key_id_for_public(&recipient),
+            },
+            std::str::from_utf8(sender.payload.expose()).unwrap(),
+            &recipient,
+            &serde_json::to_vec(&json!({"kind":"snapshot", "logins":rows})).unwrap(),
+        )
+        .unwrap();
+        hub.tamper(SHARED_LOGINS, &format!("{HOME_BOX}.{MEMBER_BOX}"), &bytes)
+            .unwrap();
+    }
+}
+
+fn transfer_public(store: &EncryptedStore) -> [u8; 32] {
+    let key = store.get(VAULT_TRANSFER_ID).unwrap();
+    credentials_core::kem::public_half(std::str::from_utf8(key.payload.expose()).unwrap())
+        .unwrap().0.try_into().unwrap()
+}
+
+fn peer_binding(own_box: &str, peer_box: &str, peer: &str, public: &[u8; 32]) -> (Arc<VaultSharingSnapshot>, HubBindings) {
+    let fingerprint = peer.strip_prefix("fed-computer:").unwrap();
+    let pairings = Arc::new(decode_snapshot(&json!({
+        "self":{"static_public_key_hex":"00".repeat(32)},
+        "devices":[{"fingerprint":fingerprint,"pairing_id":PAIR,"class":"computer","shares":[]}]
+    })).unwrap());
+    let public: String = public.iter().map(|byte| format!("{byte:02x}")).collect();
+    let bindings = HubBindings::join(own_box, &pairings, &json!({"peers":[{
+        "fingerprint":fingerprint,"pairing_id":PAIR,"class":"computer","machine_id":peer_box,
+        "key_record":{"keys":{"vault_transfer_x25519":{"pub":public}}}
+    }]})).unwrap();
+    (pairings, bindings)
 }
 
 fn add_operator_copy(store: &EncryptedStore, home: &str, adapter: &str) {
@@ -269,11 +327,7 @@ fn add_operator_copy(store: &EncryptedStore, home: &str, adapter: &str) {
 #[tokio::test]
 async fn peer_condition_live_watch_propagates_home_only_mutations_and_pins_the_peer_sample() {
     let rig = PeerRig::new("peer-condition-live", "antigravity").await;
-    let relay = HomeWatchRelay::new(Arc::clone(&rig.home_handler), rig.vaults.requester_member());
-    rig.vaults
-        .callosum
-        .answer(TARGET_MODULE, fed::OP_REMOTE_WATCH, Reply::HomeWatch(relay));
-    let (pairings, task) = rig.watch();
+    let task = rig.watch(&StandIn::new(), true);
     wait_until(|| rig.member.store.remote_record(ID).unwrap().is_some()).await;
     let before = rig.copy();
     assert_eq!(
@@ -399,8 +453,8 @@ async fn peer_condition_live_watch_propagates_home_only_mutations_and_pins_the_p
         "consumer_report_condition" | "consumer_clear_condition" | "consumer_report_stale"
     )));
     no_query(&format!("{audit:?} {events:?}"));
-    drop(pairings);
-    wait_for_signal(task).await.unwrap();
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
 }
 
 fn assert_home_event(rig: &PeerRig, op: &str) {
@@ -767,19 +821,12 @@ async fn peer_condition_malformed_rows_keep_their_marks_and_do_not_end_the_watch
         }
         row
     };
-    let notice = |seq, logins: Vec<Value>| json!({"kind":"snapshot", "home":rig.vaults.home_member(), "epoch":"ab".repeat(16), "seq":seq, "logins":logins});
     let ids: Vec<_> = (0..malformed.len())
         .map(|n| format!("oauth:malformed-{n}"))
         .collect();
-    rig.vaults.callosum.answer(
-        TARGET_MODULE,
-        fed::OP_REMOTE_WATCH,
-        Reply::Watch(notice(
-            1,
-            ids.iter().map(|id| row(id, Some(&initial))).collect(),
-        )),
-    );
-    let (pairings, task) = rig.watch();
+    let hub = StandIn::new();
+    rig.publish_rows(&hub, 1, ids.iter().map(|id| row(id, Some(&initial))).collect());
+    let task = rig.watch(&hub, false);
     let store = &rig.member.store;
     wait_until(|| store.remote_record(ids.last().unwrap()).unwrap().is_some()).await;
     let condition = |id: &str| {
@@ -797,10 +844,7 @@ async fn peer_condition_malformed_rows_keep_their_marks_and_do_not_end_the_watch
         .collect();
     let valid = json!({"reason":"future_reason", "since_ms":9_007_199_254_740_991_u64});
     incoming.push(row(ID, Some(&valid)));
-    rig.vaults
-        .callosum
-        .watch_snapshot(Some(notice(2, incoming)))
-        .await;
+    rig.publish_rows(&hub, 2, incoming);
     wait_until(|| store.remote_record(ID).unwrap().is_some()).await;
     assert_eq!(
         ids.iter().map(|id| condition(id)).collect::<Vec<_>>(),
@@ -808,49 +852,31 @@ async fn peer_condition_malformed_rows_keep_their_marks_and_do_not_end_the_watch
     );
     assert_eq!(rig.copy_mark().unwrap().reason, "future_reason");
     assert_eq!(rig.copy_mark().unwrap().since_ms, 9_007_199_254_740_991);
-    assert_eq!(rig.requests(fed::OP_REMOTE_WATCH).len(), 1);
+    assert_eq!(hub.watch_opens(SHARED_LOGINS), 1);
     {
         let logs = logs.0.lock().unwrap();
         assert_eq!(
-            logs.matches("home watch row rejected; existing row unchanged")
+            logs.matches("hub login row rejected; existing row unchanged")
                 .count(),
             malformed.len()
         );
         no_query(&logs);
     }
 
-    rig.vaults
-        .callosum
-        .watch_snapshot(Some(notice(3, vec![row(ID, None)])))
-        .await;
+    rig.publish_rows(&hub, 3, vec![row(ID, None)]);
     wait_until(|| rig.copy_mark().is_none()).await;
-    assert_eq!(rig.requests(fed::OP_REMOTE_WATCH).len(), 1);
+    assert_eq!(hub.watch_opens(SHARED_LOGINS), 1);
 
-    rig.vaults
-        .callosum
-        .watch_snapshot(Some(notice(4, vec![row(ID, Some(&initial))])))
-        .await;
+    rig.publish_rows(&hub, 4, vec![row(ID, Some(&initial))]);
     wait_until(|| rig.copy_mark().is_some()).await;
-    rig.vaults.callosum.answer(
-        TARGET_MODULE,
-        fed::OP_REMOTE_WATCH,
-        Reply::RouteRefusal("home_unavailable".into()),
-    );
-    rig.vaults.callosum.watch_snapshot(None).await;
-    wait_until(|| logs.0.lock().unwrap().contains("stream_end")).await;
-    let paired = pairings.borrow().clone();
-    pairings.send_replace(paired);
-    wait_until(|| rig.requests(fed::OP_REMOTE_WATCH).len() == 2).await;
-    rig.vaults
-        .callosum
-        .reply_fence(&rig.vaults.b.outbound)
-        .await;
+    hub.terminate_watches(SHARED_LOGINS);
+    wait_until(|| hub.watch_opens(SHARED_LOGINS) == 2).await;
     assert_eq!(
         rig.copy_mark().unwrap().action_url.as_deref(),
         Some(link.as_str())
     );
-    drop(pairings);
-    wait_for_signal(task).await.unwrap();
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
 
     let PeerRig {
         vaults,

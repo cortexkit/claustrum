@@ -108,6 +108,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hub_backoff_clamps_the_first_doubling_above_the_cap() {
+        for (previous, next) in [(299, 598), (300, 600), (301, 600)] {
+            let mut backoff = Backoff(previous);
+            assert_eq!(backoff.next_delay(), Duration::from_secs(previous));
+            assert_eq!(backoff.next_delay(), Duration::from_secs(next));
+        }
+    }
+
+    #[test]
     fn hub_backoff_caps_at_ten_minutes_and_resets() {
         let mut backoff = Backoff::default();
         for seconds in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 600, 600] {

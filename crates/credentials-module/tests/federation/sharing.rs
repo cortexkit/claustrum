@@ -714,3 +714,97 @@ async fn fleet_removal_write_failure_does_not_block_sharing_and_retries_on_next_
     assert_eq!(rig.home.store.verify_audit_chain().unwrap(), None);
     rig.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn login_sharing_invalid_startup_edits_warn_once_and_poll_on_tokio_clock() {
+    use claustrum_module_probe::federation::login_sharing::ConfigPoll;
+    use std::{sync::Mutex, time::Duration};
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?};", field.name()));
+        }
+    }
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event
+                .metadata()
+                .module_path()
+                .is_some_and(|p| p.ends_with("login_sharing"))
+            {
+                assert_eq!(*event.metadata().level(), tracing::Level::WARN);
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    let rig = Rig::new("login-sharing-poll", snapshot("all_classes")).await;
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(Capture(Arc::clone(&logs)));
+    let path = rig._root.join("claustrum.jsonc");
+    std::fs::write(&path, "private-marker-one").unwrap();
+    let mut poll = ConfigPoll::new(path.clone(), Arc::clone(&rig.home.store));
+    poll.poll().await.unwrap();
+    assert!(
+        !rig.home.store.login_sharing().unwrap(),
+        "invalid startup applies off"
+    );
+    poll.poll().await.unwrap();
+    std::fs::write(&path, r#"{"login_sharing":true}"#).unwrap();
+    poll.poll().await.unwrap();
+    assert!(rig.home.store.login_sharing().unwrap());
+    for text in [
+        "private-marker-one",
+        "private-marker-two",
+        "private-marker-two",
+        "private-marker-one",
+    ] {
+        std::fs::write(&path, text).unwrap();
+        poll.poll().await.unwrap();
+        assert!(
+            rig.home.store.login_sharing().unwrap(),
+            "invalid edit keeps last valid value"
+        );
+    }
+    {
+        let logs = logs.lock().unwrap();
+        assert_eq!(
+            logs.len(),
+            2,
+            "one WARN per distinct invalid content, even after a valid edit"
+        );
+        for log in logs.iter() {
+            assert!(log.contains(&path.display().to_string()));
+            assert!(log.contains("reason="));
+            assert!(!log.contains("private-marker"));
+        }
+    }
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        ready.send(()).unwrap();
+        poll.run().await;
+    });
+    wait_for_signal(started).await.unwrap();
+    let mut writes = rig.home.store.subscribe_writes();
+    std::fs::write(&path, r#"{"login_sharing":false}"#).unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    wait_for_signal(writes.changed()).await.unwrap();
+    assert!(
+        !rig.home.store.login_sharing().unwrap(),
+        "next poll applies the edit"
+    );
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
+}

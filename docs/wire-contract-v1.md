@@ -50,6 +50,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `not_found` | permanent | unknown handle, revoked handle, or an id no grant covers — indistinguishable by design |
 | `kind_not_gettable` | permanent | `credential.get` on a `SigningKey`; use `credential.sign` or `credential.public_key` |
 | `kind_not_signable` | permanent | `credential.sign` on a record that is not a `SigningKey` |
+| `reserved_payload_prefix` | permanent | `credential.sign` on `signing:fleet-record:*` with decoded payload bytes beginning with ASCII `ck-vault-hub/` |
 | `kind_not_openable` | permanent | authorized `credential.open` on a record that is not a `KemKey` |
 | `bus_seal_info_domain` | permanent | authorized bus-seal open with a missing, wrong or bare caller-specific `info` prefix |
 | `open_failed` | permanent | KEM payload or HPKE opening failed; all crypto faults have the same reply |
@@ -2059,6 +2060,10 @@ or reading the record all return the identical `not_found` / permanent body, and
 counts toward the refusal threshold. A `seal` grant authorizes no other operation, and
 no other grant authorizes `seal`.
 
+`kem:vault-transfer:1` is reserved for federation, including hub login lists. No
+grant can authorize `credential.seal` with this key: the store refuses such grants,
+and the read surface returns the same `not_found` even if a legacy grant exists.
+
 **Every seal is audited.** Before the ciphertext is returned the vault commits one
 HMAC-chained row with `audit_log.op = seal`, the credential id, `payload_hash` set to
 a keyed fingerprint of the decoded plaintext, and the resolved `reserved:<module>` or
@@ -2117,10 +2122,35 @@ switch row with `member_grant_sharing_switch` and directs the operator to
 `ck callosum share <device> claustrum/vault off`; manual revocation would be undone
 by the next snapshot. Operator rows remain manually revocable.
 
-### `federation.remote_watch` login snapshots
+### Hub login lists
 
-The home streams full non-secret login snapshots to paired members with matching
-`remote_read` grants. Each `snapshot` notice has `home`, `epoch`, `seq`, and `logins`.
+The home writes one authenticated, encrypted value per member to the
+`vault-shared-logins` bucket (history 1, maximum value 256 KiB), at
+`{home_box}.{member_box}`. Box ids are 32 lowercase hex digits. Each vault gets its
+own box id from the bus and maps peer boxes using Callosum's announced machine ids,
+joined to its current paired-computer snapshot by fingerprint and pairing id.
+No pairing id is included in a hub value. A home publishes a snapshot only while
+sharing is enabled and the member holds a current `remote_read` grant; the
+projection includes only the logins those grants cover.
+
+The outer JSON object is exactly `{v, enc_b64, ciphertext_b64, aad}`, with `v: 1`.
+The seal uses RFC 9180 Auth mode and the suite in §13, with the home's active
+`kem:vault-transfer:1` as sender and the member's announced `vault_transfer_x25519`
+as recipient. HPKE `info` is UTF-8 `cortexkit/claustrum/hub-logins/v1`. The base64
+fields use the strict, padded standard alphabet. The `aad` value is a JSON **string**
+containing these fields in order: `home`, `member`, `home_box`, `member_box`,
+`generation`, `sender_key_id`, `recipient_key_id`. Authenticate its exact UTF-8
+bytes, never reserialize. `home` and `member` are `fed-computer:` ids, and the key
+ids derive from the raw 32-byte X25519 public keys. The member checks all identity,
+box and key bindings against its local state and the KV key. `generation` is a
+decimal JSON string, without sign or leading zero, in `1..=9223372036854775807`.
+Compare it numerically (for example, with JavaScript `BigInt`).
+
+The plaintext is exactly `{"kind":"snapshot","logins":[...]}` or `{"kind":"ended"}`.
+The envelope, AAD and plaintext wrapper reject missing, duplicate or unknown
+fields. The hub-specific seal accepts at most 184320 bytes of plaintext and 1024
+bytes of AAD; the public seal limits in §13 are unchanged. A duplicate login id
+or a `corrupt` row rejects the entire snapshot without consuming the generation.
 Each login row contains:
 
 | Field | Meaning |
@@ -2135,26 +2165,26 @@ Each login row contains:
 | `home_version` | The home's record version. |
 | `condition` | When set, `{reason, since_ms, action_url?}`; otherwise omitted. The reporter is never sent. |
 
-Members ignore unknown login-row fields. Older homes omit `provider_ids`: members
-keep an existing copy's ids in that case, and seed an empty set for a new copy.
+Members ignore unknown login-row fields. If `provider_ids` is absent, members keep
+an existing copy's ids and seed an empty set for a new copy.
 When present, the set replaces the ids of a `home_watch` copy in the same transaction
 as its other metadata. Invalid provider-id syntax, duplicates, or a set exceeding
 the existing per-credential cap reject only that row, retaining any existing copy;
 other valid rows still apply. These updates move the member's `credential.list_scoped`
 view and `auth.watch_scoped` view just as category changes do.
 
-Condition changes, including a link-only replacement or removal, trigger a notice even
+Condition changes, including a link-only replacement or removal, trigger a snapshot even
 without a new home version. A member accepts a reason of 1–64 bytes drawn from
 `[a-z0-9_]` (including unknown reasons without a link) and an integer `since_ms` in
 `0..=2^53−1`. A link is allowed only for a known reason whose adapter admits the host,
 and must pass the URL rules in §5b. `condition: null` and non-object values are malformed.
 A malformed condition rejects only its row: the copy is retained unchanged, the rejection
-log omits the link, and valid sibling rows apply. Older members ignore the new field.
+log omits the link, and valid sibling rows apply.
 
 A newly inserted copy stores the condition in the snapshot, even on an insert-only replay.
 For an existing copy, a full snapshot applies the new condition or clears it when the key
 is absent; an insert-only replay never changes it. The change commits with the usual
-`remote_update` audit row. A failed list fetch leaves the copy unchanged. After a restart
+`remote_update` audit row. A failed read leaves the copy unchanged. After a restart
 the copy's scoped and connectors projections read the locally stored condition without
 asking the home.
 
@@ -2163,6 +2193,18 @@ by `ck auth remote add` does not carry provider ids, so a hand-added copy starts
 without them and keeps its member-local set. Hand-added copies can forward condition
 mutations but do not display a condition from the home. Converting a watched copy to
 operator ownership removes its condition because it will not receive the home's clears.
+
+The member watches keys ending in `.{member_box}`. It normally applies only a
+generation greater than the last it committed for that home. Restoration after
+locally re-enabling sharing and insertion of previously blocked copies may use the
+same generation from a point read. A valid newer `ended` removes that home's
+automatic copies, never operator copies. A missing key, delete, purge, bucket reset,
+hub outage, invalid value or failed open is not an `ended`. A snapshot itself grants
+no access: every `federation.remote_token` is checked by the home under the current
+pairing and grants.
+
+A test-only sealed value and an independent Node verifier are in
+[`crates/credentials-module/tests/fixtures/hub-wire-v1/`](../crates/credentials-module/tests/fixtures/hub-wire-v1/).
 
 ### Computer-local login sharing opt-out
 
@@ -2174,13 +2216,10 @@ audit row (actor `config:<path>`) and the existing per-removal audit rows. Reapp
 the current value writes nothing. Operator grants and records are preserved;
 operator-granted `remote_token` and `secret_use` behavior is unchanged.
 
-Both new and open `federation.remote_watch` streams at an off home receive the
-**existing** relayed Error frame, not a completion or a new refusal code:
-`{"code":"not_found","message":"not found","detail":{"class":"permanent"}}`.
-Peers treat it as no longer shared and remove only that home's automatic copies,
-not operator records. Local receiving watches close while off. Turning on rereads
-Callosum's current switches and reopens watches, restoring grants and copies from
-live state. Invalid input never enables sharing: startup is off; later invalid edits
+An off home publishes a sealed `ended` for its affected members. An off member
+does not apply hub login lists. Turning sharing on rereads Callosum's current
+switches and restores copies from the hub when the current binding is available.
+Invalid input never enables sharing: startup is off; later invalid edits
 retain the applied value. The vault declares `config.review` and opts into
 `config.gate` when offered; consumer wire operations and replies are unchanged.
 
@@ -2221,7 +2260,11 @@ answer uniform `not_found`. Only a federation member channel can invoke these op
 | `federation.secret_request_flow_approval` | Mutate | Record a member vault's flow consent request for a secret this vault holds. |
 | `federation.secret_revoke_flow_grants` | Mutate | Revoke a member vault's flow grants for one flow install. |
 
-Every other op on that channel is `not_found` before dispatch. `handle` or
+The manifest read and watch in §17 also use these channels. Other unlisted methods
+on member channels answer `not_found`, except for the retired `federation.remote_watch`
+and `federation.manifest_report_active`: those answer classless `unknown_method`
+on mapped member and ordinary routes and are no longer declared. Refused channels
+still answer uniform `not_found` for every method. `handle` or
 `enrollment_token` params are `invalid_params`, never resolved. Federation ops
 on any non-federation channel (including `callosum-self`, a granted reserved module, or
 any channel with the gate off) are `not_found`. `secret.home` is declared beside the
@@ -4469,24 +4512,22 @@ fields, such as `remedy_member`, sit beside `code` and `class`. Successes are
 distinction (§ 1a).
 
 The manifest home is the agent-secret home, not a separate setting. A `Single` or
-`Home` vault serves all six operations locally. A `Remote` vault forwards latest,
-watch and report_active, refuses propose and active_status with `not_found`, and
+`Home` vault serves all six operations locally. A `Remote` vault serves report_active
+locally and forwards latest and watch. It refuses propose and active_status with `not_found`, and
 gives approve the phone pipeline's `secret_home_elsewhere` with `remedy_member`
 naming the home, before checking phone registration. `RemoteSetupIncomplete`
-refuses the three forwarded operations with `remote_setup_incomplete`/`permanent`
+refuses latest, watch and report_active with `remote_setup_incomplete`/`permanent`
 and `remedy_member`, refuses propose and active_status with `not_found`, and gives
 approve the phone pipeline's `remote_setup_incomplete` (with `remedy_member` when
 the self id is set). An unreadable role gives `store_error`/`transient`.
 
 For forwarding, the member calls the home's `fed:<fp>:claustrum` surface using
-`federation.manifest_latest` (Query, unary), `federation.manifest_watch` (Query,
-held subscription with `WATCH` delivery), and `federation.manifest_report_active`
-(Mutate, unary). The home admits these under the same pairing and `secret_use`
+`federation.manifest_latest` (Query, unary) and `federation.manifest_watch` (Query,
+held subscription with `WATCH` delivery). The home admits these under the same pairing and `secret_use`
 member-grant checks as forwarded secret operations. A caller without membership
-or the grant receives uniform `not_found`; for the watch this is a terminal
-`Response`. An unreachable home gives `home_unavailable`/`transient`. These three
-operations are declared in the peer-sharing `vault` share; a Mutate must not be
-relayed as a retryable query.
+or the grant receives uniform `not_found`; for the federation watch this is a
+terminal `Error` frame with `detail.class: "permanent"`. An unreachable home gives
+`home_unavailable`/`transient`. Both operations are declared in the peer-sharing `vault` share.
 
 `manifest.one_tap` is **off by default**. Missing means off; a malformed setting
 is unreadable and treated as off. After the principal check, while the setting is
@@ -4686,10 +4727,10 @@ vaults answer `unknown_method` for manifest operations.
 - `verdict`: `valid` or `invalid`.
 - `reason`: a string of at most 512 characters for `invalid`, otherwise `null`.
 
-The reporting computer is the local vault's own federation member id, or the
-attested `fed-computer:<fp>` for a forwarded report, **never a param**. A local
-report with no self member id gives `secret_setup_incomplete`/`permanent`.
-The report sets that computer's row to the tuple and `reported_at_ms`. A lower
+The reporting computer is the local vault's own federation member id, **never a
+param**. With no self member id, the report gives `secret_setup_incomplete`/`permanent`.
+The report commits both the vault's latest local report and its own activation row
+with `reported_at_ms`, without waiting for a hub connection. A lower
 version than its current one is still recorded and logs a tracing warning.
 Retired computers' reports are recorded without clearing `retired_at_ms`.
 
@@ -4698,9 +4739,40 @@ an activation audit row, together with its deduplication row in the same
 transaction. Changes to reason or hash, repeats, and reports of unstored versions
 update the activation table only. There are at most two activation audit rows per
 member per stored version. The success result is exactly
-`{status: "recorded", member_id, version}`. After a forwarded call has been sent,
-`home_unavailable` is an **unknown outcome**, not proof of refusal: the home may
-have committed. Retrying the same report writes no additional activation audit.
+`{status: "recorded", member_id, version}`. Hub publication is separate from that
+reply. Retrying the same report writes no additional activation audit.
+
+#### Signed hub activation reports
+
+Each vault publishes its latest local report to `vault-manifest-active`, key
+`{computer_box}` (history 1, maximum value 16 KiB). The outer JSON is exactly
+`{v, body, signature_b64, key_id}` with `v: 1`. The `body` is a JSON string with
+exactly `box`, `member`, `version`, `manifest_sha256`, `verdict`, `reason`, and `seq`.
+The hash and verdict follow `manifest.report_active`; `reason` is `null` for
+`valid` and `"reported_invalid"` for `invalid`. The free-text reason and the local
+timestamp never appear in the hub value. `seq` is a JSON integer token in
+`1..=9007199254740991`, with no sign, fraction, or exponent. The sequence is durable
+and increases for each new signed publication. The envelope and body reject
+unknown, missing or duplicate fields.
+
+The vault signs the UTF-8 bytes of `ck-vault-hub/manifest-active/v1`, followed by
+one `0x00` byte and the exact UTF-8 bytes of the `body` string, with the current
+`signing:fleet-record:1` Ed25519 key. The signature uses strict padded standard
+base64. A verifier uses the writer's announced `fleet_record_ed25519` only: the
+outer `key_id` must match that raw 32-byte public key, the KV key must equal
+`body.box`, and `body.member` must be the member currently bound to that box.
+Caller-directed `credential.sign` cannot sign decoded inputs starting with
+`ck-vault-hub/` on a fleet-record key.
+
+The Home records an authenticated report only for a currently paired, non-retired
+computer with a `secret_use` grant, and only for a `seq` newer than the last it
+accepted for that member and box under the current pairing. Losing admission,
+a confirmed delete or purge, or definite verification failure clears the derived
+report fields. A bucket reset clears the other computers' fields and uses the
+same watch to process the relist. A failed hub read or a watch with no value on
+open is not evidence of absence. The Home's own slot is never cleared by the
+hub collector. See the signed report and Node verifier in the
+[test samples](../crates/credentials-module/tests/fixtures/hub-wire-v1/).
 
 `manifest.active_status` takes exactly `{version}`. A version that is not stored
 refuses `unknown_version`/`transient`. Its success result is exactly
@@ -4710,12 +4782,13 @@ without a report has null report fields, not a missing entry. The expected set
 is the home's own member id, all members holding a `secret_use` grant and all
 members with an activation row, minus retired members. `ready` is true only for
 a non-empty set whose every entry reports exactly the requested version, its
-stored SHA-256 and `valid`.
+stored SHA-256 and `valid`. A non-self report counts only while the computer
+holds `secret_use`; a grant revoke makes its entry not ready at commit.
 
 Operator retirement removes a computer from this readiness population and is
 final; reporting never un-retires it. Retirement does not revoke delivery: a
-retired computer retaining `secret_use` can still read, watch and report. Revoke
-that grant to stop delivery.
+retired computer retaining `secret_use` can still read and watch. It may still
+record its own report locally, but the Home ignores it. Revoke the grant to stop delivery.
 
 ### Domain refusals
 
@@ -4736,8 +4809,8 @@ In addition, callers outside each operation's admitted principal receive uniform
 | `manifest.latest` | `transient` | `home_unavailable`; `store_error` |
 | `manifest.watch` — terminal `Response` | `permanent` | `not_found`; `remote_setup_incomplete` |
 | `manifest.watch` — terminal `Response` | `transient` | `home_unavailable` (a member's upstream could not be opened) |
-| `manifest.report_active` | `permanent` | `secret_setup_incomplete`; `not_found` (forwarded without a grant); `remote_setup_incomplete` |
-| `manifest.report_active` | `transient` | `home_unavailable` (unknown outcome once sent); `store_error` |
+| `manifest.report_active` | `permanent` | `secret_setup_incomplete`; `remote_setup_incomplete` |
+| `manifest.report_active` | `transient` | `store_error` |
 | `manifest.active_status` | `permanent` | `not_found` (not the home) |
 | `manifest.active_status` | `transient` | `unknown_version` (version not stored); `store_error` |
 
@@ -4746,8 +4819,7 @@ A refusal decided by the answering vault leaves `gh_manifests`,
 `gh_manifest_activation_audits` and `audit_log` unchanged. Shared paths may still
 write the phone pipeline's pairing observation before a phone-op refusal, or the
 home's diagnostic row for a forwarded `not_found`; neither is a manifest state
-change. A member's `home_unavailable` after forwarding is an unknown outcome,
-not a home-decided refusal.
+change.
 
 ### Audit rows
 

@@ -957,7 +957,6 @@ mod connectors_contract {
                 | "manifest.active_status"
                 | "federation.manifest_latest"
                 | "federation.manifest_watch"
-                | "federation.manifest_report_active"
                 | "secret.request_flow_approval"
                 | "secret.revoke_flow_grants"
                 | "permissions.list"
@@ -972,7 +971,6 @@ mod connectors_contract {
                 | OP_GET
                 | OP_GET_MANY
                 | federation::ingress::OP_REMOTE_TOKEN
-                | federation::ingress::OP_REMOTE_WATCH
                 | federation::ingress::OP_REPORT_AUTH_FAILURE
                 | federation::ingress::OP_REPORT_CONDITION
                 | federation::ingress::OP_CLEAR_CONDITION

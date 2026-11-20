@@ -1,5 +1,5 @@
 use super::*;
-use crate::manifest_active_report::{record_manifest_active_report, ReportParams};
+use crate::manifest_active_report::{record_own_manifest_active_report, ReportParams};
 use credentials_core::{
     admin_auth::AdminMacKey,
     audit::{AuditCtx, AuditOp},
@@ -295,11 +295,19 @@ async fn manifest_report_records_self_and_active_status_tracks_missing_invalid_a
         status["computers"][1],
         json!({"member_id":OTHER,"version":null,"payload_sha256":null,"verdict":null,"reason":null,"reported_at_ms":null})
     );
-    let p: ReportParams = serde_json::from_value(report(28)).unwrap();
-    assert_eq!(
-        record_manifest_active_report(&rig.store, OTHER, &p)["status"],
-        "recorded"
-    );
+    rig.store
+        .report_gh_manifest_active(
+            &credentials_core::store::GhManifestActivationReport {
+                member_id: OTHER,
+                version: 28,
+                payload_sha256: HASH,
+                verdict: credentials_core::store::GhManifestVerdict::Valid,
+                reason: None,
+                reported_at_ms: 1,
+            },
+            AuditCtx::admin(AuditOp::GhManifestActivation),
+        )
+        .unwrap();
     assert_eq!(
         rig.call("plexus", OP_ACTIVE_STATUS, json!({"version":28}))
             .await["ready"],
@@ -450,6 +458,7 @@ async fn manifest_params_are_exact_and_status_is_home_only() {
 #[tokio::test]
 async fn manifest_watch_initial_empty_and_stored_then_only_new_versions_notify() {
     let mut rig = Rig::new();
+    rig.self_member();
     let mut completed = rig.surface.watches.completed.subscribe();
     rig.request(caller("aft"), OP_WATCH, json!({}), 1, 11).await;
     let initial = rig.notice(1, 11, 1).await;
@@ -462,9 +471,12 @@ async fn manifest_watch_initial_empty_and_stored_then_only_new_versions_notify()
     assert_eq!(changed["version"], 28);
     assert_eq!(changed["manifest_sha256"], HASH);
     completed.wait_for(|count| *count >= 2).await.unwrap();
-    // A committed activation wakes the hub but cannot change the manifest notice.
+    // A committed activation wakes the local watch but does not change its notice.
     let p: ReportParams = serde_json::from_value(report(28)).unwrap();
-    record_manifest_active_report(&rig.store, SELF, &p);
+    assert_eq!(
+        record_own_manifest_active_report(&rig.store, SELF, &p)["status"],
+        "recorded"
+    );
     completed.wait_for(|count| *count >= 3).await.unwrap();
     assert!(matches!(
         rig.rx.try_recv(),
@@ -619,6 +631,7 @@ impl tracing::Subscriber for Capture {
 #[test]
 fn manifest_lower_version_report_logs_exactly_one_bounded_warning_after_commit() {
     let rig = Rig::new();
+    rig.self_member();
     let events = Arc::new(Mutex::new(vec![]));
     tracing::subscriber::with_default(Capture(Arc::clone(&events)), || {
         for version in [29, 29, 28, 28] {
@@ -627,14 +640,14 @@ fn manifest_lower_version_report_logs_exactly_one_bounded_warning_after_commit()
             params["reason"] = json!("private report detail");
             let params: ReportParams = serde_json::from_value(params).unwrap();
             assert_eq!(
-                record_manifest_active_report(&rig.store, SELF, &params)["status"],
+                record_own_manifest_active_report(&rig.store, SELF, &params)["status"],
                 "recorded"
             );
         }
         rig.sql("CREATE TRIGGER fail_report BEFORE UPDATE ON gh_manifest_activations BEGIN SELECT RAISE(ABORT,'unavailable'); END");
         let params: ReportParams = serde_json::from_value(report(27)).unwrap();
         assert_eq!(
-            record_manifest_active_report(&rig.store, SELF, &params),
+            record_own_manifest_active_report(&rig.store, SELF, &params),
             refusal("store_error", "transient")
         );
     });
@@ -788,7 +801,7 @@ impl FederationRig {
 
 #[tokio::test(start_paused = true)]
 async fn manifest_federation_latest_recovers_missed_notice_and_report_commits_locally() {
-    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE};
+    use crate::federation::ingress::OP_MANIFEST_LATEST;
     use federation_support::wait_for_signal;
     let mut rig = FederationRig::new().await;
     rig.store_version(28);
@@ -825,7 +838,7 @@ async fn manifest_federation_latest_recovers_missed_notice_and_report_commits_lo
             .callosum
             .methods(&rig.target())
             .iter()
-            .filter(|method| method.as_str() == OP_MANIFEST_REPORT_ACTIVE)
+            .filter(|method| method.as_str() == "federation.manifest_report_active")
             .count(),
         0
     );
@@ -868,7 +881,7 @@ async fn manifest_federation_watch_shares_upstream_relays_and_ends_on_loss() {
         "the member owns its notice sequence"
     );
     rig.store_version(29);
-    wait_for_signal(rig.home.remote_watches.waking_for_test()).await;
+    wait_for_signal(rig.home.manifest_watches.waking_for_test()).await;
     tokio::time::advance(std::time::Duration::from_millis(250)).await;
     let mut channels = Vec::new();
     for _ in 0..2 {
@@ -909,11 +922,68 @@ async fn manifest_federation_watch_shares_upstream_relays_and_ends_on_loss() {
     );
 }
 
+#[tokio::test]
+async fn manifest_watch_four_streams_and_fifth_evicts_oldest_only_after_success() {
+    let rig = FederationRig::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let open = |corr, params| {
+        let header = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            1,
+            1,
+            corr,
+            Vec::new(),
+        )
+        .unwrap()
+        .header;
+        let pending = rig.home.manifest_watches.register(header);
+        let rig = &rig;
+        let tx = &tx;
+        async move {
+            federation_support::wait_for_signal(rig.home.manifest_watches.open(
+                &rig.home,
+                pending,
+                tx,
+                header,
+                rig.vaults.requester_member(),
+                &params,
+            ))
+            .await
+            .unwrap();
+        }
+    };
+    for corr in 1..=4 {
+        open(corr, json!({})).await;
+        let frame = rx.try_recv().unwrap();
+        assert_eq!(
+            (frame.header.ty, frame.header.corr),
+            (FrameType::StreamData, corr)
+        );
+        assert_eq!(body(&frame)["seq"], 1);
+        assert!(rx.try_recv().is_err());
+    }
+    open(5, json!({"extra": true})).await;
+    let frame = rx.try_recv().unwrap();
+    assert_eq!((frame.header.ty, frame.header.corr), (FrameType::Error, 5));
+    assert_eq!(body(&frame)["code"], "invalid_params");
+    assert!(rx.try_recv().is_err());
+
+    open(6, json!({})).await;
+    let end = rx.try_recv().unwrap();
+    assert_eq!((end.header.ty, end.header.corr), (FrameType::StreamEnd, 1));
+    let next = rx.try_recv().unwrap();
+    assert_eq!(
+        (next.header.ty, next.header.corr),
+        (FrameType::StreamData, 6)
+    );
+    assert!(rx.try_recv().is_err());
+}
+
 #[tokio::test(start_paused = true)]
 async fn manifest_federation_missing_grant_and_nonmember_watch_are_not_found() {
-    use crate::federation::ingress::{
-        OP_MANIFEST_LATEST, OP_MANIFEST_REPORT_ACTIVE, OP_MANIFEST_WATCH,
-    };
+    use crate::federation::ingress::{OP_MANIFEST_LATEST, OP_MANIFEST_WATCH};
     use federation_support::{wait_for_signal, HomeWatchRelay, Reply};
     let mut rig = FederationRig::new().await;
     rig.store_version(28);
@@ -926,10 +996,6 @@ async fn manifest_federation_missing_grant_and_nonmember_watch_are_not_found() {
     assert_eq!(
         wait_for_signal(rig.member.call("aft", OP_LATEST, json!({}))).await,
         refusal("not_found", "permanent")
-    );
-    assert!(
-        matches!(wait_for_signal(rig.home.serve(rig.vaults.requester_member(), OP_MANIFEST_REPORT_ACTIVE, &report(28))).await,
-        claustrum_module_probe::federation::HomeAnswer::Reply(reply) if reply == refusal("not_found", "permanent"))
     );
     let relay = HomeWatchRelay::new(Arc::clone(&rig.home), rig.vaults.requester_member());
     rig.vaults.callosum.answer(

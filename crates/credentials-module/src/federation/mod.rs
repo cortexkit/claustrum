@@ -7,7 +7,6 @@
 //! are dispatched by `AdminSurface` through the stage functions exported here. Every
 //! entry point is reached as `federation::*`.
 
-pub mod home_watch;
 #[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
 pub(crate) mod hub;
 #[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
@@ -38,10 +37,12 @@ mod hub_manifest_tests;
     reason = "started by the daemon when the hub transport is available"
 )]
 pub(crate) mod hub_member_watcher;
+#[cfg(test)]
+mod hub_wire_tests;
 pub mod ingress;
 pub mod login_sharing;
 pub mod manifest_watch;
-pub mod member_watch;
+pub mod manifest_watch_ingress;
 pub mod outbound;
 pub mod remote_read;
 pub mod sharing;

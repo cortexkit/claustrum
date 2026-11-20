@@ -291,7 +291,6 @@ fn parse_catalogue(source: &str) -> Vec<(String, OpKind)> {
     let region = &source[start..end];
     let library_constants = [
         ("OP_REMOTE_TOKEN", ingress::OP_REMOTE_TOKEN),
-        ("OP_REMOTE_WATCH", ingress::OP_REMOTE_WATCH),
         ("OP_REPORT_AUTH_FAILURE", ingress::OP_REPORT_AUTH_FAILURE),
         ("OP_REPORT_CONDITION", ingress::OP_REPORT_CONDITION),
         ("OP_CLEAR_CONDITION", ingress::OP_CLEAR_CONDITION),
@@ -522,15 +521,12 @@ pub type ResponderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Re
 #[derive(Clone)]
 pub struct Responder(pub Arc<dyn Fn(Value) -> ResponderFuture + Send + Sync>);
 
-type RelayFence = tokio::sync::oneshot::Sender<()>;
-
 #[derive(Clone)]
 pub struct HomeWatchRelay {
     home: Arc<claustrum_module_probe::federation::HomeVault>,
     member: String,
     runtime: tokio::runtime::Handle,
     frames: Arc<Mutex<Vec<Frame>>>,
-    fences: Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<RelayFence>>>>,
 }
 
 impl std::fmt::Debug for HomeWatchRelay {
@@ -546,32 +542,15 @@ impl HomeWatchRelay {
             member: member.into(),
             runtime: tokio::runtime::Handle::current(),
             frames: Arc::default(),
-            fences: Arc::default(),
         }
     }
 
     pub fn frames(&self) -> Vec<Frame> {
         self.frames.lock().unwrap().clone()
     }
-
-    /// A home cycle can finish before its frames reach the socket runtime. Fence
-    /// that relay queue before tests assert the cycle emitted no snapshot.
-    pub async fn fence(&self) {
-        let senders = {
-            let mut senders = self.fences.lock().unwrap();
-            senders.retain(|sender| !sender.is_closed());
-            senders.clone()
-        };
-        assert!(!senders.is_empty(), "no live home relay to fence");
-        for sender in senders {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            sender.send(tx).expect("live relay");
-            wait_for_signal(rx).await.expect("relay fence");
-        }
-    }
 }
 
-pub fn reexport_home_watch_frame(home_frame: Frame) -> Frame {
+pub fn reexport_manifest_watch_frame(home_frame: Frame) -> Frame {
     let header = home_frame.header;
     // Callosum fed-reexport-watch-v1.0 §8.9 drops a Response body on completion.
     // relayed_module_error_body preserves ordinary errors; reserved_module_error_body
@@ -630,7 +609,7 @@ impl Drop for LiveHomeWatch {
     fn drop(&mut self) {
         self.relay
             .home
-            .remote_watches
+            .manifest_watches
             .cancel(self.header.channel, self.header.corr);
         self.forward.abort();
     }
@@ -1448,38 +1427,24 @@ async fn serve_one(
         };
         match reply {
             Reply::HomeWatch(relay) => {
+                assert_eq!(method, "federation.manifest_watch");
                 let header = frame.header;
-                let pending = relay.home.remote_watches.register(header);
+                let pending = relay.home.manifest_watches.register(header);
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(32);
                 let home = Arc::clone(&relay.home);
                 let member = relay.member.clone();
-                let manifest = method == "federation.manifest_watch";
                 relay.runtime.spawn(async move {
-                    if manifest {
-                        home.remote_watches
-                            .open_manifest(&home, pending, &tx, header, &member, &params)
-                            .await
-                            .expect("home manifest watch open");
-                    } else {
-                        home.remote_watches
-                            .open(&home, pending, &tx, header, &member, &params)
-                            .await
-                            .expect("home watch open");
-                    }
+                    home.manifest_watches
+                        .open(&home, pending, &tx, header, &member, &params)
+                        .await
+                        .expect("home manifest watch open");
                 });
                 let writer = Arc::clone(&writer);
                 let observed = Arc::clone(&relay.frames);
-                let (fence_tx, mut fence_rx) = tokio::sync::mpsc::unbounded_channel::<RelayFence>();
-                relay.fences.lock().unwrap().push(fence_tx);
                 let forward = tokio::spawn(async move {
-                    loop {
-                        let home_frame = tokio::select! {
-                            biased;
-                            frame = rx.recv() => match frame { Some(frame) => frame, None => break },
-                            Some(fence) = fence_rx.recv() => { let _ = fence.send(()); continue; }
-                        };
+                    while let Some(home_frame) = rx.recv().await {
                         observed.lock().unwrap().push(home_frame.clone());
-                        let forwarded = reexport_home_watch_frame(home_frame);
+                        let forwarded = reexport_manifest_watch_frame(home_frame);
                         let terminal = forwarded.header.ty != FrameType::StreamData;
                         if write_frame(&mut *writer.lock().await, &forwarded)
                             .await
@@ -1523,7 +1488,7 @@ async fn serve_one(
                 // Callosum treats a home watch Response as clean completion and
                 // drops its body instead of forwarding it to the origin.
                 let reply =
-                    if method == "federation.remote_watch" && ledger_target.starts_with("fed:") {
+                    if method == "federation.manifest_watch" && ledger_target.starts_with("fed:") {
                         watch_frame(
                             frame.header.channel,
                             frame.header.epoch,

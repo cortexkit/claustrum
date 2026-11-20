@@ -46,17 +46,17 @@ async fn subscription_events_distinguish_data_and_clean_end() {
 
     let root = crate::support::temp_root("outbound-subscription-data");
     let vaults = TwoVaults::new(&root).await;
-    let snapshot = json!({ "kind": "snapshot", "seq": 1, "logins": [] });
+    let snapshot = json!({ "kind": "changed", "seq": 1, "version": 28 });
     vaults.callosum.answer(
         "claustrum",
-        "federation.remote_watch",
+        fed::ingress::OP_MANIFEST_WATCH,
         Reply::Watch(json!({ "result": snapshot })),
     );
     let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
         "subscription-data",
         route(
             "claustrum",
-            json!({ "method": "federation.remote_watch", "params": {} }),
+            json!({ "method": fed::ingress::OP_MANIFEST_WATCH, "params": {} }),
         ),
         fed::HOME_OP_DEADLINE,
     ))
@@ -94,7 +94,7 @@ async fn subscription_events_keep_direct_responses_but_federation_relays_them_as
     let refusal = json!({ "error": { "code": "not_found", "class": "permanent" } });
     vaults.callosum.answer(
         "claustrum",
-        "federation.remote_watch",
+        fed::ingress::OP_MANIFEST_WATCH,
         Reply::Ok(refusal.clone()),
     );
     for (target, expected) in [
@@ -108,7 +108,7 @@ async fn subscription_events_keep_direct_responses_but_federation_relays_them_as
             target,
             route(
                 target,
-                json!({ "method": "federation.remote_watch", "params": {} }),
+                json!({ "method": fed::ingress::OP_MANIFEST_WATCH, "params": {} }),
             ),
             fed::HOME_OP_DEADLINE,
         ))
@@ -180,17 +180,17 @@ async fn subscription_events_keep_error_details_on_routes_and_channel_zero() {
         ] {
             vaults.callosum.answer(
                 "claustrum",
-                "federation.remote_watch",
+                fed::ingress::OP_MANIFEST_WATCH,
                 Reply::SubscriptionError { channel_zero, body },
             );
             vaults
                 .callosum
-                .stray_error_before("federation.remote_watch", "unrelated-error");
+                .stray_error_before(fed::ingress::OP_MANIFEST_WATCH, "unrelated-error");
             let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
                 "subscription-error",
                 route(
                     "claustrum",
-                    json!({ "method": "federation.remote_watch", "params": {} }),
+                    json!({ "method": fed::ingress::OP_MANIFEST_WATCH, "params": {} }),
                 ),
                 fed::HOME_OP_DEADLINE,
             ))
@@ -225,12 +225,12 @@ async fn subscription_events_report_dropped_links_and_routes_as_errors() {
     ] {
         vaults
             .callosum
-            .answer("claustrum", "federation.remote_watch", reply);
+            .answer("claustrum", fed::ingress::OP_MANIFEST_WATCH, reply);
         let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
             key,
             route(
                 "claustrum",
-                json!({ "method": "federation.remote_watch", "params": {} }),
+                json!({ "method": fed::ingress::OP_MANIFEST_WATCH, "params": {} }),
             ),
             fed::HOME_OP_DEADLINE,
         ))
@@ -263,12 +263,12 @@ async fn subscription_next_keeps_the_data_and_terminal_mapping() {
         let data = matches!(reply, Reply::Watch(_));
         vaults
             .callosum
-            .answer("claustrum", "federation.remote_watch", reply);
+            .answer("claustrum", fed::ingress::OP_MANIFEST_WATCH, reply);
         let mut subscription = wait_for_signal(vaults.b.outbound.subscribe(
             "subscription-next",
             route(
                 "claustrum",
-                json!({ "method": "federation.remote_watch", "params": {} }),
+                json!({ "method": fed::ingress::OP_MANIFEST_WATCH, "params": {} }),
             ),
             fed::HOME_OP_DEADLINE,
         ))
@@ -1140,4 +1140,63 @@ async fn a_route_goodbye_fails_that_routes_call_and_leaves_another_routes_call_a
         error.is_transient() && error.message().contains("closed the route"),
         "the closed route's call fails at once, as a route closure: {error:?}"
     );
+}
+
+#[test]
+fn manifest_watch_relay_matches_callosum_error_and_completion_contract() {
+    use crate::support::reexport_manifest_watch_frame;
+    use serde_json::Value;
+    use subc_protocol::{Flags, Frame, FrameType, Priority};
+
+    let frame = |kind, body: Value| {
+        Frame::build(
+            kind,
+            Flags::new(false, Priority::Interactive, false),
+            11,
+            2,
+            7,
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap()
+    };
+    let data = frame(FrameType::StreamData, json!({"kind":"changed", "seq":1}));
+    let forwarded = reexport_manifest_watch_frame(data.clone());
+    assert_eq!(forwarded.header.ty, FrameType::StreamData);
+    assert_eq!(forwarded.body, data.body);
+    assert_eq!(
+        (
+            forwarded.header.channel,
+            forwarded.header.epoch,
+            forwarded.header.corr
+        ),
+        (11, 2, 7)
+    );
+
+    let ordinary = json!({"code":"not_found", "message":"not listed", "detail":{"home":"A"}});
+    let forwarded = reexport_manifest_watch_frame(frame(FrameType::Error, ordinary.clone()));
+    assert_eq!(forwarded.header.ty, FrameType::Error);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&forwarded.body).unwrap(),
+        ordinary
+    );
+
+    // Pin Callosum fed-reexport-watch-v1.0's reserved_module_error_body encoding:
+    // only the original code/message survive inside detail, never its own detail.
+    let reserved =
+        json!({"code":"fed_not_exposed", "message":"module message", "detail":{"ignored":true}});
+    let forwarded = reexport_manifest_watch_frame(frame(FrameType::Error, reserved));
+    assert_eq!(forwarded.header.ty, FrameType::Error);
+    assert_eq!(forwarded.body, br#"{"code":"executor_error","message":"module used a reserved federation error code","detail":{"code":"fed_not_exposed","message":"module message"}}"#);
+    let forwarded = reexport_manifest_watch_frame(frame(
+        FrameType::Error,
+        json!({"code":"fed_bad_call", "detail":{"ignored":true}}),
+    ));
+    assert_eq!(forwarded.body, br#"{"code":"executor_error","message":"module used a reserved federation error code","detail":{"code":"fed_bad_call"}}"#);
+
+    let completed = reexport_manifest_watch_frame(frame(
+        FrameType::Response,
+        json!({"result":{"error":{"code":"not_found"}}}),
+    ));
+    assert_eq!(completed.header.ty, FrameType::StreamEnd);
+    assert!(completed.body.is_empty());
 }

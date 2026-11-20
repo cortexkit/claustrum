@@ -1,0 +1,14 @@
+{
+  "login": {
+    "key": "11111111111111111111111111111111.22222222222222222222222222222222",
+    "plaintext": "{\"kind\":\"snapshot\",\"logins\":[{\"categories\":[],\"credential_id\":\"oauth:example\",\"detected_plan\":null,\"home_version\":1,\"identity\":{},\"provider_ids\":[],\"refresh_adapter\":\"test\",\"state\":\"active\"}]}",
+    "recipient_private_b64": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+    "sender_public_b64": "e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM=",
+    "value": "{\"v\":1,\"enc_b64\":\"T07wKdL8GHmJI1p8TWTXYJgjyKp+GnWFT5YptfZG6Qk=\",\"ciphertext_b64\":\"gg2dBwO5ndeAFUXczD4xc0ASmNi3wmkoof1vvsoqMdJCdTo3DC0NIoVc8mPDJhpp+crOW/qkZhPyZFMfKHeJjB8bzI1dKOtQowgejhW+xtUYq2Ko9oYw/+eKhefWPWgrTTBc9MvMyEYrHZu8H5oT3KJBQ7dCaYZ3Hn6JBCunbu5HP2MBfODu+Tl1OFu4vHs/WrVQMFqq/HR3UhyClHIicwFfgQI1xuved/OFIbctZJx//jYLTgxra9pjC7Pw/eRc7UYAl4iI4DtX9vTWFZVP8g==\",\"aad\":\"{\\\"home\\\":\\\"fed-computer:01010101010101010101010101010101\\\",\\\"member\\\":\\\"fed-computer:02020202020202020202020202020202\\\",\\\"home_box\\\":\\\"11111111111111111111111111111111\\\",\\\"member_box\\\":\\\"22222222222222222222222222222222\\\",\\\"generation\\\":\\\"9223372036854775807\\\",\\\"sender_key_id\\\":\\\"d19bf3f082782c87\\\",\\\"recipient_key_id\\\":\\\"1663945714ac14c3\\\"}\"}"
+  },
+  "manifest": {
+    "key": "11111111111111111111111111111111",
+    "value": "{\"v\":1,\"body\":\"{\\\"box\\\":\\\"11111111111111111111111111111111\\\",\\\"member\\\":\\\"fed-computer:01010101010101010101010101010101\\\",\\\"version\\\":29,\\\"manifest_sha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"verdict\\\":\\\"invalid\\\",\\\"reason\\\":\\\"reported_invalid\\\",\\\"seq\\\":9007199254740991}\",\"signature_b64\":\"VD+PJcVwa9yQb9iECGFit4x5LfIoRXra80bPUuzmME4L5pklhbbr52tNhKACXWdi4ubz9Zda82ScSZXI4bVzCQ==\",\"key_id\":\"56fae12f77164627\"}",
+    "writer_public_hex": "66cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf7633"
+  }
+}

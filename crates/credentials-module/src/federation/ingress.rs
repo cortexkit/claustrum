@@ -58,8 +58,6 @@ use crate::secret_use::{ForwardedUseAnswer, UseAnswer};
 /// A peer asks the home for a short-lived access token (a `query`: callosum keeps no
 /// reply body on disk).
 pub const OP_REMOTE_TOKEN: &str = "federation.remote_token";
-/// A peer watches the non-secret inventory of logins its remote-read grants reach.
-pub const OP_REMOTE_WATCH: &str = "federation.remote_watch";
 /// A peer forwards its consumer's report that a token was refused upstream.
 pub const OP_REPORT_AUTH_FAILURE: &str = "federation.report_auth_failure";
 pub const OP_REPORT_CONDITION: &str = "federation.report_condition";
@@ -78,10 +76,9 @@ pub const OP_SECRET_REQUEST_FLOW_APPROVAL: &str = "federation.secret_request_flo
 pub const OP_SECRET_REVOKE_FLOW_GRANTS: &str = "federation.secret_revoke_flow_grants";
 pub const OP_MANIFEST_LATEST: &str = "federation.manifest_latest";
 pub const OP_MANIFEST_WATCH: &str = "federation.manifest_watch";
-pub const OP_MANIFEST_REPORT_ACTIVE: &str = "federation.manifest_report_active";
 
 /// The closed allowlist of a federation channel. Nothing else is dispatched there.
-pub const FEDERATION_OPS: [&str; 13] = [
+pub const FEDERATION_OPS: [&str; 11] = [
     OP_REMOTE_TOKEN,
     OP_REPORT_AUTH_FAILURE,
     OP_REPORT_CONDITION,
@@ -91,10 +88,8 @@ pub const FEDERATION_OPS: [&str; 13] = [
     OP_SECRET_SSH_SIGN,
     OP_SECRET_REQUEST_FLOW_APPROVAL,
     OP_SECRET_REVOKE_FLOW_GRANTS,
-    OP_REMOTE_WATCH,
     OP_MANIFEST_LATEST,
     OP_MANIFEST_WATCH,
-    OP_MANIFEST_REPORT_ACTIVE,
 ];
 
 /// The HPKE `info` of a sealed token reply. A transfer envelope uses a different
@@ -1046,7 +1041,7 @@ pub type CallosumStub = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
 /// This vault in its role as home: it answers other members' federation ops.
 pub struct HomeVault {
     engine: Arc<RefreshEngine>,
-    pub remote_watches: Arc<super::home_watch::RemoteWatchHub>,
+    pub manifest_watches: Arc<super::manifest_watch_ingress::ManifestWatchHub>,
     /// The outbound client the home uses to ask callosum about pairings and keys. Set
     /// once at startup; until then every lookup is unavailable (transient).
     callosum: OnceLock<OutboundClient>,
@@ -1078,7 +1073,7 @@ impl HomeVault {
     pub fn new(engine: Arc<RefreshEngine>) -> Self {
         Self {
             engine,
-            remote_watches: Arc::default(),
+            manifest_watches: Arc::default(),
             callosum: OnceLock::new(),
             cooldown_clock: Arc::new(wall_now_ms),
             secret_clock: Arc::new(wall_now_ms),
@@ -1170,10 +1165,8 @@ impl HomeVault {
                 match method {
                     OP_REMOTE_TOKEN => self.remote_token(member, params, budget).await,
                     // A watch needs streaming replies; this dispatcher returns only one reply.
-                    OP_REMOTE_WATCH | OP_MANIFEST_WATCH => Err(Refusal::NotFound),
-                    OP_MANIFEST_LATEST | OP_MANIFEST_REPORT_ACTIVE => {
-                        self.manifest_op(member, method, params, budget).await
-                    }
+                    OP_MANIFEST_WATCH => Err(Refusal::NotFound),
+                    OP_MANIFEST_LATEST => self.manifest_op(member, params, budget).await,
                     OP_REPORT_AUTH_FAILURE => {
                         self.report_auth_failure(member, params, budget).await
                     }
@@ -1222,12 +1215,11 @@ impl HomeVault {
         }
     }
 
-    pub(crate) async fn prepare_remote_watch(
+    pub(crate) async fn prepare_manifest_watch(
         &self,
         member: &str,
         params: &Value,
-        manifest: bool,
-    ) -> Result<super::home_watch::PreparedWatch, HomeAnswer> {
+    ) -> Result<super::manifest_watch_ingress::PreparedWatch, HomeAnswer> {
         let budget = tokio::time::Instant::now() + self.op_deadline;
         // Subscribe before the first projection, including while the open checks wait.
         let writes = self.engine.store().subscribe_writes();
@@ -1237,59 +1229,33 @@ impl HomeVault {
                     "a federation channel takes no handle or enrollment_token".into(),
                 ));
             }
-            let pairing = if manifest {
-                self.secret_home_self()?;
-                let pairing = self
-                    .current_pairing(member, OP_MANIFEST_WATCH, budget)
-                    .await?;
-                self.require_secret_use_grant(member, &pairing, OP_MANIFEST_WATCH)?;
-                pairing
-            } else {
-                self.current_pairing(member, UNADDRESSED_SUBJECT, budget)
-                    .await?
-            };
+            self.secret_home_self()?;
+            let pairing = self
+                .current_pairing(member, OP_MANIFEST_WATCH, budget)
+                .await?;
+            self.require_secret_use_grant(member, &pairing, OP_MANIFEST_WATCH)?;
             if !params.as_object().is_some_and(|object| object.is_empty()) {
                 return Err(Refusal::InvalidParams(
-                    "remote_watch takes exactly {}".into(),
+                    "manifest_watch takes exactly {}".into(),
                 ));
             }
-            let home = self
-                .engine
+            self.engine
                 .store()
                 .federation_self_member()
                 .map_err(|_| STORE_ERROR)?
                 .ok_or(Refusal::Local("remote_setup_incomplete", "permanent"))?;
-            let rows = if manifest {
-                super::home_watch::Projection::Manifest(
-                    Self::project_manifest_watch(self.engine.store(), member, &pairing)
-                        .map_err(|_| STORE_ERROR)?
-                        .ok_or(Refusal::NotFound)?,
-                )
-            } else {
-                if !self
-                    .engine
-                    .store()
-                    .login_sharing()
-                    .map_err(|_| STORE_ERROR)?
-                {
-                    return Err(Refusal::NotFound);
-                }
-                self.active_transfer_key(&home)?;
-                super::home_watch::Projection::Logins(
-                    self.remote_watch_projection(member, &pairing)
-                        .map_err(|_| STORE_ERROR)?,
-                )
-            };
+            let projection = Self::project_manifest_watch(self.engine.store(), member, &pairing)
+                .map_err(|_| STORE_ERROR)?
+                .ok_or(Refusal::NotFound)?;
             // Synchronous store reads cannot be interrupted by timeout_at. Check again
             // before admitting a stream, so a slow first projection cannot evict one.
             if tokio::time::Instant::now() >= budget {
                 return Err(Refusal::HomeUnavailable);
             }
-            Ok(super::home_watch::PreparedWatch {
+            Ok(super::manifest_watch_ingress::PreparedWatch {
                 member: member.to_owned(),
                 pairing,
-                home,
-                projection: rows,
+                projection,
                 store: Arc::clone(self.engine.store()),
                 writes,
                 budget: self.op_deadline,
@@ -1307,35 +1273,28 @@ impl HomeVault {
     async fn manifest_op(
         &self,
         member: &str,
-        method: &str,
         params: &Value,
         budget: tokio::time::Instant,
     ) -> Result<Value, Refusal> {
         self.secret_home_self()?;
-        let pairing = self.current_pairing(member, method, budget).await?;
-        self.require_secret_use_grant(member, &pairing, method)?;
-        let store = Arc::clone(self.engine.store());
-        if method == OP_MANIFEST_LATEST {
-            if !params.as_object().is_some_and(|p| p.is_empty()) {
-                return Err(Refusal::InvalidParams(
-                    "manifest_latest takes exactly {}".into(),
-                ));
-            }
-            return match store.latest_gh_manifest().map_err(|_| STORE_ERROR)? {
-                Some(latest) => Ok(json!(latest)),
-                None => Err(Refusal::NotFound),
-            };
+        let pairing = self
+            .current_pairing(member, OP_MANIFEST_LATEST, budget)
+            .await?;
+        self.require_secret_use_grant(member, &pairing, OP_MANIFEST_LATEST)?;
+        if !params.as_object().is_some_and(|p| p.is_empty()) {
+            return Err(Refusal::InvalidParams(
+                "manifest_latest takes exactly {}".into(),
+            ));
         }
-        let report = crate::manifest_active_report::parse_active_report(params)
-            .ok_or_else(|| Refusal::InvalidParams("invalid manifest report".into()))?;
-        let member = member.to_owned();
-        // The blocking writer can outlive the lookup budget. A lost reply is safe
-        // to retry because activation audits deduplicate committed reports.
-        tokio::task::spawn_blocking(move || {
-            crate::manifest_active_report::record_manifest_active_report(&store, &member, &report)
-        })
-        .await
-        .map_err(|_| STORE_ERROR)
+        match self
+            .engine
+            .store()
+            .latest_gh_manifest()
+            .map_err(|_| STORE_ERROR)?
+        {
+            Some(latest) => Ok(json!(latest)),
+            None => Err(Refusal::NotFound),
+        }
     }
 
     pub(crate) fn project_manifest_watch(
@@ -2155,16 +2114,8 @@ impl HomeVault {
 }
 
 #[cfg(test)]
-#[path = "home_watch_open_tests.rs"]
-mod home_watch_open_tests;
-
-#[cfg(test)]
 #[path = "home_watch_projection_tests.rs"]
 mod home_watch_projection_tests;
-
-#[cfg(test)]
-#[path = "home_watch_stream_tests.rs"]
-mod home_watch_stream_tests;
 
 #[cfg(test)]
 mod tests {

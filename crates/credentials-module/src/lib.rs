@@ -39,7 +39,7 @@ pub async fn observe_hub_bindings_for_test(
     let (paired_tx, paired_rx) = tokio::sync::watch::channel(None);
     let (joins_tx, mut joins_rx) = tokio::sync::watch::channel(None);
     tokio::select! {
-        _ = run_with_pairing_snapshots(store, client.clone(), None, None, Some(paired_tx)) => {},
+        _ = run_with_pairing_snapshots(store, client.clone(), None, Some(paired_tx)) => {},
         _ = run_binding_feed(own_box, client, paired_rx, joins_tx) => {},
         _ = async {
             while joins_rx.changed().await.is_ok() {

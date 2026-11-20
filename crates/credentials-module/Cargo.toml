@@ -47,7 +47,7 @@ harness = false
 [features]
 default = []
 test-support = ["credentials-core/test-support"]
-consumer-e2e = ["dep:subc-client-rs", "dep:cortexkit-claustrum-client"]
+consumer-e2e = ["dep:cortexkit-claustrum-client"]
 import-prompt-seam = []
 # Debug-only Windows CLI rendezvous points keep real handles open for the
 # runtime tests. The shipped default-feature release contains none of them.
@@ -62,7 +62,10 @@ subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
 subc-config = { workspace = true }
-subc-client-rs = { version = "0.41.1", optional = true }
+subc-client-rs = "0.41.1"
+cortexkit-bus-client = "=0.1.12"
+cortexkit-bus-nats = "0.5.6"
+async-nats = "0.50"
 cortexkit-claustrum-client = { path = "../claustrum-client", optional = true }
 cortexkit-store = { workspace = true }
 # `durable_replace`: the engram catalog and the OpenCode file writers replace a file

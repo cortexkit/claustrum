@@ -19,6 +19,8 @@ const PEER_KEYS: &[u8] = include_bytes!("../fixtures/callosum/peer-keys/cases.js
 const PAIRED_DEVICES_V2: &[u8] =
     include_bytes!("../fixtures/callosum/paired-devices-v2/cases.json");
 const PEER_KEYS_V3: &[u8] = include_bytes!("../fixtures/callosum/peer-keys-v3/cases.json");
+const PEER_KEYS_WATCH_V1: &[u8] =
+    include_bytes!("../fixtures/callosum/peer-keys-watch-v1/cases.json");
 
 /// The member id callosum's paired-devices README documents for the fixture's own key.
 const FIXTURE_SELF_MEMBER: &str = "fed-computer:300c9c9603b92a4b39ed3958bf924011";
@@ -217,7 +219,7 @@ sharing_fixture!(watch_bad_params_before_caller, None::<usize>, false);
 sharing_fixture!(watch_not_ready, None::<usize>, false);
 
 #[test]
-fn the_vendored_v2_and_v3_vectors_are_the_bytes_callosum_published() {
+fn the_vendored_snapshot_and_peer_watch_vectors_are_the_bytes_callosum_published() {
     for (bytes, checksum) in [
         (
             PAIRED_DEVICES_V2,
@@ -233,15 +235,27 @@ fn the_vendored_v2_and_v3_vectors_are_the_bytes_callosum_published() {
         ),
         (
             PEER_KEYS_V3,
-            "ad6b6bc5ecc43edf79d8f9480b14d2c7123ff2c5dfdb01887cf63ac72d6b5cb0",
+            "b5243386c46b0551c21f24f45dd696fb8edaa2dcb260b71e0d4f7da7e880979c",
         ),
         (
             include_bytes!("../fixtures/callosum/peer-keys-v3/README.md").as_slice(),
-            "3eeffe87745ca8bda4164cf45be8bb9de22253d535fb8d46dc27c3aa79e8e629",
+            "eaecef1ceec27a38bc542de7f17c71db7f368725dbc6b528f8107d985dfbd2ea",
         ),
         (
             include_bytes!("../fixtures/callosum/peer-keys-v3/SHA256SUMS").as_slice(),
-            "867f077792c4a8406f28cb2950f371daa852bf11bf2b1dc25f966fb419f1323c",
+            "d9a3774670b45e1a81f69b738564fa0a5496d6de0b145477a6aa799ebfc71d16",
+        ),
+        (
+            PEER_KEYS_WATCH_V1,
+            "11e987c87f461a3179ff096b1ccd457dab74ff2327e09eac6b754df762811ecd",
+        ),
+        (
+            include_bytes!("../fixtures/callosum/peer-keys-watch-v1/README.md").as_slice(),
+            "4e4e890b5a984a70e5ec72c7f5c565da1cfe4a981e20fd7bc2dbd77524d5ea28",
+        ),
+        (
+            include_bytes!("../fixtures/callosum/peer-keys-watch-v1/SHA256SUMS").as_slice(),
+            "9bd33a0c087a164505369b04d104e349d5b08739e7a678f6554f082edab522e5",
         ),
     ] {
         assert_eq!(sha256_hex(bytes), checksum, "must match VENDORED.md");
@@ -320,7 +334,7 @@ fn every_paired_devices_v2_case_decodes_through_the_sharing_reader() {
 fn every_peer_keys_v3_case_decodes_through_the_transfer_reader() {
     let file: Value = serde_json::from_slice(PEER_KEYS_V3).unwrap();
     let cases = file["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 14);
     let member = "fed-computer:72cd6e8422c407fb6d098690f1130b7d";
     for case in cases {
         let name = case["name"].as_str().unwrap();

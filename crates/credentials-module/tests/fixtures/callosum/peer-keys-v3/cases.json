@@ -562,6 +562,114 @@
         "method": "callosum.peer_keys_read",
         "params": {}
       }
+    },
+    {
+      "caller": "reserved:engram",
+      "name": "engram_sees_bus_and_verification_keys",
+      "peers": [
+        {
+          "class": "computer",
+          "key_record": {
+            "keys": {
+              "bus_seal_x25519": {
+                "pub": "ff06",
+                "version": "17"
+              },
+              "fleet_epoch_wrap_x25519": {
+                "pub": "dd04",
+                "version": "11"
+              },
+              "fleet_record_ed25519": {
+                "pub": "ee05",
+                "version": "13"
+              },
+              "msgsig_ed25519": {
+                "pub": "bb02",
+                "version": "5"
+              },
+              "vault_transfer_x25519": {
+                "pub": "cc03",
+                "version": "3"
+              }
+            }
+          },
+          "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+          "pairing_id": "9d3a2f6e-9a1d-4b42-8c56-cf6c6d3d4a9e:1",
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": "ios"
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "key_record": {
+              "keys": {
+                "bus_seal_x25519": {
+                  "pub": "ff06",
+                  "version": "17"
+                },
+                "fleet_record_ed25519": {
+                  "pub": "ee05",
+                  "version": "13"
+                },
+                "msgsig_ed25519": {
+                  "pub": "bb02",
+                  "version": "5"
+                }
+              }
+            },
+            "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+            "registry_platform": "ios"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:engram",
+      "name": "engram_sees_bus_only_record",
+      "peers": [
+        {
+          "class": "computer",
+          "key_record": {
+            "keys": {
+              "bus_seal_x25519": {
+                "pub": "ff06",
+                "version": "17"
+              }
+            }
+          },
+          "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+          "pairing_id": "9d3a2f6e-9a1d-4b42-8c56-cf6c6d3d4a9e:1",
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": "ios"
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "key_record": {
+              "keys": {
+                "bus_seal_x25519": {
+                  "pub": "ff06",
+                  "version": "17"
+                }
+              }
+            },
+            "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+            "registry_platform": "ios"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
     }
   ],
   "version": 3

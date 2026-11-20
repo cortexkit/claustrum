@@ -430,7 +430,7 @@ pub fn decode_peer_transfer_key(body: &Value, member_id: &str) -> Lookup<PeerKey
     else {
         return Lookup::Absent;
     };
-    match decode_x25519_hex(public_hex) {
+    match decode_public_key_hex(public_hex) {
         Some(public) => Lookup::Found(PeerKey {
             key_id: credentials_core::signing::key_id_for_public(&public),
             public,
@@ -465,7 +465,7 @@ pub fn decode_self_member(body: &Value) -> Lookup<String> {
     body.get("self")
         .and_then(|own| own.get("static_public_key_hex"))
         .and_then(Value::as_str)
-        .and_then(decode_x25519_hex)
+        .and_then(decode_public_key_hex)
         .map_or(Lookup::Absent, |public| {
             Lookup::Found(member_id_for_static_key(&public))
         })
@@ -499,7 +499,7 @@ pub async fn callosum_lookup(
 }
 
 /// Exactly 64 lowercase hex characters, as 32 bytes.
-fn decode_x25519_hex(value: &str) -> Option<[u8; 32]> {
+pub(super) fn decode_public_key_hex(value: &str) -> Option<[u8; 32]> {
     if !credentials_core::federation::is_lower_hex_sha256(value) {
         return None;
     }

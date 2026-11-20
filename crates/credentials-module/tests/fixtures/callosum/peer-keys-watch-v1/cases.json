@@ -1,0 +1,129 @@
+{
+  "cases": [
+    {
+      "caller": "reserved:occipital",
+      "name": "ordinary_open",
+      "notices": [
+        {
+          "peers": [
+            {
+              "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+              "key_record": {
+                "keys": {
+                  "msgsig_ed25519": {
+                    "pub": "aa01",
+                    "version": "1"
+                  }
+                }
+              },
+              "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "method": "callosum.peer_keys_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "vault_open",
+      "notices": [
+        {
+          "peers": [
+            {
+              "class": "computer",
+              "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+              "key_record": {
+                "keys": {
+                  "bus_seal_x25519": {
+                    "pub": "dd04",
+                    "version": "4"
+                  },
+                  "fleet_epoch_wrap_x25519": {
+                    "pub": "cc03",
+                    "version": "3"
+                  },
+                  "msgsig_ed25519": {
+                    "pub": "aa01",
+                    "version": "1"
+                  },
+                  "vault_transfer_x25519": {
+                    "pub": "bb02",
+                    "version": "2"
+                  }
+                }
+              },
+              "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+              "pairing_id": "9d3a2f6e-9a1d-4b42-8c56-cf6c6d3d4a9e:1"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "method": "callosum.peer_keys_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "key_update": {
+        "kind": "msgsig_ed25519",
+        "pub": "ee05",
+        "version": "5"
+      },
+      "name": "visible_key_change",
+      "notices": [
+        {
+          "peers": [
+            {
+              "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+              "key_record": {
+                "keys": {
+                  "msgsig_ed25519": {
+                    "pub": "ee05",
+                    "version": "5"
+                  }
+                }
+              },
+              "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "method": "callosum.peer_keys_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "key_update": {
+        "kind": "vault_transfer_x25519",
+        "pub": "ff06",
+        "version": "6"
+      },
+      "name": "invisible_key_change",
+      "notices": [],
+      "request": {
+        "method": "callosum.peer_keys_watch",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "name": "not_ready",
+      "notices": [],
+      "refusal": {
+        "code": "fed_not_ready",
+        "message": "peer runtimes are not ready yet"
+      },
+      "request": {
+        "method": "callosum.peer_keys_watch",
+        "params": {}
+      }
+    }
+  ],
+  "version": 1
+}

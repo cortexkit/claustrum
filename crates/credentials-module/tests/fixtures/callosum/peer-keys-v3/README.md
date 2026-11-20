@@ -7,8 +7,11 @@ local caller. Params are ignored. Caller authority comes from the daemon,
 never request JSON.
 
 Version 3 retains every version 2 case and adds the NATS bus seal public key,
-`bus_seal_x25519`. Only daemon-stamped `reserved:ckbus` and
-`reserved:claustrum` callers see that kind. `vault_transfer_x25519` and
+`bus_seal_x25519`. Only the `reserved:ckbus`, `reserved:claustrum` and
+`reserved:engram` callers see that kind. These identities are set by the
+local daemon from the module's verified launch, never claimed by the caller. Engram seals agent-move keys to
+the same public key; the vault keeps the uses apart by requiring a
+per-caller HPKE `info` prefix when it opens. `vault_transfer_x25519` and
 `fleet_epoch_wrap_x25519` remain claustrum-only, as do `class` and
 `pairing_id`. Classes are `computer`, `phone`, `sim` or `unknown`; pairing ids
 are the opaque `<incarnation>:<ceremony counter>` returned by
@@ -19,8 +22,10 @@ returning an empty map.
 
 The bus cases show claustrum's full view, ckbus's bus and verification keys,
 and an ordinary caller's verification keys with the bus and vault-only kinds
-removed. A bus-only record is omitted for an ordinary caller. Every version
-2 reply remains byte-identical. `peers` outside `reply` describes the input
+removed. A bus-only record is omitted for an ordinary caller. The two engram
+cases (tag `peer-keys-vectors-v3.1`) show engram's view, which matches ckbus's.
+They are appended after the v3.0 cases, which stay byte-identical. Every
+version 2 reply remains byte-identical. `peers` outside `reply` describes the input
 fixture; null optional input fields are omitted in replies.
 
 Each kind's `pub` is lowercase hex bounded by fed-wire §6 only; consumers

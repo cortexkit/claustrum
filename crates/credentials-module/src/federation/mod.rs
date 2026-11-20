@@ -8,6 +8,10 @@
 //! entry point is reached as `federation::*`.
 
 pub mod home_watch;
+#[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
+pub(crate) mod hub;
+#[allow(dead_code, reason = "used by the hub federation tasks at cutover")]
+pub(crate) mod hub_binding;
 pub mod ingress;
 pub mod login_sharing;
 pub mod manifest_watch;

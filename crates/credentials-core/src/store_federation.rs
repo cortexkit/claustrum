@@ -250,6 +250,7 @@ struct RemoteWatchDiff<'a> {
 
 pub struct HubLoginApply<'a> {
     pub home_member: &'a str,
+    pub recipient_member: &'a str,
     pub pairing_id: &'a str,
     pub generation: crate::hub_counters::HubGeneration,
     pub recipient_key_incarnation: &'a str,
@@ -1169,12 +1170,14 @@ impl EncryptedStore {
     ) -> Result<Option<RemoteWatchApplyResult>, StoreOpError> {
         let HubLoginApply {
             home_member,
+            recipient_member,
             pairing_id,
             generation,
             recipient_key_incarnation,
             recipient_key_record_version,
         } = *apply;
         check_member_id(home_member)?;
+        check_member_id(recipient_member)?;
         check_pairing_id(pairing_id)?;
         let (rows, retained_ids) = match mode {
             HubLoginApplyMode::NewSnapshot { rows, retained_ids }
@@ -1196,7 +1199,11 @@ impl EncryptedStore {
                 HubLoginApplyMode::RestoreSnapshot { .. } | HubLoginApplyMode::RestoreEnded => equal.is_some_and(|state| state.reapply),
                 HubLoginApplyMode::FillCollisions { .. } => equal.is_some_and(|state| !state.reapply && !state.skipped_ids.is_empty()),
             };
-            if !eligible || !login_sharing_conn(tx)? || !still_current() {
+            if !eligible
+                || !login_sharing_conn(tx)?
+                || read_setting(tx, SELF_MEMBER_SETTING)?.as_deref() != Some(recipient_member)
+                || !still_current()
+            {
                 return Ok(None);
             }
             let same_recipient_key = tx.query_row("SELECT EXISTS (SELECT 1 FROM credentials \

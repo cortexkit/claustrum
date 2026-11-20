@@ -7,13 +7,8 @@ use std::{
 };
 
 use credentials_core::{
-    federation::{
-        is_lower_hex_16_bytes, validate_remote_watch_row, RemoteHomeState, RemoteRecordSource,
-        RemoteWatchApplyMode, RemoteWatchRow,
-    },
-    plan_detection::DetectedPlan,
-    record::RecordIdentity,
-    store::{Condition, EncryptedStore, StoreOpError},
+    federation::{is_lower_hex_16_bytes, RemoteRecordSource, RemoteWatchApplyMode},
+    store::EncryptedStore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -22,6 +17,7 @@ use tokio::{
     time::Instant,
 };
 
+use super::hub_logins::{decode_rows, Login, Snapshot};
 use super::outbound::{
     management_surface, OutboundClient, OutboundError, RouteCall, SubscriptionEvent,
     ADMIN_OP_BUDGET,
@@ -332,50 +328,6 @@ struct Notice {
     logins: Vec<Login>,
 }
 
-#[derive(Deserialize)]
-struct Login {
-    credential_id: String,
-    state: RemoteHomeState,
-    refresh_adapter: Option<String>,
-    identity: RecordIdentity,
-    categories: Vec<String>,
-    provider_ids: Option<Vec<String>>,
-    detected_plan: Option<DetectedPlan>,
-    home_version: u64,
-    #[serde(default, deserialize_with = "present_condition")]
-    condition: Option<Value>,
-}
-
-fn present_condition<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(de).map(Some)
-}
-
-fn decode_condition(value: Value) -> Result<Condition, StoreOpError> {
-    let malformed = || StoreOpError::Encode("malformed home-watch condition".into());
-    let value = value.as_object().ok_or_else(malformed)?;
-    Ok(Condition {
-        reason: value
-            .get("reason")
-            .and_then(Value::as_str)
-            .ok_or_else(malformed)?
-            .to_owned(),
-        since_ms: value
-            .get("since_ms")
-            .and_then(Value::as_u64)
-            .ok_or_else(malformed)?,
-        action_url: value
-            .get("action_url")
-            .map(|link| link.as_str().map(str::to_owned).ok_or_else(malformed))
-            .transpose()?,
-    })
-}
-
-#[derive(Clone, Debug)]
-struct Snapshot {
-    rows: Vec<RemoteWatchRow>,
-    retained_ids: Vec<String>,
-}
-
 fn decode_notice(home: &str, body: Value, logged: &Logged) -> Option<Snapshot> {
     let notice: Notice = serde_json::from_value(body).ok()?;
     if notice.kind != "snapshot"
@@ -385,42 +337,11 @@ fn decode_notice(home: &str, body: Value, logged: &Logged) -> Option<Snapshot> {
     {
         return None;
     }
-    let mut ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    let mut retained_ids = Vec::new();
-    for login in notice.logins {
-        if login.state == RemoteHomeState::Corrupt || !ids.insert(login.credential_id.clone()) {
-            return None;
+    decode_rows(home, notice.logins, |id, error| {
+        if logged.first(home, id) {
+            tracing::warn!(target: "federation", home, %id, %error, "home watch row rejected; existing row unchanged");
         }
-        let mut row = RemoteWatchRow {
-            credential_id: login.credential_id,
-            state: login.state,
-            refresh_adapter: login.refresh_adapter,
-            identity: login.identity,
-            categories: login.categories,
-            provider_ids: login.provider_ids,
-            detected_plan: login.detected_plan,
-            home_version: login.home_version,
-            condition: None,
-        };
-        let result = login
-            .condition
-            .map(decode_condition)
-            .transpose()
-            .and_then(|condition| {
-                row.condition = condition;
-                validate_remote_watch_row(home, &row)
-            });
-        if let Err(error) = result {
-            if logged.first(home, &row.credential_id) {
-                tracing::warn!(target: "federation", home, id = %row.credential_id, %error, "home watch row rejected; existing row unchanged");
-            }
-            retained_ids.push(row.credential_id);
-        } else {
-            rows.push(row);
-        }
-    }
-    Some(Snapshot { rows, retained_ids })
+    })
 }
 
 #[derive(Debug)]

@@ -1,4 +1,5 @@
 use super::*;
+use credentials_core::federation::{RemoteHomeState, RemoteWatchRow};
 
 const FP: &str = "aa11bb22cc33dd44ee55ff6600112233";
 const HOME: &str = "fed-computer:aa11bb22cc33dd44ee55ff6600112233";

@@ -274,6 +274,9 @@ fn row(id: &str) -> RemoteWatchRow {
 #[test]
 fn hub_member_applies_restores_and_ends_atomically_with_stored_generation() {
     let (_root, store) = rig("hub-member", 184);
+    store
+        .set_federation_self_member_audited(PEER, AuditCtx::vault(AuditOp::FederationSelfSet))
+        .unwrap();
     let key = VaultRecord::new_static(
         CredentialKind::KemKey,
         "operator",
@@ -286,6 +289,7 @@ fn hub_member_applies_restores_and_ends_atomically_with_stored_generation() {
     let meta = store.meta(VAULT_TRANSFER_ID).unwrap();
     let mut apply = HubLoginApply {
         home_member: HOME,
+        recipient_member: PEER,
         pairing_id: "pair",
         generation: HubGeneration::FIRST,
         recipient_key_incarnation: meta.incarnation.as_deref().unwrap(),
@@ -327,6 +331,23 @@ fn hub_member_applies_restores_and_ends_atomically_with_stored_generation() {
         .unwrap()
         .is_none());
     apply.recipient_key_record_version = meta.record_version;
+    store
+        .set_federation_self_member_audited(HOME, AuditCtx::vault(AuditOp::FederationSelfSet))
+        .unwrap();
+    let before = store.read_audit(None).unwrap();
+    assert!(
+        store
+            .apply_hub_login_audited(&apply, snap(), || true)
+            .unwrap()
+            .is_none(),
+        "the decoded recipient is no longer this vault's member id"
+    );
+    assert!(store.hub_login_home_state(HOME).unwrap().is_none());
+    assert!(store.remote_record("oauth:auto").unwrap().is_none());
+    assert_eq!(store.read_audit(None).unwrap(), before);
+    store
+        .set_federation_self_member_audited(PEER, AuditCtx::vault(AuditOp::FederationSelfSet))
+        .unwrap();
     assert_eq!(
         store
             .apply_hub_login_audited(&apply, snap(), || true)

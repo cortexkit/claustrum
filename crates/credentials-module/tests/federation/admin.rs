@@ -1568,6 +1568,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "federation/hub_home_writer.rs",
         "federation/hub_home_writer_tests.rs",
         "federation/hub_logins.rs",
+        "federation/hub_member_watcher.rs",
+        "federation/hub_member_watcher_tests.rs",
         "federation/hub_stand_in.rs",
         "federation/outbound.rs",
         "federation/remote_read.rs",

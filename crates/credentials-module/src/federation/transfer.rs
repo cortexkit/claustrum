@@ -525,10 +525,10 @@ impl From<TransferRefusal> for Stop {
 
 /// This vault's own transfer setup: its self id, its transfer key's private half (only
 /// while `Active`) and that key's id.
-struct OwnKey {
-    self_id: String,
-    pem: String,
-    key_id: String,
+pub(super) struct OwnKey {
+    pub(super) self_id: String,
+    pub(super) pem: String,
+    pub(super) key_id: String,
 }
 
 impl std::fmt::Debug for OwnKey {
@@ -542,7 +542,9 @@ impl std::fmt::Debug for OwnKey {
 
 /// Read this vault's own setup. `Ok(Err(self_id))` when the self id or a usable,
 /// `Active` transfer key is missing (carrying the self id when it is set).
-fn own_key(store: &EncryptedStore) -> Result<Result<OwnKey, Option<String>>, StoreOpError> {
+pub(super) fn own_key(
+    store: &EncryptedStore,
+) -> Result<Result<OwnKey, Option<String>>, StoreOpError> {
     let Some(self_id) = store.federation_self_member()? else {
         return Ok(Err(None));
     };

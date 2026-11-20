@@ -26,3 +26,28 @@ pub mod secret_use;
 #[cfg(not(test))]
 #[path = "admin_surface.rs"]
 pub mod admin_surface;
+
+/// Expose only mapped member IDs to the external Callosum test harness.
+#[cfg(feature = "test-support")]
+pub async fn observe_hub_bindings_for_test(
+    store: std::sync::Arc<credentials_core::store::EncryptedStore>,
+    client: federation::OutboundClient,
+    own_box: &str,
+    observed: tokio::sync::watch::Sender<Option<Vec<String>>>,
+) {
+    use federation::{hub_binding::run_binding_feed, sharing::run_with_pairing_snapshots};
+    let (paired_tx, paired_rx) = tokio::sync::watch::channel(None);
+    let (joins_tx, mut joins_rx) = tokio::sync::watch::channel(None);
+    tokio::select! {
+        _ = run_with_pairing_snapshots(store, client.clone(), None, None, Some(paired_tx)) => {},
+        _ = run_binding_feed(own_box, client, paired_rx, joins_tx) => {},
+        _ = async {
+            while joins_rx.changed().await.is_ok() {
+                let mapped = joins_rx.borrow_and_update().as_ref().map(|joined| {
+                    joined.bindings().map(|binding| binding.member_id.clone()).collect()
+                });
+                observed.send_replace(mapped);
+            }
+        } => {},
+    }
+}

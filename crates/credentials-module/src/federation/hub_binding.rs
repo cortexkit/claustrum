@@ -1,13 +1,22 @@
 //! Join Callosum's two local views before using a computer's hub address or keys.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use credentials_core::federation::is_lower_hex_16_bytes;
-use serde_json::Value;
+use serde_json::{json, Value};
+use tokio::sync::watch;
 
-use super::{ingress::decode_public_key_hex, sharing::VaultSharingSnapshot};
+use super::{
+    hub::Backoff,
+    ingress::decode_public_key_hex,
+    outbound::{management_surface, OutboundClient, RouteCall, ADMIN_OP_BUDGET},
+    sharing::VaultSharingSnapshot,
+};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HubBinding {
     pub(crate) member_id: String,
     pub(crate) box_id: String,
@@ -25,11 +34,12 @@ pub(crate) enum HubMember<'a> {
     Absent,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HubBindings {
     present: BTreeSet<String>,
     by_fingerprint: BTreeMap<String, HubBinding>,
     by_box: BTreeMap<String, String>,
+    ambiguous_boxes: BTreeSet<String>,
 }
 
 impl HubBindings {
@@ -65,6 +75,11 @@ impl HubBindings {
                 .collect(),
             by_fingerprint: BTreeMap::new(),
             by_box: BTreeMap::new(),
+            ambiguous_boxes: boxes
+                .iter()
+                .filter(|(_, count)| **count > 1)
+                .map(|(box_id, _)| (*box_id).to_string())
+                .collect(),
         };
         for (fingerprint, pairing_id) in &paired.computers {
             let Some(peer) = peers.get(fingerprint.as_str()) else {
@@ -118,6 +133,71 @@ impl HubBindings {
     pub(crate) fn bindings(&self) -> impl Iterator<Item = &HubBinding> {
         self.by_fingerprint.values()
     }
+
+    pub(super) fn box_is_ambiguous(&self, box_id: &str) -> bool {
+        self.ambiguous_boxes.contains(box_id)
+    }
+}
+
+/// Join the sharing loop's paired-device snapshots with the full peer-key notices.
+/// A terminated stream invalidates its half; it does not prove nobody is paired.
+pub(crate) async fn run_binding_feed(
+    own_box: &str,
+    client: OutboundClient,
+    mut pairings: watch::Receiver<Option<Arc<VaultSharingSnapshot>>>,
+    joined: watch::Sender<Option<HubBindings>>,
+) {
+    let mut backoff = Backoff::default();
+    loop {
+        let request = RouteCall {
+            target: management_surface("callosum"),
+            prelude: None,
+            request: json!({"method":"callosum.peer_keys_watch", "params":{}}),
+        };
+        let subscription = tokio::select! {
+            _ = joined.closed() => return,
+            result = client.subscribe("callosum", request, ADMIN_OP_BUDGET) => result,
+        };
+        if let Ok(mut subscription) = subscription {
+            let mut peer_keys = None;
+            loop {
+                let current = pairings
+                    .borrow_and_update()
+                    .clone()
+                    .and_then(|paired| HubBindings::join(own_box, &paired, peer_keys.as_ref()?));
+                if current.is_some() {
+                    backoff.reset();
+                }
+                replace_if_changed(&joined, current);
+                tokio::select! {
+                    _ = joined.closed() => return,
+                    change = pairings.changed() => if change.is_err() {
+                        replace_if_changed(&joined, None);
+                        return;
+                    },
+                    result = subscription.next() => match result {
+                        Ok(Some(value)) => peer_keys = Some(value),
+                        _ => break,
+                    },
+                }
+            }
+        }
+        replace_if_changed(&joined, None);
+        tokio::select! {
+            _ = joined.closed() => return,
+            _ = tokio::time::sleep(backoff.next_delay()) => {},
+        }
+    }
+}
+
+fn replace_if_changed(joined: &watch::Sender<Option<HubBindings>>, current: Option<HubBindings>) {
+    joined.send_if_modified(|prior| {
+        if *prior == current {
+            return false;
+        }
+        *prior = current;
+        true
+    });
 }
 
 fn machine_id(peer: &Value) -> Option<&str> {

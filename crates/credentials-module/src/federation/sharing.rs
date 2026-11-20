@@ -79,6 +79,8 @@ pub struct VaultSharingSnapshot {
     pub tombstones: Vec<SharingTombstone>,
 }
 
+pub(crate) type PairingSnapshots = tokio::sync::watch::Sender<Option<Arc<VaultSharingSnapshot>>>;
+
 pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     let snapshot: Snapshot = serde_json::from_value(body.clone()).ok()?;
     if !is_lower_hex_sha256(&snapshot.identity.static_public_key_hex) {
@@ -155,18 +157,23 @@ async fn apply(
     removals: &Arc<PendingRemovals>,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
     member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
-    let snapshot =
-        decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?;
+    let snapshot = Arc::new(
+        decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?,
+    );
     if let Some(hub) = home_watches {
-        hub.paired_devices(snapshot.devices);
+        hub.paired_devices(snapshot.devices.clone());
     }
     if let Some(pairings) = member_pairings {
-        pairings.send_replace(Some(snapshot.computers));
+        pairings.send_replace(Some(snapshot.computers.clone()));
+    }
+    if let Some(pairings) = hub_pairings {
+        pairings.send_replace(Some(Arc::clone(&snapshot)));
     }
     let removals = Arc::clone(removals);
     tokio::task::spawn_blocking(move || {
-        removals.record(&store, snapshot.tombstones);
+        removals.record(&store, snapshot.tombstones.clone());
         if snapshot.enabled {
             super::transfer::ensure_transfer_key(&store, "vault")?;
         }
@@ -320,11 +327,21 @@ pub async fn run_with_reconcilers(
     home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
     member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
 ) {
+    run_with_pairing_snapshots(store, client, home_watches, member_pairings, None).await;
+}
+
+pub(crate) async fn run_with_pairing_snapshots(
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
+    member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    hub_pairings: Option<PairingSnapshots>,
+) {
     let removals = Arc::new(PendingRemovals::default());
     // Keep the removal queue alive across reconnects and login-sharing changes.
     tokio::select! {
         _ = removals.run(Arc::clone(&store)) => {},
-        _ = reconcile(store, client, home_watches, member_pairings, &removals) => {},
+        _ = reconcile(store, client, home_watches, member_pairings, hub_pairings, &removals) => {},
     }
 }
 
@@ -333,6 +350,7 @@ async fn reconcile(
     client: OutboundClient,
     home_watches: Option<Arc<super::home_watch::RemoteWatchHub>>,
     member_pairings: Option<tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    hub_pairings: Option<PairingSnapshots>,
     removals: &Arc<PendingRemovals>,
 ) {
     let mut retries = RetryState::default();
@@ -347,6 +365,7 @@ async fn reconcile(
                 removals,
                 home_watches.as_deref(),
                 member_pairings.as_ref(),
+                hub_pairings.as_ref(),
             );
             tokio::pin!(attempt);
             loop {
@@ -357,11 +376,19 @@ async fn reconcile(
                         let current = store.login_sharing().unwrap_or(false);
                         let turned_on = !enabled && current;
                         enabled = current;
-                        if turned_on { continue 'watching; }
+                        if turned_on {
+                            if let Some(pairings) = &hub_pairings {
+                                pairings.send_replace(None);
+                            }
+                            continue 'watching;
+                        }
                     }
                 }
             }
         };
+        if let Some(pairings) = &hub_pairings {
+            pairings.send_replace(None);
+        }
         let delay = match outcome {
             Err(error) => {
                 let (delay, warn) = retries.failed(&error);
@@ -383,6 +410,7 @@ async fn watch(
     removals: &Arc<PendingRemovals>,
     home_watches: Option<&super::home_watch::RemoteWatchHub>,
     member_pairings: Option<&tokio::sync::watch::Sender<super::member_watch::PairedComputers>>,
+    hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
     let snapshot = client
         .call(
@@ -399,6 +427,7 @@ async fn watch(
         removals,
         home_watches,
         member_pairings,
+        hub_pairings,
     )
     .await?;
     let mut subscription = client
@@ -421,6 +450,7 @@ async fn watch(
             removals,
             home_watches,
             member_pairings,
+            hub_pairings,
         )
         .await?;
     }

@@ -20,6 +20,40 @@ const READ: &str = "callosum.paired_devices_read";
 const WATCH: &str = "callosum.paired_devices_watch";
 const MEMBER: &str = "fed-computer:648aa5c579fb30f38af744d97d6ec840";
 
+#[tokio::test]
+async fn hub_binding_feed_joins_live_callosum_watches_and_invalidates_on_end() {
+    const PEER_KEYS_WATCH: &str = "callosum.peer_keys_watch";
+    let rig = Rig::new("hub-binding-feed", snapshot("all_classes")).await;
+    rig.callosum.answer(
+        TARGET_MODULE,
+        PEER_KEYS_WATCH,
+        Reply::Watch(json!({"peers": [{
+            "class":"computer",
+            "fingerprint":"648aa5c579fb30f38af744d97d6ec840",
+            "machine_id":"00000000000000000000000000000002",
+            "pairing_id":"11111111-2222-4333-8444-555555555555:3"
+        }]})),
+    );
+    let (observed_tx, mut observed) = tokio::sync::watch::channel(None);
+    let task = tokio::spawn(claustrum_module_probe::observe_hub_bindings_for_test(
+        Arc::clone(&rig.home.store),
+        rig.vault.outbound.clone(),
+        "00000000000000000000000000000001",
+        observed_tx,
+    ));
+    wait_for_signal(observed.changed()).await.unwrap();
+    assert_eq!(
+        observed.borrow_and_update().as_deref(),
+        Some(&[MEMBER.to_string()][..])
+    );
+    wait_until(|| rig.callosum.saw_method(WATCH)).await;
+    assert_eq!(rig.callosum.watch_snapshot(None).await, 2);
+    wait_for_signal(observed.changed()).await.unwrap();
+    assert_eq!(*observed.borrow_and_update(), None);
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
+}
+
 fn snapshot(name: &str) -> Value {
     let file: Value = serde_json::from_str(include_str!(
         "../fixtures/callosum/paired-devices/cases.json"

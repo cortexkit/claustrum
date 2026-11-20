@@ -285,7 +285,7 @@ async fn wait<T>(signal: impl Future<Output = T>) -> T {
 async fn until(mut ready: impl FnMut() -> bool) {
     wait(async {
         while !ready() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await;

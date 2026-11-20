@@ -293,7 +293,7 @@ impl Rig {
                         return entry;
                     }
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -317,26 +317,16 @@ fn signed(pem: &str, box_id: &str, member: &str, seq: i64, verdict: GhManifestVe
 }
 
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut future = std::pin::pin!(future);
-    loop {
-        if let std::task::Poll::Ready(value) =
-            std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await
-        {
-            return value;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "hub manifest signal did not arrive"
-        );
-        tokio::task::yield_now().await;
-    }
+    // Leave room on the paused clock for retries that back off for up to ten minutes.
+    tokio::time::timeout(Duration::from_secs(3600), future)
+        .await
+        .expect("hub manifest signal did not arrive")
 }
 
 async fn wait(mut done: impl FnMut() -> bool) {
     bounded(async {
         while !done() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await;

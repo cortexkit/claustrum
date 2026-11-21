@@ -229,6 +229,37 @@ async fn permissions_credential_grants_default_display_names_are_read_only_and_e
 }
 
 #[tokio::test]
+async fn permissions_list_shows_the_policy_token_scope_and_label() {
+    let (surface, admin, store) = cp_rig(161);
+    let selector = "github_app:sample";
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "aft",
+            SelectorKind::Exact,
+            selector,
+            GrantOperation::PolicyToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let reply = cp_reply(&surface, &admin, "permissions.list", json!({})).await;
+    let body: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    let rows: Vec<_> = body["result"]["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["holder"]["module_id"] == "aft")
+        .collect();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["scope"], "policy_token");
+    assert_eq!(rows[0]["subject_label"], selector);
+    assert_eq!(
+        rows[0]["scope_label"],
+        "can get GitHub tokens limited by the signed policy for this credential"
+    );
+}
+
+#[tokio::test]
 async fn permissions_credential_grants_dispatcher_lists_and_pins_samples() {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};

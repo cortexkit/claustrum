@@ -119,12 +119,7 @@ pub(super) fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, 
         let operation = grant
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .filter(|operation| {
-                matches!(
-                    *operation,
-                    "read" | "sign" | "open" | "list" | "deposit" | "account_token" | "seal"
-                )
-            })
+            .filter(|operation| operation.parse::<GrantOperation>().is_ok())
             .ok_or_else(|| {
                 CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant operation at row {index}"

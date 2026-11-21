@@ -119,6 +119,17 @@ fn declared_inventory_is_opt_in_and_plain_grants_stays_account_compatible() {
         "--operation",
         "read",
     ]));
+    assert_ok(&vault.run(&[
+        "grant",
+        "--principal",
+        "reserved:aft",
+        "--selector-kind",
+        "exact",
+        "--selector",
+        "github_app:sample",
+        "--operation",
+        "policy_token",
+    ]));
     let before = vault.run(&["grants"]);
     let inventories: Vec<_> = [vec!["list"], vec!["list", "--json"], vec!["status"]]
         .into_iter()
@@ -134,6 +145,19 @@ fn declared_inventory_is_opt_in_and_plain_grants_stays_account_compatible() {
     assert_eq!(plain.stdout, before.stdout);
     assert_eq!(plain.stderr, SUMMARY.as_bytes());
     assert!(account_accepts_grants(&plain.stdout));
+    assert!(std::str::from_utf8(&plain.stdout)
+        .unwrap()
+        .lines()
+        .any(|line| {
+            line.split_whitespace().take(6).eq([
+                "reserved",
+                "aft",
+                "exact",
+                "github_app:sample",
+                "policy_token",
+                "0",
+            ])
+        }));
     let mut broken = plain.stdout.clone();
     broken.extend_from_slice(b"\ndeclared grants (last declaration each module presented):\n");
     assert!(

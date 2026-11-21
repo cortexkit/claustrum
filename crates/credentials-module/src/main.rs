@@ -12063,6 +12063,7 @@ mod tests {
             json!([{"selector":{"category":"llm-provider"},"operation":"deposit"}]),
             json!([{"selector":{"category":"llm-provider"},"operation":"seal"}]),
             json!([{"selector":{"category":"llm-provider"},"operation":"account_token"}]),
+            json!([{"selector":{"exact":"github_app:sample"},"operation":"policy_token"}]),
             json!([{"selector":{"category":"bad category"},"operation":"read"}]),
             json!([{"selector":{"exact":""},"operation":"read"}]),
             json!([{"selector":{"audience":"provider"},"operation":"read"}]),

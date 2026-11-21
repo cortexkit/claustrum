@@ -34,8 +34,10 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token|seal>
-//!   revoke-grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token|seal>
+//!   grant --principal <id> --selector-kind <exact|category|audience> --selector <value>
+//!       --operation <read|sign|open|list|deposit|account_token|seal|policy_token>
+//!   revoke-grant --principal <id> --selector-kind <exact|category|audience> --selector <value>
+//!       --operation <read|sign|open|list|deposit|account_token|seal|policy_token>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //! ```
@@ -1545,7 +1547,7 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id|enrolled:name>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
-             \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
+             \x20   --operation <read|sign|open|list|deposit|account_token|seal|policy_token>\n\
              \n\
              \x20 --principal <principal>       reserved module or enrolled consumer name\n\
              \x20 --selector-kind <kind>        required: exact, category or audience\n\
@@ -1573,6 +1575,8 @@ fn help_verb(verb: &str) -> String {
              then attribute to that key. Exact selector only: a category grant would\n\
              extend that to keys added later. Every seal is audited. It grants no read,\n\
              open, sign or list access, and no other grant implies it.\n\
+             policy_token: get a GitHub token limited by the signed policy for one\n\
+             GitHub App credential. Exact selector only; it grants no read access.\n\
              On success a second line says how many credentials the grant reaches\n\
              now (`reaches N credentials`), counted as `ck auth grants` counts it. A\n\
              grant that reaches nothing still succeeds, with a warning on stderr\n\
@@ -1587,7 +1591,7 @@ fn help_verb(verb: &str) -> String {
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id|enrolled:name>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
-             \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
+             \x20   --operation <read|sign|open|list|deposit|account_token|seal|policy_token>\n\
              \n\
              \x20 --principal <id|reserved:id|enrolled:name>\n\
              \x20                               module or enrolled consumer principal\n\
@@ -1598,7 +1602,7 @@ fn help_verb(verb: &str) -> String {
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation.\n\
              Revoking list leaves any read grant on the same selector in place.\n\
-             seal grants are exact-only, so revoke them with --selector-kind exact."
+             seal and policy_token grants require --selector-kind exact."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -3680,6 +3684,47 @@ mod deposit_cli_tests {
     }
 
     #[test]
+    fn policy_token_cli_grants_require_an_exact_selector() {
+        let root = root("policy-token-grants");
+        for (kind, selector, reason) in [
+            (
+                "category",
+                "github-app-native",
+                "policy_token requires selector-kind exact",
+            ),
+            (
+                "audience",
+                "cortexkit-runners",
+                "audience requires operation account_token",
+            ),
+        ] {
+            for verb in ["grant", "revoke-grant"] {
+                let output = invoke(
+                    &root,
+                    &[
+                        verb,
+                        "--principal",
+                        "reserved:aft",
+                        "--selector-kind",
+                        kind,
+                        "--selector",
+                        selector,
+                        "--operation",
+                        "policy_token",
+                    ],
+                );
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                assert!(
+                    !output.status.success() && stderr.contains(reason),
+                    "{verb} {kind}: {stderr}"
+                );
+            }
+        }
+        assert!(success(&root, &["grants"]).contains("no grants"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn seal_cli_grants_are_exact_only_listed_and_revocable() {
         let root = root("seal-grants");
         let grant = [
@@ -3809,7 +3854,8 @@ mod deposit_cli_tests {
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "error: deposit requires a reserved principal and category browser-session selector\n");
         }
         for verb in ["grant", "revoke-grant"] {
-            assert!(help_verb(verb).contains("<read|sign|open|list|deposit|account_token|seal>"));
+            assert!(help_verb(verb)
+                .contains("<read|sign|open|list|deposit|account_token|seal|policy_token>"));
         }
         assert!(help_verb("grant")
             .contains("cerebellum-style module write access for cookie: records only"));

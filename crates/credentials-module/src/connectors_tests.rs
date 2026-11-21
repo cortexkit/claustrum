@@ -322,6 +322,59 @@ mod connectors_contract {
     }
 
     #[tokio::test]
+    async fn declared_policy_token_is_skipped_and_hand_grant_operations_stay_independent() {
+        let (surface, admin, store, _db, _root) = rig(233);
+        let id = "github_app:sample";
+        declared_bind(
+            &surface,
+            &admin,
+            77,
+            Some(reserved("aft")),
+            "self",
+            Some(declaration(json!([
+                {"category":"github-app-native","operation":"read"},
+                {"category":"github-app-native","operation":"policy_token"},
+                {"category":"github-app-native","operation":"list"}
+            ]))),
+        )
+        .await;
+        let declared = declared_set(&admin, 77);
+        assert_eq!(
+            declared
+                .grants()
+                .iter()
+                .map(|grant| (grant.selector.as_str(), grant.operation))
+                .collect::<Vec<_>>(),
+            [
+                ("github-app-native", GrantOperation::List),
+                ("github-app-native", GrantOperation::Read),
+            ]
+        );
+        assert!(store.list_read_grants().unwrap().is_empty());
+        let covers = |module, op, grants: &credentials_core::store::DeclaredGrantSet| {
+            store
+                .read_grant_covers("reserved", module, id, op, grants)
+                .unwrap()
+        };
+        assert!(!covers("aft", GrantOperation::PolicyToken, &declared));
+
+        declared_hand_grant(&store, "aft", SelectorKind::Exact, id, GrantOperation::Read);
+        assert!(covers("aft", GrantOperation::Read, &declared));
+        assert!(!covers("aft", GrantOperation::PolicyToken, &declared));
+
+        declared_hand_grant(
+            &store,
+            "plexus",
+            SelectorKind::Exact,
+            id,
+            GrantOperation::PolicyToken,
+        );
+        let empty = credentials_core::store::DeclaredGrantSet::empty();
+        assert!(covers("plexus", GrantOperation::PolicyToken, &empty));
+        assert!(!covers("plexus", GrantOperation::Read, &empty));
+    }
+
+    #[tokio::test]
     async fn declared_scoped_union_matches_hand_grants_in_local_remote_and_audience_paths() {
         let (surface, admin, store, _db, _root) = rig(227);
         store

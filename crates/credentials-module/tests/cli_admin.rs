@@ -2019,17 +2019,16 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
     assert_eq!(&rows[2][..5], &["reserved", "agent", "exact", "z:", "sign"]);
 }
 
-/// One principal holding BOTH selector kinds and all three operations must still list.
+/// One principal holding every selector kind and operation must still list.
 ///
 /// The CLI refuses a grant inventory that does not arrive in stable order, and it checks
 /// that order on the TEXT of each field. A store that sorted by enum declaration order
 /// instead (exact before category, open after sign) passed every single-kind test and
 /// took `ck auth grants` and `ck auth status` down on the live vault, where one module
-/// holds exact and category grants side by side. The producer's order and the
-/// consumer's check only meet when both kinds and a non-alphabetical operation are
-/// present in one listing, so this test puts them there.
+/// holds exact and category grants side by side. Multiple selector kinds and operations
+/// on the same selector exercise the producer's order and the consumer's check together.
 #[test]
-fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation() {
+fn grants_list_when_one_principal_holds_every_selector_kind_and_operation() {
     let vault = GrantCliVault::new("grants-mixed-kinds");
     vault.bootstrap();
 
@@ -2039,6 +2038,10 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
         ("exact", "a:", "open"),
         ("exact", "a:", "sign"),
         ("exact", "a:", "list"),
+        ("category", "browser-session", "deposit"),
+        ("audience", "cortexkit-runners", "account_token"),
+        ("exact", "kem:push", "seal"),
+        ("exact", "github_app:sample", "policy_token"),
     ] {
         let created = vault.run(&[
             "grant",
@@ -2069,7 +2072,7 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
         .lines()
         .filter(|line| line.contains("reserved"))
         .count();
-    assert_eq!(rows, 5, "every grant needs its own row: {stdout}");
+    assert_eq!(rows, 9, "every grant needs its own row: {stdout}");
 }
 
 #[test]
@@ -2084,6 +2087,7 @@ fn bus_seal_grants_use_the_same_allowlist_offline() {
         ("reserved:other", "open", false),
         ("reserved:engram", "seal", false),
         ("reserved:ckbus", "account_token", false),
+        ("reserved:engram", "policy_token", false),
     ] {
         let output = vault.run(&[
             "grant",

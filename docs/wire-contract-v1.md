@@ -290,6 +290,13 @@ another (`deposit` and `account_token` are described in sections 11 and 12):
 | `open` | `credential.open` with a KEM key; the row (without identity) in `list_scoped` | the token, `sign` |
 | `list` | the row in `list_scoped` WITH its identity (`account_id`, `email`, `org_name`) and `refresh_adapter` | every other operation: no token, no status, no key use, no report |
 | `seal` | `credential.seal` with a KEM key; the row (without identity) in `list_scoped`. **Exact selector only** | the token, `public_key`, `sign`, `open` |
+| `policy_token` | `credential.policy_token` for one GitHub App credential, limited by the signed policy and subject to the method's partner allowlist. **Exact selector only** | `get_scoped` or any other `read` authority |
+
+An operator can add or revoke `policy_token` with `ck auth grant` or
+`ck auth revoke-grant`, using `--selector-kind exact --selector <credential-id>` and
+`--operation policy_token`. Category and audience selectors are refused. `read` does
+not confer `policy_token`, and a module declaration cannot request it. The hand grant
+appears as `policy_token` in `ck auth grants` and the apps' permission list.
 
 `list` is the account roster without the tokens, for a consumer that chooses which
 account serves a request and must never be able to fetch one. It unseals the record only
@@ -565,7 +572,8 @@ get no declared grants. `origin` is recorded but does not gate admission.
 
 The operation string is checked against this closed set before other entry validation.
 Other strings are skipped with reason `operation`, even when they are valid hand-grant
-operations: category `sign`, `open`, `seal` and category `account_token` are not declarable.
+operations: `sign`, `open`, `seal` and `policy_token` are not declarable, and
+`account_token` is declarable only with an audience selector.
 Every whitelisted entry must also pass the same full-tuple validation as `ck auth grant`
 for the reserved module, selector kind, selector and operation. Category names must satisfy
 the vault's category-name grammar; `deposit` is valid only for `browser-session`.
@@ -2896,7 +2904,7 @@ the label may come from a fixed table of CortexKit plugin names. Module holders
 never receive a vault label: apps get module names from the module's catalog entry.
 Neither holder includes its principal prefix. Other principal kinds are not listed.
 The `scope` is the stored operation: `read`, `list`, `sign`, `open`, `seal`,
-`deposit`, or `account_token`. The timestamp is the grant's creation time.
+`deposit`, `account_token`, or `policy_token`. The timestamp is the grant's creation time.
 
 The `subject_label` describes the selector without a reach count. An exact selector
 uses the credential id, and an audience selector uses
@@ -2919,8 +2927,9 @@ uses the credential id, and an audience selector uses
 The provider supplies the complete `scope_label`; apps display it unchanged. It
 distinguishes reading secrets from listing accounts and plans without secrets,
 signing, encrypting or decrypting messages, storing browser sign-ins, and getting
-CortexKit account tokens. Category scope labels include the number of credentials reached
-now, using the same credential/category membership as `ck auth grants`. Adding or
+CortexKit account tokens. For `policy_token`, the label is `can get GitHub tokens limited by the
+signed policy for this credential`. Category scope labels include the number of credentials
+reached now, using the same credential/category membership as `ck auth grants`. Adding or
 removing a category member changes that count, not the id or subject label. No row
 contains secret or token material. All permission rows are sorted by id.
 

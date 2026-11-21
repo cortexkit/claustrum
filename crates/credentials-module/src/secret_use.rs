@@ -184,32 +184,21 @@ fn local_scope(
     if coverage != "scope" {
         return Err(local_error(store, name, SecretError::InvalidParams));
     }
-    let stamp: ScopeStamp = match serde_json::from_value(stamp) {
+    let stamp = match decode_stamp(stamp) {
         Ok(s) => s,
-        Err(e) if e.to_string().starts_with("missing field ") => {
+        Err(StampError::Unmapped) => {
             store.record_secret_use_refusal(SecretSender::Aft, Some(name), "unmapped");
             return Err(UseAnswer::Reply(SecretError::NotFound.body()));
         }
-        Err(_) => return Err(local_error(store, name, SecretError::InvalidParams)),
+        Err(StampError::Invalid) => {
+            return Err(local_error(store, name, SecretError::InvalidParams))
+        }
     };
-    if stamp.scope_epoch > MAX_SECRET_JSON_INTEGER
-        || stamp
-            .parent
-            .as_ref()
-            .is_some_and(|p| p.scope_epoch > MAX_SECRET_JSON_INTEGER)
-    {
-        return Err(local_error(store, name, SecretError::InvalidParams));
-    }
     let Some((scope, parent)) = asking(&stamp) else {
         store.record_secret_use_refusal(SecretSender::Aft, Some(name), "unmapped");
         return Err(UseAnswer::Reply(SecretError::NotFound.body()));
     };
-    let agent = if stamp.kind == ScopeKind::Worker {
-        stamp.attributes.on_behalf_of_agent
-    } else {
-        stamp.attributes.agent_id
-    };
-    Ok((scope, parent, agent))
+    Ok((scope, parent, stamp_agent(stamp)))
 }
 
 fn parse_local_use(
@@ -352,11 +341,44 @@ pub(crate) fn preflight_forward(
     local_enabled(store)
 }
 
-fn owner(principal: &Principal) -> String {
+pub(crate) fn owner(principal: &Principal) -> String {
     match principal {
         Principal::Reserved { module_id } => format!("reserved:{module_id}"),
         Principal::Direct => "direct".into(),
         Principal::Unverified => "unverified".into(),
+    }
+}
+
+pub(crate) enum StampError {
+    Unmapped,
+    Invalid,
+}
+
+pub(crate) fn decode_stamp(value: Value) -> Result<ScopeStamp, StampError> {
+    // Missing required members are unmapped, not an invitation to infer authority.
+    let stamp: ScopeStamp = serde_json::from_value(value).map_err(|error| {
+        if error.to_string().starts_with("missing field ") {
+            StampError::Unmapped
+        } else {
+            StampError::Invalid
+        }
+    })?;
+    if stamp.scope_epoch > MAX_SECRET_JSON_INTEGER
+        || stamp
+            .parent
+            .as_ref()
+            .is_some_and(|p| p.scope_epoch > MAX_SECRET_JSON_INTEGER)
+    {
+        return Err(StampError::Invalid);
+    }
+    Ok(stamp)
+}
+
+pub(crate) fn stamp_agent(stamp: ScopeStamp) -> Option<String> {
+    if stamp.kind == ScopeKind::Worker {
+        stamp.attributes.on_behalf_of_agent
+    } else {
+        stamp.attributes.agent_id
     }
 }
 
@@ -536,26 +558,14 @@ fn parse_use(
     if let Err(e) = target.validate() {
         return Err(invalid(e));
     }
-    // Decode the dependency's ScopeStamp, including its required scope_epoch.
-    // Missing required fields are unmapped, not an invitation to infer authority.
-    let stamp: ScopeStamp = match serde_json::from_value(params.stamp) {
+    let stamp = match decode_stamp(params.stamp) {
         Ok(s) => s,
-        Err(e) if e.to_string().starts_with("missing field ") => {
+        Err(StampError::Unmapped) => {
             store.record_secret_use_refusal(sender, None, "unmapped");
             return Err(UseAnswer::Reply(SecretError::NotFound.body()));
         }
-        Err(_) => return Err(invalid(ValidationError::InvalidParams)),
+        Err(StampError::Invalid) => return Err(invalid(ValidationError::InvalidParams)),
     };
-    // The store encodes pending approval statements as RFC 8785 canonical JSON;
-    // its epoch must fit the exact JSON integer range, ending at 2^53 - 1.
-    if stamp.scope_epoch > 9_007_199_254_740_991
-        || stamp
-            .parent
-            .as_ref()
-            .is_some_and(|p| p.scope_epoch > 9_007_199_254_740_991)
-    {
-        return Err(invalid(ValidationError::InvalidParams));
-    }
     let Some((scope, worker_parent)) = asking(&stamp) else {
         store.record_secret_use_refusal(sender, None, "unmapped");
         return Err(UseAnswer::Reply(SecretError::NotFound.body()));
@@ -571,11 +581,7 @@ fn parse_use(
         coverage: params.coverage,
         // Worker attribution names its head for display, without inheriting the
         // head's identity or changing the scope to which approval is bound.
-        agent_id: if stamp.kind == ScopeKind::Worker {
-            stamp.attributes.on_behalf_of_agent
-        } else {
-            stamp.attributes.agent_id
-        },
+        agent_id: stamp_agent(stamp),
         target,
     };
     match params.name {

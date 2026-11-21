@@ -166,7 +166,7 @@ fn policy_token_binding_accepts_500_and_refuses_501() {
     );
 }
 
-fn serving_role(conn: &Connection) -> Result<(), PolicyTokenError> {
+pub(super) fn serving_role(conn: &Connection) -> Result<(), PolicyTokenError> {
     match secret_home_role_conn(conn) {
         SecretHomeRole::Single | SecretHomeRole::Home { .. } => Ok(()),
         SecretHomeRole::Remote { .. } | SecretHomeRole::RemoteSetupIncomplete { .. } => {
@@ -176,7 +176,11 @@ fn serving_role(conn: &Connection) -> Result<(), PolicyTokenError> {
     }
 }
 
-fn has_exact_grant(conn: &Connection, module_id: &str, identity: &str) -> rusqlite::Result<bool> {
+pub(super) fn has_exact_grant(
+    conn: &Connection,
+    module_id: &str,
+    identity: &str,
+) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM read_grants \
          WHERE principal_kind = 'reserved' AND principal_id = ?1 \

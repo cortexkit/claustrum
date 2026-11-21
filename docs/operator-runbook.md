@@ -1220,6 +1220,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `enroll.reissue` | Operator-reissue a replacement enrollment token. |
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
+| `broker_action_request` | Mint one pending broker action request. The target is the App identity, the actor is `reserved:aft` or `reserved:plexus`, and `payload_hash` is the SHA-256 of the exact canonical statement bytes. No alarm, field value, context or stamp is recorded in the row. |
 | `seal` | Record one `credential.seal` (auth-mode HPKE under a vault-held KEM key) before its ciphertext is returned; `payload_hash` is a keyed fingerprint of the plaintext. |
 | `remote_issue` | The home issued an access token to a member; durable dedup bounds this to one row per member, credential, home version and encrypted material. |
 | `transfer_out` | Commit a sealed outgoing transfer before delivery; resuming it adds no second row. |
@@ -1259,6 +1260,10 @@ For SSH grants, `secret_grant_create`, `secret_grant_revoke` and
 `secret_grant_expire` name the bare signing-key credential id instead of a
 `secret\|<name>` target. Local-use releases and signatures audit every use, including
 uses under remembered grants; they never use `secret_first_release`.
+
+If `policy.request_action` returns `approval_pending_limit`, wait for an existing
+request to expire or have all its legs issued before retrying. Expired requests
+stop counting immediately, even when their rows are still kept for diagnosis.
 
 Secret grants are also visible through the `permissions/v1` provider. Cingulate uses
 `permissions.list` and `permissions.revoke`; the local operator uses those operation

@@ -290,7 +290,7 @@ another (`deposit` and `account_token` are described in sections 11 and 12):
 | `open` | `credential.open` with a KEM key; the row (without identity) in `list_scoped` | the token, `sign` |
 | `list` | the row in `list_scoped` WITH its identity (`account_id`, `email`, `org_name`) and `refresh_adapter` | every other operation: no token, no status, no key use, no report |
 | `seal` | `credential.seal` with a KEM key; the row (without identity) in `list_scoped`. **Exact selector only** | the token, `public_key`, `sign`, `open` |
-| `policy_token` | `credential.policy_token` for one GitHub App credential, limited by the signed policy and subject to the method's partner allowlist. **Exact selector only** | `get_scoped` or any other `read` authority |
+| `policy_token` | `credential.policy_token` and `policy.request_action` for one GitHub App credential, limited by the signed policy and subject to each method's partner allowlist. **Exact selector only** | `get_scoped` or any other `read` authority |
 
 An operator can add or revoke `policy_token` with `ck auth grant` or
 `ck auth revoke-grant`, using `--selector-kind exact --selector <credential-id>` and
@@ -5692,6 +5692,79 @@ the new row once; an unusable row or a failed authorization is not retried.
 
 No refusal returns a token or a provider response body. An unreadable credential
 is not quarantined by this method, and mint failures do not change its state.
+
+### Request broker action approval
+
+`policy.request_action` is a Mutate operation on the Single or Home vault. It
+is never relayed and never contacts GitHub. Only `reserved:aft` and
+`reserved:plexus` may call it, with a persisted exact `policy_token` grant on the
+`github_app:<slug>` identity. The request is one of two closed objects:
+
+- One leg: `{identity, service, action, kind, method, host, resource, request_sha256, fields, stamp, context?}`.
+  `action` must equal `kind`.
+- Explicit legs: `{identity, service, action, host, legs, fields, stamp, context?}`.
+  `legs` holds 1–16 closed `{kind, method, resource, request_sha256}` objects in
+  send order. The statement's top-level `resource` is the first leg's resource.
+
+`fields` holds up to 16 closed `{name, value}` objects. Values are JSON, with
+only integers in ±(2^53−1) as numbers, including inside arrays and objects.
+`service` and `action` are nonempty strings. Each method is one or more ASCII
+uppercase letters; each `request_sha256`
+is 64 lowercase hexadecimal digits supplied by the enforcer, not computed by the
+vault. The host uses the policy host grammar and may have a port in 1–65535
+without a leading zero; `:443` is not permitted. If present, `context` is nonempty
+display text of at most 200 characters with no Unicode Cc, Cf, Zl or Zp character.
+
+The sender relays the daemon's `stamp` verbatim using the `secret.use` stamp
+grammar. The vault trusts the two senders to relay it unchanged. It takes
+`agent_id` from `attributes.on_behalf_of_agent` for workers and
+`attributes.agent_id` otherwise. The statement's `{owner, kind, ref, epoch}`
+comes from the stamp itself, with `epoch` set to `scope_epoch`. An ephemeral
+stamp does not map to its parent, and a stamp with `flow_id` may be used.
+
+Checks run in order. Every refusal writes nothing. Application refusals are
+`{"error":{"code","class"}}`; `invalid_params` is a transport error.
+
+1. A non-serving role or a caller outside the allowlist gets `not_found`
+   (permanent). For an allowed caller, a missing or malformed `identity` is
+   `invalid_params`; a well-formed identity without a covering grant gets
+   `not_found` before any remaining parameter checks. A missing top-level
+   `stamp` is `invalid_params`. Missing required members *inside* the stamp or
+   no attributed agent get `not_found`.
+2. A malformed stamp (including a scope or parent epoch above 2^53−1), an
+   unknown or missing request member, or another shape defect is `invalid_params`.
+3. No active policy is `policy_absent` (permanent).
+4. The service must be `github`; its host list must contain the exact `host`
+   string, so a host with a port cannot match. The active binding must list the
+   identity, stamped agent and every resource. Every kind must exist with
+   identity `agent` and a class other than `denied`. The local credential must
+   exist, and any App creation attestation must match the binding's agent.
+   A failure is `not_found` (permanent).
+5. Any leg whose kind does not require `approval: once` returns
+   `approval_not_required` (permanent).
+6. Field names must match the kinds' `consent.fields` exactly, with no
+   duplicates, or the result is `consent_fields_invalid` (permanent). The
+   statement uses template order; for explicit legs the vault takes the union
+   of fields in leg order, keeping the first occurrence of each name.
+7. A statement that fails the `ck-broker-action-statement/v1` grammar or exceeds
+   524,288 decoded bytes returns `invalid_params`.
+8. More than 16 pending requests for the stamped agent or more than 256 total
+   returns `approval_pending_limit` (transient). A request is pending until
+   expiry or until all its legs have issued. Wait for a slot before retrying.
+
+Success is `{request_id, statement_b64url, statement_sha256, expires_at_ms}`.
+The request id is a fresh ULID, and expiry is exactly ten minutes after minting.
+The statement is unpadded base64url of the exact RFC 8785 JSON bytes.
+`statement_sha256` is the lowercase SHA-256 of those decoded bytes. The statement
+carries the active policy version and digest, and the request details in the
+shape above, except it replaces `stamp` with `agent_id` and `scope` and adds
+`v: "ck-broker-action-statement/v1"`, `request_id`, `policy_version`,
+`policy_sha256` and `expires_at_ms`. No approval or token is issued by the mint.
+A successful mint commits one `broker_action_request` audit row. Its credential
+is the App identity, its actor is the calling reserved module, and its
+`payload_hash` is `statement_sha256`. It has no alarm.
+A store failure returns `store_error` (transient), without committing a request
+or its audit row.
 
 ### Document and signature
 

@@ -1666,6 +1666,10 @@ pub use github_app_store::{
 #[path = "store_policy_token.rs"]
 mod policy_token;
 
+#[path = "store_broker_action.rs"]
+mod broker_action;
+pub use broker_action::{BrokerActionRequestError, BrokerActionRequestReply};
+
 #[path = "store_gh_proposals.rs"]
 mod gh_proposals;
 

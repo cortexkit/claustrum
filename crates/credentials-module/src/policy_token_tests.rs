@@ -13,6 +13,9 @@ use std::{
     sync::atomic::{AtomicI64, AtomicUsize, Ordering},
 };
 
+#[path = "broker_action_request_tests.rs"]
+mod broker_action_request_tests;
+
 const APP: &str = "github_app:plex-alfonso";
 const INSTALLATIONS: &[u8] =
     include_bytes!("../../credentials-core/tests/fixtures/github_app/installations.json");

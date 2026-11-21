@@ -989,7 +989,7 @@ mod connectors_contract {
                     Some((GrantOperation::Deposit, "category browser-session", true))
                 }
                 OP_ACCOUNT_TOKEN => Some((GrantOperation::AccountToken, "audience", true)),
-                crate::policy_token::OP_POLICY_TOKEN => {
+                crate::policy_token::OP_POLICY_TOKEN | crate::broker_action::OP_REQUEST_ACTION => {
                     Some((GrantOperation::PolicyToken, "credential_id (not handle)", false))
                 }
                 OP_SIGN => Some((GrantOperation::Sign, "credential_id (not handle)", false)),
@@ -1048,7 +1048,7 @@ mod connectors_contract {
                 scoped.push((op.name.as_str(), classification));
             }
         }
-        assert_eq!(scoped.len(), 15);
+        assert_eq!(scoped.len(), 16);
     }
 
     #[tokio::test(flavor = "current_thread")]

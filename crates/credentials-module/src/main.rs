@@ -22,6 +22,7 @@
 
 mod account_token_mint;
 mod admin_surface;
+mod broker_action;
 mod connectors;
 mod error_class;
 mod federation;
@@ -1651,6 +1652,7 @@ impl std::fmt::Debug for ReadRequest {
                 | OP_CLEAR_CONDITION
                 | federation::ingress::OP_REPORT_CONDITION
                 | federation::ingress::OP_CLEAR_CONDITION
+                | broker_action::OP_REQUEST_ACTION
         ) {
             request.finish_non_exhaustive()
         } else {
@@ -1707,6 +1709,16 @@ async fn dispatch_request(
 ) -> Result<(), ModuleError> {
     let header = decoded.header;
     let method = decoded.body.as_ref().ok();
+    if let Some(request) = method.filter(|r| r.method == broker_action::OP_REQUEST_ACTION) {
+        return broker_action::serve(
+            header,
+            writer,
+            surface.store(),
+            caller.principal().as_ref(),
+            &request.params,
+        )
+        .await;
+    }
     if let Some(retired) = method.filter(|request| {
         matches!(
             request.method.as_str(),
@@ -3049,6 +3061,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "policy.active".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "credential.policy_token".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "policy.request_action".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -3502,6 +3515,7 @@ mod tests {
             "policy.active",
             "policy.watch",
             policy_token::OP_POLICY_TOKEN,
+            broker_action::OP_REQUEST_ACTION,
             "federation.manifest_latest",
             "federation.manifest_watch",
             "secret.request_flow_approval",

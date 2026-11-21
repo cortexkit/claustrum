@@ -56,7 +56,8 @@ pub enum BrokerActionShape {
     Legs(Vec<BrokerActionLeg>),
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrokerActionLeg {
     pub kind: String,
     pub method: String,

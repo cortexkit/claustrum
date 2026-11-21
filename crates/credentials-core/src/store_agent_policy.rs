@@ -325,7 +325,9 @@ fn active_agent_policy_read(
     Ok((role, row))
 }
 
-fn active_agent_policy_conn(conn: &Connection) -> rusqlite::Result<Option<ActiveAgentPolicy>> {
+pub(super) fn active_agent_policy_conn(
+    conn: &Connection,
+) -> rusqlite::Result<Option<ActiveAgentPolicy>> {
     active_agent_policy_version_conn(conn)?
         .map(|version| {
             conn.query_row(

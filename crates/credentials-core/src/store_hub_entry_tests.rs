@@ -93,7 +93,19 @@ fn hub_migration_clears_self_and_peer_fields_but_keeps_roster_retirement_and_aud
         .retire_gh_manifest_member("retired", 123, AuditCtx::admin(AuditOp::GhManifestRetire))
         .unwrap();
     let audit = store.read_audit(None).unwrap();
-    assert!(store.gh_manifest_active_status(28).unwrap().unwrap().ready);
+    // The status reader also reads the signed-policy table from a later migration, so
+    // check the reports that make this version ready directly at this older schema.
+    let ready_reports: i64 = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM gh_manifest_activations \
+                 WHERE version = 28 AND verdict = 'valid' AND retired_at_ms IS NULL",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(ready_reports, 2);
 
     EncryptedStore::migrate(&store.store).unwrap();
     let status = store.gh_manifest_active_status(28).unwrap().unwrap();

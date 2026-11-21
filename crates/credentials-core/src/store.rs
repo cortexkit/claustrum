@@ -162,6 +162,8 @@ pub const MODULE_SECRET_SCHEMA_VERSION: u32 = 48;
 pub const CONDITION_SCHEMA_VERSION: u32 = 49;
 /// Durable state for login lists and activation reports exchanged over the hub.
 pub const HUB_ENTRIES_SCHEMA_VERSION: u32 = 50;
+/// Signed agent policies, policy-token grants, and GitHub App identity metadata.
+pub const AGENT_POLICY_SCHEMA_VERSION: u32 = 51;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -437,11 +439,11 @@ impl HomeWatchCandidate {
 /// order in list_scoped responses. It permits cookie creation and replacement only
 /// when the stored creator is the same depositing principal.
 ///
-/// `Seal` is declared last for the same reason. It permits `credential.seal`: an
-/// auth-mode HPKE seal under one vault-held KEM key, to a caller-chosen recipient. It
-/// takes an exact selector only, because it lets the caller send messages that the
-/// recipient will attribute to that key, and a category grant would extend that to
-/// every key later put in the category without anyone choosing it.
+/// `Seal` lets callers encrypt messages to a recipient and authenticate them with a
+/// vault-held key. It requires an exact selector so callers cannot send messages on
+/// behalf of keys added to a category later.
+///
+/// `PolicyToken` likewise names one credential and authorizes only narrowed tokens.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -454,6 +456,7 @@ pub enum GrantOperation {
     Deposit,
     AccountToken,
     Seal,
+    PolicyToken,
 }
 
 impl GrantOperation {
@@ -466,6 +469,7 @@ impl GrantOperation {
             Self::Deposit => "deposit",
             Self::AccountToken => "account_token",
             Self::Seal => "seal",
+            Self::PolicyToken => "policy_token",
         }
     }
 }
@@ -482,8 +486,9 @@ impl std::str::FromStr for GrantOperation {
             "deposit" => Ok(Self::Deposit),
             "account_token" => Ok(Self::AccountToken),
             "seal" => Ok(Self::Seal),
+            "policy_token" => Ok(Self::PolicyToken),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read, sign, open, list, deposit, account_token, or seal)"
+                "unknown grant operation '{value}' (expected read, sign, open, list, deposit, account_token, seal, or policy_token)"
             )),
         }
     }
@@ -511,6 +516,11 @@ impl SelectorKind {
         if operation == GrantOperation::Seal && self != Self::Exact {
             return Err(
                 "seal requires selector-kind exact: it names one KEM key, never a category".into(),
+            );
+        }
+        if operation == GrantOperation::PolicyToken && self != Self::Exact {
+            return Err(
+                "policy_token requires selector-kind exact: it names one credential".into(),
             );
         }
         Ok(())
@@ -1606,6 +1616,13 @@ mod gh_approval;
 
 #[path = "store_gh_manifests.rs"]
 mod gh_manifests;
+
+#[path = "store_agent_policy.rs"]
+#[allow(
+    dead_code,
+    reason = "transactional writer for the agent-policy signing paths"
+)]
+mod agent_policy;
 
 #[path = "store_gh_proposals.rs"]
 mod gh_proposals;

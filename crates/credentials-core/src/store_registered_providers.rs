@@ -513,15 +513,26 @@ mod tests {
         let sqlite = open_sqlite(&descriptor).unwrap();
         let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([196; 32])).unwrap();
         EncryptedStore::migrate(&store.store).unwrap();
-        // The daemon migrates to the newest step, so the later gateway settings step
-        // runs here too; it only adds its own table and touches none of these rows.
-        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 50);
-        assert_eq!(newest_migration_version(), 50);
+        // The daemon migrates through the nullable App metadata columns too.
+        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 51);
+        assert_eq!(newest_migration_version(), 51);
         let after = snapshot(&store);
         assert_eq!(
-            after.0, before.0,
-            "sealed credential rows stay byte-identical"
+            after.0.len(),
+            before.0.len(),
+            "no credential rows were added or removed"
         );
+        for (after, before) in after.0.iter().zip(&before.0) {
+            assert_eq!(
+                &after[..before.len()],
+                before,
+                "sealed credential columns stay byte-identical"
+            );
+            assert_eq!(
+                after[before.len()..],
+                [rusqlite::types::Value::Null, rusqlite::types::Value::Null]
+            );
+        }
         assert_eq!(after.1, before.1, "grant rows stay byte-identical");
         assert_eq!(after.2, before.2, "no audit row is added or changed");
         assert_eq!(after.3.len(), 1);
@@ -876,7 +887,7 @@ mod tests {
         assert!(store.registered_providers().unwrap().is_empty());
         // The migrate above runs to the newest step, so it must cross the descriptor
         // step this module adds. Later steps may follow it.
-        assert_eq!(newest_migration_version(), 50);
+        assert_eq!(newest_migration_version(), 51);
         assert!(newest_migration_version() >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION);
     }
 

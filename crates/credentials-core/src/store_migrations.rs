@@ -981,6 +981,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         version: HUB_ENTRIES_SCHEMA_VERSION,
         statements: include_str!("hub_entries.sql"),
     },
+    Migration {
+        version: AGENT_POLICY_SCHEMA_VERSION,
+        statements: include_str!("agent_policies.sql"),
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

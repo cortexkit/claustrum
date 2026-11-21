@@ -593,8 +593,8 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 50);
-    assert_eq!(newest_migration_version(), 50);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 51);
+    assert_eq!(newest_migration_version(), 51);
     let added: Vec<_> = table_names(&store)
         .into_iter()
         .filter(|name| !tables_before.contains(name))
@@ -602,6 +602,7 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     assert_eq!(
         added,
         [
+            "agent_policies",
             "credential_conditions",
             "credential_gateway_settings",
             "declared_grant_sets",
@@ -619,8 +620,16 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     );
     assert!(rows(&store, "credential_gateway_settings").is_empty());
     assert!(rows(&store, "declared_grant_sets").is_empty());
-    for ((table, after), (_, before)) in snapshot(&store, &tables_before).iter().zip(&before) {
-        assert_eq!(after, before, "the upgrade changed rows in {table}");
+    for ((table, mut after), (_, before)) in
+        snapshot(&store, &tables_before).into_iter().zip(&before)
+    {
+        if table == "credentials" {
+            for row in &mut after {
+                assert_eq!(row.pop(), Some(rusqlite::types::Value::Null));
+                assert_eq!(row.pop(), Some(rusqlite::types::Value::Null));
+            }
+        }
+        assert_eq!(&after, before, "the upgrade changed rows in {table}");
     }
     assert_eq!(store.registered_providers().unwrap(), providers_before);
     assert_eq!(

@@ -360,6 +360,7 @@ fn credential_scope_label(
         "sign" => "can sign with this credential",
         "open" => "can decrypt messages with this credential",
         "seal" => "can encrypt messages with this credential",
+        "policy_token" => "can get GitHub tokens limited by the signed policy for this credential",
         _ => "can get account tokens with this credential",
     }
     .into()
@@ -568,5 +569,9 @@ mod tests {
             assert!(populated.contains("37 credentials"), "{populated}");
             assert!(credential_scope_label("exact", "key-1", operation, 1).starts_with("can "));
         }
+        assert_eq!(
+            credential_scope_label("exact", "github_app:sample", "policy_token", 1),
+            "can get GitHub tokens limited by the signed policy for this credential"
+        );
     }
 }

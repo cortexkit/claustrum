@@ -1002,10 +1002,11 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 50);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 51);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
+        "agent_policies",
         "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
@@ -1019,6 +1020,11 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         "remote_record_conditions",
     ] {
         assert_eq!(after.remove(table), Some(vec![]));
+    }
+    for row in after.get_mut("credentials").unwrap() {
+        for _ in ["github_app_id", "github_app_slug"] {
+            assert_eq!(row.pop(), Some(rusqlite::types::Value::Null));
+        }
     }
     assert_eq!(after, before);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
@@ -1038,6 +1044,7 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     EncryptedStore::migrate(&sqlite).unwrap();
     let mut after = every_table_row(&sqlite);
     for table in [
+        "agent_policies",
         "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
@@ -1830,7 +1837,7 @@ fn open_grants_round_trip_and_unknown_operations_are_refused_by_the_reader() {
     assert_eq!(
             "other".parse::<GrantOperation>(),
             Err(
-                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, or seal)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, seal, or policy_token)"
                     .to_string()
             )
         );
@@ -1867,7 +1874,7 @@ fn open_grants_round_trip_and_unknown_operations_are_refused_by_the_reader() {
         .to_string();
     assert!(
             error.contains(
-                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, or seal)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, seal, or policy_token)"
             ),
             "{error}"
         );
@@ -2153,6 +2160,20 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
             ],
         ),
         (
+            "agent_policies",
+            vec![
+                column("version", "INTEGER", true, None, true),
+                column("policy_bytes", "BLOB", true, None, false),
+                column("policy_sha256", "TEXT", true, None, false),
+                column("key_id", "TEXT", true, None, false),
+                column("signature", "BLOB", true, None, false),
+                column("signed_at_ms", "INTEGER", true, None, false),
+                column("source", "TEXT", true, None, false),
+                column("approval_seq", "INTEGER", true, None, false),
+                column("manifest_version", "INTEGER", true, None, false),
+            ],
+        ),
+        (
             "gh_manifest_proposals",
             vec![
                 column("proposal_id", "TEXT", true, None, true),
@@ -2308,6 +2329,10 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
         )),
         "credentials must carry a nullable creation time"
     );
+    assert!(columns_of(&store, "credentials").ends_with(&[
+        column("github_app_id", "TEXT", false, None, false),
+        column("github_app_slug", "TEXT", false, None, false),
+    ]));
 
     // The state vocabulary is DRIVEN rather than read off the DDL text: a CHECK
     // that names five states and rejects a sixth is the observable.

@@ -2798,7 +2798,6 @@ mod tests {
         use credentials_core::admin_ops::{apply, ADMIN_OP_SCHEMA_V2};
         use credentials_core::agent_policy::{AgentPolicy, MAX_POLICY_DOCUMENT_BYTES};
         use credentials_core::signing::{public_key_ed25519, MAX_SIGN_PAYLOAD};
-        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
         use serde_json::json;
 
         let seed = 12;
@@ -2807,14 +2806,14 @@ mod tests {
         let pem = crate::tests::test_ed25519_pem();
         let key_id = public_key_ed25519(&pem).unwrap().key_id;
         r.store
-            .create(
-                GH_MANIFEST_ROOT_KEY_ID,
+            .put_legacy_manifest_root_for_tests(
                 &VaultRecord::new_static(
                     CredentialKind::SigningKey,
                     "operator",
                     pem.into_bytes(),
                     None,
                 ),
+                credentials_core::audit::AuditCtx::admin(credentials_core::audit::AuditOp::Put),
             )
             .unwrap();
 

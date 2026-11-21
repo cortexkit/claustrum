@@ -9,7 +9,7 @@ use credentials_core::{
     oauth::OAuthCredential,
     record::{CredentialKind, VaultRecord},
     refresh_adapters::{HttpResponse, RefreshError},
-    store::{GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID},
+    store::{GhManifestSource, GhManifestVersion},
 };
 use rusqlite::{types::Value as SqlValue, Connection};
 use sha2::{Digest, Sha256};
@@ -50,14 +50,14 @@ fn rig(missing: &str) -> Rig {
     let (surface, store, path, root) = crate::tests::tmp_surface_with_store(201);
     if missing != "root" {
         store
-            .create(
-                GH_MANIFEST_ROOT_KEY_ID,
+            .put_legacy_manifest_root_for_tests(
                 &VaultRecord::new_static(
                     CredentialKind::SigningKey,
                     "test",
                     b"unused root".to_vec(),
                     None,
                 ),
+                credentials_core::audit::AuditCtx::admin(credentials_core::audit::AuditOp::Put),
             )
             .unwrap();
     }

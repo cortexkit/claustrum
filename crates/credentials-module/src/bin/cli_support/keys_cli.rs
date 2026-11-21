@@ -188,7 +188,7 @@ pub(super) fn cmd_mint_kem_key(global: &GlobalArgs, args: &[String]) -> Result<(
     Ok(())
 }
 
-fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
+pub(crate) fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(pkcs8);
     let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
     for chunk in encoded.as_bytes().chunks(64) {

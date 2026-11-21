@@ -5,8 +5,9 @@ use super::{
 use crate::audit::{AuditCtx, GhManifestAudit};
 use rusqlite::OptionalExtension;
 
-/// The fleet's legacy root credential. Admin operations also use this id to take
-/// the same lock before opening a transaction, regardless of the configured root.
+/// The fleet's legacy root credential. Manifest and policy signing admin operations
+/// also use this id as their per-credential single-flight lock (`AdminOpBody::lock_id`),
+/// whichever credential the root setting names, so two signers never interleave.
 pub const GH_MANIFEST_ROOT_KEY_ID: &str = "signing:gh-manifest-root:1";
 pub(super) const POLICY_ROOT_CREDENTIAL_SETTING: &str = "policy_root_credential";
 

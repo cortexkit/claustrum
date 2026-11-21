@@ -3369,6 +3369,25 @@ mod deposit_cli_tests {
         }
     }
 
+    /// Deposits the fleet's legacy root and names it as the policy signing root, as
+    /// migration 52 does on a vault that already held it. Minting the id through
+    /// `mint-signing-key` alone leaves the root setting unset, so signing refuses.
+    fn put_legacy_policy_root(global: &GlobalArgs) {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        open_for_admin(global, false)
+            .unwrap()
+            .put_legacy_manifest_root_for_tests(
+                &VaultRecord::new_static(
+                    AuthMethod::Signing.credential_kind(),
+                    "operator",
+                    keys_cli::pem_wrap_private_key(pkcs8.as_ref()).into_bytes(),
+                    None,
+                ),
+                credentials_core::audit::AuditCtx::admin(credentials_core::audit::AuditOp::Put),
+            )
+            .unwrap();
+    }
+
     fn put_policy_test_identity(global: &GlobalArgs) {
         use credentials_core::oauth::OAuthCredential;
 
@@ -3397,15 +3416,11 @@ mod deposit_cli_tests {
     #[test]
     fn policy_cli_oversized_derivation_leaves_the_output_untouched() {
         use credentials_core::signing::MAX_SIGN_PAYLOAD;
-        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
         use serde_json::json;
 
         let root = root("policy-derive-size");
         let global = global(&root);
-        success(
-            &root,
-            &["mint-signing-key", "--id", GH_MANIFEST_ROOT_KEY_ID],
-        );
+        put_legacy_policy_root(&global);
         put_policy_test_identity(&global);
         // The manifest fits the signer; including the seeded rules pushes the policy over.
         let agent = "x".repeat(MAX_SIGN_PAYLOAD - 1_000);
@@ -3460,7 +3475,6 @@ mod deposit_cli_tests {
     #[test]
     fn policy_cli_derives_signs_lists_and_recovers_an_inactive_envelope() {
         use credentials_core::agent_policy::AgentPolicy;
-        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
         use serde_json::{json, Value};
 
         let root = root("policy-cli");
@@ -3475,10 +3489,7 @@ mod deposit_cli_tests {
             json_output(&["policy", "list"]),
             json!({"policies": [], "head": null, "active": null})
         );
-        success(
-            &root,
-            &["mint-signing-key", "--id", GH_MANIFEST_ROOT_KEY_ID],
-        );
+        put_legacy_policy_root(&global);
         let path = |file: &str| root.join(file).to_str().unwrap().to_owned();
         let manifest_file = path("manifest.json");
         let identities_file = path("identities.json");

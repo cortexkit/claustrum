@@ -41,8 +41,7 @@ fn setup() -> (Rig, Ed25519KeyPair) {
         STANDARD.encode(der)
     );
     rig.store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::SigningKey,
                 "test-only",

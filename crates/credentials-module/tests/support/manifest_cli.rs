@@ -6,7 +6,6 @@ use credentials_core::{
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde_json::{json, Value};
 
-const ROOT_KEY: &str = credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
 const V28: &str = include_str!("../../../credentials-core/tests/fixtures/gh-manifest-v28.json");
 
 fn setup(tag: &str) -> (GrantCliVault, Ed25519KeyPair) {
@@ -20,8 +19,7 @@ fn setup(tag: &str) -> (GrantCliVault, Ed25519KeyPair) {
     );
     let store = open_leased_store(&vault.data_dir, &vault.key_path);
     store
-        .create_audited(
-            ROOT_KEY,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::SigningKey,
                 "operator",

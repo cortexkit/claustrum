@@ -675,11 +675,7 @@ async fn pending_manifest(
         None,
     );
     store
-        .create_audited(
-            credentials_core::store::GH_MANIFEST_ROOT_KEY_ID,
-            &record,
-            AuditCtx::admin(AuditOp::Put),
-        )
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
         .unwrap();
     store
         .set_federation_self_member_audited(

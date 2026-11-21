@@ -4,7 +4,7 @@ use credentials_core::{
     federation::{MemberGrantOperation, MemberGrantSelector},
     record::{CredentialKind, VaultRecord},
     signing::public_key_ed25519,
-    store::{GhManifestActivationReport, GhManifestVerdict, GH_MANIFEST_ROOT_KEY_ID},
+    store::{GhManifestActivationReport, GhManifestVerdict},
 };
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
@@ -90,14 +90,14 @@ fn root(rig: &Rig) -> String {
     );
     let key = public_key_ed25519(&pem).unwrap().key_id;
     rig.store
-        .create(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::SigningKey,
                 "operator",
                 pem.into_bytes(),
                 None,
             ),
+            credentials_core::audit::AuditCtx::admin(credentials_core::audit::AuditOp::Put),
         )
         .unwrap();
     key

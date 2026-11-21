@@ -992,7 +992,8 @@ mod connectors_contract {
                 "credential.policy_token" | "policy.request_action" => {
                     Some((GrantOperation::PolicyToken, "exact identity (not handle)", false))
                 }
-                // Approval uses device authority, not a declared grant selector.
+                // An approval is authorized by the approving device's registered key on its
+                // route, not by any grant, so it has no grant selector.
                 "policy.approve_action" => None,
                 OP_SIGN => Some((GrantOperation::Sign, "credential_id (not handle)", false)),
                 OP_OPEN => Some((GrantOperation::Open, "credential_id", false)),

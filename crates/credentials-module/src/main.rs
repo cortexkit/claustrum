@@ -20,8 +20,10 @@
 //! store → reconcile any dangling refresh intents → ONLY THEN accept reads. A `get`
 //! is never served while a crash-left refresh intent is unresolved.
 
+mod account_token_mint;
 mod admin_surface;
 mod connectors;
+mod error_class;
 mod federation;
 mod fleet_ops;
 #[path = "federation/hub_nats.rs"]
@@ -6250,7 +6252,7 @@ mod tests {
 
     /// One request through `dispatch_route_request`, exactly as the frame loop routes
     /// it: the frame type and body bytes of the reply.
-    async fn routed_reply(
+    pub(crate) async fn routed_reply(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
         channel: u16,
@@ -20511,7 +20513,10 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/admin_surface.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/account_token_mint.rs"
+            )),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connectors.rs")),
@@ -20550,6 +20555,11 @@ mod tests {
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/federation/hub_manifest_collector.rs"
+            )),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/github_app_admin.rs"
             )),
         ];
         let count = |shape: &str| -> usize {

@@ -5926,6 +5926,32 @@ delivery and acceptance. Store creation, replacement, invalidation and removal
 refuse the same permanent code for the reserved namespace and for the legacy id
 when it is the configured root.
 
+Two master-key operations with `v: 1` prepare creation of an agent's GitHub App:
+
+| Operation | Parameters besides `v` | Result |
+|---|---|---|
+| `admin.github_app_manifest_prepare` | `agent` | `{name, default_permissions, default_events}` |
+| `admin.github_app_relay_slot_open` | None | `{slot, webhook_url, expires_at}` |
+
+Prepare writes nothing. It refuses `agent_invalid` unless `agent` is `agent_`
+followed by 16 lowercase hexadecimal digits, `github_app_agent_exists` if a
+stored App already holds the agent, and `policy_unavailable` if the policy
+read fails. It uses the seeded GitHub rules only when no active policy exists.
+
+Slot open requires the serving daemon, which makes the relay request after
+admin admission. It only confirms a `201` reply that supplies a valid slot,
+the exact webhook URL for that slot, and an expiry. Its refusals use the
+`admin_refused` message shape `<code>/<class>: <why>`:
+
+| Code | Class | Condition |
+|---|---|---|
+| `relay_unavailable_for_account` | permanent | No machine key, or the relay returns `401`, `403` or `404` |
+| `relay_slot_limit` | permanent | The relay returns `409` |
+| `relay_unavailable` | transient | Token mint, transport, deadline, redirect, `429` or server failure |
+| `relay_request_refused` | permanent | Other client errors |
+| `relay_reply_invalid` | permanent | Unexpected success status or invalid slot reply |
+| `audit_write_failed` | permanent | The relay opened a slot but recording the audit row failed; the unused slot expires |
+
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,
 including identities. Derive uses the embedded GitHub revision 1 rule set described

@@ -1995,24 +1995,7 @@ pub enum ReadError {
     SealRateLimited,
 }
 
-/// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
-/// normative doc: llm-runner/docs/error-class-contract.md). Classification is produced
-/// here at the source. The class carries retry policy; the `ReadError` code carries the
-/// request-specific remedy. The wire set is closed and pinned: see `ERROR_CLASS_WIRE_SET`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorClass {
-    /// Retry may succeed (upstream may recover, lock may release).
-    Transient,
-    /// Retrying this credential with this request is futile until out-of-band action.
-    Permanent,
-    /// A human/admin must re-establish the credential (`login --replace`); consumers
-    /// should surface an actionable auth prompt, not retry.
-    AuthRequired,
-    /// The request exceeds a bound (`get_many` cap); remedy is to reduce the request
-    /// and retry — retrying the same request is futile.
-    ContextOverflow,
-}
+pub use crate::error_class::ErrorClass;
 
 /// The pinned wire strings of the closed class set. Golden-tested below so this
 /// producer cannot drift from the contract's canonical block. Referenced only by the

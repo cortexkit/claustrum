@@ -123,6 +123,10 @@ pub enum AdminOpBody {
     PolicyRootInit { v: u32 },
     #[serde(rename = "admin.policy_root_show")]
     PolicyRootShow { v: u32 },
+    #[serde(rename = "admin.github_app_manifest_prepare")]
+    GitHubAppManifestPrepare { v: u32, agent: String },
+    #[serde(rename = "admin.github_app_relay_slot_open")]
+    GitHubAppRelaySlotOpen { v: u32 },
     #[serde(rename = "admin.agent_policy_sign")]
     AgentPolicySign {
         v: u32,
@@ -618,9 +622,15 @@ impl std::fmt::Debug for AdminOpBody {
             AdminOpBody::ManifestList { v } | AdminOpBody::ManifestOneTapStatus { v } => {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
-            AdminOpBody::PolicyRootInit { v } | AdminOpBody::PolicyRootShow { v } => {
+            AdminOpBody::PolicyRootInit { v }
+            | AdminOpBody::PolicyRootShow { v }
+            | AdminOpBody::GitHubAppRelaySlotOpen { v } => {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
+            AdminOpBody::GitHubAppManifestPrepare { v, .. } => f
+                .debug_struct(self.op_name())
+                .field("v", v)
+                .finish_non_exhaustive(),
             AdminOpBody::ManifestRetireMachine { v, member_id } => f
                 .debug_struct("ManifestRetireMachine")
                 .field("v", v)
@@ -1129,6 +1139,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestOneTapStatus { v }
             | AdminOpBody::PolicyRootInit { v }
             | AdminOpBody::PolicyRootShow { v }
+            | AdminOpBody::GitHubAppManifestPrepare { v, .. }
+            | AdminOpBody::GitHubAppRelaySlotOpen { v }
             | AdminOpBody::AgentPolicySign { v, .. }
             | AdminOpBody::AgentPolicyList { v }
             | AdminOpBody::AgentPolicyExport { v, .. }
@@ -1266,6 +1278,8 @@ impl AdminOpBody {
             | AdminOpBody::MemberList { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::PolicyRootInit { .. }
             | AdminOpBody::PolicyRootShow { .. }
+            | AdminOpBody::GitHubAppManifestPrepare { .. }
+            | AdminOpBody::GitHubAppRelaySlotOpen { .. }
             | AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
@@ -1352,6 +1366,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::PolicyRootShow { .. }
+            | AdminOpBody::GitHubAppManifestPrepare { .. }
+            | AdminOpBody::GitHubAppRelaySlotOpen { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
             | AdminOpBody::AgentPolicyDerive { .. }
@@ -1429,6 +1445,8 @@ impl AdminOpBody {
             AdminOpBody::ManifestOneTapStatus { .. } => "admin.manifest_one_tap_status",
             AdminOpBody::PolicyRootInit { .. } => "admin.policy_root_init",
             AdminOpBody::PolicyRootShow { .. } => "admin.policy_root_show",
+            AdminOpBody::GitHubAppManifestPrepare { .. } => "admin.github_app_manifest_prepare",
+            AdminOpBody::GitHubAppRelaySlotOpen { .. } => "admin.github_app_relay_slot_open",
             AdminOpBody::AgentPolicySign { .. } => "admin.agent_policy_sign",
             AdminOpBody::AgentPolicyList { .. } => "admin.agent_policy_list",
             AdminOpBody::AgentPolicyExport { .. } => "admin.agent_policy_export",
@@ -1500,7 +1518,7 @@ impl AdminOpBody {
     /// [`apply`] with `federation_requires_daemon` before any write, so the offline
     /// lease path cannot run it.
     ///
-    /// The exhaustive match is the forcing function: a new federation op has to say
+    /// The exhaustive match is the forcing function: a new op has to say
     /// here whether `apply` may run it, rather than defaulting to a synchronous
     /// half-implementation.
     pub const fn requires_daemon(&self) -> bool {
@@ -1520,6 +1538,7 @@ impl AdminOpBody {
             | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::PolicyRootInit { .. }
             | AdminOpBody::PolicyRootShow { .. }
+            | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::AgentPolicySign { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
@@ -1595,6 +1614,7 @@ impl AdminOpBody {
             | AdminOpBody::TransferAccept { .. }
             | AdminOpBody::RemoteAdd { .. }
             | AdminOpBody::MemberGrant { .. } => true,
+            AdminOpBody::GitHubAppRelaySlotOpen { .. } => true,
         }
     }
 }
@@ -1685,6 +1705,9 @@ pub fn apply(
     match op {
         AdminOpBody::PolicyRootInit { .. } => store.init_policy_root_admin(actor),
         AdminOpBody::PolicyRootShow { .. } => store.show_policy_root_admin(),
+        AdminOpBody::GitHubAppManifestPrepare { agent, .. } => {
+            store.prepare_github_app_manifest(&agent)
+        }
         AdminOpBody::SshKeyAgentAllow { id, targets, .. } => {
             let enrollment = store.set_agent_ssh_audited(
                 &id,
@@ -2423,7 +2446,8 @@ pub fn apply(
             Ok(serde_json::json!({ "member_mapping": enabled, "changed": changed }))
         }
         // Refused above, before any write: these need the daemon's outbound calls.
-        op @ (AdminOpBody::FederationSelfSet { .. }
+        op @ (AdminOpBody::GitHubAppRelaySlotOpen { .. }
+        | AdminOpBody::FederationSelfSet { .. }
         | AdminOpBody::TransferInit { .. }
         | AdminOpBody::TransferSend { .. }
         | AdminOpBody::TransferResume { .. }

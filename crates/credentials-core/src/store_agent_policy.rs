@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 
@@ -5,7 +7,8 @@ use super::{
     store_agent_secrets::secret_home_role_conn, EncryptedStore, SecretHomeRole, StoreOpError,
 };
 use crate::agent_policy::{
-    policy_sha256, signed_input, validate_signer_rule_sets, AgentPolicy, PolicyError,
+    github_default_rule_set, policy_sha256, signed_input, valid_github_app_agent,
+    validate_signer_rule_sets, AgentPolicy, PolicyError, RuleSet,
 };
 use crate::enrollment::decode_lower_hex_32;
 use crate::signing::public_key_ed25519;
@@ -169,6 +172,65 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    pub(crate) fn prepare_github_app_manifest(
+        &self,
+        agent: &str,
+    ) -> Result<serde_json::Value, StoreOpError> {
+        if !valid_github_app_agent(agent) {
+            return Err(StoreOpError::Encode(
+                "agent_invalid: expected agent_ followed by 16 lowercase hex digits".into(),
+            ));
+        }
+        let (role, exists, policy) = self
+            .store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let role = secret_home_role_conn(&tx);
+                if !matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
+                    return Ok((role, false, None));
+                }
+                let exists = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE github_app_agent = ?1)",
+                    [agent],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                let policy = if exists {
+                    None
+                } else {
+                    active_agent_policy_conn(&tx)?
+                };
+                tx.commit()?;
+                Ok((role, exists, policy))
+            })
+            .map_err(|_| manifest_policy_unavailable())?;
+        if !matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
+            return Err(manifest_policy_unavailable());
+        }
+        if exists {
+            return Err(StoreOpError::Encode(
+                "github_app_agent_exists: an App already holds this agent".into(),
+            ));
+        }
+        let rules = match policy {
+            Some(policy) => AgentPolicy::parse_canonical(policy.policy_text.as_bytes())
+                .map_err(|_| manifest_policy_unavailable())?
+                .rule_sets
+                .remove("github"),
+            None => Some(github_default_rule_set().map_err(|_| manifest_policy_unavailable())?),
+        };
+
+        let mut suffix = [0u8; 3];
+        getrandom::getrandom(&mut suffix)
+            .map_err(|_| StoreOpError::Store("could not generate a GitHub App name".into()))?;
+        let [a, b, c] = suffix;
+        Ok(serde_json::json!({
+            "name": format!("ck-{agent}-{a:02x}{b:02x}{c:02x}"),
+            "default_permissions": github_app_manifest_permissions(rules.as_ref()),
+            "default_events": ["issues", "issue_comment", "pull_request", "pull_request_review",
+                "pull_request_review_comment", "release", "workflow_job", "workflow_run"],
+        }))
+    }
+
     /// Verify the exact bytes and approval against the current root and paired manifest
     /// in the caller's writer transaction. No policy row is written before every check passes.
     pub(crate) fn store_agent_policy_in_tx(
@@ -262,9 +324,15 @@ fn active_agent_policy_read(
         return Ok((role, None));
     }
     after_role();
-    let row = active_agent_policy_version_conn(&tx)?
+    let row = active_agent_policy_conn(&tx)?;
+    tx.commit()?;
+    Ok((role, row))
+}
+
+fn active_agent_policy_conn(conn: &Connection) -> rusqlite::Result<Option<ActiveAgentPolicy>> {
+    active_agent_policy_version_conn(conn)?
         .map(|version| {
-            tx.query_row(
+            conn.query_row(
                 "SELECT version, policy_sha256, manifest_version, policy_bytes \
                  FROM agent_policies WHERE version = ?1",
                 [version],
@@ -286,9 +354,33 @@ fn active_agent_policy_read(
                 },
             )
         })
-        .transpose()?;
-    tx.commit()?;
-    Ok((role, row))
+        .transpose()
+}
+
+fn manifest_policy_unavailable() -> StoreOpError {
+    StoreOpError::Encode("policy_unavailable: could not read the serving GitHub policy".into())
+}
+
+fn github_app_manifest_permissions(rules: Option<&RuleSet>) -> BTreeMap<&str, &str> {
+    let mut permissions = BTreeMap::from([
+        ("actions", "read"),
+        ("contents", "read"),
+        ("issues", "read"),
+        ("pull_requests", "read"),
+    ]);
+    for credential in rules
+        .into_iter()
+        .flat_map(|rules| &rules.kinds)
+        .filter_map(|kind| kind.credential.as_ref())
+    {
+        for (name, level) in &credential.github_permissions {
+            let existing = permissions.entry(name.as_str()).or_insert(level.as_str());
+            if level == "admin" || (level == "write" && *existing == "read") {
+                *existing = level.as_str();
+            }
+        }
+    }
+    permissions
 }
 
 #[cfg(test)]

@@ -303,9 +303,7 @@ async fn hub_audience_enrolled_token_cannot_borrow_ckbus_identity() {
     }
 }
 
-#[tokio::test]
-async fn hub_audience_ckbus_can_exchange_and_cache_worker_tokens() {
-    let audience = "cortexkit-hub";
+fn exchange_for_audience(audience: &str) -> Vec<Result<HttpResponse, RefreshError>> {
     let mut challenge = challenge();
     let (payload, mac) = challenge["challenge"]
         .as_str()
@@ -328,7 +326,13 @@ async fn hub_audience_ckbus_can_exchange_and_cache_worker_tokens() {
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()),
         parts[2]
     ));
-    let rig = Rig::new(vec![reply(200, challenge), reply(200, token)]);
+    vec![reply(200, challenge), reply(200, token)]
+}
+
+#[tokio::test]
+async fn hub_audience_ckbus_can_exchange_and_cache_worker_tokens() {
+    let audience = "cortexkit-hub";
+    let rig = Rig::new(exchange_for_audience(audience));
     rig.store
         .create_read_grant_audited(
             "reserved",
@@ -354,6 +358,52 @@ async fn hub_audience_ckbus_can_exchange_and_cache_worker_tokens() {
     let requests = rig.http.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|(_, body)| body["aud"] == audience));
+}
+
+#[tokio::test]
+async fn github_app_relay_audience_still_requires_a_scoped_grant_on_cache_hit_and_miss() {
+    let rig = Rig::new(exchange_for_audience(RELAY_TOKEN_AUDIENCE));
+    let params = AccountTokenParams {
+        audience: RELAY_TOKEN_AUDIENCE.into(),
+        ..params()
+    };
+    let denied = crate::federation::ingress::ScopedCaller::hand_only(Some(Principal::Reserved {
+        module_id: "other-module".into(),
+    }));
+    let scoped = crate::federation::ingress::ScopedCaller::hand_only(Some(principal()));
+    let refusal = error(rig.surface.account_token(&denied, &params).await);
+    assert_eq!(
+        (refusal.code, refusal.class),
+        ("not_found", ErrorClass::Permanent)
+    );
+    assert!(rig.http.requests().is_empty());
+
+    rig.store
+        .create_read_grant_audited(
+            "reserved",
+            "ck-motor",
+            SelectorKind::Audience,
+            RELAY_TOKEN_AUDIENCE,
+            GrantOperation::AccountToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let token = rig.surface.account_token(&scoped, &params).await.unwrap();
+    assert_eq!(token.audience, RELAY_TOKEN_AUDIENCE);
+    assert_eq!(rig.http.requests().len(), 2);
+
+    let refusal = error(rig.surface.account_token(&denied, &params).await);
+    assert_eq!(
+        (refusal.code, refusal.class),
+        ("not_found", ErrorClass::Permanent)
+    );
+    assert_eq!(rig.http.requests().len(), 2);
+    let cached = rig.surface.account_token(&scoped, &params).await.unwrap();
+    assert!(
+        cached.jwt.expose() == token.jwt.expose(),
+        "authorized caller should still hit the cache"
+    );
+    assert_eq!(rig.http.requests().len(), 2);
 }
 
 #[tokio::test]

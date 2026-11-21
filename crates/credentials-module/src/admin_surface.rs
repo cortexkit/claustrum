@@ -42,6 +42,9 @@ use credentials_core::store::{
 };
 use subc_protocol::Principal;
 
+#[path = "github_app_admin.rs"]
+mod github_app_admin;
+
 /// Challenge TTL. Long enough for a CLI to resolve the keychain key and MAC the op;
 /// short enough that a captured nonce is stale quickly (an attacker also needs the
 /// master key, so this is defense-in-depth over the authority boundary).
@@ -135,6 +138,7 @@ pub struct AdminSurface {
     /// The one budget each federation admin op's outbound calls share. Only tests
     /// shorten it.
     federation_budget: Duration,
+    github_apps: github_app_admin::GitHubAppAdmin,
 }
 
 /// The actor recorded in the audit trail for a route-driven admin write.
@@ -276,6 +280,7 @@ impl AdminSurface {
             transfers: crate::federation::Transfers::new(Arc::clone(engine.store())),
             remote: OnceLock::new(),
             federation_budget: crate::federation::ADMIN_OP_BUDGET,
+            github_apps: github_app_admin::GitHubAppAdmin::default(),
             engine,
             mac_key,
             vault_id,
@@ -729,11 +734,14 @@ impl AdminSurface {
                 op.schema_version()
             ));
         }
-        // The federation ops that await outbound calls never reach `apply`, which is
-        // synchronous and refuses them; the asynchronous federation dispatch below runs
-        // them instead.
+        // Ops that await outbound calls never reach the synchronous `apply` path.
         if op.requires_daemon() {
-            return self.dispatch_federation(op).await;
+            return match op {
+                AdminOpBody::GitHubAppRelaySlotOpen { .. } => {
+                    self.github_apps.relay_slot_open(&self.engine).await
+                }
+                other => self.dispatch_federation(other).await,
+            };
         }
         // Apply through the SHARED core applier so the online and offline admin paths
         // can never diverge in what an op does. A credential-scoped op runs under the
@@ -1239,6 +1247,9 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             credentials_core::admin_ops::FEDERATION_REQUIRES_DAEMON,
             credentials_core::admin_ops::REMOTE_RECORD_CODE,
             "invalid_params",
+            "agent_invalid",
+            "github_app_agent_exists",
+            "policy_unavailable",
         ] {
             if let Some(why) = message.strip_prefix(code).and_then(|m| m.strip_prefix(':')) {
                 return AdminOutcome::Refused(format!("{code}/permanent:{why}"));

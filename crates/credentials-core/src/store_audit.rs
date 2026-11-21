@@ -778,6 +778,25 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// Record a confirmed relay slot open without storing any credential or slot URL.
+    pub fn audit_github_app_relay_slot_open(
+        &self,
+        slot: &str,
+        actor: &str,
+    ) -> Result<AuditEntry, StoreOpError> {
+        let ctx = AuditCtx::route_admin(AuditOp::GitHubAppRelaySlotOpen, actor);
+        self.append_audit(&AuditRecord {
+            op: ctx.op,
+            credential_id: None,
+            payload_hash: Some(hex32(&audit::payload_fingerprint(
+                &self.audit_key,
+                slot.as_bytes(),
+            ))),
+            actor: ctx.actor.into(),
+            alarm: ctx.alarm,
+        })
+    }
+
     /// Record a signature only while the decoded key's generation is still current.
     /// `identity` is the version and incarnation read with the key. Checking both in
     /// the append transaction prevents replacement or removal/recreation from placing

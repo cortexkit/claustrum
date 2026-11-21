@@ -119,6 +119,152 @@ fn active_policy_reads_role_reports_and_pairing_from_one_snapshot() {
     assert!(policy.is_none());
 }
 
+const MANIFEST_AGENT: &str = "agent_ab64ea0873bbee0c";
+
+fn prepare(store: &EncryptedStore, agent: &str) -> Result<serde_json::Value, StoreOpError> {
+    crate::admin_ops::apply(
+        store,
+        crate::admin_ops::AdminOpBody::GitHubAppManifestPrepare {
+            v: 1,
+            agent: agent.into(),
+        },
+        "test",
+    )
+}
+
+#[test]
+fn github_app_manifest_prepare_defaults_checks_agent_and_writes_nothing() {
+    let (_dir, store) = taxonomy_tests::rig("github-app-prepare", 77);
+    let before = store.audit_tip().unwrap();
+    let reply = prepare(&store, MANIFEST_AGENT).unwrap();
+    let name = reply["name"].as_str().unwrap();
+    let suffix = name.strip_prefix("ck-agent_ab64ea0873bbee0c-").unwrap();
+    assert_eq!(name.len(), 32);
+    assert!(suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert_eq!(
+        reply["default_events"],
+        serde_json::json!([
+            "issues",
+            "issue_comment",
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+            "release",
+            "workflow_job",
+            "workflow_run"
+        ])
+    );
+    assert_eq!(reply["default_permissions"]["issues"], "write");
+    assert_eq!(reply["default_permissions"]["pull_requests"], "write");
+    for bad in [
+        "agent_ab64ea0873bbee0",
+        "agent_ab64ea0873bbee0ca",
+        "agent_Ab64ea0873bbee0c",
+        "agent_%264ea0873bbee0c",
+        "other_ab64ea0873bbee0c",
+    ] {
+        assert!(
+            matches!(prepare(&store, bad), Err(StoreOpError::Encode(reason)) if reason.starts_with("agent_invalid:"))
+        );
+    }
+    assert_eq!(store.audit_tip().unwrap(), before);
+    assert!(store.meta("github_app:stored").is_err());
+}
+
+#[test]
+fn github_app_manifest_prepare_uses_active_narrowed_policy_and_refuses_failed_reads() {
+    let (_dir, store) = taxonomy_tests::rig("github-app-prepare-active", 79);
+    let member = "fed-computer:22222222222222222222222222222222";
+    let mut policy = policy_fixture(1, KEY_ID);
+    let rules = policy.rule_sets.get_mut("github").unwrap();
+    let mut comment = rules.kind("add_issue_comment").unwrap().clone();
+    comment
+        .credential
+        .as_mut()
+        .unwrap()
+        .github_permissions
+        .remove("pull_requests");
+    rules.kinds = vec![comment, rules.kind("node_repository").unwrap().clone()];
+    rules.actions.clear();
+    store.with_raw_conn(|conn| {
+        conn.execute("INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 1)", params![crate::federation::SELF_MEMBER_SETTING, member])?;
+        raw_manifest(conn, 41)?;
+        let mut row = raw_policy(1, 41);
+        row[1] = policy.canonical_bytes().unwrap().into();
+        conn.execute("INSERT INTO agent_policies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params_from_iter(row))?;
+        conn.execute("INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reported_at_ms) VALUES (?1, 41, ?2, 'valid', 1)", params![member, HASH])?;
+        Ok(())
+    }).unwrap();
+    let before = store.audit_tip().unwrap();
+    let reply = prepare(&store, MANIFEST_AGENT).unwrap();
+    assert_eq!(
+        reply["default_permissions"],
+        serde_json::json!({
+            "actions": "read", "contents": "read", "issues": "write", "metadata": "read",
+            "pull_requests": "read"
+        })
+    );
+
+    let refuse_unavailable = || {
+        assert!(
+            matches!(prepare(&store, MANIFEST_AGENT), Err(StoreOpError::Encode(reason)) if reason.starts_with("policy_unavailable:"))
+        )
+    };
+    store
+        .with_raw_conn(|conn| {
+            raw_manifest(conn, 42)?;
+            conn.execute(
+                "INSERT INTO agent_policies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params_from_iter(raw_policy(2, 42)),
+            )?;
+            conn.execute(
+                "UPDATE gh_manifest_activations SET version=42 WHERE member_id=?1",
+                [member],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    refuse_unavailable();
+    store
+        .with_raw_conn(|conn| conn.execute("DROP TABLE gh_manifest_activations", []))
+        .unwrap();
+    refuse_unavailable();
+    assert_eq!(store.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn github_app_manifest_prepare_refuses_agents_held_by_inactive_apps_and_nonserving_stores() {
+    let (_dir, store) = taxonomy_tests::rig("github-app-prepare-exists", 80);
+    store
+        .create("github_app:stored", &taxonomy_tests::api_record())
+        .unwrap();
+    store.with_raw_conn(|conn| conn.execute(
+        "UPDATE credentials SET github_app_agent=?1, github_app_created_at_ms=1, state='needs_reauth' WHERE credential_id='github_app:stored'",
+        [MANIFEST_AGENT],
+    )).unwrap();
+    let before = store.audit_tip().unwrap();
+    assert!(
+        matches!(prepare(&store, MANIFEST_AGENT), Err(StoreOpError::Encode(reason)) if reason.starts_with("github_app_agent_exists:"))
+    );
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 1)",
+                params![
+                    crate::store::SECRET_HOME_SETTING,
+                    "fed-computer:33333333333333333333333333333333"
+                ],
+            )
+        })
+        .unwrap();
+    assert!(
+        matches!(prepare(&store, MANIFEST_AGENT), Err(StoreOpError::Encode(reason)) if reason.starts_with("policy_unavailable:"))
+    );
+    assert_eq!(store.audit_tip().unwrap(), before);
+}
+
 #[test]
 fn migration_51_rejects_invalid_policy_columns_in_an_empty_table() {
     let (_dir, store) = taxonomy_tests::rig("policy-sql-column-checks", 61);

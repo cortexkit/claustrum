@@ -10,6 +10,9 @@
 //! surface.
 #![forbid(unsafe_code)]
 
+#[cfg(not(test))]
+mod account_token_mint;
+pub mod error_class;
 #[path = "federation/mod.rs"]
 pub mod federation;
 pub mod fleet_ops;

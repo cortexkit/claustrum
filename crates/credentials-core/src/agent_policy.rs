@@ -224,6 +224,17 @@ pub fn policy_sha256(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
+/// The registry id that an App creation request may attest. Existing policy
+/// bindings also accept older agent names and do not use this check.
+pub fn valid_github_app_agent(agent: &str) -> bool {
+    agent.strip_prefix("agent_").is_some_and(|id| {
+        id.len() == 16
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 fn parse_canonical<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, PolicyError> {
     if bytes.len() > MAX_POLICY_DOCUMENT_BYTES {
         return Err(PolicyError::TooLarge);

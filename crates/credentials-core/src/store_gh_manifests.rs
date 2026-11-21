@@ -42,11 +42,9 @@ pub(super) fn policy_root_mutation_protected(
 fn policy_root_identity(credential_id: &str, pem: &str) -> Option<Value> {
     let public = crate::signing::ed25519_public_bytes(pem).ok()?;
     let digest = hex32(&Sha256::digest(public).into());
-    let fingerprint = digest.as_bytes()[..32]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|group| std::str::from_utf8(group).expect("hex is ASCII"))
+    // The card fingerprint is the first 32 hex digits in eight groups of four.
+    let fingerprint = (0..8)
+        .map(|group| &digest[group * 4..group * 4 + 4])
         .collect::<Vec<_>>()
         .join(" ");
     Some(json!({

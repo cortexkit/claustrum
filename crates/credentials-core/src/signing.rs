@@ -253,11 +253,10 @@ pub fn public_key_ed25519(key_pem: &str) -> Result<PublicKey, SignError> {
 
 pub(crate) fn ed25519_public_bytes(key_pem: &str) -> Result<[u8; 32], SignError> {
     let kp = parse_pkcs8_pem(key_pem)?;
-    Ok(kp
-        .public_key()
+    kp.public_key()
         .as_ref()
         .try_into()
-        .expect("Ed25519 public key size"))
+        .map_err(|_| SignError::UnusableKey("Ed25519 public key is not 32 bytes".into()))
 }
 
 /// Sign `payload` with the Ed25519 key stored as PKCS#8 PEM in `key_pem`.

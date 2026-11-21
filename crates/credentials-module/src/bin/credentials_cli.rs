@@ -405,8 +405,10 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
                     && args
                         .get(1)
                         .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-                    || (matches!(verb.as_str(), "manifest" | "policy" | "module-secret")
-                        && args.get(1).is_some()) =>
+                    || (matches!(
+                        verb.as_str(),
+                        "manifest" | "policy" | "policy-root" | "module-secret"
+                    ) && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
             }
@@ -424,8 +426,10 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
             && args
                 .first()
                 .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-            || (matches!(command.as_str(), "manifest" | "policy" | "module-secret")
-                && args.first().is_some_and(|arg| !arg.starts_with('-')))
+            || (matches!(
+                command.as_str(),
+                "manifest" | "policy" | "policy-root" | "module-secret"
+            ) && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
             format!("{command} {}", args[0])
         } else {
@@ -501,6 +505,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "module-secret" => module_secret_cli::cmd_module_secret(&global, &args),
         "manifest" => cli_support::manifest_cli::cmd_manifest(&global, &args),
         "policy" => cli_support::policy_cli::cmd_policy(&global, &args),
+        "policy-root" => keys_cli::cmd_policy_root(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -573,6 +578,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
     }
     if command == "policy" {
         return cli_support::policy_cli::guard_args(args).map(|()| ParsedOptions::default());
+    }
+    if command == "policy-root" {
+        return keys_cli::guard_policy_root_args(args).map(|()| ParsedOptions::default());
     }
     // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
     // the generic scan below cannot judge it. `secret_cli` does, against the table for the
@@ -797,7 +805,8 @@ fn usage_short() -> String {
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
         manifest            import, sign and track GitHub routing manifests\n\
-        policy              derive, sign, list and export fleet agent policies\n\
+         policy              derive, sign, list and export fleet agent policies\n\
+         policy-root         initialize or show the policy signing root\n\
            put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            ssh-key             allow or deny agent SSH use of a signing key\n\
@@ -865,6 +874,9 @@ fn help_verb(verb: &str) -> String {
     }
     if verb == "policy" || verb.starts_with("policy ") {
         return cli_support::policy_cli::help_text(verb.strip_prefix("policy "));
+    }
+    if verb == "policy-root" || verb.starts_with("policy-root ") {
+        return keys_cli::policy_root_help(verb).to_string();
     }
     let body = match verb {
         "ssh-key" => {
@@ -3367,6 +3379,68 @@ mod deposit_cli_tests {
             },
             subc_conn: None,
         }
+    }
+
+    #[test]
+    fn policy_root_cli_prints_the_public_identity_and_protects_mint_and_put() {
+        let root = root("policy-root-cli");
+        let global = global(&root);
+        let absent = invoke(&root, &["policy-root", "show"]);
+        assert!(!absent.status.success());
+        assert!(String::from_utf8_lossy(&absent.stderr).contains("policy_root_absent/permanent:"));
+        let init = success(&root, &["policy-root", "init"]);
+        assert_eq!(init, success(&root, &["policy-root", "show"]));
+        let id = "signing:policy-root:1";
+        let store = open_for_admin(&global, false).unwrap();
+        let tip = store.audit_tip().unwrap();
+        let record = store.get(id).unwrap();
+        let public = credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(record.payload.expose()).unwrap(),
+        )
+        .unwrap();
+        let raw = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let digest = ring::digest::digest(&ring::digest::SHA256, &raw);
+        let fingerprint = digest.as_ref()[..16]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|group| format!("{:02x}{:02x}", group[0], group[1]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(init.ends_with(&format!(
+            "credential_id {id}\nkey_id {}\npublic_key_hex {}\nfingerprint {fingerprint}\n",
+            public.key_id, public.public_key_hex,
+        )));
+        drop(store);
+        for id in [id, "signing:policy-root:foo"] {
+            for replace in [false, true] {
+                let mut args = vec!["mint-signing-key", "--id", id];
+                if replace {
+                    args.push("--replace");
+                }
+                let mint = invoke(&root, &args);
+                assert!(!mint.status.success());
+                assert!(String::from_utf8_lossy(&mint.stderr)
+                    .contains("policy_root_protected/permanent:"));
+            }
+        }
+        let put = invoke(&root, &["put", "--id", id, "--kind", "opaque"]);
+        assert!(!put.status.success());
+        assert!(String::from_utf8_lossy(&put.stderr)
+            .contains("signing keys must be generated with mint-signing-key, not put"));
+        assert_eq!(
+            open_for_admin(&global, false).unwrap().audit_tip().unwrap(),
+            tip
+        );
+        for verb in ["init", "show"] {
+            let help = success(&root, &["help", "policy-root", verb]);
+            assert!(help.contains(&format!("ck auth policy-root {verb}")));
+            assert!(help.lines().all(|line| line.len() <= 80));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Deposits the fleet's legacy root and names it as the policy signing root, as

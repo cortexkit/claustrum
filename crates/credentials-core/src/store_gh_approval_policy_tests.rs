@@ -65,7 +65,17 @@ fn configured_policy_root_signs_ceremony_and_one_tap_with_matching_approvals() {
     let (record, public) = super::root_key();
     let key_id = key_id_for_public(&public);
     assert_ne!(key_id, key_id_for_public(&legacy_public));
-    store.create(CONFIGURED_ROOT, &record).unwrap();
+    store
+        .fenced_write_or_refuse(|tx| {
+            store.create_audited_in_tx(
+                tx,
+                CONFIGURED_ROOT,
+                &record,
+                AuditCtx::admin(AuditOp::Put),
+                100,
+            )
+        })
+        .unwrap();
     store
         .with_raw_conn(|conn| {
             conn.execute(
@@ -544,13 +554,7 @@ fn one_tap_policy_refuses_a_replaced_manifest_root_without_writing() {
     );
     let op = approve(&envelope(&p, NOW));
     for record in [replacement, unusable] {
-        store
-            .overwrite_unconditional_audited(
-                GH_MANIFEST_ROOT_KEY_ID,
-                &record,
-                AuditCtx::admin(AuditOp::Overwrite),
-            )
-            .unwrap();
+        super::replace_legacy_root_fixture(&store, &record);
         refuses(&store, &op, NOW, SecretError::ManifestSetupIncomplete);
         assert_pending(&store, &p.proposal_id);
     }

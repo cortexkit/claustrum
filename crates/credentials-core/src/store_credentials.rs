@@ -224,7 +224,15 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        self.create_audited_with(credential_id, record, ctx, |_, _| Ok(()))
+        // A retry as create must not bypass the write check for the vault's
+        // active transfer key.
+        self.check_vault_transfer_key_writable(credential_id)?;
+        self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
+            self.create_audited_in_tx(tx, credential_id, record, ctx, now_ms())
+        })
     }
 
     /// Deposit a legacy manifest root after migration has already run in a test vault.
@@ -234,28 +242,26 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        self.create_audited_with(GH_MANIFEST_ROOT_KEY_ID, record, ctx, |tx, now| {
+        self.fenced_write_or_refuse(|tx| {
+            let now = now_ms();
+            if let Err(error) = self.create_audited_in_tx(tx, GH_MANIFEST_ROOT_KEY_ID, record, ctx, now)? {
+                return Ok(Err(error));
+            }
             tx.execute(
                 "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at_ms=excluded.updated_at_ms",
                 rusqlite::params![super::gh_manifests::POLICY_ROOT_CREDENTIAL_SETTING, GH_MANIFEST_ROOT_KEY_ID, now],
             )?;
-            Ok(())
+            Ok(Ok(()))
         })
     }
 
-    fn create_audited_with(
-        &self,
+    fn prepare_create_record(
         credential_id: &str,
         record: &VaultRecord,
-        ctx: AuditCtx<'_>,
-        after_insert: impl FnOnce(&rusqlite::Transaction<'_>, i64) -> rusqlite::Result<()>,
-    ) -> Result<(), StoreOpError> {
+    ) -> Result<VaultRecord, StoreOpError> {
         refuse_incoming_agent_ssh(record)?;
         validate_deposit_credential_id(credential_id)?;
-        // A create for the transfer key's id must not slip past the replace fence by
-        // failing first and being retried as a create.
-        self.check_vault_transfer_key_writable(credential_id)?;
         refuse_short_term_bedrock_key(record)?;
         let mut record = normalize_record_identity(record.clone());
         if let Some(derived_account_id) = derived_account_id(&record) {
@@ -274,9 +280,26 @@ impl EncryptedStore {
         validate_record_identity(&record)?;
         record.record_version = 1;
         retain_detected_plan(&mut record, None);
-        let blob = self.seal_record(credential_id, &record)?;
+        Ok(record)
+    }
+
+    pub(super) fn create_audited_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+        now: i64,
+    ) -> rusqlite::Result<Result<(), StoreOpError>> {
+        let record = match Self::prepare_create_record(credential_id, record) {
+            Ok(record) => record,
+            Err(error) => return Ok(Err(error)),
+        };
+        let blob = match self.seal_record(credential_id, &record) {
+            Ok(blob) => blob,
+            Err(error) => return Ok(Err(error)),
+        };
         let key_id_hex = self.key_id.to_hex();
-        let now = now_ms();
         let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&audit::payload_fingerprint(
             &audit_key,
@@ -286,7 +309,7 @@ impl EncryptedStore {
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
         // existence query, no error-string matching). Zero changed => AlreadyExists.
-        let changed = self.fenced_write(|tx| {
+        let changed = {
             let n = tx.execute(
                 // `created_at_ms` is written once, here, and never updated again:
                 // every later write path sets `updated_at_ms` instead, so a refresh
@@ -342,14 +365,13 @@ impl EncryptedStore {
                         alarm: ctx.alarm,
                     },
                 )?;
-                after_insert(tx, now)?;
             }
-            Ok(n)
-        })?;
+            n
+        };
         if changed == 0 {
-            return Err(StoreOpError::AlreadyExists);
+            return Ok(Err(StoreOpError::AlreadyExists));
         }
-        Ok(())
+        Ok(Ok(()))
     }
 
     /// Replace or clear the complete SSH enrollment in the same transaction that
@@ -446,6 +468,11 @@ impl EncryptedStore {
         // A CAS replace at the current version is still a replace: the transfer key's
         // active record cannot be overwritten under it.
         self.check_vault_transfer_key_writable(credential_id)?;
+        if self.store.with_conn(|conn| {
+            super::gh_manifests::policy_root_mutation_protected(conn, credential_id)
+        })? {
+            return Err(StoreOpError::PolicyRootProtected);
+        }
         // Read + decrypt the current record to verify the CAS precondition. A
         // decrypt failure here quarantines the id (handled by `get`).
         let current = self.get(credential_id)?;
@@ -469,11 +496,14 @@ impl EncryptedStore {
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
         // version we read, so a concurrent writer that already bumped it leaves zero
         // rows changed (no error-string matching). Zero changed => CasMismatch.
-        let changed = self.fenced_write(|tx| {
+        let changed = self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
             if (record.kind != CredentialKind::ApiKey || record.refresh_adapter.is_some())
                 && gateway::has_settings(tx, credential_id)?
             {
-                return Ok(None);
+                return Ok(Ok(None));
             }
             let n = tx.execute(
                 "UPDATE credentials \
@@ -517,7 +547,7 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(Some(n))
+            Ok(Ok(Some(n)))
         })?;
         match changed {
             None => Err(StoreOpError::GatewayFixed {
@@ -612,7 +642,10 @@ impl EncryptedStore {
         // removed. A CasMismatch here would mean the row vanished mid-txn (a
         // concurrent delete), which cannot happen under the single writer, so the
         // guard is belt-and-suspenders that also documents the invariant.
-        let outcome = self.fenced_write(|tx| {
+        let outcome = self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
             let existing: Option<(i64, Vec<u8>)> = tx
                 .query_row(
                     "SELECT record_version, envelope FROM credentials WHERE credential_id = ?1",
@@ -621,12 +654,12 @@ impl EncryptedStore {
                 )
                 .optional()?;
             let Some((current_version, existing_envelope)) = existing else {
-                return Ok(IdentityPolicyOverwriteOutcome::NotFound);
+                return Ok(Ok(IdentityPolicyOverwriteOutcome::NotFound));
             };
             if (incoming.kind != CredentialKind::ApiKey || incoming.refresh_adapter.is_some())
                 && gateway::has_settings(tx, credential_id)?
             {
-                return Ok(IdentityPolicyOverwriteOutcome::GatewayFixedKind);
+                return Ok(Ok(IdentityPolicyOverwriteOutcome::GatewayFixedKind));
             }
             let next_version = (current_version as u64).saturating_add(1);
 
@@ -652,10 +685,10 @@ impl EncryptedStore {
                         (identity.account_id.as_ref(), incoming_account_id.as_ref())
                     {
                         if retained_account_id != incoming_account_id {
-                            return Ok(IdentityPolicyOverwriteOutcome::AccountMismatch {
+                            return Ok(Ok(IdentityPolicyOverwriteOutcome::AccountMismatch {
                                 retained_account_id: retained_account_id.clone(),
                                 incoming_account_id: incoming_account_id.clone(),
-                            });
+                            }));
                         }
                     }
                     sealed.identity = identity;
@@ -709,7 +742,7 @@ impl EncryptedStore {
                     ctx,
                 )?;
             }
-            Ok(IdentityPolicyOverwriteOutcome::Updated(n))
+            Ok(Ok(IdentityPolicyOverwriteOutcome::Updated(n)))
         })?;
         match outcome {
             IdentityPolicyOverwriteOutcome::NotFound => Err(StoreOpError::NotFound),
@@ -1389,7 +1422,10 @@ impl EncryptedStore {
         self.check_vault_transfer_key_writable(credential_id)?;
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        self.fenced_write(|tx| {
+        self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
             // Excluding needs_reauth and corrupt makes this a transition rather than a write: the
             // rows-changed count is then the answer to "did this do anything",
             // which is what both the audit decision and the operator message need.
@@ -1434,13 +1470,12 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(InvalidateOutcome {
+            Ok(Ok(InvalidateOutcome {
                 state_changed,
                 intent_cleared,
                 handles_revoked: revoked,
-            })
+            }))
         })
-        .map_err(StoreOpError::from)
     }
 
     /// PERMANENTLY remove a credential: delete the row, its refresh intent, and its
@@ -1479,7 +1514,10 @@ impl EncryptedStore {
     ) -> Result<usize, StoreOpError> {
         self.check_vault_transfer_key_writable(credential_id)?;
         let audit_key = self.audit_key.clone();
-        let (removed, handles) = self.fenced_write(|tx| {
+        let (removed, handles) = self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
             // Count before deleting the parent: foreign-key cascades may remove the rows.
             let categories: usize = tx.query_row(
                 "SELECT COUNT(*) FROM credential_categories WHERE credential_id = ?1",
@@ -1582,7 +1620,7 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok((n, handles))
+            Ok(Ok((n, handles)))
         })?;
         if removed == 0 {
             return Err(StoreOpError::NotFound);

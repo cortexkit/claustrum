@@ -1122,6 +1122,55 @@ async fn hand_sealed_bodies_with_a_bad_tier_category_or_provider_id_are_refused_
     assert!(rig.b.incoming().is_empty());
 }
 
+#[tokio::test]
+async fn policy_root_ids_refuse_incoming_opaque_delivery_and_already_pending_accept() {
+    let rig = Rig::new("transfer-policy-root").await;
+    let store = rig.b.store();
+    let tip = store.audit_tip().unwrap();
+    for (index, id) in ["signing:gh-manifest-root:1", "signing:policy-root:foo"]
+        .into_iter()
+        .enumerate()
+    {
+        let transfer_id = tid(210 + index as u32);
+        let params = rig
+            .a
+            .hand_seal(&rig.b, &transfer_id, id, &body(id, "opaque", b"one byte"));
+        assert_eq!(
+            rig.serve_b(&rig.a.member, &params).await,
+            "policy_root_protected"
+        );
+        assert!(store
+            .incoming_transfer(&rig.a.member, &transfer_id)
+            .unwrap()
+            .is_none());
+
+        record_pending_unchecked(store, &rig.a.member, &transfer_id, id, "opaque", &params);
+        assert_eq!(
+            rig.serve_b(&rig.a.member, &params).await,
+            "policy_root_protected"
+        );
+        for replace in [false, true] {
+            let refused = rig
+                .b
+                .transfers
+                .accept(&transfer_id, &rig.a.member, replace)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                refused.body(),
+                json!({"code":"policy_root_protected","class":"permanent"})
+            );
+        }
+        let row = store
+            .incoming_transfer(&rig.a.member, &transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncomingTransferState::Pending);
+        assert!(store.get(id).is_err());
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+}
+
 /// Validation runs again at accept: a pending row whose body is ineligible or
 /// malformed (recorded here without the delivery checks, the way a row from an older
 /// build or a damaged store would look) is refused `transfer_body_invalid`, marked
@@ -1147,7 +1196,14 @@ async fn hand_sealed_ineligible_and_malformed_bodies_are_refused_at_accept() {
     for (index, sealed_body) in bodies.iter().enumerate() {
         let transfer_id = tid(200 + index as u32);
         let params = rig.a.hand_seal(&rig.b, &transfer_id, API_ID, sealed_body);
-        record_pending_unchecked(rig.b.store(), &rig.a.member, &transfer_id, &params);
+        record_pending_unchecked(
+            rig.b.store(),
+            &rig.a.member,
+            &transfer_id,
+            API_ID,
+            "api_key",
+            &params,
+        );
         let refused = rig
             .b
             .transfers
@@ -1180,6 +1236,8 @@ fn record_pending_unchecked(
     store: &EncryptedStore,
     sender: &str,
     transfer_id: &str,
+    credential_id: &str,
+    kind: &str,
     params: &Value,
 ) {
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -1187,8 +1245,8 @@ fn record_pending_unchecked(
         .insert_incoming_transfer(&credentials_core::federation::NewIncomingTransfer {
             sender_member: sender.to_string(),
             transfer_id: transfer_id.to_string(),
-            credential_id: API_ID.to_string(),
-            kind: "api_key".to_string(),
+            credential_id: credential_id.to_string(),
+            kind: kind.to_string(),
             categories: vec![],
             size_bytes: 1,
             sealed: credentials_core::federation::SealedTransfer {

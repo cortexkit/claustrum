@@ -244,12 +244,20 @@ fn parse_pkcs8_pem(pem: &str) -> Result<Ed25519KeyPair, SignError> {
 /// same validated key pair. The private bytes exist only inside the parser and are not
 /// copied into this result.
 pub fn public_key_ed25519(key_pem: &str) -> Result<PublicKey, SignError> {
-    let kp = parse_pkcs8_pem(key_pem)?;
-    let public = kp.public_key().as_ref();
+    let public = ed25519_public_bytes(key_pem)?;
     Ok(PublicKey {
-        public_key_hex: hex_lower(public),
-        key_id: key_id_for_public(public),
+        public_key_hex: hex_lower(&public),
+        key_id: key_id_for_public(&public),
     })
+}
+
+pub(crate) fn ed25519_public_bytes(key_pem: &str) -> Result<[u8; 32], SignError> {
+    let kp = parse_pkcs8_pem(key_pem)?;
+    Ok(kp
+        .public_key()
+        .as_ref()
+        .try_into()
+        .expect("Ed25519 public key size"))
 }
 
 /// Sign `payload` with the Ed25519 key stored as PKCS#8 PEM in `key_pem`.

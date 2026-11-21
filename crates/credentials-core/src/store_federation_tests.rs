@@ -1579,6 +1579,60 @@ fn login_refuses_an_id_held_by_a_remote_record() {
 }
 
 #[test]
+fn policy_root_init_skips_inactive_local_and_remote_rows_and_audits_only_the_new_key() {
+    let (_root, store) = rig("policy-root-next-free", 232);
+    let local = "signing:policy-root:1";
+    let remote = "signing:policy-root:2";
+    store
+        .fenced_write_or_refuse(|tx| {
+            store.create_audited_in_tx(tx, local, &api_record(), AuditCtx::admin(AuditOp::Put), 100)
+        })
+        .unwrap();
+    store.invalidate(local).unwrap();
+    add_remote(&store, remote);
+    let tip = store.audit_tip().unwrap();
+    assert_eq!(
+        store.show_policy_root_admin().unwrap_err().wire_code(),
+        Some("policy_root_absent")
+    );
+    assert_eq!(store.audit_tip().unwrap(), tip);
+
+    let result = store.init_policy_root_admin(ACTOR).unwrap();
+    let id = result["credential_id"].as_str().unwrap();
+    assert_eq!(id, "signing:policy-root:3");
+    assert!(store.get(local).is_err());
+    assert_eq!(local_rows(&store, local), 1);
+    assert!(store.remote_record(remote).unwrap().is_some());
+    let record = store.get(id).unwrap();
+    assert_eq!(record.kind, CredentialKind::SigningKey);
+    assert!(!record.operator_sign);
+    let public =
+        crate::signing::public_key_ed25519(std::str::from_utf8(record.payload.expose()).unwrap())
+            .unwrap();
+    assert_eq!(result["key_id"], public.key_id);
+    assert_eq!(result["public_key_hex"], public.public_key_hex);
+    assert_eq!(store.show_policy_root_admin().unwrap(), result);
+    let writes = store.read_audit(None).unwrap();
+    let row = writes.last().unwrap();
+    assert_eq!(row.op, "put");
+    assert_eq!(row.credential_id.as_deref(), Some(id));
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|row| row.credential_id.as_deref() == Some(id))
+            .count(),
+        1
+    );
+    let committed = store.audit_tip().unwrap();
+    assert_eq!(
+        store.init_policy_root_admin(ACTOR).unwrap_err().wire_code(),
+        Some("policy_root_exists")
+    );
+    assert_eq!(store.audit_tip().unwrap(), committed);
+    assert_eq!(local_rows(&store, "signing:policy-root:4"), 0);
+}
+
+#[test]
 fn mint_signing_key_refuses_an_id_held_by_a_remote_record() {
     let (_root, store) = rig("federation-signing", 196);
     add_remote(&store, "signing:agent-assertion:1");

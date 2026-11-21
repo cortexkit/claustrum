@@ -1257,13 +1257,16 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
     ) {
         return AdminOutcome::Refused(e.to_string());
     }
-    // The secret-home refusals already print the route's `code/class: detail` shape,
-    // with the member to act on or the counts that block the change.
+    // These refusals already print the route's `code/class: detail` shape.
     if matches!(
         e,
         StoreOpError::SecretHomeElsewhere { .. }
             | StoreOpError::SecretRemoteSetupIncomplete { .. }
             | StoreOpError::SecretHomeNotEmpty { .. }
+            | StoreOpError::PolicyRootProtected
+            | StoreOpError::PolicyRootExists
+            | StoreOpError::PolicyRootEstablished
+            | StoreOpError::PolicyRootAbsent
     ) {
         return AdminOutcome::Refused(e.to_string());
     }
@@ -1459,6 +1462,55 @@ mod tests {
             op_body: op_body.as_bytes(),
         };
         (hex(&rig.caller_mac.sign(&parts)), nonce_hex)
+    }
+
+    #[tokio::test]
+    async fn policy_root_admin_requires_direct_bind_and_mac_and_uses_v1() {
+        let r = rig(228);
+        r.admin.record_bind(5, Principal::Direct);
+        r.admin.record_bind(
+            6,
+            Principal::Reserved {
+                module_id: "test".into(),
+            },
+        );
+        let tip = r.store.audit_tip().unwrap();
+        for op in ["admin.policy_root_init", "admin.policy_root_show"] {
+            let body = serde_json::json!({"op":op,"v":1}).to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let scoped = r.admin.execute(6, body.as_bytes(), &tag).await;
+            assert!(
+                matches!(scoped, AdminOutcome::Refused(message) if message == "admin ops require a direct bind")
+            );
+            let bad = r
+                .admin
+                .execute(5, body.as_bytes(), &"00".repeat(tag.len() / 2))
+                .await;
+            assert!(matches!(bad, AdminOutcome::Refused(message) if message == "auth failed"));
+        }
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
+        let show = r#"{"op":"admin.policy_root_show","v":1}"#;
+        let (tag, _) = challenge_and_sign(&r, 5, show);
+        let absent = r.admin.execute(5, show.as_bytes(), &tag).await;
+        assert!(
+            matches!(absent, AdminOutcome::Refused(message) if message.starts_with("policy_root_absent/permanent: "))
+        );
+        let init = r#"{"op":"admin.policy_root_init","v":1}"#;
+        let (tag, _) = challenge_and_sign(&r, 5, init);
+        let AdminOutcome::Ok(initialized) = r.admin.execute(5, init.as_bytes(), &tag).await else {
+            panic!("authenticated init must succeed");
+        };
+        assert_eq!(initialized["credential_id"], "signing:policy-root:1");
+        let tip = r.store.audit_tip().unwrap();
+        let (tag, _) = challenge_and_sign(&r, 5, show);
+        let shown = r.admin.execute(5, show.as_bytes(), &tag).await;
+        assert!(matches!(shown, AdminOutcome::Ok(result) if result == initialized));
+        let (tag, _) = challenge_and_sign(&r, 5, init);
+        let exists = r.admin.execute(5, init.as_bytes(), &tag).await;
+        assert!(
+            matches!(exists, AdminOutcome::Refused(message) if message.starts_with("policy_root_exists/permanent: "))
+        );
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
     }
 
     #[tokio::test]

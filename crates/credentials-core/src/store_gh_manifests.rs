@@ -3,16 +3,58 @@ use super::{
     RecordState, StoreOpError, VaultRecord,
 };
 use crate::audit::{AuditCtx, GhManifestAudit};
+use base64::Engine;
+use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 /// The fleet's legacy root credential. Manifest and policy signing admin operations
 /// also use this id as their per-credential single-flight lock (`AdminOpBody::lock_id`),
 /// whichever credential the root setting names, so two signers never interleave.
 pub const GH_MANIFEST_ROOT_KEY_ID: &str = "signing:gh-manifest-root:1";
 pub(super) const POLICY_ROOT_CREDENTIAL_SETTING: &str = "policy_root_credential";
+pub(super) const POLICY_ROOT_PREFIX: &str = "signing:policy-root:";
 
-pub(super) fn is_policy_root_id(id: &str) -> bool {
-    id == GH_MANIFEST_ROOT_KEY_ID || id.starts_with("signing:policy-root:")
+/// Identifies the credential ids reserved from consumer signing and incoming transfers.
+pub fn is_policy_root_id(id: &str) -> bool {
+    id == GH_MANIFEST_ROOT_KEY_ID || id.starts_with(POLICY_ROOT_PREFIX)
+}
+
+pub(super) fn policy_root_mutation_protected(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<bool> {
+    if id.starts_with(POLICY_ROOT_PREFIX) {
+        return Ok(true);
+    }
+    if id != GH_MANIFEST_ROOT_KEY_ID {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE name = ?1 AND value = ?2)",
+        [POLICY_ROOT_CREDENTIAL_SETTING, id],
+        |row| row.get(0),
+    )
+}
+
+fn policy_root_identity(credential_id: &str, pem: &str) -> Option<Value> {
+    let public = crate::signing::ed25519_public_bytes(pem).ok()?;
+    let digest = hex32(&Sha256::digest(public).into());
+    let fingerprint = digest.as_bytes()[..32]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|group| std::str::from_utf8(group).expect("hex is ASCII"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(json!({
+        "credential_id": credential_id,
+        "key_id": &digest[..16],
+        "public_key_hex": hex32(&public),
+        "fingerprint": fingerprint,
+    }))
 }
 
 pub(super) struct ManifestRoot {
@@ -65,6 +107,92 @@ impl From<ManifestRootReadError> for StoreOpError {
 }
 
 impl EncryptedStore {
+    pub(crate) fn init_policy_root_admin(&self, actor: &str) -> Result<Value, StoreOpError> {
+        self.fenced_write_or_refuse(|tx| {
+            let configured: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE name = ?1)",
+                [POLICY_ROOT_CREDENTIAL_SETTING],
+                |row| row.get(0),
+            )?;
+            if configured {
+                return Ok(Err(StoreOpError::PolicyRootExists));
+            }
+            let established: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM gh_manifests) OR EXISTS(SELECT 1 FROM agent_policies)",
+                [],
+                |row| row.get(0),
+            )?;
+            if established {
+                return Ok(Err(StoreOpError::PolicyRootEstablished));
+            }
+
+            let mut occupied = tx.prepare(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM remote_records WHERE credential_id = ?1)",
+            )?;
+            let mut generation = 1u64;
+            let credential_id = loop {
+                let id = format!("{POLICY_ROOT_PREFIX}{generation}");
+                if !occupied.query_row([&id], |row| row.get::<_, bool>(0))? {
+                    break id;
+                }
+                let Some(next) = generation.checked_add(1) else {
+                    return Ok(Err(StoreOpError::Store(
+                        "no free policy root credential id".into(),
+                    )));
+                };
+                generation = next;
+            };
+
+            let Ok(pkcs8) = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()) else {
+                return Ok(Err(StoreOpError::Store(
+                    "could not generate a policy root key".into(),
+                )));
+            };
+            let encoded =
+                Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref()));
+            let pem = format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+                encoded.as_str()
+            );
+            let Some(identity) = policy_root_identity(&credential_id, &pem) else {
+                return Ok(Err(StoreOpError::Store(
+                    "generated policy root key is unusable".into(),
+                )));
+            };
+            let record = VaultRecord::new_static(
+                CredentialKind::SigningKey,
+                "operator",
+                pem.into_bytes(),
+                None,
+            );
+            let now = super::now_ms();
+            let ctx = AuditCtx::route_admin(crate::audit::AuditOp::Put, actor);
+            if let Err(error) = self.create_audited_in_tx(tx, &credential_id, &record, ctx, now)? {
+                return Ok(Err(error));
+            }
+            tx.execute(
+                "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3)",
+                rusqlite::params![POLICY_ROOT_CREDENTIAL_SETTING, credential_id, now],
+            )?;
+            Ok(Ok(identity))
+        })
+    }
+
+    pub(crate) fn show_policy_root_admin(&self) -> Result<Value, StoreOpError> {
+        self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            Ok(match self.read_gh_manifest_root_in_tx(&tx) {
+                Ok(root) => std::str::from_utf8(root.record.payload.expose())
+                    .ok()
+                    .and_then(|pem| policy_root_identity(&root.credential_id, pem))
+                    .ok_or(StoreOpError::PolicyRootAbsent),
+                Err(ManifestRootReadError::Unusable(_)) => Err(StoreOpError::PolicyRootAbsent),
+                Err(ManifestRootReadError::Sql(error)) => return Err(error),
+            })
+        })?
+    }
+
     /// Sign exact manifest bytes and append their plain SHA-256 commitment in the
     /// caller's fenced write transaction. Read the key here, not before taking the
     /// writer, so replacement cannot commit between key selection and the audit row.

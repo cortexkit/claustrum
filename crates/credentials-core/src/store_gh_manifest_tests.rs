@@ -139,7 +139,7 @@ fn sign_and_store(
 }
 
 #[test]
-fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows() {
+fn gh_manifest_sign_refuses_concurrent_replacement_of_the_configured_legacy_root() {
     use base64::Engine as _;
     use std::sync::{mpsc, Arc};
     let (_root, store) = taxonomy_tests::rig("manifest-sign-replacement", 179);
@@ -168,7 +168,10 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
             sign_and_store(&store, tx, 1, b"first manifest")
         })
         .unwrap();
-    replacement_job.join().unwrap().unwrap();
+    assert!(matches!(
+        replacement_job.join().unwrap(),
+        Err(StoreOpError::PolicyRootProtected)
+    ));
     let second = store
         .fenced_write(|tx| sign_and_store(&store, tx, 2, b"second manifest"))
         .unwrap();
@@ -181,8 +184,8 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
         ),
         (
             &second,
-            &second_public,
             &first_public,
+            &second_public,
             b"second manifest".as_slice(),
         ),
     ] {
@@ -207,7 +210,6 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
             "approval",
             "gh_manifest_sign",
             "gh_manifest_store",
-            "overwrite",
             "approval",
             "gh_manifest_sign",
             "gh_manifest_store",
@@ -219,7 +221,7 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
             "2aec5060ec1b1501b0c6216c98f7df76f6c96d1bab5c96c3fc369c363b995842",
         ),
         (
-            6,
+            5,
             "aa098371a12bbf87dda8655241f8b229c00e93011ab0bb494e32aad60e36b438",
         ),
     ] {
@@ -276,89 +278,98 @@ fn gh_manifest_sign_requires_an_active_usable_signing_key_without_writes() {
             .unwrap();
         assert_eq!(snapshot(&store), before);
     };
+    let replace_fixture = |record: &VaultRecord| {
+        // Simulate unusable on-disk roots without using operator replacement,
+        // which deliberately refuses to touch the selected credential.
+        store
+            .with_raw_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM credentials WHERE credential_id = ?1",
+                    [GH_MANIFEST_ROOT_KEY_ID],
+                )
+            })
+            .unwrap();
+        store
+            .put_legacy_manifest_root_for_tests(record, AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+    };
     refuse();
-    store
-        .put_legacy_manifest_root_for_tests(
-            &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"not a key".to_vec(), None),
-            AuditCtx::admin(AuditOp::Put),
-        )
-        .unwrap();
+    replace_fixture(&VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "test",
+        b"not a key".to_vec(),
+        None,
+    ));
     refuse();
-    store
-        .overwrite_unconditional_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &VaultRecord::new_static(
-                CredentialKind::SigningKey,
-                "test",
-                b"not a key".to_vec(),
-                None,
-            ),
-            AuditCtx::admin(AuditOp::Overwrite),
-        )
-        .unwrap();
+    replace_fixture(&VaultRecord::new_static(
+        CredentialKind::SigningKey,
+        "test",
+        b"not a key".to_vec(),
+        None,
+    ));
     refuse();
-    store
-        .overwrite_unconditional_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &root_key().0,
-            AuditCtx::admin(AuditOp::Overwrite),
-        )
-        .unwrap();
+    replace_fixture(&root_key().0);
     store.invalidate(GH_MANIFEST_ROOT_KEY_ID).unwrap();
     refuse();
 }
 
 #[test]
-fn gh_manifest_root_exact_sign_grant_is_refused_without_writes() {
+fn policy_root_exact_sign_grants_are_refused_without_writes_but_read_still_works() {
     let (_root, store) = taxonomy_tests::rig("manifest-grant-fence", 182);
-    for principal_kind in ["reserved", "enrolled"] {
-        let before = store
-            .with_raw_conn(|conn| {
-                Ok((
-                    rows(conn, "read_grants")?,
-                    rows(conn, "audit_log")?,
-                    conn.total_changes(),
-                ))
-            })
-            .unwrap();
-        assert!(matches!(
-            store.create_read_grant_audited(
-                principal_kind,
-                "manifest-consumer",
-                SelectorKind::Exact,
-                GH_MANIFEST_ROOT_KEY_ID,
-                GrantOperation::Sign,
-                AuditCtx::admin(AuditOp::GrantCreate)
-            ),
-            Err(StoreOpError::NotFound)
-        ));
-        let after = store
-            .with_raw_conn(|conn| {
-                Ok((
-                    rows(conn, "read_grants")?,
-                    rows(conn, "audit_log")?,
-                    conn.total_changes(),
-                ))
-            })
-            .unwrap();
-        assert_eq!(after, before);
-    }
-    for operation in [
-        GrantOperation::Read,
-        GrantOperation::List,
-        GrantOperation::Open,
-        GrantOperation::Seal,
+    for credential_id in [
+        GH_MANIFEST_ROOT_KEY_ID,
+        "signing:policy-root:1",
+        "signing:policy-root:foo",
     ] {
-        store
-            .create_read_grant_audited(
-                "reserved",
-                "manifest-consumer",
-                SelectorKind::Exact,
-                GH_MANIFEST_ROOT_KEY_ID,
-                operation,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .unwrap();
+        for principal_kind in ["reserved", "enrolled"] {
+            let before = store
+                .with_raw_conn(|conn| {
+                    Ok((
+                        rows(conn, "read_grants")?,
+                        rows(conn, "audit_log")?,
+                        conn.total_changes(),
+                    ))
+                })
+                .unwrap();
+            assert!(matches!(
+                store.create_read_grant_audited(
+                    principal_kind,
+                    "manifest-consumer",
+                    SelectorKind::Exact,
+                    credential_id,
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate)
+                ),
+                Err(StoreOpError::NotFound)
+            ));
+            let after = store
+                .with_raw_conn(|conn| {
+                    Ok((
+                        rows(conn, "read_grants")?,
+                        rows(conn, "audit_log")?,
+                        conn.total_changes(),
+                    ))
+                })
+                .unwrap();
+            assert_eq!(after, before);
+        }
+        for operation in [
+            GrantOperation::Read,
+            GrantOperation::List,
+            GrantOperation::Open,
+            GrantOperation::Seal,
+        ] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "manifest-consumer",
+                    SelectorKind::Exact,
+                    credential_id,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
     }
     store
         .create_read_grant_audited(
@@ -370,6 +381,95 @@ fn gh_manifest_root_exact_sign_grant_is_refused_without_writes() {
             AuditCtx::admin(AuditOp::GrantCreate),
         )
         .unwrap();
+}
+
+#[test]
+fn policy_root_mutations_are_refused_before_duplicate_or_not_found_checks() {
+    use crate::admin_ops::{apply, AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
+    let (_root, store) = taxonomy_tests::rig("policy-root-mutations", 227);
+    let (record, _) = root_key();
+    store
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
+        .unwrap();
+    let v = ADMIN_OP_SCHEMA_V1;
+    let before = store.read_audit(None).unwrap();
+    for credential_id in [
+        GH_MANIFEST_ROOT_KEY_ID,
+        "signing:policy-root:0",
+        "signing:policy-root:foo",
+    ] {
+        let id = credential_id.to_owned();
+        for mode in [
+            StoreMode::Create,
+            StoreMode::ReplaceUnconditional,
+            StoreMode::ReplaceCas {
+                expected_hash_hex: hex32(&payload_hash(record.payload.expose())),
+            },
+        ] {
+            let error = apply(
+                &store,
+                AdminOpBody::Store {
+                    v,
+                    id: id.clone(),
+                    record: Box::new(record.clone()),
+                    audit_op: AdminAuditOp::Put,
+                    mode,
+                },
+                "operator",
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.wire_code(),
+                Some("policy_root_protected"),
+                "{id}: {error}"
+            );
+        }
+        for op in [
+            AdminOpBody::Invalidate { v, id: id.clone() },
+            AdminOpBody::Remove { v, id },
+        ] {
+            let error = apply(&store, op, "operator").unwrap_err();
+            assert_eq!(
+                error.wire_code(),
+                Some("policy_root_protected"),
+                "{credential_id}: {error}"
+            );
+        }
+    }
+    assert_eq!(store.read_audit(None).unwrap().len(), before.len());
+    let current = store.get(GH_MANIFEST_ROOT_KEY_ID).unwrap();
+    assert_eq!(current.record_version, 1);
+    assert_eq!(current.payload.expose(), record.payload.expose());
+}
+
+#[test]
+fn unselected_legacy_root_keeps_ordinary_mutation_rules_after_init() {
+    let (_root, store) = taxonomy_tests::rig("policy-root-unselected-legacy", 228);
+    let (record, _) = root_key();
+    store.create(GH_MANIFEST_ROOT_KEY_ID, &record).unwrap();
+    let configured = store.init_policy_root_admin("operator").unwrap();
+    assert_eq!(configured["credential_id"], "signing:policy-root:1");
+    assert!(matches!(
+        store.create(GH_MANIFEST_ROOT_KEY_ID, &record),
+        Err(StoreOpError::AlreadyExists)
+    ));
+    let ctx = AuditCtx::admin(AuditOp::Overwrite);
+    store
+        .overwrite_unconditional_audited(GH_MANIFEST_ROOT_KEY_ID, &record, ctx)
+        .unwrap();
+    assert!(
+        store
+            .invalidate_and_revoke_all_audited(
+                GH_MANIFEST_ROOT_KEY_ID,
+                AuditCtx::admin(AuditOp::Invalidate)
+            )
+            .unwrap()
+            .state_changed
+    );
+    store
+        .remove_audited(GH_MANIFEST_ROOT_KEY_ID, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    assert_eq!(store.show_policy_root_admin().unwrap(), configured);
 }
 
 #[test]

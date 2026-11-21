@@ -703,18 +703,32 @@ fn gh_manifest_approval_rejects_byte_tampering_and_coherent_extra_manifest_edits
     }
 }
 
+// Model an out-of-band replacement so the tests still exercise signing from a
+// store that changed underneath a pending approval, not the operator write path.
+fn replace_legacy_root_fixture(store: &EncryptedStore, record: &VaultRecord) {
+    store
+        .fenced_write_or_refuse(|tx| {
+            tx.execute(
+                "DELETE FROM credentials WHERE credential_id = ?1",
+                [GH_MANIFEST_ROOT_KEY_ID],
+            )?;
+            store.create_audited_in_tx(
+                tx,
+                GH_MANIFEST_ROOT_KEY_ID,
+                record,
+                AuditCtx::admin(AuditOp::Overwrite),
+                NOW,
+            )
+        })
+        .unwrap();
+}
+
 #[test]
 fn gh_manifest_approval_replacement_key_signs_after_its_audit_and_base_movement_refuses() {
     let (_dir, store, old_public) = ready("manifest-replacement-approval");
     let p = propose(&store, "Octo/New", NOW);
     let (record, public) = root_key();
-    store
-        .overwrite_unconditional_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &record,
-            AuditCtx::admin(AuditOp::Overwrite),
-        )
-        .unwrap();
+    replace_legacy_root_fixture(&store, &record);
     // Approving an already-pending proposal is independent of the proposal gate.
     store
         .set_manifest_one_tap_audited(false, AuditCtx::admin(AuditOp::GhManifestOneTapSet))

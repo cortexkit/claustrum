@@ -6033,11 +6033,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
     // additions include sign, the four federation verbs (transfer, remote, member,
     // federation), secret, ssh-key, provider-report, module-secret and
-    // clear-condition. Policy adds one top-level entry for its four subcommands.
+    // clear-condition. Policy and policy-root each add one top-level entry.
     assert_eq!(
         verbs.len(),
-        45,
-        "the rendered verb-table scan must include the policy command family"
+        46,
+        "the rendered verb-table scan must include the policy-root command family"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

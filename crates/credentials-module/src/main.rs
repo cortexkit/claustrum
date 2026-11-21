@@ -16921,6 +16921,15 @@ mod tests {
 
     #[tokio::test]
     async fn gh_manifest_root_sign_is_not_found_in_every_address_mode_without_writes() {
+        assert_root_sign_is_not_found_in_every_address_mode(true).await;
+    }
+
+    #[tokio::test]
+    async fn policy_root_sign_is_not_found_in_every_address_mode_without_writes() {
+        assert_root_sign_is_not_found_in_every_address_mode(false).await;
+    }
+
+    async fn assert_root_sign_is_not_found_in_every_address_mode(legacy: bool) {
         use credentials_core::store::{SetCategoryMode, GH_MANIFEST_ROOT_KEY_ID};
 
         fn snapshot(conn: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
@@ -16965,10 +16974,28 @@ mod tests {
             None,
         );
         record.audit_each_signature = true;
-        for id in [GH_MANIFEST_ROOT_KEY_ID, "signing:other-manifest-test:1"] {
+        let root_id = if legacy {
             store
-                .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+                .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
                 .unwrap();
+            GH_MANIFEST_ROOT_KEY_ID
+        } else {
+            use credentials_core::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V1};
+            let result = apply(
+                &store,
+                AdminOpBody::PolicyRootInit {
+                    v: ADMIN_OP_SCHEMA_V1,
+                },
+                "operator",
+            )
+            .unwrap();
+            assert_eq!(result["credential_id"], "signing:policy-root:1");
+            "signing:policy-root:1"
+        };
+        store
+            .create("signing:other-manifest-test:1", &record)
+            .unwrap();
+        for id in [root_id, "signing:other-manifest-test:1"] {
             store
                 .set_categories_audited(
                     id,
@@ -16978,11 +17005,11 @@ mod tests {
                 )
                 .unwrap();
         }
-        let handle = mint_test_handle(&store, GH_MANIFEST_ROOT_KEY_ID);
+        let handle = mint_test_handle(&store, root_id);
         let db = rusqlite::Connection::open(db_path).unwrap();
         // Simulate an exact grant inserted before grant creation began refusing
         // root-key Sign grants. Existing rows must not let callers sign with it.
-        db.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'manifest-exact', 'exact', ?1, 'sign', 1)", [GH_MANIFEST_ROOT_KEY_ID]).unwrap();
+        db.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'manifest-exact', 'exact', ?1, 'sign', 1)", [root_id]).unwrap();
         admin.record_bind(
             183,
             subc_protocol::Principal::Reserved {
@@ -17031,7 +17058,7 @@ mod tests {
                     kind,
                     id,
                     SelectorKind::Exact,
-                    GH_MANIFEST_ROOT_KEY_ID,
+                    root_id,
                     GrantOperation::Read,
                     AuditCtx::admin(AuditOp::GrantCreate),
                 )
@@ -17073,17 +17100,17 @@ mod tests {
             (
                 "exact",
                 183,
-                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+                json!({"credential_id":root_id,"payload_b64":"YQ=="}),
             ),
             (
                 "category",
                 184,
-                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"payload_b64":"YQ=="}),
+                json!({"credential_id":root_id,"payload_b64":"YQ=="}),
             ),
             (
                 "enrollment",
                 185,
-                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token,"payload_b64":"YQ=="}),
+                json!({"credential_id":root_id,"enrollment_token":token,"payload_b64":"YQ=="}),
             ),
         ] {
             let refused = routed_reply(&surface, &admin, channel, OP_SIGN, params).await;
@@ -17097,16 +17124,17 @@ mod tests {
                 "{mode} must write nothing, including first-use diagnostics"
             );
         }
+        let record = store.get(root_id).unwrap();
         let expected = credentials_core::signing::public_key_ed25519(
             std::str::from_utf8(record.payload.expose()).unwrap(),
         )
         .unwrap();
         for (channel, params) in [
             (183, json!({"handle":handle})),
-            (184, json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID})),
+            (184, json!({"credential_id":root_id})),
             (
                 185,
-                json!({"credential_id":GH_MANIFEST_ROOT_KEY_ID,"enrollment_token":token}),
+                json!({"credential_id":root_id,"enrollment_token":token}),
             ),
         ] {
             let (_, body) = routed_reply(&surface, &admin, channel, OP_PUBLIC_KEY, params).await;
@@ -17114,7 +17142,7 @@ mod tests {
             assert_eq!(reply["result"]["key_id"], expected.key_id);
             assert_eq!(reply["result"]["public_key_hex"], expected.public_key_hex);
         }
-        assert!(!store.get(GH_MANIFEST_ROOT_KEY_ID).unwrap().operator_sign);
+        assert!(!record.operator_sign);
     }
 
     #[tokio::test]

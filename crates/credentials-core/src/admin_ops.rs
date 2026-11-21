@@ -119,6 +119,10 @@ pub enum AdminOpBody {
     ManifestOneTapSet { v: u32, enabled: bool },
     #[serde(rename = "admin.manifest_one_tap_status")]
     ManifestOneTapStatus { v: u32 },
+    #[serde(rename = "admin.policy_root_init")]
+    PolicyRootInit { v: u32 },
+    #[serde(rename = "admin.policy_root_show")]
+    PolicyRootShow { v: u32 },
     #[serde(rename = "admin.agent_policy_sign")]
     AgentPolicySign {
         v: u32,
@@ -612,6 +616,9 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("version", version)
                 .finish(),
             AdminOpBody::ManifestList { v } | AdminOpBody::ManifestOneTapStatus { v } => {
+                f.debug_struct(self.op_name()).field("v", v).finish()
+            }
+            AdminOpBody::PolicyRootInit { v } | AdminOpBody::PolicyRootShow { v } => {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
             AdminOpBody::ManifestRetireMachine { v, member_id } => f
@@ -1120,6 +1127,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { v, .. }
             | AdminOpBody::ManifestOneTapSet { v, .. }
             | AdminOpBody::ManifestOneTapStatus { v }
+            | AdminOpBody::PolicyRootInit { v }
+            | AdminOpBody::PolicyRootShow { v }
             | AdminOpBody::AgentPolicySign { v, .. }
             | AdminOpBody::AgentPolicyList { v }
             | AdminOpBody::AgentPolicyExport { v, .. }
@@ -1255,7 +1264,9 @@ impl AdminOpBody {
             | AdminOpBody::MemberGrant { .. }
             | AdminOpBody::MemberRevoke { .. }
             | AdminOpBody::MemberList { .. } => ADMIN_OP_SCHEMA_V2,
-            AdminOpBody::Store { .. }
+            AdminOpBody::PolicyRootInit { .. }
+            | AdminOpBody::PolicyRootShow { .. }
+            | AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
@@ -1331,7 +1342,7 @@ impl AdminOpBody {
                 Some(crate::federation::VAULT_TRANSFER_ID)
             }
             AdminOpBody::ManifestSign { .. } | AdminOpBody::ManifestImport { .. }
-            | AdminOpBody::AgentPolicySign { .. } => {
+            | AdminOpBody::AgentPolicySign { .. } | AdminOpBody::PolicyRootInit { .. } => {
                 Some(crate::store::GH_MANIFEST_ROOT_KEY_ID)
             }
             AdminOpBody::RevokeHandle { .. }
@@ -1340,6 +1351,7 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
             | AdminOpBody::AgentPolicyDerive { .. }
@@ -1415,6 +1427,8 @@ impl AdminOpBody {
             AdminOpBody::ManifestRetireMachine { .. } => "admin.manifest_retire_machine",
             AdminOpBody::ManifestOneTapSet { .. } => "admin.manifest_one_tap_set",
             AdminOpBody::ManifestOneTapStatus { .. } => "admin.manifest_one_tap_status",
+            AdminOpBody::PolicyRootInit { .. } => "admin.policy_root_init",
+            AdminOpBody::PolicyRootShow { .. } => "admin.policy_root_show",
             AdminOpBody::AgentPolicySign { .. } => "admin.agent_policy_sign",
             AdminOpBody::AgentPolicyList { .. } => "admin.agent_policy_list",
             AdminOpBody::AgentPolicyExport { .. } => "admin.agent_policy_export",
@@ -1504,6 +1518,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::PolicyRootInit { .. }
+            | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::AgentPolicySign { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
@@ -1667,6 +1683,8 @@ pub fn apply(
         return Err(requires_daemon_refusal(&op));
     }
     match op {
+        AdminOpBody::PolicyRootInit { .. } => store.init_policy_root_admin(actor),
+        AdminOpBody::PolicyRootShow { .. } => store.show_policy_root_admin(),
         AdminOpBody::SshKeyAgentAllow { id, targets, .. } => {
             let enrollment = store.set_agent_ssh_audited(
                 &id,

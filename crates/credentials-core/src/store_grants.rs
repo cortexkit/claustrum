@@ -46,7 +46,7 @@ pub(super) fn validate_read_grant(
         if crate::agent_secret::is_deposit_key(selector) {
             return Err(StoreOpError::NotFound);
         }
-        if operation == GrantOperation::Sign && selector == GH_MANIFEST_ROOT_KEY_ID {
+        if operation == GrantOperation::Sign && is_policy_root_id(selector) {
             return Err(StoreOpError::NotFound);
         }
         crate::federation::transfer_key_admits_grant(

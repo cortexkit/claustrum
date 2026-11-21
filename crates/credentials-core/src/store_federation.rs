@@ -2413,6 +2413,9 @@ impl EncryptedStore {
         if crate::federation::is_vault_transfer_id(id) {
             return Err(StoreOpError::TransferKeyReserved);
         }
+        if is_policy_root_id(id) {
+            return Err(StoreOpError::PolicyRootProtected);
+        }
         if !transferable_record(&acceptance.record) {
             return Err(StoreOpError::Encode(
                 "a transfer creates only an api_key, dsn, cookie or opaque record".into(),

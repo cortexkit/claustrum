@@ -5902,6 +5902,30 @@ The master-key admin surface provides four operations with `v: 2`:
 | `admin.agent_policy_export` | `version` | Retained envelope for that version, or `not_found` |
 | `admin.agent_policy_derive` | `manifest_version`, `identities` | Canonical policy text (unsigned) |
 
+Two master-key operations with `v: 1` manage the install's signing root:
+
+| Operation | Parameters besides `v` | Result |
+|---|---|---|
+| `admin.policy_root_init` | None | `{credential_id, key_id, public_key_hex, fingerprint}` |
+| `admin.policy_root_show` | None | Same public identity, without any write |
+
+Init mints the first unused `signing:policy-root:<n>` (starting at 1 and skipping
+both local and remote rows). It refuses `policy_root_exists` if the setting is
+already present or `policy_root_established` if any signed manifest or policy
+version exists. Show refuses `policy_root_absent` if there is no usable configured
+root. These refusals have class `permanent`. The public key is 64 lowercase hex
+characters. The key id is the first eight bytes of the SHA-256 of the raw public
+key, in lowercase hex; the fingerprint is the first 16 bytes of the same digest
+in eight space-separated groups of four lowercase hex characters.
+
+The `signing:policy-root:` namespace and the legacy `signing:gh-manifest-root:1`
+do not admit exact `Sign` grants, and `credential.sign` refuses them by handle
+and by grant. Public-key reads still use `Read` authorization.
+Incoming transfers to either root id shape refuse `policy_root_protected` at
+delivery and acceptance. Store creation, replacement, invalidation and removal
+refuse the same permanent code for the reserved namespace and for the legacy id
+when it is the configured root.
+
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,
 including identities. Derive uses the embedded GitHub revision 1 rule set described

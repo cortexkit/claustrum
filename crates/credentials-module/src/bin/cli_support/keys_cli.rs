@@ -111,6 +111,42 @@ pub(super) fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Resu
     Ok(())
 }
 
+pub(super) fn guard_policy_root_args(args: &[String]) -> Result<(), CliError> {
+    match args {
+        [verb] if matches!(verb.as_str(), "init" | "show") => Ok(()),
+        _ => Err(CliError::Usage("ck auth policy-root init|show".into())),
+    }
+}
+
+pub(super) fn cmd_policy_root(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let op = if args[0] == "init" {
+        AdminOpBody::PolicyRootInit {
+            v: ADMIN_OP_SCHEMA_V1,
+        }
+    } else {
+        AdminOpBody::PolicyRootShow {
+            v: ADMIN_OP_SCHEMA_V1,
+        }
+    };
+    let result = commit_admin(global, op)?;
+    let fields = ["credential_id", "key_id", "public_key_hex", "fingerprint"];
+    let values = fields.map(|field| result[field].as_str());
+    let [Some(credential_id), Some(key_id), Some(public_key_hex), Some(fingerprint)] = values
+    else {
+        return Err(CliError::Io("invalid policy-root reply".into()));
+    };
+    println!("credential_id {credential_id}\nkey_id {key_id}\npublic_key_hex {public_key_hex}\nfingerprint {fingerprint}");
+    Ok(())
+}
+
+pub(super) fn policy_root_help(verb: &str) -> &'static str {
+    match verb {
+        "policy-root init" => "ck auth policy-root init\n\nMint this vault's first policy and manifest signing root.\nRefuses if a root is configured or signed versions already exist.",
+        "policy-root show" => "ck auth policy-root show\n\nShow the configured root's credential id, key id, public key and fingerprint.",
+        _ => "ck auth policy-root init|show\n\n  init  mint the first policy and manifest signing root\n  show  display its public identity and fingerprint",
+    }
+}
+
 pub(super) fn cmd_sign(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     use std::io::Read;
 

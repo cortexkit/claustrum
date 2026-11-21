@@ -1037,6 +1037,26 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
 }
 
 #[test]
+fn policy_root_init_refuses_a_step_51_vault_with_a_lost_root() {
+    let (_root, sqlite) = sqlite("policy-root-lost", 226);
+    migrate_through_for_test(&sqlite, 51).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([226; 32])).unwrap();
+    store.with_raw_conn(|conn| {
+        conn.execute(
+            "INSERT INTO gh_manifests VALUES (1, X'01', ?1, '0123456789abcdef', zeroblob(64), 1, 'import', NULL)",
+            ["a".repeat(64)],
+        )
+    }).unwrap();
+    migrate_through_for_test(&store.store, 52).unwrap();
+    let before = every_table_row(&store.store);
+    assert!(before["credentials"].is_empty());
+    let refused = store.init_policy_root_admin("operator").unwrap_err();
+    assert_eq!(refused.wire_code(), Some("policy_root_established"));
+    assert_eq!(refused.wire_class(), Some("permanent"));
+    assert_eq!(every_table_row(&store.store), before);
+}
+
+#[test]
 fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy() {
     use base64::Engine as _;
     use rusqlite::{params, types::Value};

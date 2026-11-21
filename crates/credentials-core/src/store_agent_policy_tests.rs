@@ -506,7 +506,11 @@ fn configured_policy_root_refuses_a_planted_legacy_approval() {
     install_root(&store);
     let (record, pair) = root_key();
     let id = "signing:policy-root:1";
-    store.create(id, &record).unwrap();
+    store
+        .fenced_write_or_refuse(|tx| {
+            store.create_audited_in_tx(tx, id, &record, AuditCtx::admin(AuditOp::Put), 100)
+        })
+        .unwrap();
     store
         .with_raw_conn(|conn| {
             conn.execute(

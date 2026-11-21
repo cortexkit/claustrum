@@ -456,7 +456,9 @@ impl GitHubAppAdmin {
             }
         }
         if !relay.pending_put_confirmed() {
-            let pending = relay.pending().expect("a candidate was staged");
+            let Some(pending) = relay.pending() else {
+                return refusal(HOOK_UPDATE_FAILED);
+            };
             if let Err(failure) = self
                 .put_stored_secret(engine, deadline, &relay, pending)
                 .await
@@ -474,7 +476,9 @@ impl GitHubAppAdmin {
                 return refusal(HOOK_UPDATE_FAILED);
             }
         }
-        let pending = relay.pending().expect("a confirmed candidate was staged");
+        let Some(pending) = relay.pending() else {
+            return refusal(HOOK_UPDATE_FAILED);
+        };
         if !self
             .patch_github_hook(engine, deadline, &relay, pending)
             .await

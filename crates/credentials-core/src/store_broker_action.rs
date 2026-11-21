@@ -408,13 +408,13 @@ fn next_request_id(conn: &Connection, now_ms: u64) -> rusqlite::Result<String> {
         if !valid_ulid(&last_id) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let last = last_id.bytes().fold(0_u128, |value, ch| {
-            (value << 5)
-                | CROCKFORD
-                    .iter()
-                    .position(|&digit| digit == ch)
-                    .expect("validated ULID") as u128
+        let last = last_id.bytes().try_fold(0_u128, |value, ch| {
+            let digit = CROCKFORD.iter().position(|&digit| digit == ch)?;
+            Some((value << 5) | digit as u128)
         });
+        let Some(last) = last else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
         if value <= last {
             value = last.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
         }

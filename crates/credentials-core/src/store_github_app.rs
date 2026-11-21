@@ -91,13 +91,18 @@ impl EncryptedStore {
         };
         let record = VaultRecord::new_oauth("operator", ADAPTER_NAME, oauth, Vec::new());
         let slot = relay.map(|(slot, _)| slot);
-        let companion = relay.map(|(_, secret)| {
-            let payload = serde_json::to_vec(&WebhookRecord {
-                current: secret.expose(),
+        let unencodable = |_| StoreOpError::Encode("could not encode GitHub App material".into());
+        let companion = relay
+            .map(|(_, secret)| {
+                serde_json::to_vec(&WebhookRecord {
+                    current: secret.expose(),
+                })
+                .map(|payload| {
+                    VaultRecord::new_static(CredentialKind::Opaque, "operator", payload, None)
+                })
             })
-            .expect("a string field always serializes");
-            VaultRecord::new_static(CredentialKind::Opaque, "operator", payload, None)
-        });
+            .transpose()
+            .map_err(unencodable)?;
         let audit_input = Zeroizing::new(
             serde_json::to_vec(&(
                 app_id,
@@ -108,7 +113,7 @@ impl EncryptedStore {
                 slot,
                 relay.map(|(_, secret)| secret.expose()),
             ))
-            .expect("strings, bytes and an App id always serialize"),
+            .map_err(unencodable)?,
         );
         let payload_hash = hex32(&crate::audit::payload_fingerprint(
             &self.audit_key,

@@ -8,6 +8,7 @@ use super::agent_policy::{
     active_agent_policy_version_conn, head_agent_policy_conn, AgentPolicySource, AgentPolicyVersion,
 };
 use super::gh_admin::{manifest_root_error, sql};
+use super::gh_manifests::ManifestRootReadError;
 use super::{
     append_audit_tx, envelope, now_ms, AuditOp, AuditRecord, CredentialKind, EncryptedStore,
     RecordBinding, RecordState, StoreOpError, VaultRecord, GH_MANIFEST_ROOT_KEY_ID,
@@ -26,6 +27,24 @@ pub(super) struct PreparedAgentPolicy<'a> {
     bytes: &'a [u8],
     hash: String,
     signature: PreparedEd25519Signature<'a>,
+}
+
+pub(super) enum PrepareAgentPolicyError {
+    Root(ManifestRootReadError),
+    UnusableKey,
+    RootKeyIdMismatch,
+    TooLarge,
+}
+
+impl From<PrepareAgentPolicyError> for StoreOpError {
+    fn from(error: PrepareAgentPolicyError) -> Self {
+        match error {
+            PrepareAgentPolicyError::Root(error) => manifest_root_error(error.into()),
+            PrepareAgentPolicyError::UnusableKey => unusable_root(),
+            PrepareAgentPolicyError::RootKeyIdMismatch => refusal("policy_root_key_id_mismatch"),
+            PrepareAgentPolicyError::TooLarge => policy_error(PolicyError::TooLarge),
+        }
+    }
 }
 
 pub(super) struct AgentPolicyApproval<'a> {
@@ -111,17 +130,16 @@ impl EncryptedStore {
         policy: &AgentPolicy,
         bytes: &'a [u8],
         input: &'a [u8],
-    ) -> Result<PreparedAgentPolicy<'a>, StoreOpError> {
-        let root = self
-            .gh_manifest_root_in_tx(tx)
-            .map_err(manifest_root_error)?;
-        let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| unusable_root())?;
+    ) -> Result<PreparedAgentPolicy<'a>, PrepareAgentPolicyError> {
+        use PrepareAgentPolicyError::{Root, RootKeyIdMismatch, TooLarge, UnusableKey};
+        let root = self.read_gh_manifest_root_in_tx(tx).map_err(Root)?;
+        let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| UnusableKey)?;
         let signature = prepare_ed25519(pem, input).map_err(|error| match error {
-            SignError::TooLarge { .. } => policy_error(PolicyError::TooLarge),
-            SignError::UnusableKey(_) => unusable_root(),
+            SignError::TooLarge { .. } => TooLarge,
+            SignError::UnusableKey(_) => UnusableKey,
         })?;
         if signature.key_id() != policy.root_key_id {
-            return Err(refusal("policy_root_key_id_mismatch"));
+            return Err(RootKeyIdMismatch);
         }
         Ok(PreparedAgentPolicy {
             version: policy.version,

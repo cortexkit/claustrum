@@ -1,5 +1,6 @@
 use super::agent_policy::{head_agent_policy_conn, AgentPolicySource};
-use super::agent_policy_admin::AgentPolicyApproval;
+use super::agent_policy_admin::{AgentPolicyApproval, PrepareAgentPolicyError};
+use super::gh_manifests::ManifestRootReadError;
 use super::{
     append_audit_tx, gh_proposals, hex32, payload_hash, EncryptedStore, GhManifestProposal,
     GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID,
@@ -74,7 +75,7 @@ fn one_tap_policy(
     mut head: AgentPolicy,
     p: &GhManifestProposal,
     manifest: &GhManifest,
-) -> Result<(AgentPolicy, Vec<u8>), SecretError> {
+) -> Result<(AgentPolicy, Vec<u8>, Vec<u8>), SecretError> {
     use SecretError::{PolicyBindingConflict, PolicyTooLarge};
 
     // A parsed head's version fits within the JSON safe integer range, below i64::MAX.
@@ -120,7 +121,8 @@ fn one_tap_policy(
     {
         return Err(PolicyBindingConflict);
     }
-    Ok((policy, bytes))
+    let input = signed_input(&bytes).map_err(|_| PolicyTooLarge)?;
+    Ok((policy, bytes, input))
 }
 
 fn reply(p: &GhManifestProposal) -> Value {
@@ -194,6 +196,19 @@ impl EncryptedStore {
             },
             None => None,
         };
+        let prepared_policy = if let Some((policy, bytes, input)) = &policy {
+            use PrepareAgentPolicyError::{Root, RootKeyIdMismatch, TooLarge, UnusableKey};
+            match self.prepare_agent_policy_in_tx(tx, policy, bytes, input) {
+                Ok(prepared) => Some(prepared),
+                Err(TooLarge) => return Ok(Err(SecretError::PolicyTooLarge)),
+                Err(Root(ManifestRootReadError::Sql(error))) => return Err(error),
+                Err(Root(ManifestRootReadError::Unusable(_)) | UnusableKey | RootKeyIdMismatch) => {
+                    return Ok(Err(SecretError::ManifestSetupIncomplete));
+                }
+            }
+        } else {
+            None
+        };
 
         let actor = authority.actor(fingerprint, true);
         let approval = append_audit_tx(
@@ -251,11 +266,7 @@ impl EncryptedStore {
                 alarm: None,
             },
         )?;
-        if let Some((policy, bytes)) = policy {
-            let input = signed_input(&bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let prepared = self
-                .prepare_agent_policy_in_tx(tx, &policy, &bytes, &input)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if let Some(prepared) = prepared_policy {
             self.sign_and_store_agent_policy_in_tx(
                 tx,
                 prepared,

@@ -378,3 +378,31 @@ fn one_tap_policy_insert_failure_aborts_manifest_and_sibling_changes() {
         2
     );
 }
+
+#[test]
+fn one_tap_policy_refuses_a_replaced_manifest_root_without_writing() {
+    let (_dir, store, public) = ready("one-tap-policy-root-replaced");
+    let policy = initial_policy(&public);
+    sign_policy(&store, &policy, 28);
+    let p = propose(&store, "Octo/New", NOW);
+    let (replacement, replacement_public) = super::root_key();
+    assert_ne!(policy.root_key_id, key_id_for_public(&replacement_public));
+    let unusable = crate::record::VaultRecord::new_static(
+        crate::record::CredentialKind::SigningKey,
+        "operator",
+        b"not a PKCS#8 key".to_vec(),
+        None,
+    );
+    let op = approve(&envelope(&p, NOW));
+    for record in [replacement, unusable] {
+        store
+            .overwrite_unconditional_audited(
+                GH_MANIFEST_ROOT_KEY_ID,
+                &record,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        refuses(&store, &op, NOW, SecretError::ManifestSetupIncomplete);
+        assert_pending(&store, &p.proposal_id);
+    }
+}

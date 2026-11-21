@@ -38,6 +38,20 @@ pub struct GhManifestVersion<'a> {
     pub approval_audit_seq: Option<i64>,
 }
 
+pub(super) enum ManifestRootReadError {
+    Sql(rusqlite::Error),
+    Unusable(StoreOpError),
+}
+
+impl From<ManifestRootReadError> for StoreOpError {
+    fn from(error: ManifestRootReadError) -> Self {
+        match error {
+            ManifestRootReadError::Sql(error) => Self::Store(error.to_string()),
+            ManifestRootReadError::Unusable(error) => error,
+        }
+    }
+}
+
 impl EncryptedStore {
     /// Sign exact manifest bytes and append their plain SHA-256 commitment in the
     /// caller's fenced write transaction. Read the key here, not before taking the
@@ -78,7 +92,15 @@ impl EncryptedStore {
         &self,
         tx: &rusqlite::Transaction<'_>,
     ) -> Result<VaultRecord, StoreOpError> {
-        let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
+        self.read_gh_manifest_root_in_tx(tx).map_err(Into::into)
+    }
+
+    pub(super) fn read_gh_manifest_root_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<VaultRecord, ManifestRootReadError> {
+        use ManifestRootReadError::{Sql, Unusable};
+        let not_found = || Unusable(StoreOpError::NotFound);
         let (version, state, blob): (i64, String, Vec<u8>) = tx
             .query_row(
                 "SELECT record_version, state, envelope FROM credentials WHERE credential_id = ?1",
@@ -86,10 +108,10 @@ impl EncryptedStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
-            .map_err(sql_error)?
-            .ok_or(StoreOpError::NotFound)?;
+            .map_err(Sql)?
+            .ok_or_else(not_found)?;
         if RecordState::from_str(&state) != RecordState::Active {
-            return Err(StoreOpError::NotFound);
+            return Err(not_found());
         }
         // Ordinary reads can quarantine a broken record through another write. This
         // transaction must instead fail without attempting a nested store mutation.
@@ -101,11 +123,11 @@ impl EncryptedStore {
                 record_version: version as u64,
             },
         )
-        .map_err(StoreOpError::Decrypt)?;
-        let record =
-            VaultRecord::decode(&plaintext).map_err(|e| StoreOpError::Corrupt(e.to_string()))?;
+        .map_err(|error| Unusable(StoreOpError::Decrypt(error)))?;
+        let record = VaultRecord::decode(&plaintext)
+            .map_err(|error| Unusable(StoreOpError::Corrupt(error.to_string())))?;
         if record.kind != CredentialKind::SigningKey {
-            return Err(StoreOpError::NotFound);
+            return Err(not_found());
         }
         Ok(record)
     }

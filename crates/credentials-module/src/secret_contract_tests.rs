@@ -1719,8 +1719,9 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
             let rest = &SECRET_CONTRACT_DOC[at + marker.len()..];
             &rest[..rest.find(" -->").expect("golden marker end")]
         })
-        // Manifest goldens have their own producer-driven completeness check.
-        .filter(|id| !id.starts_with("manifest."))
+        // Manifest and policy goldens have their own producer-driven checks
+        // (manifest_tests.rs and policy_reads_tests.rs).
+        .filter(|id| !id.starts_with("manifest.") && !id.starts_with("policy."))
         .collect();
     let checked: std::collections::BTreeSet<&str> = SECRET_GOLDEN_IDS.iter().copied().collect();
     assert_eq!(
@@ -2336,9 +2337,12 @@ fn local_ops_preserve_every_legacy_golden_byte() {
         let (id, rest) = part.split_once(" -->\n```json\n").expect("golden fence");
         // The attestation refusal was added after the legacy byte pin; its own
         // golden is checked by secret_error_codes_are_golden_and_match_the_doc_table.
+        // Policy read goldens were added after the pin too; policy_reads_tests.rs
+        // checks them against the dispatcher's output.
         if SC_LOCAL_GOLDENS.contains(&id)
             || SC_BASIC_AUTH_GOLDENS.contains(&id)
             || id == "error.phone_not_attested"
+            || id.starts_with("policy.")
         {
             continue;
         }

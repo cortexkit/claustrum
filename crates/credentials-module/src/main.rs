@@ -3046,7 +3046,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.active".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.watch".into(), description: None, kind: ManagementOperationKind::Query },
-            ManagementOperation { name: policy_token::OP_POLICY_TOKEN.into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "credential.policy_token".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },

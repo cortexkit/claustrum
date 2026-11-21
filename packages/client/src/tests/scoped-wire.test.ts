@@ -60,6 +60,38 @@ test('list_scoped emits only the enrollment token and decodes the producer reply
     const inventory = await client.listScoped('fixture-token')
     expect(requests).toEqual([{ enrollment_token: 'fixture-token' }])
     expect(inventory.rows.find((row) => row.id === 'oauth:anthropic')?.refreshAdapter).toBe('anthropic')
+    expect(inventory.rows.find((row) => row.id === 'github_app:plex-alfonso')?.githubApp)
+      .toEqual({ appId: '4617236', slug: 'plex-alfonso' })
+  } finally {
+    client.close()
+  }
+})
+
+test('list_scoped preserves the producer App ID string and rejects malformed GitHub App rows', async () => {
+  const vector = JSON.parse(readFileSync(join(
+    import.meta.dir,
+    '../../../../crates/credentials-module/tests/vectors/list-scoped-v2.json',
+  ), 'utf8')) as { cases: { case: string; reply: { result: { credentials: Record<string, unknown>[] } } }[] }
+  const reply = vector.cases.find((entry) => entry.case === 'github_app_identity')!.reply
+  const client = await clientFor('credential.list_scoped', undefined, () => reply)
+  try {
+    const { rows } = await client.listScoped()
+    expect(rows[0]?.githubApp).toEqual({ appId: '9007199254740993', slug: 'listing-vector' })
+
+    const row = reply.result.credentials[0]!
+    delete row.github_app
+    const legacy = await client.listScoped()
+    expect(legacy.rows).toHaveLength(1)
+    expect(legacy.rows[0]).not.toHaveProperty('githubApp')
+
+    for (const malformed of [
+      { app_id: 4617236, slug: 'listing-vector' },
+      { app_id: '9007199254740993' },
+      null,
+    ]) {
+      row.github_app = malformed
+      expect(await rejectionOf(client.listScoped())).toMatchObject({ code: 'invalid_response' })
+    }
   } finally {
     client.close()
   }

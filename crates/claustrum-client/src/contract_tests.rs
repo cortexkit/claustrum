@@ -542,6 +542,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     condition: None,
+                    github_app: None,
                     fusiform_provider_id: None,
                     hosts: Some(vec![
                         "cloudcode-pa.googleapis.com".into(),
@@ -569,6 +570,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     condition: None,
+                    github_app: None,
                     fusiform_provider_id: Some("openrouter".into()),
                     hosts: Some(vec!["openrouter.ai".into()]),
                     id: "apikey:openrouter".into(),
@@ -613,6 +615,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     condition: None,
+                    github_app: None,
                     fusiform_provider_id: None,
                     hosts: Some(vec!["chatgpt.com".into()]),
                     id: "chatgpt:openai".into(),
@@ -637,6 +640,10 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     condition: None,
+                    github_app: Some(ListedGitHubApp {
+                        app_id: "4617236".into(),
+                        slug: "plex-alfonso".into(),
+                    }),
                     fusiform_provider_id: None,
                     hosts: None,
                     id: "github_app:plex-alfonso".into(),
@@ -661,6 +668,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     plan_tier_observed_at_ms: None,
                     plan_tier_since_ms: None,
                     condition: None,
+                    github_app: None,
                     fusiform_provider_id: None,
                     hosts: Some(vec!["api.anthropic.com".into()]),
                     id: "oauth:anthropic".into(),
@@ -692,11 +700,51 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "AKtuUXnHqM1ZUANENNaZlVaLGL1AmV81zx+HSNMj14w=".into(),
+            view: "ZpQXQD4HjW5CEc306xB9eZGX6QWH0btDat2EE9trGvk=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }
     );
+}
+
+#[test]
+fn github_app_listing_preserves_string_id_and_quarantines_malformed_rows() {
+    let mut reply = producer_vector_reply("list-scoped-v2.json", "github_app_identity");
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    assert_eq!(listing.credentials.len(), 1);
+    assert_eq!(
+        listing.credentials[0].github_app,
+        Some(ListedGitHubApp {
+            app_id: "9007199254740993".into(),
+            slug: "listing-vector".into(),
+        })
+    );
+
+    let rows = reply["result"]["credentials"].as_array_mut().unwrap();
+    let mut legacy = rows[0].clone();
+    legacy.as_object_mut().unwrap().remove("github_app");
+    rows.push(legacy);
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    assert_eq!(listing.credentials.len(), 2);
+    assert_eq!(listing.credentials[1].github_app, None);
+
+    for (malformed, field) in [
+        (
+            json!({ "app_id": 9007199254740993u64, "slug": "listing-vector" }),
+            "github_app.app_id",
+        ),
+        (json!({ "app_id": "9007199254740993" }), "github_app.slug"),
+        (Value::Null, "github_app"),
+    ] {
+        let mut broken = reply.clone();
+        broken["result"]["credentials"][0]["github_app"] = malformed;
+        let listing = decode_list_scoped_reply(broken).unwrap();
+        assert_eq!(listing.credentials.len(), 1);
+        assert_eq!(listing.credentials[0].github_app, None);
+        assert_eq!(listing.undecodable_credentials.len(), 1);
+        assert!(listing.undecodable_credentials[0]
+            .starts_with(&format!("github_app:listing-vector: {field} ")));
+    }
 }
 
 #[test]
@@ -712,6 +760,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 plan_tier_observed_at_ms: None,
                 plan_tier_since_ms: None,
                 condition: None,
+                github_app: None,
                 fusiform_provider_id: None,
                 hosts: Some(vec!["api.anthropic.com".into()]),
                 id: "oauth:anthropic".into(),

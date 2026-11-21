@@ -51,6 +51,20 @@ impl CredentialConsumerConnector for ConsumerConnector {
     > {
         connect(Arc::clone(&self.0), identity())
     }
+
+    fn connect_policy_watch(
+        &self,
+    ) -> CredentialResolverFuture<
+        '_,
+        Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
+    > {
+        // The SDK shares routes with the same bind identity. Use a separate bind
+        // from unary calls and scoped watches, without overriding the attested principal.
+        connect(
+            Arc::clone(&self.0),
+            BindIdentity::new("claustrum-client".to_owned(), "policy-watch".to_owned()),
+        )
+    }
 }
 
 struct ConsumerConnection {
@@ -114,6 +128,12 @@ impl CredentialConsumerConnection for ConsumerConnection {
         enrollment_token: Option<String>,
     ) -> CredentialResolverFuture<'static, Result<ScopedWatch, CredentialResolverError>> {
         Box::pin(watch::start_scoped_watch(*self, enrollment_token))
+    }
+
+    fn into_policy_watch(
+        self: Box<Self>,
+    ) -> CredentialResolverFuture<'static, Result<PolicyWatch, CredentialResolverError>> {
+        Box::pin(watch::start_policy_watch(*self))
     }
 
     fn credential_request<'a>(

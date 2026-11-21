@@ -21,11 +21,14 @@ export {
 } from './errors.js'
 export {
   ClaustrumClient,
+  type ActivePolicy,
   type ClaustrumClientOptions,
   type ClaustrumConnector,
   type ClaustrumReporterSource,
   type CredentialStatus,
   type EnrollmentPollOutcome,
+  type PolicyToken,
+  type PolicyTokenRequest,
   type ScopedGrantTuple,
   type ScopedInventory,
   type ScopedInventoryRow,
@@ -34,6 +37,8 @@ export {
 } from './wire.js'
 export {
   ScopedWatchError,
+  type PolicyWatch,
+  type PolicyWatchNotice,
   type ScopedWatch,
   type ScopedWatchNotice,
   type ScopedWatchOptions,

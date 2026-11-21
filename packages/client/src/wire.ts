@@ -10,7 +10,10 @@ import {
   hasCredentialError,
 } from './errors.js'
 import { storeIdentity } from './identity.js'
-import { openScopedWatch, type ScopedWatch, type ScopedWatchNotice, type ScopedWatchOptions } from './watch.js'
+import {
+  isLowerHex, openPolicyWatch, openScopedWatch, type PolicyWatch, type PolicyWatchNotice,
+  type ScopedWatch, type ScopedWatchNotice, type ScopedWatchOptions,
+} from './watch.js'
 
 const CLAUSTRUM_MODULE_ID = 'claustrum'
 const RECONNECT_BACKOFF_MS = 60_000
@@ -170,6 +173,47 @@ export type ClaustrumReporterSource =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export interface ActivePolicy {
+  readonly version: number
+  readonly policySha256: string
+  readonly policyText: string
+  readonly manifestVersion: number
+}
+
+export interface PolicyTokenRequest {
+  readonly identity: string
+  readonly service: string
+  readonly kind: string
+  readonly resource: string
+  readonly policyVersion: number
+}
+
+export interface PolicyToken {
+  readonly token: string
+  readonly expiresAtMs: number
+  readonly repositories: readonly string[]
+  readonly permissions: Readonly<Record<string, string>>
+}
+
+function decodeActivePolicy(response: unknown, log: (errorClass: string) => void): ActivePolicy | null {
+  const result = policyResult(response, log)
+  const { version, policy_sha256, policy_text, manifest_version } = result
+  if (version === null && policy_sha256 === null && policy_text === null && manifest_version === null) return null
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version <= 0 ||
+    !isLowerHex(policy_sha256, 64) || typeof policy_text !== 'string' || policy_text.length === 0 ||
+    typeof manifest_version !== 'number' || !Number.isSafeInteger(manifest_version) || manifest_version <= 0) {
+    throw asCredentialError(response, 'invalid_response', log)
+  }
+  return { version, policySha256: policy_sha256, policyText: policy_text, manifestVersion: manifest_version }
+}
+
+function policyResult(response: unknown, log: (errorClass: string) => void): Record<string, unknown> {
+  if (hasCredentialError(response) || !isRecord(response) || !isRecord(response.result)) {
+    throw asCredentialError(response, 'invalid_response', log)
+  }
+  return response.result
 }
 
 function asRecordVersion(value: unknown): number | undefined {
@@ -440,6 +484,38 @@ export class ClaustrumClient {
         { identity: this.#identity, consumerIdentity: null })
       return decodeScopedInventory(response, this.#logger)
     })
+  }
+
+  /** Read the active policy, or null if no policy is active. Policy text is preserved verbatim. */
+  async policyActive(): Promise<ActivePolicy | null> {
+    return decodeActivePolicy(await this.#call('policy.active', {}), this.#logger)
+  }
+
+  /** Open one policy watch on a dedicated route. The caller owns reconnecting and rereading. */
+  policyWatch(onNotice: (notice: PolicyWatchNotice) => void): PolicyWatch {
+    const client = this.#client
+    return openPolicyWatch(client, this.#identity, onNotice, async () => {
+      const response = await this.#send(client, 'policy.active', {})
+      return decodeActivePolicy(response, this.#logger)
+    })
+  }
+
+  /** Request a policy-narrowed token without retrying or falling back to a broad token. */
+  async policyToken(input: PolicyTokenRequest): Promise<PolicyToken> {
+    const response = await this.#callOnce('credential.policy_token', {
+      identity: input.identity,
+      service: input.service,
+      kind: input.kind,
+      resource: input.resource,
+      policy_version: input.policyVersion,
+    })
+    const { token, expires_at_ms, repositories, permissions } = policyResult(response, this.#logger)
+    if (typeof token !== 'string' || token.length === 0 ||
+      typeof expires_at_ms !== 'number' || !Number.isSafeInteger(expires_at_ms) || expires_at_ms < 0 ||
+      !isStringArray(repositories) || !isStringRecord(permissions)) {
+      throw asCredentialError(response, 'invalid_response', this.#logger)
+    }
+    return { token, expiresAtMs: expires_at_ms, repositories, permissions }
   }
 
   /**
@@ -782,6 +858,8 @@ export interface ScopedInventoryRow {
   readonly planTierSinceMs?: number
   /** A provider condition separate from state. Future reasons are open strings. */
   readonly condition?: { readonly reason: string; readonly sinceMs: number }
+  /** Recorded GitHub App identity. The decimal App ID stays a string to preserve precision. */
+  readonly githubApp?: { readonly appId: string; readonly slug: string }
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
@@ -949,6 +1027,15 @@ export function decodeScopedInventory(
       }
       condition = { reason: rawCondition.reason, sinceMs: rawCondition.since_ms }
     }
+    const rawGitHubApp = row.github_app
+    let githubApp: ScopedInventoryRow['githubApp']
+    if (rawGitHubApp !== undefined) {
+      if (!isRecord(rawGitHubApp) || typeof rawGitHubApp.app_id !== 'string' || rawGitHubApp.app_id.length === 0 ||
+        typeof rawGitHubApp.slug !== 'string' || rawGitHubApp.slug.length === 0) {
+        throw asCredentialError(response, 'invalid_response', logUnknownClass)
+      }
+      githubApp = { appId: rawGitHubApp.app_id, slug: rawGitHubApp.slug }
+    }
     if (
       !isOptionalString(provider) || !isOptionalString(fusiformProviderId) ||
       (hosts !== undefined && !isStringArray(hosts)) || !isOptionalString(incarnation) ||
@@ -983,6 +1070,7 @@ export function decodeScopedInventory(
       planTierObservedAtMs,
       planTierSinceMs,
       ...(condition === undefined ? {} : { condition }),
+      ...(githubApp === undefined ? {} : { githubApp }),
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),

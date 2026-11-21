@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { ClaustrumClient, ScopedWatchError, type ScopedWatchNotice } from '../index'
+import { ClaustrumClient, ScopedWatchError, type PolicyWatchNotice, type ScopedWatchNotice } from '../index'
 import { decodeScopedWatchNotice } from '../watch'
 import { rejectionOf } from './settle'
 
@@ -61,6 +61,80 @@ async function clientWith(daemon: WatchDaemon) {
   return ClaustrumClient.connect({ connectionFile: '/nonexistent/watch.json', identity: { project_root: '/project' } as never,
     connector: async () => daemon as never, logger: () => {} })
 }
+
+function policySample(caseName: string) {
+  const contract = readFileSync(new URL('../../../../docs/wire-contract-v1.md', import.meta.url), 'utf8')
+  const sample = contract.split(`<!-- golden:${caseName} -->\n\`\`\`json\n`)[1]?.split('\n```')[0]
+  if (sample === undefined) throw new Error(`missing policy wire sample: ${caseName}`)
+  return JSON.parse(sample)
+}
+
+test('policyActive preserves the exact policy text and distinguishes no policy from a refusal', async () => {
+  const daemon = new WatchDaemon()
+  const client = await clientWith(daemon)
+  try {
+    daemon.reply = policySample('policy.active.none')
+    expect(await client.policyActive()).toBeNull()
+    const ready = policySample('policy.active.ready')
+    daemon.reply = ready
+    expect(await client.policyActive()).toEqual({
+      version: 1, manifestVersion: 41, policySha256: ready.result.policy_sha256, policyText: ready.result.policy_text,
+    })
+    daemon.reply = refusal
+    expect(await rejectionOf(client.policyActive())).toMatchObject({ code: 'not_found', class: 'permanent' })
+    daemon.reply = { result: { ...ready.result, policy_text: null } }
+    expect(await rejectionOf(client.policyActive())).toMatchObject({ code: 'invalid_response' })
+    expect(daemon.reads.map((call) => call.slice(0, 3))).toEqual(Array(4).fill(['claustrum', 'policy.active', {}]))
+  } finally {
+    client.close()
+  }
+})
+
+test('policyWatch decodes both vault snapshots and confirms a zero-notice close once', async () => {
+  const daemon = new WatchDaemon()
+  const active = policySample('policy.watch.changed')
+  daemon.scripts = [{ notices: [encode(policySample('policy.watch.initial')), encode(active)] }, { notices: [] }]
+  const client = await clientWith(daemon)
+  try {
+    const received: PolicyWatchNotice[] = []
+    expect(await client.policyWatch((notice) => received.push(notice)).closed).toEqual({ kind: 'ended' })
+    expect(received).toEqual([
+      { kind: 'changed', seq: 1, epoch: '00112233445566778899aabbccddeeff', version: null, policySha256: null },
+      { kind: 'changed', seq: 2, epoch: '00112233445566778899aabbccddeeff', version: 1, policySha256: active.policy_sha256 },
+    ])
+    expect(daemon.reads).toHaveLength(0)
+    daemon.reply = refusal
+    expect(await client.policyWatch(() => {}).closed).toMatchObject({ kind: 'refused', error: { code: 'not_found' } })
+    expect(daemon.reads.map((call) => call.slice(0, 3))).toEqual([['claustrum', 'policy.active', {}]])
+    expect(daemon.requests).toEqual(Array(2).fill({ method: 'policy.watch', params: {} }))
+  } finally {
+    client.close()
+  }
+})
+
+test('policyToken sends the exact request and never falls back after a refusal', async () => {
+  const daemon = new WatchDaemon()
+  const client = await clientWith(daemon)
+  const input = { identity: 'github_app:agent', service: 'github', kind: 'add_issue_comment', resource: 'org/r', policyVersion: 1 }
+  try {
+    daemon.reply = { result: {
+      token: 'fixture-token-1', expires_at_ms: 4_102_444_800_000, repositories: ['org/r'],
+      permissions: { issues: 'write', pull_requests: 'write' },
+    } }
+    expect(await client.policyToken(input)).toEqual({
+      token: 'fixture-token-1', expiresAtMs: 4_102_444_800_000, repositories: ['org/r'],
+      permissions: { issues: 'write', pull_requests: 'write' },
+    })
+    daemon.reply = { result: { error: { code: 'policy_version_not_active', class: 'permanent' } } }
+    expect(await rejectionOf(client.policyToken(input))).toMatchObject({ code: 'policy_version_not_active', class: 'permanent' })
+    expect(daemon.reads.map((call) => call.slice(0, 3))).toEqual(Array(2).fill([
+      'claustrum', 'credential.policy_token',
+      { identity: 'github_app:agent', service: 'github', kind: 'add_issue_comment', resource: 'org/r', policy_version: 1 },
+    ]))
+  } finally {
+    client.close()
+  }
+})
 
 test('watch stand-in rejects op and extra read-envelope keys', async () => {
   for (const body of [

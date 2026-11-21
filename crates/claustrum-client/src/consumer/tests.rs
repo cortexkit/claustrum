@@ -413,6 +413,127 @@ async fn consumer_watch_drains_notices_and_confirms_empty_streams() {
 }
 
 #[tokio::test]
+async fn policy_calls_use_the_attested_route_and_decode_vault_samples() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let sample = |case: &str| {
+        let contract = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/wire-contract-v1.md"
+        ))
+        .unwrap();
+        let (_, rest) = contract
+            .split_once(&format!("<!-- golden:{case} -->\n```json\n"))
+            .unwrap();
+        serde_json::from_str::<Value>(rest.split_once("\n```").unwrap().0).unwrap()
+    };
+    let ready = sample("policy.active.ready");
+    let request = PolicyTokenRequest {
+        identity: "github_app:agent",
+        service: "github",
+        kind: "add_issue_comment",
+        resource: "org/r",
+        policy_version: 1,
+    };
+    let calls = async {
+        assert!(resolver.policy_active().await.unwrap().is_none());
+        let active = resolver.policy_active().await.unwrap().unwrap();
+        assert_eq!(active.version, 1);
+        assert_eq!(active.manifest_version, 41);
+        assert_eq!(
+            active.policy_text,
+            ready["result"]["policy_text"].as_str().unwrap()
+        );
+        let mut watch = resolver.policy_watch().await.unwrap();
+        let none = watch.next().await.unwrap();
+        assert_eq!(
+            (none.seq, none.version, none.policy_sha256),
+            (1, None, None)
+        );
+        let changed = watch.next().await.unwrap();
+        assert_eq!((changed.seq, changed.version), (2, Some(1)));
+        assert_eq!(
+            changed.policy_sha256.as_deref(),
+            Some(active.policy_sha256.as_str())
+        );
+        assert!(watch.next().await.is_none());
+        let ScopedWatchOutcome::Refused(error) = watch.closed().await else {
+            panic!("expected a terminal role refusal");
+        };
+        assert_eq!(error.code(), "not_found");
+        assert_eq!(error.class, CredentialErrorClass::Permanent);
+
+        let token = resolver.policy_token(request).await.unwrap();
+        assert_eq!(token.token.expose(), "fixture-token-1");
+        assert_eq!(token.expires_at_ms, 4_102_444_800_000);
+        assert_eq!(token.repositories, ["org/r"]);
+        assert_eq!(
+            token.permissions,
+            BTreeMap::from([
+                ("issues".into(), "write".into()),
+                ("pull_requests".into(), "write".into()),
+            ])
+        );
+        assert!(!format!("{token:?}").contains("fixture-token-1"));
+        let error = resolver.policy_token(request).await.unwrap_err();
+        assert_eq!(error.code(), "policy_version_not_active");
+        assert_eq!(error.class, CredentialErrorClass::Permanent);
+    };
+    let server = async {
+        let (first, body) = rig.next().await;
+        assert_eq!(body, json!({"method":"policy.active","params":{}}));
+        rig.reply(&first, FrameType::Response, sample("policy.active.none"))
+            .await;
+        let (second, body) = rig.next().await;
+        assert_eq!(body, json!({"method":"policy.active","params":{}}));
+        rig.reply(&second, FrameType::Response, ready.clone()).await;
+        let (watch, body) = rig.next().await;
+        assert_eq!(body, json!({"method":"policy.watch","params":{}}));
+        assert!(watch.header.flags.is_subscription());
+        assert_ne!(first.header.channel, watch.header.channel);
+        rig.reply(
+            &watch,
+            FrameType::StreamData,
+            sample("policy.watch.initial"),
+        )
+        .await;
+        rig.reply(
+            &watch,
+            FrameType::StreamData,
+            sample("policy.watch.changed"),
+        )
+        .await;
+        rig.reply(
+            &watch,
+            FrameType::Response,
+            json!({"result":{"error":{"code":"not_found","class":"permanent"}}}),
+        )
+        .await;
+        let token_request = json!({"method":"credential.policy_token","params":{
+            "identity":"github_app:agent","service":"github","kind":"add_issue_comment","resource":"org/r","policy_version":1,
+        }});
+        let (frame, body) = rig.next().await;
+        assert_eq!(body, token_request);
+        rig.reply(&frame, FrameType::Response, json!({"result":{
+            "token":"fixture-token-1","expires_at_ms":4_102_444_800_000i64,"repositories":["org/r"],
+            "permissions":{"issues":"write","pull_requests":"write"},
+        }})).await;
+        let (frame, body) = rig.next().await;
+        assert_eq!(body, token_request);
+        rig.reply(
+            &frame,
+            FrameType::Response,
+            json!({"result":{"error":{
+                "code":"policy_version_not_active","class":"permanent",
+            }}}),
+        )
+        .await;
+    };
+    tokio::join!(calls, server);
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
 async fn fleet_epoch_consumer_uses_the_normal_attested_route() {
     let mut rig = Rig::new().await;
     let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));

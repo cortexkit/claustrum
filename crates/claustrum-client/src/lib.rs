@@ -55,6 +55,7 @@ use tokio::time::Instant;
 mod consumer;
 mod fleet_epoch;
 mod module_secret;
+mod policy;
 #[cfg(any(feature = "transport", test))]
 mod sensitive_wire;
 #[cfg(feature = "transport")]
@@ -69,10 +70,15 @@ pub use module_secret::{
     ModuleSecret, ModuleSecretError, ModuleSecretState, ModuleSecretSummary, ModuleSecretWritten,
     Secret,
 };
+pub use policy::{
+    decode_policy_active_reply, decode_policy_token_reply, ActivePolicy, PolicyToken,
+    PolicyTokenRequest,
+};
 #[cfg(feature = "transport")]
-pub use watch::ScopedWatch;
+pub use watch::{PolicyWatch, ScopedWatch};
 pub use watch::{
-    ScopedWatchKind, ScopedWatchNotice, ScopedWatchOutcome, WatchAction, WatchNotice, WatchTracker,
+    PolicyWatchNotice, ScopedWatchKind, ScopedWatchNotice, ScopedWatchOutcome, WatchAction,
+    WatchNotice, WatchTracker,
 };
 
 #[cfg(feature = "transport")]
@@ -381,6 +387,15 @@ pub struct ListedCredential {
     /// or `detected` (read from the provider). Present only alongside `plan_tier`.
     pub plan_tier_source: Option<String>,
     pub condition: Option<ListedCredentialCondition>,
+    pub github_app: Option<ListedGitHubApp>,
+}
+
+/// GitHub App identity recorded by the vault for a listed credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedGitHubApp {
+    /// Decimal App ID kept as a string so it can be used without precision loss.
+    pub app_id: String,
+    pub slug: String,
 }
 
 /// A login condition visible in a scoped listing, without the action link or reporter.
@@ -1061,6 +1076,12 @@ trait CredentialConsumerConnection: Send {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
 
+    fn into_policy_watch(
+        self: Box<Self>,
+    ) -> CredentialResolverFuture<'static, Result<PolicyWatch, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     fn credential_get<'a>(
         &'a mut self,
         raw_handle: &'a str,
@@ -1182,6 +1203,15 @@ trait CredentialConsumerConnector: Send + Sync {
         'a,
         Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
     >;
+
+    fn connect_policy_watch(
+        &self,
+    ) -> CredentialResolverFuture<
+        '_,
+        Result<Box<dyn CredentialConsumerConnection>, CredentialResolverError>,
+    > {
+        self.connect()
+    }
 }
 
 #[cfg(feature = "transport")]
@@ -1764,6 +1794,12 @@ impl CredentialConsumerConnection for ClaustrumConsumer {
         Box::pin(async move { (*self).start_scoped_watch(enrollment_token).await })
     }
 
+    fn into_policy_watch(
+        self: Box<Self>,
+    ) -> CredentialResolverFuture<'static, Result<PolicyWatch, CredentialResolverError>> {
+        Box::pin(watch::start_policy_watch(*self))
+    }
+
     fn credential_request<'a>(
         &'a mut self,
         request: Value,
@@ -1924,6 +1960,19 @@ fn decode_optional_condition(row: &Value) -> Result<Option<ListedCredentialCondi
     }))
 }
 
+fn decode_optional_github_app(row: &Value) -> Result<Option<ListedGitHubApp>, String> {
+    let Some(app) = row.get("github_app") else {
+        return Ok(None);
+    };
+    if !app.is_object() {
+        return Err("github_app is not an object".into());
+    }
+    Ok(Some(ListedGitHubApp {
+        app_id: listing_string(app, "app_id").map_err(|error| format!("github_app.{error}"))?,
+        slug: listing_string(app, "slug").map_err(|error| format!("github_app.{error}"))?,
+    }))
+}
+
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
         plan_tier_since_ms: row
@@ -1965,6 +2014,7 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         plan_tier: decode_optional_string(row, "plan_tier")?,
         plan_tier_source: decode_optional_string(row, "plan_tier_source")?,
         condition: decode_optional_condition(row)?,
+        github_app: decode_optional_github_app(row)?,
     })
 }
 

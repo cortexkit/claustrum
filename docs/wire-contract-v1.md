@@ -5658,9 +5658,10 @@ Before using the cache or making any GitHub request, the vault checks, in order:
 4. With the pair, the request must exist, be approved and unexpired, and belong
    to the minting module. Its policy version must still be active. Its identity
    and the next unissued leg's kind, resource and digest must match the call.
-   No daemon scope `stamp` is sent on this call. The vault checked the agent
-   when minting the approval request and binds the issue to the minting module
-   and identity under the same policy.
+   This call carries no `stamp` member: unlike `policy.request_action`, it
+   names no daemon-attested agent and scope. The vault checked the agent when it
+   minted the approval request, and it binds the issue to the minting module and
+   identity under the same policy.
 5. `policy_version` equals the active version from `policy.active`.
 6. The active policy has a binding for that service and identity.
 7. The rule set contains `kind`, with identity `agent`, a credential, and a
@@ -5689,8 +5690,9 @@ version, sealed-record digest, repository set and permissions can share one mint
 and can reuse the result until five minutes before expiry.
 Before handing out any token, the vault rechecks its role, the accepted caller's
 exact grant, any approval for the prepared leg, the active policy version, the
-credential row and token expiry. It commits the caller's scoped first-use event
-in that same transaction. For an approved leg it also advances the issue count
+credential row and token expiry. In that same transaction it records the
+caller's first use of the credential, the same scoped first-use row a
+`credential.get_scoped` read writes. For an approved leg it also advances the issue count
 and appends one `broker_action_issue` audit row with the leg digest. Cached
 tokens go through the same checks. No refusal spends a leg. The write
 fails if this vault process no longer holds the store's single-writer lock (the
@@ -5701,9 +5703,9 @@ the new row once; an unusable row or a failed authorization is not retried.
 | Class | Code | Meaning |
 |---|---|---|
 | `permanent` | `not_found` | Caller, role, grant, service, binding, kind, or resource refused |
-| `permanent` | `approval_required` | An otherwise eligible local request names a `once` kind but carries no approval; file an approval card |
+| `permanent` | `approval_required` | An otherwise eligible local request names a `once` kind but carries no approval; request one with `policy.request_action` and have the person approve it on an approving device |
 | `permanent` | `approval_invalid` | No live approved request matches this caller, identity, and next leg; an expired or spent approval cannot be reused |
-| `permanent` | `approval_policy_changed` | The approval's policy is no longer active; file a new card under the active policy |
+| `permanent` | `approval_policy_changed` | The approval's policy is no longer active; request a new approval under the active policy |
 | `permanent` | `policy_version_not_active` | No policy is active, or the supplied version is not active |
 | `permanent` | `not_installed` | No local App credential |
 | `auth_required` | `needs_reauth` | Credential needs reauthentication or is retired |

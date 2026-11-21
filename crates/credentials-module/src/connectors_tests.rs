@@ -1000,6 +1000,7 @@ mod connectors_contract {
                 | "secret.deposit"
                 | "secret.approve"
                 | "manifest.approve"
+                | crate::secret_phone::OP_APPROVE_ACTION
                 | "secret.list"
                 | "secret.delete"
                 | "secret.revoke_grant"

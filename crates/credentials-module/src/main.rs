@@ -1828,7 +1828,7 @@ async fn dispatch_request(
             if let Some(request) = method.as_ref().filter(|request| {
                 matches!(
                     request.method.as_str(),
-                    "secret.approve" | "manifest.approve"
+                    "secret.approve" | "manifest.approve" | secret_phone::OP_APPROVE_ACTION
                 )
             }) {
                 return match admin
@@ -3062,6 +3062,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "policy.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "credential.policy_token".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.request_action".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "policy.approve_action".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -6919,13 +6920,11 @@ mod tests {
         )
     }
 
-    /// On a vault whose secrets live on another member, each of the phone ops is
-    /// refused `secret_home_elsewhere` naming the home, for a registered phone and for a
-    /// paired phone that never registered here, and none of them writes anything. The
-    /// same requests are served again once the setting is cleared, so the refusal comes
-    /// from the role alone.
+    /// A vault whose secrets live on another member refuses phone ops other than home
+    /// discovery without writing. Secret and manifest ops name the home; approval uses its
+    /// uniform approval refusal. The refusal does not depend on phone registration.
     #[tokio::test]
-    async fn a_remote_role_vault_refuses_every_phone_op_with_the_home_and_writes_nothing() {
+    async fn a_remote_role_vault_refuses_every_phone_op_and_writes_nothing() {
         use credentials_core::{agent_secret::SecretMaterial, secret::Secret};
         let flow = SecretFlow::new(201).await;
         let deposit = flow.deposit_request(
@@ -6954,6 +6953,10 @@ mod tests {
                 "manifest.approve",
                 json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
             ),
+            (
+                secret_phone::OP_APPROVE_ACTION,
+                json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
+            ),
             ("secret.list", json!({})),
             ("secret.delete", json!({"name": deposit["name"].clone()})),
             (
@@ -6965,14 +6968,20 @@ mod tests {
             calls.iter().map(|(method, _)| *method).collect::<Vec<_>>(),
             secret_phone::PHONE_OPS.to_vec()
         );
+        let invalid_approval = credentials_core::agent_secret::SecretError::ApprovalInvalid.body();
         for (method, params) in &calls {
+            let expected = if *method == secret_phone::OP_APPROVE_ACTION {
+                &invalid_approval
+            } else {
+                &elsewhere
+            };
             assert_eq!(
-                flow.phone(method, params.clone()).await,
-                elsewhere,
+                &flow.phone(method, params.clone()).await,
+                expected,
                 "registered phone: {method}"
             );
             assert_eq!(
-                phone_on(
+                &phone_on(
                     &flow.store,
                     UNREGISTERED_FP,
                     method,
@@ -6980,7 +6989,7 @@ mod tests {
                     Some(paired_phone(UNREGISTERED_FP)),
                 )
                 .await,
-                elsewhere,
+                expected,
                 "unregistered phone: {method}"
             );
         }
@@ -6998,9 +7007,14 @@ mod tests {
             "code":"remote_setup_incomplete","class":"permanent","remedy_member":PHONE_TEST_HOME,
         }});
         for (method, params) in &calls {
+            let expected = if *method == secret_phone::OP_APPROVE_ACTION {
+                &invalid_approval
+            } else {
+                &incomplete
+            };
             assert_eq!(
-                flow.phone(method, params.clone()).await,
-                incomplete,
+                &flow.phone(method, params.clone()).await,
+                expected,
                 "{method}"
             );
         }

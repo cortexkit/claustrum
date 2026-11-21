@@ -1,10 +1,16 @@
 use super::*;
-use crate::broker_action::{request_scope, OP_REQUEST_ACTION};
+use crate::{
+    broker_action::{request_scope, OP_REQUEST_ACTION},
+    secret_phone::OP_APPROVE_ACTION,
+};
+use base64::prelude::{Engine, BASE64_URL_SAFE_NO_PAD};
 use credentials_core::{
     agent_policy::{policy_sha256, Consent},
+    agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS},
     broker_action::{check_statement, valid_ulid},
-    store::{BrokerActionRequestError, BrokerActionRequestReply},
+    store::{BrokerActionRequestError, BrokerActionRequestReply, PhoneOperation},
 };
+use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use sha2::{Digest, Sha256};
 
 const NOW: i64 = 1_800_000_000_000;
@@ -14,6 +20,8 @@ const CONTEXT_CANARY: &str = "uniquely-sensitive-command-text";
 const STAMP_CANARY: &str = "uniquely-sensitive-scope-ref";
 const COMMENT: &str = "add_issue_comment";
 const CLOSE: &str = "close_issue";
+const APPROVING_PHONE: &str = "11111111111111111111111111111111";
+const DEVELOPMENT_DESKTOP: &str = "00000000000000000000000000000000";
 
 fn setup_actions() -> (Rig, Arc<Github>, String) {
     let rig = Rig::new();
@@ -439,6 +447,475 @@ async fn broker_action_mint_checks_the_statement_and_audits_exactly_its_digest()
 fn mint_at(rig: &Rig, at: i64) -> Result<BrokerActionRequestReply, BrokerActionRequestError> {
     rig.store
         .request_broker_action(Some("aft"), one(), request_scope, || at)
+}
+
+fn envelope(request: &BrokerActionRequestReply, fingerprint: &str, issued: i64) -> Value {
+    json!({"v":"ck-broker-action-envelope/v1","request_id":request.request_id,
+        "statement_sha256":request.statement_sha256,"decision":"allow",
+        "device_fingerprint":fingerprint,"issued_at_ms":issued})
+}
+
+fn sign(key: &SigningKey, bytes: &[u8]) -> Vec<u8> {
+    let signature: Signature = key.sign(bytes);
+    signature.to_der().as_bytes().to_vec()
+}
+
+fn register_approver(rig: &Rig, key: &SigningKey) {
+    let operation = PhoneOperation::Register {
+        deposit_pub: vec![46; 32],
+        approval_pub: key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec(),
+    };
+    assert_eq!(
+        rig.store
+            .secret_phone_operation(
+                APPROVING_PHONE,
+                Some("pair-A"),
+                1,
+                &operation,
+                || true,
+                || 1,
+            )
+            .unwrap(),
+        json!({"status":"stored"})
+    );
+}
+
+fn approval_snapshot(rig: &Rig) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let conn = Connection::open(&rig.path).unwrap();
+    [
+        "SELECT * FROM broker_action_requests ORDER BY request_id",
+        "SELECT * FROM secret_phone_observations ORDER BY fingerprint",
+        "SELECT * FROM audit_log ORDER BY rowid",
+        "SELECT * FROM auth_events ORDER BY rowid",
+    ]
+    .into_iter()
+    .map(|sql| {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let count = stmt.column_count();
+        stmt.query_map([], |row| {
+            (0..count)
+                .map(|i| row.get(i))
+                .collect::<rusqlite::Result<_>>()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    })
+    .collect()
+}
+
+fn approval_reply(request: &BrokerActionRequestReply) -> Value {
+    json!({"status":"approved","request_id":request.request_id,"statement_sha256":request.statement_sha256})
+}
+
+fn assert_recorded_approval(
+    rig: &Rig,
+    request: &BrokerActionRequestReply,
+    fingerprint: &str,
+    bytes: &[u8],
+    actor: &str,
+) {
+    let conn = Connection::open(&rig.path).unwrap();
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let state: (i64, String, String, i64) = conn
+        .query_row(
+            "SELECT approved_at_ms, device_fingerprint, envelope_sha256, issued_legs
+         FROM broker_action_requests WHERE request_id = ?1",
+            [&request.request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert!(state.0 < request.expires_at_ms as i64);
+    assert_eq!(
+        (state.1.as_str(), state.2.as_str(), state.3),
+        (fingerprint, hash.as_str(), 0)
+    );
+    let audit: Vec<_> = rig
+        .store
+        .read_audit(None)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.op == "broker_action_approve")
+        .collect();
+    assert_eq!(audit.len(), 1);
+    let entry = &audit[0];
+    assert_eq!(entry.credential_id.as_deref(), Some(APP));
+    assert_eq!(entry.payload_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(entry.actor, actor);
+    assert!(!entry.alarm);
+    assert_eq!(entry.alarm_reason, None);
+}
+
+fn approval_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+async fn approve_on_phone(
+    rig: &Rig,
+    params: Value,
+    pairing: &str,
+) -> crate::secret_phone::PhoneAnswer {
+    crate::secret_phone::serve_with_lookup(
+        Arc::clone(&rig.store), APPROVING_PHONE, Some("production"), OP_APPROVE_ACTION, &params,
+        tokio::time::Instant::now() + crate::secret_phone::PHONE_OP_DEADLINE,
+        async { Some(json!({"devices":[{"class":"phone","fingerprint":APPROVING_PHONE,"pairing_id":pairing}]})) },
+    ).await
+}
+
+fn phone_approval_params(bytes: &[u8], key: &SigningKey) -> Value {
+    json!({"envelope_b64url":BASE64_URL_SAFE_NO_PAD.encode(bytes),
+        "signature_b64url":BASE64_URL_SAFE_NO_PAD.encode(sign(key, bytes))})
+}
+
+#[tokio::test]
+async fn broker_action_phone_checks_registered_key_and_binding_and_records_only_once() {
+    let (rig, _, _) = setup_actions();
+    let key = SigningKey::from_slice(&[51; 32]).unwrap();
+    let other_key = SigningKey::from_slice(&[52; 32]).unwrap();
+    register_approver(&rig, &key);
+    let created = approval_now();
+    let request = mint_at(&rig, created).unwrap();
+    let canonical = envelope(&request, APPROVING_PHONE, created);
+    let bytes = serde_json::to_vec(&canonical).unwrap();
+    let valid = phone_approval_params(&bytes, &key);
+    let before = approval_snapshot(&rig);
+    let invalid = SecretError::ApprovalInvalid.body();
+    let check = |answer| match answer {
+        crate::secret_phone::PhoneAnswer::Reply(value) => value,
+        _ => panic!("expected a broker action approval result"),
+    };
+
+    assert_eq!(
+        check(approve_on_phone(&rig, valid.clone(), "new-pair").await),
+        invalid
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+    assert_eq!(
+        check(approve_on_phone(&rig, phone_approval_params(&bytes, &other_key), "pair-A").await),
+        invalid
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+
+    for (label, bad) in [
+        (
+            "wrong digest",
+            changed(canonical.clone(), "statement_sha256", json!("a".repeat(64))),
+        ),
+        (
+            "wrong fingerprint",
+            changed(
+                canonical.clone(),
+                "device_fingerprint",
+                json!(DEVELOPMENT_DESKTOP),
+            ),
+        ),
+        (
+            "wrong domain",
+            changed(
+                canonical.clone(),
+                "v",
+                json!("ck-manifest-binding-envelope/v1"),
+            ),
+        ),
+        (
+            "non-allow",
+            changed(canonical.clone(), "decision", json!("decline")),
+        ),
+        (
+            "bad request id",
+            changed(
+                canonical.clone(),
+                "request_id",
+                json!("81HF7YAT000000000000000004"),
+            ),
+        ),
+        (
+            "missing request",
+            changed(
+                canonical.clone(),
+                "request_id",
+                json!("01HF7YAT000000000000000004"),
+            ),
+        ),
+        (
+            "unknown member",
+            changed(canonical.clone(), "proposal_id", json!(request.request_id)),
+        ),
+        (
+            "before creation",
+            changed(canonical.clone(), "issued_at_ms", json!(created - 1)),
+        ),
+    ] {
+        let params = phone_approval_params(&serde_json::to_vec(&bad).unwrap(), &key);
+        assert_eq!(
+            check(approve_on_phone(&rig, params, "pair-A").await),
+            invalid,
+            "{label}"
+        );
+        assert_eq!(approval_snapshot(&rig), before, "{label}");
+    }
+    let mut duplicate = bytes.clone();
+    duplicate.pop();
+    duplicate.extend(br#", "decision":"allow"}"#);
+    for bad_bytes in [serde_json::to_vec_pretty(&canonical).unwrap(), duplicate] {
+        assert_eq!(
+            check(approve_on_phone(&rig, phone_approval_params(&bad_bytes, &key), "pair-A").await),
+            invalid
+        );
+        assert_eq!(approval_snapshot(&rig), before);
+    }
+
+    let reply = approval_reply(&request);
+    assert_eq!(
+        check(approve_on_phone(&rig, valid.clone(), "pair-A").await),
+        reply
+    );
+    let recorded = approval_snapshot(&rig);
+    let retry = changed(valid, "card_ref", json!("different-card-ref"));
+    assert_eq!(check(approve_on_phone(&rig, retry, "pair-A").await), reply);
+    let different = changed(canonical, "issued_at_ms", json!(created + 1));
+    let params = phone_approval_params(&serde_json::to_vec(&different).unwrap(), &key);
+    assert_eq!(
+        check(approve_on_phone(&rig, params, "pair-A").await),
+        invalid
+    );
+    assert_eq!(approval_snapshot(&rig), recorded);
+    assert_recorded_approval(
+        &rig,
+        &request,
+        APPROVING_PHONE,
+        &bytes,
+        &format!("fed-phone:{APPROVING_PHONE}/approver:fed-phone:{APPROVING_PHONE}"),
+    );
+}
+
+#[test]
+fn broker_action_approval_checks_expiry_and_both_edges_of_the_skew_window() {
+    let (rig, _, _) = setup_actions();
+    let key = SigningKey::from_slice(&[51; 32]).unwrap();
+    register_approver(&rig, &key);
+    let request = mint_at(&rig, NOW).unwrap();
+    let expires = request.expires_at_ms as i64;
+    let approve = |request, issued, now| {
+        let bytes = serde_json::to_vec(&envelope(request, APPROVING_PHONE, issued)).unwrap();
+        let signature = sign(&key, &bytes);
+        rig.store.secret_phone_operation(
+            APPROVING_PHONE,
+            Some("pair-A"),
+            now,
+            &PhoneOperation::BrokerActionApprove {
+                envelope: bytes,
+                signature,
+            },
+            || true,
+            || now,
+        )
+    };
+    let skew = SECRET_ISSUE_SKEW_LIMIT_MS;
+    let now = expires - 2 * skew;
+    let before = approval_snapshot(&rig);
+    for (signed_at, attempted_at) in [
+        (expires - 1, expires),
+        (expires, expires - 1),
+        (now + skew + 1, now),
+        (now - skew - 1, now),
+    ] {
+        assert_eq!(
+            approve(&request, signed_at, attempted_at),
+            Err(SecretError::ApprovalInvalid)
+        );
+        assert_eq!(approval_snapshot(&rig), before);
+    }
+    let other = mint_at(&rig, NOW).unwrap();
+    assert_eq!(
+        approve(&request, now - skew, now).unwrap(),
+        approval_reply(&request)
+    );
+    assert_eq!(
+        approve(&other, now + skew, now).unwrap(),
+        approval_reply(&other)
+    );
+
+    let last = mint_at(&rig, NOW).unwrap();
+    let reply = approval_reply(&last);
+    assert_eq!(approve(&last, expires - 1, expires - 1).unwrap(), reply);
+    let recorded = approval_snapshot(&rig);
+    assert_eq!(approve(&last, expires - 1, expires).unwrap(), reply);
+    assert_eq!(
+        approve(&last, expires - 1, expires + skew),
+        Err(SecretError::ApprovalInvalid)
+    );
+    assert_eq!(approval_snapshot(&rig), recorded);
+}
+
+async fn approve_on_route(rig: &Rig, params: Value) -> (FrameType, Value) {
+    let (kind, bytes) =
+        crate::tests::routed_reply(&rig.surface, &rig.admin, 77, OP_APPROVE_ACTION, params).await;
+    (kind, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn broker_action_approval_route_requires_production_phone_or_enabled_development_desktop() {
+    let (rig, _, _) = setup_actions();
+    let created = approval_now();
+    let request = mint_at(&rig, created).unwrap();
+    let bytes = serde_json::to_vec(&envelope(&request, DEVELOPMENT_DESKTOP, created)).unwrap();
+    let params =
+        json!({"envelope_b64url":BASE64_URL_SAFE_NO_PAD.encode(&bytes), "card_ref":"desktop-card"});
+    let direct = subc_protocol::Principal::Direct;
+    rig.admin.record_bind_at(77, 1, direct.clone(), "");
+    let not_found = (FrameType::Response, crate::uniform_not_found());
+    assert_eq!(approve_on_route(&rig, params.clone()).await, not_found);
+
+    rig.store
+        .set_secret_dev_desktop_approvals_audited(
+            true,
+            AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+        )
+        .unwrap();
+    rig.store
+        .set_federation_member_mapping_audited(true, AuditCtx::admin(AuditOp::FederationGateSet))
+        .unwrap();
+    rig.store
+        .set_secret_phone_mapping_audited(true, AuditCtx::admin(AuditOp::SecretPhoneGateSet))
+        .unwrap();
+    let callosum = subc_protocol::Principal::Reserved {
+        module_id: "callosum".into(),
+    };
+    let reserved = subc_protocol::Principal::Reserved {
+        module_id: "aft".into(),
+    };
+    let harness = format!("fed-phone:{APPROVING_PHONE}");
+    let scope = subc_protocol::scope::ScopeStamp::new(
+        direct.clone(),
+        "tool",
+        1,
+        subc_protocol::scope::ScopeKind::Head,
+    );
+
+    let before = approval_snapshot(&rig);
+    for (principal, route, scope, build) in [
+        (reserved, "", None, None),
+        (direct.clone(), "", Some(&scope), None),
+        (direct.clone(), harness.as_str(), None, Some("production")),
+        (callosum.clone(), SELF, None, Some("production")),
+        (callosum.clone(), harness.as_str(), None, None),
+        (
+            callosum.clone(),
+            harness.as_str(),
+            None,
+            Some("development"),
+        ),
+    ] {
+        rig.admin.record_connector_bind(
+            77,
+            1,
+            principal,
+            route,
+            None,
+            scope,
+            None,
+            build.map(str::to_owned),
+        );
+        assert_eq!(approve_on_route(&rig, Value::Null).await, not_found);
+    }
+
+    rig.admin.record_connector_bind(
+        77,
+        1,
+        callosum,
+        &harness,
+        None,
+        None,
+        None,
+        Some("production".into()),
+    );
+    let (kind, body) = approve_on_route(&rig, Value::Null).await;
+    assert_eq!(kind, FrameType::Error);
+    assert_eq!(body["code"], "invalid_params");
+
+    rig.admin.record_bind_at(77, 1, direct, "");
+    for signature in [Value::Null, json!(""), json!("AA")] {
+        let (kind, body) =
+            approve_on_route(&rig, changed(params.clone(), "signature_b64url", signature)).await;
+        assert_eq!(kind, FrameType::Error);
+        assert_eq!(body["code"], "invalid_params");
+    }
+    let wrong = serde_json::to_vec(&envelope(&request, APPROVING_PHONE, created)).unwrap();
+    assert_eq!(
+        approve_on_route(
+            &rig,
+            changed(
+                params.clone(),
+                "envelope_b64url",
+                json!(BASE64_URL_SAFE_NO_PAD.encode(wrong))
+            )
+        )
+        .await,
+        (
+            FrameType::Response,
+            json!({"result":SecretError::ApprovalInvalid.body()})
+        )
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+
+    let approved = (
+        FrameType::Response,
+        json!({"result":approval_reply(&request)}),
+    );
+    assert_eq!(approve_on_route(&rig, params.clone()).await, approved);
+    let recorded = approval_snapshot(&rig);
+    assert_eq!(approve_on_route(&rig, params).await, approved);
+    assert_eq!(approval_snapshot(&rig), recorded);
+    assert_recorded_approval(
+        &rig,
+        &request,
+        DEVELOPMENT_DESKTOP,
+        &bytes,
+        "desktop-development",
+    );
+}
+
+#[test]
+fn broker_action_approval_is_rolled_back_if_the_audit_append_fails() {
+    let (rig, _, _) = setup_actions();
+    rig.store
+        .set_secret_dev_desktop_approvals_audited(
+            true,
+            AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+        )
+        .unwrap();
+    let request = mint_at(&rig, NOW).unwrap();
+    let bytes = serde_json::to_vec(&envelope(&request, DEVELOPMENT_DESKTOP, NOW)).unwrap();
+    let before = approval_snapshot(&rig);
+    rig.sql("CREATE TRIGGER reject_approval BEFORE INSERT ON audit_log
+        WHEN NEW.op = 'broker_action_approve' BEGIN SELECT RAISE(ABORT, 'blocked test insert'); END;");
+    assert_eq!(
+        rig.store.broker_action_dev_desktop_approval(&bytes, || NOW),
+        Err(SecretError::ApprovalInvalid)
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+    rig.sql("DROP TRIGGER reject_approval");
+    assert_eq!(
+        rig.store
+            .broker_action_dev_desktop_approval(&bytes, || NOW)
+            .unwrap(),
+        approval_reply(&request)
+    );
+    assert_recorded_approval(
+        &rig,
+        &request,
+        DEVELOPMENT_DESKTOP,
+        &bytes,
+        "desktop-development",
+    );
 }
 
 fn seed_pending(rig: &Rig, count: usize) {

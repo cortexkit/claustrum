@@ -178,6 +178,10 @@ pub enum PhoneOperation {
         envelope: Vec<u8>,
         signature: Vec<u8>,
     },
+    BrokerActionApprove {
+        envelope: Vec<u8>,
+        signature: Vec<u8>,
+    },
     DeleteRequest {
         name: String,
     },
@@ -377,7 +381,9 @@ impl EncryptedStore {
             let discovering_remote_home = matches!(op, PhoneOperation::Home)
                 && matches!(role, super::operator::SecretHomeRole::Remote { .. });
             let role_refusal = if discovering_remote_home { None } else { role.phone_deposit_refusal() };
-            if !matches!(op, PhoneOperation::DepositKeys) && role_refusal.is_none() {
+            let broker_action = matches!(op, PhoneOperation::BrokerActionApprove { .. });
+            // A broker action refusal or replay must not even update the phone observation.
+            if !broker_action && !matches!(op, PhoneOperation::DepositKeys) && role_refusal.is_none() {
                 observation(tx, fingerprint, pairing, observed_at_ms)?;
             }
             if !admitted { return Ok(Err(SecretError::PairingUnavailable)); }
@@ -395,6 +401,9 @@ impl EncryptedStore {
             // refusal body is returned as the reply; the transport passes it through
             // unchanged, exactly as it would `SecretError::body()`.
             if let Some(refusal) = role_refusal {
+                if broker_action {
+                    return Ok(Err(SecretError::ApprovalInvalid));
+                }
                 return Ok(refusal);
             }
             if matches!(op, PhoneOperation::Home) {
@@ -426,6 +435,7 @@ impl EncryptedStore {
                 }
                 PhoneOperation::Approve { envelope, signature, card_ref } => self.secret_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, card_ref.as_deref(), false, op_now),
                 PhoneOperation::ManifestApprove { envelope, signature } => self.gh_manifest_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, op_now),
+                PhoneOperation::BrokerActionApprove { envelope, signature } => self.broker_action_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, op_now),
                 PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, super::desktop::ApprovalAuthority::Phone { public_key: &approval_pub, signature }, envelope, None, true, op_now),
                 PhoneOperation::DeleteRequest { name } => self.secret_delete_request_tx(tx, name, op_now),
                 PhoneOperation::Revoke { grant_id } => super::approval::revoke(tx, &self.audit_key, grant_id, &format!("fed-phone:{fingerprint}"), op_now).map(Ok),

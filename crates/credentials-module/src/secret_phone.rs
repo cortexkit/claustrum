@@ -16,12 +16,14 @@ pub const PHONE_OP_DEADLINE: std::time::Duration =
     std::time::Duration::from_millis(PHONE_OP_DEADLINE_LIMIT_MS);
 pub const MAX_DEPOSIT_CIPHERTEXT: usize = 16384;
 pub const MAX_SECRET_CARD_REF_BYTES: usize = 64;
-pub const PHONE_OPS: [&str; 8] = [
+pub(crate) const OP_APPROVE_ACTION: &str = "policy.approve_action";
+pub const PHONE_OPS: [&str; 9] = [
     "secret.phone_keys_register",
     "secret.deposit_keys",
     "secret.deposit",
     "secret.approve",
     "manifest.approve",
+    OP_APPROVE_ACTION,
     "secret.list",
     "secret.delete",
     "secret.revoke_grant",
@@ -33,11 +35,12 @@ pub fn is_phone_op(method: &str) -> bool {
 
 /// These operations establish phone signing authority or act on it. Delete's
 /// statement request is gated too, so an untrusted build cannot create pending work.
-pub const ATTESTED_PHONE_OPS: [&str; 4] = [
+pub const ATTESTED_PHONE_OPS: [&str; 5] = [
     "secret.phone_keys_register",
     "secret.approve",
     "secret.delete",
     "manifest.approve",
+    OP_APPROVE_ACTION,
 ];
 
 /// The phone-callable query that says where this account's agent secrets live. It is
@@ -46,7 +49,7 @@ pub const ATTESTED_PHONE_OPS: [&str; 4] = [
 /// home.
 pub const HOME_OP: &str = "secret.home";
 
-/// Every op the phone route serves: secret and manifest approval ops and [`HOME_OP`].
+/// Every op the phone route serves, including [`HOME_OP`].
 pub fn is_phone_route_op(method: &str) -> bool {
     is_phone_op(method) || method == HOME_OP
 }
@@ -76,6 +79,15 @@ fn answer(result: Result<Value, SecretError>) -> PhoneAnswer {
         }
         Err(error) => PhoneAnswer::Reply(error.body()),
     }
+}
+
+fn answer_for_method(method: &str, result: Result<Value, SecretError>) -> PhoneAnswer {
+    answer(result.map_err(|error| match (method, error) {
+        (OP_APPROVE_ACTION, SecretError::InvalidParams) => SecretError::InvalidParams,
+        (OP_APPROVE_ACTION, SecretError::NotFound) => SecretError::NotFound,
+        (OP_APPROVE_ACTION, _) => SecretError::ApprovalInvalid,
+        (_, error) => error,
+    }))
 }
 
 pub async fn serve(
@@ -109,25 +121,13 @@ pub async fn serve_dev_desktop(
     match store.secret_dev_desktop_approvals_enabled() {
         Ok(true) => {}
         Ok(false) => return answer(Err(SecretError::NotFound)),
-        Err(error) => return answer(Err(error)),
+        Err(error) => return answer_for_method(method, Err(error)),
     }
     tracing::info!(target: "approvals", "admitted development desktop approval");
     let parsed = (|| {
         keys(params, &["envelope_b64url"], &["card_ref"])?;
         let envelope = base64(text(params, "envelope_b64url")?)?;
-        let card_ref = match params.get("card_ref") {
-            None => None,
-            Some(value) => {
-                let card = value.as_str().ok_or(SecretError::InvalidParams)?;
-                if card.is_empty()
-                    || card.len() > MAX_SECRET_CARD_REF_BYTES
-                    || !card.bytes().all(|b| b.is_ascii_graphic())
-                {
-                    return Err(SecretError::InvalidParams);
-                }
-                Some(card.to_owned())
-            }
-        };
+        let card_ref = card_ref(params)?.map(str::to_owned);
         Ok((envelope, card_ref))
     })();
     let (envelope, card_ref) = match parsed {
@@ -135,9 +135,20 @@ pub async fn serve_dev_desktop(
         Err(error) => return answer(Err(error)),
     };
     let manifest = method == "manifest.approve";
-    answer(
+    let broker_action = method == OP_APPROVE_ACTION;
+    answer_for_method(
+        method,
         tokio::task::spawn_blocking(move || {
-            store.secret_dev_desktop_approval(&envelope, card_ref.as_deref(), manifest, wall_now_ms)
+            if broker_action {
+                store.broker_action_dev_desktop_approval(&envelope, wall_now_ms)
+            } else {
+                store.secret_dev_desktop_approval(
+                    &envelope,
+                    card_ref.as_deref(),
+                    manifest,
+                    wall_now_ms,
+                )
+            }
         })
         .await
         .unwrap_or(Err(SecretError::StoreError)),
@@ -155,7 +166,11 @@ pub(crate) async fn serve_with_lookup(
     lookup: impl std::future::Future<Output = Option<Value>>,
 ) -> PhoneAnswer {
     if ATTESTED_PHONE_OPS.contains(&method) && peer_build != Some("production") {
-        return answer(Err(SecretError::PhoneNotAttested));
+        return answer(Err(if method == OP_APPROVE_ACTION {
+            SecretError::NotFound
+        } else {
+            SecretError::PhoneNotAttested
+        }));
     }
     if federation::carries_bearer(params) {
         return answer(Err(SecretError::InvalidParams));
@@ -175,19 +190,22 @@ pub(crate) async fn serve_with_lookup(
     } else {
         let body = match tokio::time::timeout_at(deadline, lookup).await {
             Ok(Some(body)) => body,
-            _ => return answer(Err(SecretError::PairingUnavailable)),
+            _ => return answer_for_method(method, Err(SecretError::PairingUnavailable)),
         };
         match federation::decode_paired_devices(&body, &format!("fed-phone:{fingerprint}")) {
             Lookup::Found(pairing) => Some(pairing),
             Lookup::Absent => None,
-            Lookup::Unavailable => return answer(Err(SecretError::PairingUnavailable)),
+            Lookup::Unavailable => {
+                return answer_for_method(method, Err(SecretError::PairingUnavailable));
+            }
         }
     };
     let now = wall_now_ms();
     let fingerprint = fingerprint.to_owned();
     // Do not timeout the blocking job: it checks admission after acquiring SQLite's
     // write transaction, and an admitted transaction must finish even after the budget.
-    answer(
+    answer_for_method(
+        method,
         tokio::task::spawn_blocking(move || {
             store.secret_phone_operation(
                 &fingerprint,
@@ -208,6 +226,20 @@ fn text<'a>(params: &'a Value, key: &str) -> Result<&'a str, SecretError> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or(SecretError::InvalidParams)
+}
+
+fn card_ref(params: &Value) -> Result<Option<&str>, SecretError> {
+    let Some(value) = params.get("card_ref") else {
+        return Ok(None);
+    };
+    let card = value.as_str().ok_or(SecretError::InvalidParams)?;
+    if card.is_empty()
+        || card.len() > MAX_SECRET_CARD_REF_BYTES
+        || !card.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(SecretError::InvalidParams);
+    }
+    Ok(Some(card))
 }
 
 fn keys(params: &Value, required: &[&str], optional: &[&str]) -> Result<(), SecretError> {
@@ -376,41 +408,35 @@ pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, Secr
                 signature: base64(text(params, "signature_b64url")?)?,
             })
         }
-        "secret.approve" | "secret.delete" if params.get("envelope_b64url").is_some() => {
+        "secret.approve" | OP_APPROVE_ACTION | "secret.delete"
+            if params.get("envelope_b64url").is_some() =>
+        {
             keys(
                 params,
                 &["envelope_b64url", "signature_b64url"],
-                if method == "secret.approve" {
-                    &["card_ref"]
-                } else {
+                if method == "secret.delete" {
                     &[]
+                } else {
+                    &["card_ref"]
                 },
             )?;
             let envelope = base64(text(params, "envelope_b64url")?)?;
             let signature = base64(text(params, "signature_b64url")?)?;
-            if let Some(card) = params.get("card_ref") {
-                let card = card.as_str().ok_or(SecretError::InvalidParams)?;
-                if card.is_empty()
-                    || card.len() > MAX_SECRET_CARD_REF_BYTES
-                    || !card.bytes().all(|b| b.is_ascii_graphic())
-                {
-                    return Err(SecretError::InvalidParams);
-                }
-            }
-            Ok(if method == "secret.approve" {
-                PhoneOperation::Approve {
+            let card_ref = card_ref(params)?;
+            Ok(match method {
+                "secret.approve" => PhoneOperation::Approve {
                     envelope,
                     signature,
-                    card_ref: params
-                        .get("card_ref")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                }
-            } else {
-                PhoneOperation::DeleteCommit {
+                    card_ref: card_ref.map(str::to_owned),
+                },
+                OP_APPROVE_ACTION => PhoneOperation::BrokerActionApprove {
                     envelope,
                     signature,
-                }
+                },
+                _ => PhoneOperation::DeleteCommit {
+                    envelope,
+                    signature,
+                },
             })
         }
         "secret.delete" => {

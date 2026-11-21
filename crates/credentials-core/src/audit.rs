@@ -81,6 +81,7 @@ pub enum AuditOp {
     AgentPolicySign,
     AgentPolicyStore,
     BrokerActionRequest,
+    BrokerActionApprove,
     GhManifestActivation,
     GhManifestRetire,
     GhManifestOneTapSet,
@@ -285,6 +286,7 @@ impl AuditOp {
             AuditOp::AgentPolicySign => "agent_policy_sign",
             AuditOp::AgentPolicyStore => "agent_policy_store",
             AuditOp::BrokerActionRequest => "broker_action_request",
+            AuditOp::BrokerActionApprove => "broker_action_approve",
             AuditOp::GhManifestActivation => "gh_manifest_activation",
             AuditOp::GhManifestRetire => "gh_manifest_retire",
             AuditOp::GhManifestOneTapSet => "gh_manifest_one_tap_set",
@@ -1057,6 +1059,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::AgentPolicySign => AuditOp::AgentPolicySign.as_str(),
                 AuditOp::AgentPolicyStore => AuditOp::AgentPolicyStore.as_str(),
                 AuditOp::BrokerActionRequest => AuditOp::BrokerActionRequest.as_str(),
+                AuditOp::BrokerActionApprove => AuditOp::BrokerActionApprove.as_str(),
                 AuditOp::GhManifestActivation => AuditOp::GhManifestActivation.as_str(),
                 AuditOp::GhManifestRetire => AuditOp::GhManifestRetire.as_str(),
                 AuditOp::GhManifestOneTapSet => AuditOp::GhManifestOneTapSet.as_str(),
@@ -1185,6 +1188,7 @@ mod vocabulary_documentation_tests {
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretMultiHostSet)));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::SecretBasicAuthSet)));
         assert!(WIRE_CONTRACT.contains(value(AuditOp::LoginSharingSet)));
+        assert_documented(section, "audit_log.op", value(AuditOp::BrokerActionApprove));
         for op in [
             AuditOp::GhManifestPropose,
             AuditOp::GhManifestProposalState,
@@ -1193,6 +1197,7 @@ mod vocabulary_documentation_tests {
             AuditOp::AgentPolicySign,
             AuditOp::AgentPolicyStore,
             AuditOp::BrokerActionRequest,
+            AuditOp::BrokerActionApprove,
             AuditOp::GhManifestActivation,
             AuditOp::GhManifestRetire,
             AuditOp::GhManifestOneTapSet,

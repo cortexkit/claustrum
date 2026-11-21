@@ -2073,10 +2073,13 @@ async fn secret_caller_gate_and_op_matrix_matches_the_wire_contract() {
                     SecretCell::Served => unreachable!(),
                 };
 
-                // Seven phone ops.
+                // The synthetic phone caller has no production build mark. Broker
+                // action approval deliberately hides the operation on that route.
                 for op in crate::secret_phone::PHONE_OPS {
                     let answer = call(op, json!({})).await;
-                    if expected[0] == SecretCell::Served {
+                    if op == crate::secret_phone::OP_APPROVE_ACTION {
+                        check_refusal(SecretCell::NotFound, &answer, op);
+                    } else if expected[0] == SecretCell::Served {
                         assert_ne!(
                             answer, not_found,
                             "{at} {op} must reach the phone preflight"

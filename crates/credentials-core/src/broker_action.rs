@@ -1,23 +1,80 @@
-//! Canonical statements for one-time broker action approvals.
+//! Canonical statements and approval envelopes for one-time broker actions.
 
 use std::{borrow::Cow, collections::BTreeMap, fmt};
 
 use base64::prelude::{Engine, BASE64_URL_SAFE_NO_PAD};
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
     agent_policy::{valid_app_slug, valid_host, valid_resource},
+    agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS},
     federation::is_lower_hex_sha256,
     gh_manifest::{sha256_hex, ManifestValue, MAX_MANIFEST_JSON_INTEGER as MAX_SAFE_INTEGER},
 };
 
 const STATEMENT_VERSION: &str = "ck-broker-action-statement/v1";
+const ENVELOPE_VERSION: &[u8] = b"ck-broker-action-envelope/v1";
 pub const MAX_STATEMENT_BYTES: usize = 524_288;
 pub const MAX_STATEMENT_FIELDS: usize = 16;
 pub const MAX_STATEMENT_LEGS: usize = 16;
 pub const MAX_CONTEXT_CHARS: usize = 200;
 const ENCODING: &str = "statement_b64url";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BrokerActionEnvelope {
+    v: String,
+    pub request_id: String,
+    pub statement_sha256: String,
+    decision: String,
+    device_fingerprint: String,
+    pub issued_at_ms: u64,
+}
+
+impl BrokerActionEnvelope {
+    pub(crate) fn parse_canonical(
+        bytes: &[u8],
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<Self, SecretError> {
+        let invalid = SecretError::ApprovalInvalid;
+        let envelope: Self = serde_json::from_slice(bytes).map_err(|_| invalid)?;
+        if envelope.v.as_bytes() != ENVELOPE_VERSION
+            || envelope.decision != "allow"
+            || envelope.device_fingerprint != fingerprint
+            || !valid_ulid(&envelope.request_id)
+            || !is_lower_hex_sha256(&envelope.statement_sha256)
+            || envelope.issued_at_ms > MAX_SAFE_INTEGER as u64
+            || now.abs_diff(envelope.issued_at_ms as i64) > SECRET_ISSUE_SKEW_LIMIT_MS as u64
+        {
+            return Err(invalid);
+        }
+        // The field names are ASCII, so lexicographic order matches RFC 8785 order.
+        let mut value = serde_json::to_value(&envelope).map_err(|_| invalid)?;
+        value.sort_all_objects();
+        if serde_json::to_vec(&value).map_err(|_| invalid)? != bytes {
+            return Err(invalid);
+        }
+        Ok(envelope)
+    }
+
+    pub(crate) fn verify(
+        bytes: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<Self, SecretError> {
+        let envelope = Self::parse_canonical(bytes, fingerprint, now)?;
+        let invalid = SecretError::ApprovalInvalid;
+        let key = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| invalid)?;
+        let signature = Signature::from_der(signature).map_err(|_| invalid)?;
+        key.verify(bytes, &signature).map_err(|_| invalid)?;
+        Ok(envelope)
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct BrokerActionStatement {

@@ -1,6 +1,7 @@
 //! Temporary unsigned desktop approvals. Remove before the next public release.
 use super::*;
 use crate::agent_secret::{ApprovalEnvelope, SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
+use crate::broker_action::BrokerActionEnvelope;
 use crate::gh_manifest::ManifestBindingEnvelope;
 use serde_json::Value;
 
@@ -53,6 +54,23 @@ impl ApprovalAuthority<'_> {
         }
     }
 
+    pub(in crate::store) fn broker_action(
+        &self,
+        bytes: &[u8],
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<BrokerActionEnvelope, SecretError> {
+        match self {
+            Self::Phone {
+                public_key,
+                signature,
+            } => BrokerActionEnvelope::verify(bytes, signature, public_key, fingerprint, now),
+            Self::DevelopmentDesktop => {
+                BrokerActionEnvelope::parse_canonical(bytes, DEV_DESKTOP_FINGERPRINT, now)
+            }
+        }
+    }
+
     pub(in crate::store) fn actor(&self, fingerprint: &str, manifest: bool) -> String {
         match self {
             Self::Phone { .. } if manifest => {
@@ -65,6 +83,31 @@ impl ApprovalAuthority<'_> {
 }
 
 impl EncryptedStore {
+    /// The caller must be an unscoped direct development route. Check the switch again
+    /// inside the transaction so a queued request cannot outlive its admission.
+    pub fn broker_action_dev_desktop_approval(
+        &self,
+        bytes: &[u8],
+        clock: impl FnOnce() -> i64,
+    ) -> Result<Value, SecretError> {
+        self.fenced_write(|tx| {
+            if !phone::setting_enabled(tx, phone::DEV_DESKTOP_APPROVALS_SETTING) {
+                return Ok(Err(SecretError::NotFound));
+            }
+            if super::super::policy_token::serving_role(tx).is_err() {
+                return Ok(Err(SecretError::ApprovalInvalid));
+            }
+            self.broker_action_approval_tx(
+                tx,
+                DEV_DESKTOP_FINGERPRINT,
+                ApprovalAuthority::DevelopmentDesktop,
+                bytes,
+                clock(),
+            )
+        })
+        .map_err(|_| SecretError::ApprovalInvalid)?
+    }
+
     pub fn secret_dev_desktop_approvals_status_read_only(
         path: &std::path::Path,
     ) -> Result<String, StoreOpError> {

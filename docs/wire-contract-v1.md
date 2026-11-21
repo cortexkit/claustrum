@@ -2817,7 +2817,11 @@ with the caller, the gates or the stored state.
 
 The eight phone operations are `secret.phone_keys_register`, `secret.deposit_keys`,
 `secret.deposit`, `secret.approve`, `manifest.approve`, `secret.list`, `secret.delete`
-and `secret.revoke_grant`. "Credential get" is `credential.get` with a valid `handle`;
+and `secret.revoke_grant`. `policy.approve_action` follows the same routing matrix,
+but also requires the exact `production` build mark on a phone route and admits an
+unscoped development desktop only while its switch is on (see
+[Approve a broker action](#approve-a-broker-action)).
+"Credential get" is `credential.get` with a valid `handle`;
 "scoped get" is `credential.get_scoped` without `enrollment_token`.
 
 Rows name the route principal and, for `reserved:callosum`, the opener harness. Member gate
@@ -5765,6 +5769,43 @@ is the App identity, its actor is the calling reserved module, and its
 `payload_hash` is `statement_sha256`. It has no alarm.
 A store failure returns `store_error` (transient), without committing a request
 or its audit row.
+
+### Approve a broker action
+
+`policy.approve_action` is a Mutate operation on the Single or Home vault. It
+admits only an authenticated `fed-phone:` route marked `peer_build: "production"`
+or the unscoped direct development desktop while its approval switch is on.
+Other routes get `not_found` (permanent) before parameter checks. The phone must
+have a current pairing and a registered approval key for that pairing.
+
+The closed body is `{card_ref?, envelope_b64url, signature_b64url}`. The base64url
+values are strict and unpadded. If present, `card_ref` is 1–64 ASCII graphic bytes;
+the vault validates it but does not use or store it. On the development route the
+signature member must be absent (even `null` is refused), and the device
+fingerprint is 32 zeroes. A malformed body returns transport `invalid_params`.
+
+The decoded envelope is exact RFC 8785 JSON, with only these members:
+`{v, request_id, statement_sha256, decision, device_fingerprint, issued_at_ms}`.
+`v` is `ck-broker-action-envelope/v1`, `request_id` is a ULID, `statement_sha256`
+is 64 lowercase hexadecimal digits, and `decision` is `allow`. The fingerprint
+must match the route. On the phone route the registered P-256 key must verify a
+DER signature over the exact decoded envelope. The unsigned `issued_at_ms` must
+be a safe JSON integer within the same clock-skew window as `manifest.approve`.
+
+The request must exist, match the statement digest, and have been created no
+later than `issued_at_ms`. A first approval must be recorded before the request's
+expiry, and its `issued_at_ms` must also precede expiry. An already recorded
+approval returns the same reply only for an exact envelope hash and fingerprint
+match, after signature and time-window verification. It does not extend the
+request or write another row. Any other refusal on an admitted route with a
+well-formed body returns `{"error":{"code":"approval_invalid","class":"permanent"}}`.
+No refusal writes an approval, audit row, or phone observation.
+
+Success is `{status: "approved", request_id, statement_sha256}`. The first
+success records the approval and one `broker_action_approve` audit row together.
+The row names the App identity, uses SHA-256 of the decoded envelope as
+`payload_hash`, and uses the same actor format as a manifest approval, with no
+alarm. A decline is not sent to the vault.
 
 ### Document and signature
 

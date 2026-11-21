@@ -1,14 +1,15 @@
-//! Admission and atomic minting of pending broker action approvals.
+//! Admission, minting and recording broker action approvals.
 
 use std::collections::{HashMap, HashSet};
 
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     agent_policy::{valid_app_slug, AgentPolicy, Approval, Class, Identity, Kind},
+    agent_secret::SecretError,
     audit::{AuditOp, AuditRecord},
     broker_action::{
         valid_context, valid_method, valid_statement_host, valid_ulid, BrokerActionField,
@@ -16,12 +17,14 @@ use crate::{
         MAX_STATEMENT_FIELDS, MAX_STATEMENT_LEGS,
     },
     federation::is_lower_hex_sha256,
+    gh_manifest::sha256_hex,
 };
 
 use super::{
     agent_policy::active_agent_policy_conn,
     append_audit_tx,
     policy_token::{has_exact_grant, serving_role, PolicyTokenError},
+    store_agent_secrets::desktop::ApprovalAuthority,
     EncryptedStore,
 };
 
@@ -144,6 +147,84 @@ fn nonempty_text(value: Value) -> Option<String> {
     match value {
         Value::String(text) if !text.is_empty() => Some(text),
         _ => None,
+    }
+}
+
+impl EncryptedStore {
+    /// Runs inside the write transaction after admitting a phone or the development desktop.
+    pub(super) fn broker_action_approval_tx(
+        &self,
+        tx: &Transaction<'_>,
+        fingerprint: &str,
+        authority: ApprovalAuthority<'_>,
+        bytes: &[u8],
+        now: i64,
+    ) -> rusqlite::Result<Result<Value, SecretError>> {
+        let envelope = match authority.broker_action(bytes, fingerprint, now) {
+            Ok(envelope) => envelope,
+            Err(error) => return Ok(Err(error)),
+        };
+        let stored = tx
+            .query_row(
+                "SELECT identity, statement_sha256, created_at_ms, expires_at_ms, approved_at_ms, \
+             device_fingerprint, envelope_sha256 FROM broker_action_requests WHERE request_id=?1",
+                [&envelope.request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((identity, digest, created, expires, approved, recorded_device, recorded_hash)) =
+            stored
+        else {
+            return Ok(Err(SecretError::ApprovalInvalid));
+        };
+        let issued = envelope.issued_at_ms as i64;
+        if envelope.statement_sha256 != digest || issued < created {
+            return Ok(Err(SecretError::ApprovalInvalid));
+        }
+        let envelope_hash = sha256_hex(bytes);
+        let reply = json!({"status":"approved", "request_id":envelope.request_id, "statement_sha256":digest});
+        // An exact retry acknowledges the existing approval; it never extends the request.
+        if approved.is_some() {
+            return Ok(
+                if recorded_device.as_deref() == Some(fingerprint)
+                    && recorded_hash.as_deref() == Some(envelope_hash.as_str())
+                {
+                    Ok(reply)
+                } else {
+                    Err(SecretError::ApprovalInvalid)
+                },
+            );
+        }
+        if now >= expires || issued >= expires {
+            return Ok(Err(SecretError::ApprovalInvalid));
+        }
+        tx.execute(
+            "UPDATE broker_action_requests SET approved_at_ms=?1, device_fingerprint=?2, envelope_sha256=?3 \
+             WHERE request_id=?4",
+            params![now, fingerprint, envelope_hash, envelope.request_id],
+        )?;
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AuditRecord {
+                op: AuditOp::BrokerActionApprove,
+                credential_id: Some(identity),
+                payload_hash: Some(envelope_hash),
+                actor: authority.actor(fingerprint, true),
+                alarm: None,
+            },
+        )?;
+        Ok(Ok(reply))
     }
 }
 

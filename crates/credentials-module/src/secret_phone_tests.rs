@@ -102,7 +102,7 @@ fn phone_mapping_requires_both_gates_and_exact_authenticated_harness() {
 #[tokio::test]
 async fn phone_allowlist_and_bearers_fail_before_lookup() {
     let (_root, store) = rig("allowlist");
-    assert_eq!(PHONE_OPS.len(), 8);
+    assert_eq!(PHONE_OPS.len(), 9);
     for method in [
         "credential.get",
         "credential.get_scoped",
@@ -148,6 +148,66 @@ async fn phone_allowlist_and_bearers_fail_before_lookup() {
             .await;
             assert_eq!(code(result), "invalid_params");
             assert!(!polled.load(Ordering::SeqCst));
+        }
+    }
+}
+
+#[test]
+fn broker_action_phone_body_uses_secret_approve_grammar() {
+    for (params, accepted) in [
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ"}),
+            true,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":"!"}),
+            true,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":"x".repeat(64)}),
+            true,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":"x".repeat(65)}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":""}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":"a b"}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":"é"}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","card_ref":null}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ","unknown":false}),
+            false,
+        ),
+        (json!({"envelope_b64url":"AA"}), false),
+        (json!({"signature_b64url":"AQ"}), false),
+        (
+            json!({"envelope_b64url":"AB","signature_b64url":"AQ"}),
+            false,
+        ),
+        (
+            json!({"envelope_b64url":"AA","signature_b64url":"AQ="}),
+            false,
+        ),
+    ] {
+        for method in ["secret.approve", OP_APPROVE_ACTION] {
+            assert_eq!(
+                parse(method, &params).is_ok(),
+                accepted,
+                "{method}: {params}"
+            );
         }
     }
 }

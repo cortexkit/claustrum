@@ -439,11 +439,19 @@ impl HomeWatchCandidate {
 /// order in list_scoped responses. It permits cookie creation and replacement only
 /// when the stored creator is the same depositing principal.
 ///
-/// `Seal` lets callers encrypt messages to a recipient and authenticate them with a
-/// vault-held key. It requires an exact selector so callers cannot send messages on
-/// behalf of keys added to a category later.
+/// `Seal` is declared after `Deposit` for the same ordering reason. It permits
+/// `credential.seal`: encrypting a message to a caller-chosen recipient in a way that
+/// also proves it came from one vault-held key-exchange key (HPKE auth mode). It takes
+/// an exact selector only, because it lets the caller send messages that the recipient
+/// will attribute to that key, and a category grant would extend that to every key
+/// later put in the category without anyone choosing it.
 ///
-/// `PolicyToken` likewise names one credential and authorizes only narrowed tokens.
+/// `PolicyToken` is declared last for the same ordering reason. It permits only
+/// `credential.policy_token`: a GitHub App installation token limited to the
+/// repositories and permissions that the active signed agent policy (see
+/// `crate::agent_policy`) allows for the request kind the caller names. It never
+/// implies `Read`, which would return the App's broad installation token, and it takes
+/// an exact selector only, so it names one App.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

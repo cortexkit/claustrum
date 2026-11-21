@@ -135,6 +135,10 @@ pub enum AdminOpBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slot: Option<String>,
     },
+    #[serde(rename = "admin.github_app_relay_retry")]
+    GitHubAppRelayRetry { v: u32, slug: String },
+    #[serde(rename = "admin.github_app_webhook_rotate")]
+    GitHubAppWebhookRotate { v: u32, slug: String },
     #[serde(rename = "admin.agent_policy_sign")]
     AgentPolicySign {
         v: u32,
@@ -636,6 +640,8 @@ impl std::fmt::Debug for AdminOpBody {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
             AdminOpBody::GitHubAppManifestPrepare { v, .. }
+            | AdminOpBody::GitHubAppRelayRetry { v, .. }
+            | AdminOpBody::GitHubAppWebhookRotate { v, .. }
             | AdminOpBody::GitHubAppCreateComplete { v, .. } => f
                 .debug_struct(self.op_name())
                 .field("v", v)
@@ -1151,6 +1157,8 @@ impl AdminOpBody {
             | AdminOpBody::GitHubAppManifestPrepare { v, .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { v }
             | AdminOpBody::GitHubAppCreateComplete { v, .. }
+            | AdminOpBody::GitHubAppRelayRetry { v, .. }
+            | AdminOpBody::GitHubAppWebhookRotate { v, .. }
             | AdminOpBody::AgentPolicySign { v, .. }
             | AdminOpBody::AgentPolicyList { v }
             | AdminOpBody::AgentPolicyExport { v, .. }
@@ -1291,6 +1299,8 @@ impl AdminOpBody {
             | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
             | AdminOpBody::GitHubAppCreateComplete { .. }
+            | AdminOpBody::GitHubAppRelayRetry { .. }
+            | AdminOpBody::GitHubAppWebhookRotate { .. }
             | AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
@@ -1380,6 +1390,8 @@ impl AdminOpBody {
             | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
             | AdminOpBody::GitHubAppCreateComplete { .. }
+            | AdminOpBody::GitHubAppRelayRetry { .. }
+            | AdminOpBody::GitHubAppWebhookRotate { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
             | AdminOpBody::AgentPolicyDerive { .. }
@@ -1460,6 +1472,8 @@ impl AdminOpBody {
             AdminOpBody::GitHubAppManifestPrepare { .. } => "admin.github_app_manifest_prepare",
             AdminOpBody::GitHubAppRelaySlotOpen { .. } => "admin.github_app_relay_slot_open",
             AdminOpBody::GitHubAppCreateComplete { .. } => "admin.github_app_create_complete",
+            AdminOpBody::GitHubAppRelayRetry { .. } => "admin.github_app_relay_retry",
+            AdminOpBody::GitHubAppWebhookRotate { .. } => "admin.github_app_webhook_rotate",
             AdminOpBody::AgentPolicySign { .. } => "admin.agent_policy_sign",
             AdminOpBody::AgentPolicyList { .. } => "admin.agent_policy_list",
             AdminOpBody::AgentPolicyExport { .. } => "admin.agent_policy_export",
@@ -1628,7 +1642,9 @@ impl AdminOpBody {
             | AdminOpBody::RemoteAdd { .. }
             | AdminOpBody::MemberGrant { .. } => true,
             AdminOpBody::GitHubAppRelaySlotOpen { .. }
-            | AdminOpBody::GitHubAppCreateComplete { .. } => true,
+            | AdminOpBody::GitHubAppCreateComplete { .. }
+            | AdminOpBody::GitHubAppRelayRetry { .. }
+            | AdminOpBody::GitHubAppWebhookRotate { .. } => true,
         }
     }
 }
@@ -2462,6 +2478,8 @@ pub fn apply(
         // Refused above, before any write: these need the daemon's outbound calls.
         op @ (AdminOpBody::GitHubAppRelaySlotOpen { .. }
         | AdminOpBody::GitHubAppCreateComplete { .. }
+        | AdminOpBody::GitHubAppRelayRetry { .. }
+        | AdminOpBody::GitHubAppWebhookRotate { .. }
         | AdminOpBody::FederationSelfSet { .. }
         | AdminOpBody::TransferInit { .. }
         | AdminOpBody::TransferSend { .. }

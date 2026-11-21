@@ -226,7 +226,7 @@ pub fn copy_link(url: &str) -> std::io::Result<()> {
 /// Read stdin outside Tokio's blocking pool: an idle terminal must not hold up
 /// runtime shutdown after the browser wins. Closing the receiver stops further
 /// reads; an already blocked OS read is left to end with this CLI process.
-fn pasted_lines() -> tokio::sync::mpsc::Receiver<std::io::Result<String>> {
+pub(super) fn pasted_lines() -> tokio::sync::mpsc::Receiver<std::io::Result<String>> {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     std::thread::spawn(move || loop {
         if tx.is_closed() {

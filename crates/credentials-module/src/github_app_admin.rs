@@ -1,7 +1,11 @@
 //! Daemon-only GitHub App operations. The admin surface authenticates the exact
 //! request before reaching any code here.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use credentials_core::{
@@ -10,8 +14,12 @@ use credentials_core::{
     http::ReqwestTransport,
     refresh_adapters::{github_app::GithubAppAdapter, HttpResponse, HttpTransport},
     secret::{SecretBytes, SecretString},
-    store::{GitHubAppCreation, SecretHomeRole, StoreOpError},
+    store::{
+        GitHubAppCreation, GitHubAppRelay, GitHubAppRelayError, SecretHomeRole, StoreOpError,
+        WebhookRotation,
+    },
 };
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::{timeout_at, Instant};
@@ -26,6 +34,8 @@ const GITHUB_MANIFEST_BASE: &str = "https://api.github.com/app-manifests";
 const GITHUB_APPS_BASE: &str = "https://github.com/apps";
 const MAX_MANIFEST_CODE_BYTES: usize = 128;
 const MAX_CONVERSION_REPLY_BYTES: usize = 64 * 1024;
+const GITHUB_HOOK_URL: &str = "https://api.github.com/app/hook/config";
+const MAX_HOOK_REPLY_BYTES: usize = 8 * 1024;
 
 pub(super) struct GitHubAppAdmin {
     budget: Duration,
@@ -329,7 +339,242 @@ impl GitHubAppAdmin {
             .map_err(|_| RelayFailure::Unavailable)?;
         confirmed_put(reply)
     }
+
+    async fn locked_relay(
+        &self,
+        engine: &RefreshEngine,
+        slug: &str,
+    ) -> Result<(Instant, tokio::sync::OwnedMutexGuard<()>, GitHubAppRelay), AdminOutcome> {
+        if !valid_app_slug(slug) {
+            return Err(refusal("invalid_params/permanent: invalid GitHub App slug"));
+        }
+        let deadline = self.admit(engine).await?;
+        let lock = timeout_at(
+            deadline,
+            engine.acquire_admin_lock(&format!("github_app:{slug}")),
+        )
+        .await
+        .map_err(|_| RelayFailure::Unavailable.refusal())?;
+        if Instant::now() >= deadline {
+            return Err(RelayFailure::Unavailable.refusal());
+        }
+        let relay = engine
+            .store()
+            .github_app_relay(slug)
+            .map_err(|reason| match reason {
+                GitHubAppRelayError::NotFound => {
+                    refusal("not_found/permanent: GitHub App not found")
+                }
+                GitHubAppRelayError::Inactive => {
+                    refusal("github_app_inactive/permanent: GitHub App is not active")
+                }
+                GitHubAppRelayError::NoRelay => {
+                    refusal("github_app_no_relay/permanent: GitHub App has no managed relay slot")
+                }
+                GitHubAppRelayError::Store(_) => RelayFailure::Unavailable.refusal(),
+            })?;
+        if !valid_relay_slot(&relay.slot) {
+            return Err(RelayFailure::ReplyInvalid.refusal());
+        }
+        Ok((deadline, lock, relay))
+    }
+
+    pub(super) async fn relay_retry(
+        &self,
+        engine: &Arc<RefreshEngine>,
+        slug: &str,
+    ) -> AdminOutcome {
+        let (deadline, _lock, relay) = match self.locked_relay(engine, slug).await {
+            Ok(state) => state,
+            Err(refused) => return refused,
+        };
+        if relay.pending().is_some() {
+            return refusal(
+                "github_app_rotation_pending/permanent: resume the pending webhook rotation first",
+            );
+        }
+        if let Err(failure) = self
+            .put_stored_secret(engine, deadline, &relay, relay.current())
+            .await
+        {
+            return failure.refusal();
+        }
+        if engine
+            .store()
+            .audit_github_app_relay_retry(&relay, ROUTE_ADMIN_ACTOR)
+            .is_err()
+        {
+            return refusal(
+                "audit_write_failed/permanent: could not record the confirmed relay retry",
+            );
+        }
+        AdminOutcome::Ok(json!({"slug": slug}))
+    }
+
+    pub(super) async fn webhook_rotate(
+        &self,
+        engine: &Arc<RefreshEngine>,
+        slug: &str,
+    ) -> AdminOutcome {
+        let (deadline, _lock, mut relay) = match self.locked_relay(engine, slug).await {
+            Ok(state) => state,
+            Err(refused) => return refused,
+        };
+        if Instant::now() >= deadline {
+            return RelayFailure::Unavailable.refusal();
+        }
+        let store = engine.store();
+        // An unconfirmed candidate may already be in use at the relay if the reply
+        // or the local confirmation was lost. Always send the same secret again.
+        let repeated_put = relay.pending().is_some() && !relay.pending_put_confirmed();
+        if relay.pending().is_none() {
+            let mut bytes = [0; 32];
+            if SystemRandom::new().fill(&mut bytes).is_err() {
+                return refusal(HOOK_UPDATE_FAILED);
+            }
+            let hex = b"0123456789abcdef";
+            let secret = SecretString::new(
+                bytes
+                    .into_iter()
+                    .flat_map(|byte| {
+                        [
+                            hex[(byte >> 4) as usize] as char,
+                            hex[(byte & 15) as usize] as char,
+                        ]
+                    })
+                    .collect(),
+            );
+            if store
+                .rotate_github_app_webhook_audited(
+                    &mut relay,
+                    WebhookRotation::Stage(secret),
+                    ROUTE_ADMIN_ACTOR,
+                )
+                .is_err()
+            {
+                return refusal(HOOK_UPDATE_FAILED);
+            }
+        }
+        if !relay.pending_put_confirmed() {
+            let pending = relay.pending().expect("a candidate was staged");
+            if let Err(failure) = self
+                .put_stored_secret(engine, deadline, &relay, pending)
+                .await
+            {
+                return failure.refusal();
+            }
+            if store
+                .rotate_github_app_webhook_audited(
+                    &mut relay,
+                    WebhookRotation::ConfirmPut,
+                    ROUTE_ADMIN_ACTOR,
+                )
+                .is_err()
+            {
+                return refusal(HOOK_UPDATE_FAILED);
+            }
+        }
+        let pending = relay.pending().expect("a confirmed candidate was staged");
+        if !self
+            .patch_github_hook(engine, deadline, &relay, pending)
+            .await
+            || store
+                .rotate_github_app_webhook_audited(
+                    &mut relay,
+                    WebhookRotation::Promote,
+                    ROUTE_ADMIN_ACTOR,
+                )
+                .is_err()
+        {
+            return refusal(HOOK_UPDATE_FAILED);
+        }
+        AdminOutcome::Ok(json!({"slug": slug, "repeated_put": repeated_put}))
+    }
+
+    async fn put_stored_secret(
+        &self,
+        engine: &Arc<RefreshEngine>,
+        deadline: Instant,
+        relay: &GitHubAppRelay,
+        secret: &SecretString,
+    ) -> Result<(), RelayFailure> {
+        let http = self.http()?;
+        timeout_at(
+            deadline,
+            self.put_relay_slot(
+                engine,
+                http.as_ref(),
+                deadline,
+                &relay.slot,
+                &relay.app_id,
+                secret,
+            ),
+        )
+        .await
+        .unwrap_or(Err(RelayFailure::Unavailable))
+    }
+
+    async fn patch_github_hook(
+        &self,
+        engine: &RefreshEngine,
+        deadline: Instant,
+        relay: &GitHubAppRelay,
+        pending: &SecretString,
+    ) -> bool {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let Ok(oauth) = engine.store().github_app_relay_oauth(relay) else {
+            return false;
+        };
+        let now = self.clock.map(|ms| ms / 1000).unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
+        let Ok(jwt) = GithubAppAdapter::build_app_jwt(&oauth, now).map(SecretString::new) else {
+            return false;
+        };
+        let Ok(http) = self.http() else {
+            return false;
+        };
+        let bearer = SecretString::new(format!("Bearer {}", jwt.expose()));
+        let body = serde_json::to_vec(&HookPatch { secret: pending })
+            .expect("a string field always serializes");
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let reply = timeout_at(
+            deadline,
+            http.patch(
+                GITHUB_HOOK_URL,
+                &[
+                    ("Authorization", bearer.expose()),
+                    ("Accept", "application/vnd.github+json"),
+                    ("User-Agent", "cortexkit-claustrum"),
+                ],
+                "application/json",
+                body,
+            ),
+        )
+        .await;
+        reply.is_ok_and(|result| result.is_ok_and(confirmed_hook_patch))
+    }
 }
+
+#[derive(Serialize)]
+struct HookPatch<'a> {
+    secret: &'a SecretString,
+}
+
+fn confirmed_hook_patch(reply: HttpResponse) -> bool {
+    let body = SecretBytes::new(reply.body);
+    (200..=299).contains(&reply.status) && body.expose().len() <= MAX_HOOK_REPLY_BYTES
+}
+
+const HOOK_UPDATE_FAILED: &str =
+    "github_app_hook_update_failed/transient: could not finish updating the GitHub App webhook; rerun rotation to resume";
 
 const CONVERSION_UNKNOWN: &str =
     "github_app_conversion_unknown/permanent: GitHub App conversion could not be confirmed";

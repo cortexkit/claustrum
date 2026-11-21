@@ -5928,13 +5928,15 @@ refuse the same permanent code for the reserved namespace and for the legacy id
 when it is the configured root.
 
 These `admin_op` operations use the master-key challenge and MAC above. They
-use `v: 1` and create an agent's GitHub App:
+use `v: 1` and create an agent's GitHub App or manage its webhook relay:
 
 | Operation | Parameters besides `v` | Result |
 |---|---|---|
 | `admin.github_app_manifest_prepare` | `agent` | `{name, default_permissions, default_events}` |
 | `admin.github_app_relay_slot_open` | None | `{slot, webhook_url, expires_at}` |
 | `admin.github_app_create_complete` | `code`, `agent`, optional `slot` | `{outcome: "created", slug, app_id, install_url}` or a result with a failure outcome (below) |
+| `admin.github_app_relay_retry` | `slug` | `{slug}` |
+| `admin.github_app_webhook_rotate` | `slug` | `{slug, repeated_put}` |
 
 Prepare writes nothing. It refuses `agent_invalid` unless `agent` is `agent_`
 followed by 16 lowercase hexadecimal digits, `github_app_agent_exists` if a
@@ -5987,6 +5989,30 @@ With a slot, the daemon keeps the App lock from the store commit through the
 initial relay `PUT`. Only a `200` reply within the 8 KiB reply limit confirms
 registration. A failed `PUT` does not roll back the App. Only the cause
 `relay_unavailable` offers a same-slot retry.
+
+Retry and rotation require the serving daemon. They check the App's state and
+run under the `github_app:<slug>` lock, using the App id and slot recorded at
+creation. An invalid slug refuses `invalid_params`; a missing row refuses
+`not_found`; an inactive row refuses `github_app_inactive`; an App without a
+vault attestation or slot refuses `github_app_no_relay`. Retry refuses
+`github_app_rotation_pending` when a rotation is in progress. These permanent
+refusals make no outbound call.
+
+Retry repeats only the same-slot `PUT` with the current secret. Retry and
+rotation use the relay `PUT` refusals listed under `relay_registration_failed`
+as `<code>/<class>: <why>` messages in `admin_refused` errors. Only
+`relay_unavailable` is transient. If a confirmed retry cannot be audited it
+refuses `audit_write_failed` (permanent); a rerun sends the same `PUT`.
+
+Rotation first stores a candidate, confirms it with the relay (only a `200`
+`PUT` confirms), then updates GitHub's hook config with an App JWT. The GitHub
+`PATCH` response must have a success status and be no larger than 8 KiB. Only
+then does the candidate become current. A confirmation write, GitHub update,
+or final store failure returns `github_app_hook_update_failed` (transient). A
+rerun resumes the same candidate, skipping `PUT` if its confirmation was
+already saved. The boolean `repeated_put` is true when this run re-sent a
+pending secret that an earlier run may already have sent. Each committed
+rotation step records a keyed digest in its audit row.
 
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,

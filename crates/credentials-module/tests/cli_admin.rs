@@ -6033,11 +6033,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
     // additions include sign, the four federation verbs (transfer, remote, member,
     // federation), secret, ssh-key, provider-report, module-secret and
-    // clear-condition. Policy and policy-root each add one top-level entry.
+    // clear-condition, policy, policy-root and github-app.
     assert_eq!(
         verbs.len(),
-        46,
-        "the rendered verb-table scan must include the policy-root command family"
+        47,
+        "the rendered verb-table scan must include the github-app command family"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
@@ -7781,6 +7781,11 @@ impl ProviderRoutePeer {
     }
 
     fn start_with_gateway_refusal(vault: &GrantCliVault, refuse_gateway: bool) -> Self {
+        Self::start_inner(vault, refuse_gateway, false)
+    }
+
+    fn start_inner(vault: &GrantCliVault, refuse_gateway: bool, drop_create_reply: bool) -> Self {
+        use credentials_core::admin_ops::AdminOpBody;
         use subc_protocol::{Flags, Frame, FrameType, Priority};
         use subc_transport::{
             authenticate_server, connection_file, read_frame, write_frame, ConnectionInfo, Endpoint,
@@ -7863,9 +7868,28 @@ impl ProviderRoutePeer {
                             (_, Some("admin.challenge")) => (FrameType::Response, serde_json::json!({"result":{"nonce_hex":"00".repeat(credentials_core::admin_auth::ADMIN_NONCE_LEN),"key_id_hex":key_id,"vault_id_hex":vault_id}})),
                             (_, Some("admin.op")) => {
                                 let raw = body["params"]["op_body"].as_str().unwrap();
-                                let op: credentials_core::admin_ops::AdminOpBody = serde_json::from_str(raw).unwrap();
-                                ops.lock().unwrap().push(serde_json::from_str(raw).unwrap());
-                                if refuse_gateway && matches!(op, credentials_core::admin_ops::AdminOpBody::GatewayCreate { .. }) {
+                                 let op: AdminOpBody = serde_json::from_str(raw).unwrap();
+                                 ops.lock().unwrap().push(serde_json::from_str(raw).unwrap());
+                                 if drop_create_reply {
+                                     match &op {
+                                         AdminOpBody::GitHubAppCreateComplete { code, agent, slot, .. } => {
+                                             assert!(code == "manifest-fixture-canary" && slot.is_none());
+                                             store.create_github_app_audited(credentials_core::store::GitHubAppCreation {
+                                                 slug: "saved-app", app_id: 321, agent,
+                                                 pem: &credentials_core::secret::SecretString::new(include_str!("../../credentials-core/tests/fixtures/github_app/test_private_key_pkcs1.pem").into()),
+                                                 client_id: "fixture-client-id", relay: None,
+                                             }, "route-cli-test").unwrap();
+                                             break;
+                                         }
+                                         AdminOpBody::GitHubAppManifestPrepare { agent, .. } if store.github_app_agent_exists(agent).unwrap() => {
+                                             let response = Frame::build(FrameType::Error, Flags::new(false, Priority::Passive, false), request.header.channel, request.header.epoch, request.header.corr, serde_json::to_vec(&serde_json::json!({"code":"admin_refused", "message":"github_app_agent_exists/permanent: an App already holds this agent"})).unwrap()).unwrap();
+                                             write_frame(&mut stream, &response).await.unwrap();
+                                             continue;
+                                         }
+                                         _ => {}
+                                     }
+                                 }
+                                 if refuse_gateway && matches!(op, AdminOpBody::GatewayCreate { .. }) {
                                     (FrameType::Error, serde_json::json!({"message":"unsupported admin.gateway_create"}))
                                 } else {
                                     match credentials_core::admin_ops::apply(&store, op, "route-cli-test") {
@@ -7898,6 +7922,130 @@ impl Drop for ProviderRoutePeer {
         }
         self.join.take().unwrap().join().unwrap();
     }
+}
+
+#[test]
+fn github_app_cli_reconciles_when_route_peer_commits_and_disconnects() {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpStream,
+        process::Stdio,
+        time::Duration,
+    };
+
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("github-app-lost-reply");
+    vault.bootstrap();
+    let peer = ProviderRoutePeer::start_inner(&vault, false, true);
+    let command = || {
+        let mut cmd = cli();
+        cmd.args([
+            "github-app",
+            "create",
+            "--agent",
+            "agent_ab64ea0873bbee0c",
+            "--no-relay",
+            "--no-browser",
+        ])
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .arg("--subc")
+        .arg(&peer.connection)
+        .env("HOME", &*vault.root)
+        .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1");
+        cmd
+    };
+    let refused = command().args(["--approve-on", "other"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--approve-on other is not supported")
+    );
+    assert!(peer.observed.lock().unwrap().is_empty());
+
+    let mut child = command()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (address_out, address_in) = std::sync::mpsc::sync_channel(1);
+    let stdout = std::thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line.starts_with("http://127.0.0.1:") {
+                address_out.send(line.clone()).unwrap();
+            }
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    });
+    let start = match address_in.recv_timeout(Duration::from_secs(10)) {
+        Ok(start) => start,
+        Err(_) => {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "no loopback start URL: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
+    let address = start
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/start")
+        .unwrap();
+    let request = |path: &str| {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(socket, "GET {path} HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        response
+    };
+    let form = request("/start");
+    let state = form
+        .split_once("/settings/apps/new?state=")
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap();
+    let callback = request(&format!(
+        "/auth/github-app/callback?code=manifest-fixture-canary&state={state}"
+    ));
+    assert!(callback.starts_with("HTTP/1.1 200"));
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stdout = stdout.join().unwrap();
+    assert!(stderr.contains("Check `ck auth list`"));
+    assert!(stderr.contains("relay-retry"));
+    assert!(!stderr.to_ascii_lowercase().contains("delete"));
+    assert!(!format!("{stdout}{stderr}{callback}").contains("manifest-fixture-canary"));
+
+    let observed = peer.observed.lock().unwrap();
+    let ops: Vec<_> = observed
+        .iter()
+        .map(|value| value["op"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            "admin.github_app_manifest_prepare",
+            "admin.github_app_create_complete",
+            "admin.github_app_manifest_prepare"
+        ]
+    );
 }
 
 #[test]

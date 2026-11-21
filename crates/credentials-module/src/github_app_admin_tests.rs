@@ -6,7 +6,7 @@ use credentials_core::{
     audit::{AuditCtx, AuditOp},
     key::{MasterKey, MASTER_KEY_LEN},
     record::{CredentialKind, VaultRecord},
-    refresh_adapters::RefreshError,
+    refresh_adapters::{RefreshAdapter, RefreshError, RefreshedTokens},
     store::{EncryptedStore, SECRET_HOME_SETTING},
     test_support::TestTempDir,
 };
@@ -26,6 +26,8 @@ const TOKEN_MARKER: &str = "fixture-machine-token-redaction-canary";
 const OPEN: &str = r#"{"op":"admin.github_app_relay_slot_open","v":1}"#;
 const PREPARE: &str =
     r#"{"op":"admin.github_app_manifest_prepare","v":1,"agent":"agent_ab64ea0873bbee0c"}"#;
+const RETRY: &str = r#"{"op":"admin.github_app_relay_retry","v":1,"slug":"managed-app"}"#;
+const ROTATE: &str = r#"{"op":"admin.github_app_webhook_rotate","v":1,"slug":"managed-app"}"#;
 const AGENT: &str = "agent_ab64ea0873bbee0c";
 const CODE: &str = "manifest-code-redaction-canary";
 const WEBHOOK_SECRET: &str = "webhook-secret-redaction-canary";
@@ -71,6 +73,7 @@ enum Step {
     Response(HttpResponse),
     Signal(HttpResponse),
     Together(Arc<Barrier>, HttpResponse),
+    Blocked(Arc<Barrier>, HttpResponse),
     TransportError,
     Pending,
 }
@@ -80,6 +83,9 @@ struct RecordedHttp {
     steps: Mutex<VecDeque<Step>>,
     requests: Mutex<Vec<String>>,
     pending: Notify,
+    rotation: std::sync::atomic::AtomicBool,
+    put_secrets: Mutex<Vec<SecretString>>,
+    patch_secrets: Mutex<Vec<SecretString>>,
 }
 
 impl RecordedHttp {
@@ -97,6 +103,11 @@ impl RecordedHttp {
                 Ok(reply)
             }
             Step::Together(barrier, reply) => {
+                barrier.wait().await;
+                Ok(reply)
+            }
+            Step::Blocked(barrier, reply) => {
+                self.pending.notify_one();
                 barrier.wait().await;
                 Ok(reply)
             }
@@ -158,13 +169,65 @@ impl HttpTransport for RecordedHttp {
                     format!("Bearer {}", token_fixture()).as_str()
                 )]
         );
-        assert!(
-            serde_json::from_slice::<Value>(&body).unwrap()
-                == json!({
-                    "app_id": LARGE_APP_ID.to_string(), "webhook_secret": WEBHOOK_SECRET,
-                })
-        );
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let secret = body["webhook_secret"].as_str().unwrap();
+        if self.rotation.load(std::sync::atomic::Ordering::Relaxed) {
+            assert_eq!(body["app_id"], LARGE_APP_ID.to_string());
+            assert!(
+                secret == WEBHOOK_SECRET
+                    || (secret.len() == 64
+                        && secret
+                            .bytes()
+                            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            );
+            self.put_secrets
+                .lock()
+                .unwrap()
+                .push(secret.to_owned().into());
+        } else {
+            assert!(
+                body == json!({"app_id": LARGE_APP_ID.to_string(), "webhook_secret": WEBHOOK_SECRET})
+            );
+        }
         self.requests.lock().unwrap().push(format!("PUT {url}"));
+        self.next().await
+    }
+
+    async fn patch(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        assert_eq!(url, GITHUB_HOOK_URL);
+        assert_eq!(content_type, "application/json");
+        let bearer = headers
+            .iter()
+            .find(|(key, _)| *key == "Authorization")
+            .unwrap()
+            .1;
+        let jwt = bearer.strip_prefix("Bearer ").unwrap();
+        let record = credentials_core::oauth::OAuthCredential {
+            access_token: String::new().into(),
+            refresh_token: PKCS1_PEM.to_owned().into(),
+            expires_at_ms: None,
+            token_url: String::new(),
+            client_id: Some("fixture-client-id".into()),
+            client_secret: None,
+            scopes: Vec::new(),
+        };
+        assert!(
+            jwt == GithubAppAdapter::build_app_jwt(&record, 1_800_000_000).unwrap(),
+            "PATCH must use the stored PKCS#1 key and its App client id"
+        );
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        self.patch_secrets
+            .lock()
+            .unwrap()
+            .push(body["secret"].as_str().unwrap().to_owned().into());
+        self.requests.lock().unwrap().push(format!("PATCH {url}"));
         self.next().await
     }
 
@@ -185,6 +248,14 @@ struct Rig {
 
 impl Rig {
     fn new(steps: Vec<Step>, machine: bool) -> Self {
+        Self::with_adapters(steps, machine, Vec::new())
+    }
+
+    fn with_adapters(
+        steps: Vec<Step>,
+        machine: bool,
+        adapters: Vec<Arc<dyn RefreshAdapter>>,
+    ) -> Self {
         let (read, store, db_path, root) = crate::tests::tmp_surface_with_store(SEED);
         let key = MasterKey::from_bytes([SEED; MASTER_KEY_LEN]);
         let vault_id = credentials_core::vault_id_for(db_path.parent().unwrap()).unwrap();
@@ -194,7 +265,7 @@ impl Rig {
         });
         let engine = Arc::new(RefreshEngine::new(
             Arc::clone(&store),
-            Vec::new(),
+            adapters,
             http.clone(),
         ));
         let mut admin = AdminSurface::new(
@@ -623,13 +694,21 @@ async fn github_app_admin_ops_reject_offline_open_and_check_route_admission_befo
     assert!(
         matches!(apply(&rig.store, create_op, "offline-cli"), Err(StoreOpError::Encode(reason)) if reason.starts_with(FEDERATION_REQUIRES_DAEMON))
     );
-    for body in [OPEN, PREPARE, &create] {
+    for body in [RETRY, ROTATE] {
+        let op: AdminOpBody = serde_json::from_str(body).unwrap();
+        assert!(op.requires_daemon());
+        assert!(
+            matches!(apply(&rig.store, op, "offline-cli"), Err(StoreOpError::Encode(reason)) if reason.starts_with(FEDERATION_REQUIRES_DAEMON))
+        );
+    }
+    for body in [OPEN, PREPARE, &create, RETRY, ROTATE] {
         let valid_direct_tag = rig.sign(body);
         for channel in [2, 3] {
             let (_, reply) = rig.route(channel, body, &valid_direct_tag).await;
             assert!(reply["result"]["slot"].is_null());
             assert!(reply["result"]["name"].is_null());
             assert!(reply["result"]["outcome"].is_null());
+            assert!(reply["result"]["slug"].is_null());
         }
         let (frame, reply) = rig.route(1, body, &"00".repeat(32)).await;
         assert_eq!(frame, FrameType::Error);
@@ -653,10 +732,12 @@ async fn github_app_admin_ops_reject_offline_open_and_check_route_admission_befo
         .as_str()
         .unwrap()
         .starts_with("remote_setup_incomplete/"));
-    let (frame, reply) = rig.call(&create).await;
-    assert_eq!(frame, FrameType::Error);
-    assert_eq!(reply["code"], "admin_refused");
-    assert_eq!(reply["message"], "remote_setup_incomplete/permanent");
+    for body in [&*create, RETRY, ROTATE] {
+        let (frame, reply) = rig.call(body).await;
+        assert_eq!(frame, FrameType::Error);
+        assert_eq!(reply["code"], "admin_refused");
+        assert_eq!(reply["message"], "remote_setup_incomplete/permanent");
+    }
     assert_eq!(rig.counts(), before);
     assert!(rig.http.requests.lock().unwrap().is_empty());
 }
@@ -721,7 +802,10 @@ fn assert_conversion_audit_redacted(rig: &Rig) {
         .unwrap();
     assert_redacted(&format!("{rows:?}"));
     for (op, actor, id, digest, alarm) in rows {
-        if op == "github_app.create_complete" {
+        if matches!(
+            op.as_str(),
+            "github_app.create_complete" | "github_app.relay_retry" | "github_app.webhook_rotate"
+        ) {
             assert_eq!(actor, "route-admin");
             assert!(id.unwrap().starts_with("github_app:"));
             assert_eq!(alarm, 0);
@@ -1207,5 +1291,370 @@ async fn github_app_create_complete_keeps_lock_through_put_timeout_or_interrupti
         assert_refused(rig.call(PREPARE).await, "github_app_agent_exists/permanent");
         assert_eq!(rig.counts(), (before.0 + 2, before.1 + 1, before.2));
         assert_eq!(rig.http.requests.lock().unwrap().len(), 4);
+    }
+}
+
+const MANAGED: &str = "managed-app";
+const MANAGED_ID: &str = "github_app:managed-app";
+
+fn seed_app(rig: &Rig, with_relay: bool) {
+    let key = SecretString::new(PKCS1_PEM.to_owned());
+    let secret = SecretString::new(WEBHOOK_SECRET.to_owned());
+    rig.store
+        .create_github_app_audited(
+            GitHubAppCreation {
+                slug: MANAGED,
+                app_id: LARGE_APP_ID,
+                agent: AGENT,
+                pem: &key,
+                client_id: "fixture-client-id",
+                relay: with_relay.then_some((SLOT, &secret)),
+            },
+            ROUTE_ADMIN_ACTOR,
+        )
+        .unwrap();
+    rig.http
+        .rotation
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn relay_state(rig: &Rig) -> GitHubAppRelay {
+    rig.store
+        .github_app_relay(MANAGED)
+        .unwrap_or_else(|_| panic!("expected relay state"))
+}
+
+fn audit_count(rig: &Rig, op: &str) -> i64 {
+    rig.db
+        .query_row(
+            "SELECT count(*) FROM audit_log WHERE op = ?1",
+            [op],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn put_steps(step: Step) -> Vec<Step> {
+    exchange().into_iter().chain([step]).collect()
+}
+
+#[tokio::test]
+async fn github_app_retry_and_rotation_state_refusals_make_no_outbound_call() {
+    let rig = Rig::new(vec![], true);
+    for op in [RETRY, ROTATE] {
+        assert_refused(
+            rig.call(&op.replace(MANAGED, "../other")).await,
+            "invalid_params/permanent",
+        );
+        assert_refused(rig.call(op).await, "not_found/permanent");
+    }
+    seed_app(&rig, false);
+    let before = rig.counts();
+    for op in [RETRY, ROTATE] {
+        assert_refused(rig.call(op).await, "github_app_no_relay/permanent");
+    }
+    assert_eq!(rig.counts(), before);
+
+    let rig = Rig::new(vec![], true);
+    seed_app(&rig, true);
+    rig.db
+        .execute(
+            "UPDATE credentials SET state = 'needs_reauth' WHERE credential_id = ?1",
+            [MANAGED_ID],
+        )
+        .unwrap();
+    let before = rig.counts();
+    for op in [RETRY, ROTATE] {
+        assert_refused(rig.call(op).await, "github_app_inactive/permanent");
+    }
+    assert_eq!(rig.counts(), before);
+    assert!(rig.http.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn github_app_rotation_resumes_unconfirmed_and_confirmed_without_a_third_secret() {
+    let mut steps = put_steps(reply(202, json!({"detail": WEBHOOK_SECRET})));
+    steps.extend(put_steps(reply(200, json!({}))));
+    steps.extend([
+        reply(302, json!({"detail": CLIENT_SECRET})),
+        reply(200, json!({"detail": PEM_ARMOUR})),
+    ]);
+    let rig = Rig::new(steps, true);
+    seed_app(&rig, true);
+    let logs = Arc::new(Mutex::new(String::new()));
+    let _capture = tracing::subscriber::set_default(Capture(logs.clone()));
+    let first = rig.call(ROTATE).await;
+    assert_redacted(&first.1.to_string());
+    assert_refused(first, "relay_reply_invalid/permanent");
+    let state = relay_state(&rig);
+    let pending = state.pending().unwrap().clone();
+    assert!(!state.pending_put_confirmed());
+    assert!(state.current().expose() == WEBHOOK_SECRET);
+    assert!(rig.http.patch_secrets.lock().unwrap().is_empty());
+    assert_eq!(audit_count(&rig, "github_app.webhook_rotate"), 1);
+    let before_retry = rig.http.requests.lock().unwrap().len();
+    let before = rig.counts();
+    assert_refused(
+        rig.call(RETRY).await,
+        "github_app_rotation_pending/permanent",
+    );
+    assert_eq!(rig.http.requests.lock().unwrap().len(), before_retry);
+    assert_eq!(rig.counts(), before);
+
+    let second = rig.call(ROTATE).await;
+    assert_redacted(&second.1.to_string());
+    assert_refused(second, "github_app_hook_update_failed/transient");
+    let state = relay_state(&rig);
+    assert!(state.pending_put_confirmed());
+    assert_eq!(state.pending(), Some(&pending));
+    assert!(state.current().expose() == WEBHOOK_SECRET);
+    assert_eq!(audit_count(&rig, "github_app.webhook_rotate"), 2);
+
+    assert_result(
+        rig.call(ROTATE).await,
+        json!({"slug": MANAGED, "repeated_put": false}),
+    );
+    let state = relay_state(&rig);
+    assert_eq!(state.current(), &pending);
+    assert!(state.pending().is_none());
+    assert!(!state.pending_put_confirmed());
+    assert_eq!(
+        rig.http.put_secrets.lock().unwrap().as_slice(),
+        [pending.clone(), pending.clone()]
+    );
+    assert_eq!(
+        rig.http.patch_secrets.lock().unwrap().as_slice(),
+        [pending.clone(), pending]
+    );
+    assert_eq!(audit_count(&rig, "github_app.webhook_rotate"), 3);
+    assert!(rig.http.steps.lock().unwrap().is_empty());
+    assert_redacted(&logs.lock().unwrap());
+    assert_conversion_audit_redacted(&rig);
+}
+
+#[tokio::test]
+async fn github_app_rotation_confirmation_audit_failure_repeats_put_before_patch() {
+    let mut steps = put_steps(reply(200, json!({})));
+    steps.extend(put_steps(reply(200, json!({}))));
+    steps.push(reply(200, json!({})));
+    let rig = Rig::new(steps, true);
+    seed_app(&rig, true);
+    rig.db
+        .execute_batch(
+            "CREATE TRIGGER refuse_confirmation BEFORE INSERT ON audit_log
+        WHEN NEW.op = 'github_app.webhook_rotate'
+             AND EXISTS(SELECT 1 FROM audit_log WHERE op = 'github_app.webhook_rotate')
+        BEGIN SELECT RAISE(ABORT, 'injected confirmation audit failure'); END;",
+        )
+        .unwrap();
+    assert_refused(
+        rig.call(ROTATE).await,
+        "github_app_hook_update_failed/transient",
+    );
+    let state = relay_state(&rig);
+    let pending = state.pending().unwrap().clone();
+    assert!(!state.pending_put_confirmed());
+    assert!(state.current().expose() == WEBHOOK_SECRET);
+    assert_eq!(audit_count(&rig, "github_app.webhook_rotate"), 1);
+    assert!(rig.http.patch_secrets.lock().unwrap().is_empty());
+
+    rig.db
+        .execute_batch("DROP TRIGGER refuse_confirmation")
+        .unwrap();
+    assert_result(
+        rig.call(ROTATE).await,
+        json!({"slug": MANAGED, "repeated_put": true}),
+    );
+    assert_eq!(
+        rig.http.put_secrets.lock().unwrap().as_slice(),
+        [pending.clone(), pending.clone()]
+    );
+    assert_eq!(rig.http.patch_secrets.lock().unwrap().as_slice(), [pending]);
+    assert_eq!(audit_count(&rig, "github_app.webhook_rotate"), 3);
+    assert!(rig.http.steps.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn github_app_retry_audit_failure_repeats_identical_put() {
+    let mut steps = put_steps(reply(200, json!({})));
+    steps.extend(put_steps(reply(200, json!({}))));
+    let rig = Rig::new(steps, true);
+    seed_app(&rig, true);
+    let before = rig.counts();
+    rig.db
+        .execute_batch(
+            "CREATE TRIGGER refuse_retry BEFORE INSERT ON audit_log
+        WHEN NEW.op = 'github_app.relay_retry'
+        BEGIN SELECT RAISE(ABORT, 'injected retry audit failure'); END;",
+        )
+        .unwrap();
+    assert_refused(rig.call(RETRY).await, "audit_write_failed/permanent");
+    assert_eq!(rig.counts(), before);
+    assert_eq!(audit_count(&rig, "github_app.relay_retry"), 0);
+    rig.db.execute_batch("DROP TRIGGER refuse_retry").unwrap();
+    assert_result(rig.call(RETRY).await, json!({"slug": MANAGED}));
+    assert_eq!(audit_count(&rig, "github_app.relay_retry"), 1);
+    let puts = rig.http.put_secrets.lock().unwrap();
+    assert_eq!(puts.len(), 2);
+    assert!(puts.iter().all(|secret| secret.expose() == WEBHOOK_SECRET));
+    assert!(rig.http.steps.lock().unwrap().is_empty());
+    assert_conversion_audit_redacted(&rig);
+}
+
+#[test]
+fn github_app_hook_patch_reply_accepts_8_kib_and_refuses_one_byte_more() {
+    assert!(confirmed_hook_patch(HttpResponse {
+        status: 200,
+        body: vec![b'x'; 8192]
+    }));
+    assert!(!confirmed_hook_patch(HttpResponse {
+        status: 200,
+        body: vec![b'x'; 8193]
+    }));
+}
+
+#[tokio::test]
+async fn github_app_retry_waiting_behind_rotation_reads_the_promoted_secret() {
+    let gate = Arc::new(Barrier::new(2));
+    let mut steps = put_steps(Step::Blocked(
+        gate.clone(),
+        HttpResponse {
+            status: 200,
+            body: vec![],
+        },
+    ));
+    steps.push(reply(200, json!({})));
+    steps.extend(put_steps(reply(200, json!({}))));
+    let rig = Rig::new(steps, true);
+    seed_app(&rig, true);
+    let mut rotate = spawn_route(&rig, ROTATE.into());
+    // The first PUT is blocked with the App lock held. Poll retry before letting
+    // rotation finish; retry may not use the older current secret it supersedes.
+    tokio::select! {
+        _ = rig.http.pending.notified() => {},
+        _ = &mut rotate => panic!("rotation finished before the PUT was released"),
+    }
+    let retry = rig.call(RETRY);
+    tokio::pin!(retry);
+    tokio::select! {
+        biased;
+        _ = &mut retry => panic!("retry did not wait for rotation"),
+        _ = std::future::ready(()) => {},
+    }
+    gate.wait().await;
+    let (frame, reply) = rotate.await.unwrap();
+    assert_result(
+        (frame, serde_json::from_slice(&reply).unwrap()),
+        json!({"slug": MANAGED, "repeated_put": false}),
+    );
+    assert_result(retry.await, json!({"slug": MANAGED}));
+    let state = relay_state(&rig);
+    assert!(state.current().expose() != WEBHOOK_SECRET);
+    assert_eq!(
+        rig.http.put_secrets.lock().unwrap().as_slice(),
+        [state.current().clone(), state.current().clone()]
+    );
+    assert!(rig.http.steps.lock().unwrap().is_empty());
+}
+
+struct AppRefresh;
+
+#[async_trait::async_trait]
+impl RefreshAdapter for AppRefresh {
+    fn name(&self) -> &str {
+        credentials_core::refresh_adapters::github_app::ADAPTER_NAME
+    }
+
+    async fn refresh(
+        &self,
+        cred: &credentials_core::oauth::OAuthCredential,
+        _: &dyn HttpTransport,
+    ) -> Result<RefreshedTokens, RefreshError> {
+        Ok(RefreshedTokens {
+            access_token: "fixture-installation-token".to_owned().into(),
+            refresh_token: cred.refresh_token.clone(),
+            expires_at_ms: None,
+            github_app_permissions: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn github_app_retry_keeps_refresh_and_remove_behind_the_confirmed_put() {
+    let gate = Arc::new(Barrier::new(2));
+    let steps = put_steps(Step::Blocked(
+        gate.clone(),
+        HttpResponse {
+            status: 200,
+            body: vec![],
+        },
+    ));
+    let rig = Rig::with_adapters(steps, true, vec![Arc::new(AppRefresh)]);
+    seed_app(&rig, true);
+    let mut retry = spawn_route(&rig, RETRY.into());
+    tokio::select! {
+        _ = rig.http.pending.notified() => {},
+        _ = &mut retry => panic!("retry finished before the PUT was released"),
+    }
+    let refresh = rig.engine.get(MANAGED_ID, None, true);
+    tokio::pin!(refresh);
+    tokio::select! {
+        biased;
+        _ = &mut refresh => panic!("refresh did not wait for the retry's App lock"),
+        _ = std::future::ready(()) => {},
+    }
+    let remove = rig.call(r#"{"op":"admin.remove","v":1,"id":"github_app:managed-app"}"#);
+    tokio::pin!(remove);
+    tokio::select! {
+        biased;
+        _ = &mut remove => panic!("remove did not wait for the retry's App lock"),
+        _ = std::future::ready(()) => {},
+    }
+    assert_eq!(rig.store.get(MANAGED_ID).unwrap().record_version, 1);
+    gate.wait().await;
+    let (frame, reply) = retry.await.unwrap();
+    assert_result(
+        (frame, serde_json::from_slice(&reply).unwrap()),
+        json!({"slug": MANAGED}),
+    );
+    assert_eq!(refresh.await.unwrap().record_version, 2);
+    assert_eq!(remove.await.0, FrameType::Response);
+    assert_refused(rig.call(RETRY).await, "not_found/permanent");
+    assert_refused(rig.call(ROTATE).await, "not_found/permanent");
+    assert_eq!(rig.http.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn github_app_retry_and_rotation_share_the_deadline_across_lock_and_put() {
+    for op in [RETRY, ROTATE] {
+        let rig = Rig::new(vec![], true);
+        seed_app(&rig, true);
+        let before = rig.counts();
+        let lock = rig.engine.acquire_admin_lock(MANAGED_ID).await;
+        // Keep the lock through the deadline. Neither the state nor outbound work
+        // can proceed, even though the App would otherwise admit both operations.
+        assert_refused(rig.call(op).await, "relay_unavailable/transient");
+        assert_eq!(rig.counts(), before);
+        assert!(rig.http.requests.lock().unwrap().is_empty());
+        drop(lock);
+
+        let rig = Rig::new(put_steps(Step::Pending), true);
+        seed_app(&rig, true);
+        let mut call = spawn_route(&rig, op.into());
+        tokio::select! {
+            _ = rig.http.pending.notified() => {},
+            _ = &mut call => panic!("operation did not reach the delayed PUT"),
+        }
+        tokio::time::advance(crate::federation::ADMIN_OP_BUDGET).await;
+        let (frame, bytes) = call.await.unwrap();
+        assert_refused(
+            (frame, serde_json::from_slice(&bytes).unwrap()),
+            "relay_unavailable/transient",
+        );
+        assert_eq!(rig.http.put_secrets.lock().unwrap().len(), 1);
+        assert!(rig.http.patch_secrets.lock().unwrap().is_empty());
+        let state = relay_state(&rig);
+        assert_eq!(state.pending().is_some(), op == ROTATE);
+        assert!(!state.pending_put_confirmed());
     }
 }

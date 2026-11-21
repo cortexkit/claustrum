@@ -1649,7 +1649,9 @@ mod agent_policy_admin;
 
 #[path = "store_github_app.rs"]
 mod github_app_store;
-pub use github_app_store::GitHubAppCreation;
+pub use github_app_store::{
+    GitHubAppCreation, GitHubAppRelay, GitHubAppRelayError, WebhookRotation,
+};
 
 #[path = "store_policy_token.rs"]
 mod policy_token;

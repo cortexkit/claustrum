@@ -747,6 +747,12 @@ impl AdminSurface {
                         .create_complete(&self.engine, code.into(), &agent, slot.as_deref())
                         .await
                 }
+                AdminOpBody::GitHubAppRelayRetry { slug, .. } => {
+                    self.github_apps.relay_retry(&self.engine, &slug).await
+                }
+                AdminOpBody::GitHubAppWebhookRotate { slug, .. } => {
+                    self.github_apps.webhook_rotate(&self.engine, &slug).await
+                }
                 other => self.dispatch_federation(other).await,
             };
         }

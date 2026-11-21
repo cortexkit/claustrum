@@ -448,6 +448,28 @@ never writes or refreshes tokens. It opens the store read-only without a lease, 
 the daemon can keep running. The check needs the operator master key and network
 access to GitHub.
 
+### Create a GitHub App for an agent
+
+Run `ck auth github-app create --agent <id>` on the computer running the vault.
+Open the loopback start page in a browser on that computer; `--no-browser`
+prints the URL without opening it. Add `--org <login>` to create the App in an
+organization, or `--name <name>` to override the generated name. The vault
+keeps the App key. Use the printed install link and choose **Only select
+repositories**. With `--no-relay` (or when the account cannot use the relay),
+the App is created without webhook delivery to this vault.
+
+If create loses its daemon reply and reports that the App may be saved, check
+`ck auth list`. Do not resubmit the manifest code. If the App is listed with
+a relay slot, use `ck auth github-app relay-retry --slug <slug>` to finish
+registration. Retry never opens another slot; it cannot repair an expired
+slot or an App mismatch.
+
+Use `ck auth github-app rotate-webhook-secret --slug <slug>` to change the
+webhook secret on the relay and then on GitHub. If interrupted, rerun rotation
+instead of relay retry: it resumes with the same candidate. The old secret's
+10-minute grace period starts when the relay first accepts the candidate. A
+repeated `PUT` is not guaranteed to preserve that grace period.
+
 ### Agent secrets: keys an agent uses without seeing them
 
 Agent secrets are a separate record kind that no credential id, handle, credential grant
@@ -1177,6 +1199,8 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `refresh_commit` | Commit new tokens from a vault-owned refresh. |
 | `github_app.relay_slot_open` | Record a confirmed GitHub App relay slot open; the payload holds a keyed digest of the slot. |
 | `github_app.create_complete` | Record a committed GitHub App creation, including its attestation and any webhook companion; the payload holds a keyed digest. The initial relay PUT adds no row. |
+| `github_app.relay_retry` | Record a confirmed retry of the existing relay slot; the payload holds a keyed digest. |
+| `github_app.webhook_rotate` | Record a committed rotation step (stage the candidate, record relay confirmation, or promote after the GitHub update); the payload holds a keyed digest. |
 | `report_auth_failure` | Record a consumer report that changes credential state. |
 | `report_condition` | Set or replace a provider login condition without changing credential state. |
 | `clear_condition` | Remove a provider login condition on consumer or operator request. |

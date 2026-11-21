@@ -151,10 +151,18 @@ impl CallbackListener {
 /// Receive one code callback without blocking pasted input, even if an HTTP client
 /// connects and sends only part of a request. The caller validates code and state.
 pub async fn receive_code(listener: &tokio::net::TcpListener) -> Option<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     let (mut stream, _) = listener.accept().await.ok()?;
-    let query = tokio::time::timeout(Duration::from_secs(5), async {
+    let query = read_request_target(&mut stream)
+        .await
+        .and_then(|(method, target)| callback_query(&method, &target));
+    write_response_async(&mut stream, &browser_response(query.is_some())).await;
+    query
+}
+
+async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<(String, String)> {
+    use tokio::io::AsyncReadExt;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
         let mut request = Vec::new();
         let mut chunk = [0; 1024];
         loop {
@@ -169,20 +177,146 @@ pub async fn receive_code(listener: &tokio::net::TcpListener) -> Option<String> 
             if request.windows(4).any(|w| w == b"\r\n\r\n") {
                 let text = std::str::from_utf8(&request).ok()?;
                 let mut parts = text.lines().next()?.split_whitespace();
-                return callback_query(parts.next()?, parts.next()?);
+                return Some((parts.next()?.into(), parts.next()?.into()));
             }
         }
     })
     .await
     .ok()
-    .flatten();
-    let response = browser_response(query.is_some());
+    .flatten()
+}
+
+async fn write_response_async(stream: &mut tokio::net::TcpStream, response: &str) {
+    use tokio::io::AsyncWriteExt;
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         stream.write_all(response.as_bytes()),
     )
     .await;
-    query
+}
+
+const MANIFEST_CALLBACK_PATH: &str = "/auth/github-app/callback";
+
+/// A loopback server for the manifest form and its one GitHub callback.
+pub(super) struct ManifestListener(CallbackListener);
+
+impl ManifestListener {
+    pub(super) fn bind() -> Option<Self> {
+        capture_dynamic_callback().map(Self)
+    }
+
+    pub(super) fn start_url(&self) -> std::io::Result<String> {
+        Ok(format!("http://{}/start", self.0.local_addr()?))
+    }
+
+    pub(super) fn redirect_url(&self) -> std::io::Result<String> {
+        Ok(format!(
+            "http://{}{MANIFEST_CALLBACK_PATH}",
+            self.0.local_addr()?
+        ))
+    }
+
+    pub(super) async fn wait(
+        self,
+        action: &str,
+        manifest: &serde_json::Value,
+        expected_state: &str,
+        mut pasted: tokio::sync::mpsc::Receiver<std::io::Result<String>>,
+    ) -> Result<String, &'static str> {
+        let listener = self
+            .0
+            .into_async()
+            .map_err(|_| "Could not start the loopback listener.")?;
+        let page = manifest_page(action, manifest);
+        let receive = async {
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .map_err(|_| "Could not accept the loopback callback.")?;
+                let target = read_request_target(&mut stream).await;
+                let target = target
+                    .as_ref()
+                    .filter(|(method, _)| method == "GET")
+                    .map(|(_, target)| target.as_str());
+                let (path, query) = target
+                    .unwrap_or_default()
+                    .split_once('?')
+                    .unwrap_or((target.unwrap_or_default(), ""));
+                match path {
+                    "/start" => write_response_async(&mut stream, &page).await,
+                    MANIFEST_CALLBACK_PATH => {
+                        let result = manifest_callback_code(query, expected_state);
+                        let (status, body) = if result.is_ok() {
+                            ("200 OK", "Callback received. Return to the terminal.")
+                        } else {
+                            (
+                                "400 Bad Request",
+                                "Callback refused. Return to the terminal.",
+                            )
+                        };
+                        write_response_async(&mut stream, &manifest_http_response(status, body))
+                            .await;
+                        return result;
+                    }
+                    _ => {
+                        write_response_async(
+                            &mut stream,
+                            &manifest_http_response("404 Not Found", "Not found"),
+                        )
+                        .await
+                    }
+                }
+            }
+        };
+        let browser = tokio::time::timeout(LISTEN_TIMEOUT, receive);
+        tokio::pin!(browser);
+        tokio::select! {
+            result = &mut browser => result.map_err(|_| "Timed out waiting for the GitHub App callback.")?,
+            line = pasted.recv() => match line {
+                Some(Ok(line)) => manifest_callback_code(&line, expected_state),
+                Some(Err(_)) => Err("Could not read the pasted GitHub App callback."),
+                None => browser.await.map_err(|_| "Timed out waiting for the GitHub App callback.")?,
+            },
+        }
+    }
+}
+
+fn manifest_callback_code(input: &str, expected_state: &str) -> Result<String, &'static str> {
+    let callback = credentials_core::oauth_login::parse_callback(input)
+        .ok_or("The GitHub App callback did not contain a code and state.")?;
+    if callback.state != expected_state {
+        return Err("The GitHub App callback state did not match. No code was exchanged.");
+    }
+    Ok(callback.code)
+}
+
+fn manifest_page(action: &str, manifest: &serde_json::Value) -> String {
+    fn escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Create a GitHub App</title>\
+         <form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"manifest\" value=\"{}\">\
+         <button type=\"submit\">Continue to GitHub</button></form>\
+         <script>document.forms[0].submit();</script>",
+        escape(action),
+        escape(&manifest.to_string()),
+    );
+    manifest_http_response("200 OK", &body)
+}
+
+fn manifest_http_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+        Connection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+        X-Frame-Options: DENY\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// Fragment mode needs two browser connections: the first GET receives a page that

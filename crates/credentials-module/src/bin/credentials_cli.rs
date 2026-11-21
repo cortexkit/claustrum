@@ -123,6 +123,8 @@ mod api_key_login;
 mod browser_login;
 #[allow(dead_code)]
 mod cli_support;
+#[path = "cli_support/github_app_cli.rs"]
+mod github_app_cli;
 #[path = "cli_support/github_apps.rs"]
 mod github_apps;
 #[path = "cli_support/google_login.rs"]
@@ -407,7 +409,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
                         .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
                     || (matches!(
                         verb.as_str(),
-                        "manifest" | "policy" | "policy-root" | "module-secret"
+                        "manifest" | "policy" | "policy-root" | "module-secret" | "github-app"
                     ) && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
@@ -428,7 +430,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
                 .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
             || (matches!(
                 command.as_str(),
-                "manifest" | "policy" | "policy-root" | "module-secret"
+                "manifest" | "policy" | "policy-root" | "module-secret" | "github-app"
             ) && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
             format!("{command} {}", args[0])
@@ -497,6 +499,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "usable" => cmd_usable(&global),
         "verify-audit" => cmd_verify_audit(&global),
         "verify-github-apps" => github_apps::cmd_verify(&global),
+        "github-app" => github_app_cli::cmd(&global, &args),
         "transfer" => cli_support::federation_cli::cmd_transfer(&global, &args),
         "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
@@ -566,6 +569,9 @@ impl ParsedOptions {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    if command == "github-app" {
+        return Ok(ParsedOptions::default()); // Subcommand flags are checked by github_app_cli.
+    }
     if command == "module-secret" {
         return module_secret_cli::guard_args(args).map(|()| ParsedOptions::default());
     }
@@ -831,6 +837,7 @@ fn usage_short() -> String {
        usable              which credentials can still serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
        verify-github-apps  check GitHub App record ids against GitHub's slugs\n\
+       github-app          create Apps or manage their webhook relay\n\
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
@@ -866,6 +873,9 @@ fn usage_short() -> String {
 /// overrides — so they stay discoverable without dumping on every invocation.
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
+    if verb == "github-app" || verb.starts_with("github-app ") {
+        return github_app_cli::help(verb).into();
+    }
     if verb == "module-secret" || verb.starts_with("module-secret ") {
         return module_secret_cli::help_text(verb.strip_prefix("module-secret "));
     }

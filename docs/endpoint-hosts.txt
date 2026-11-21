@@ -791,8 +791,11 @@ crates/credentials-module/src/account_token_mint.rs CHALLENGE_URL account.cortex
 crates/credentials-module/src/account_token_mint.rs TOKEN_URL account.cortexkit.io
 crates/credentials-module/src/account_token_tests.rs INLINE_001 account.cortexkit.io
 crates/credentials-module/src/account_token_tests.rs INLINE_002 account.cortexkit.io
+crates/credentials-module/src/bin/cli_support/github_app_cli.rs GITHUB_ORIGIN github.com
+crates/credentials-module/src/bin/cli_support/github_app_cli.rs MANIFEST_APP_URL cortexkit.io
 crates/credentials-module/src/config_gate_tests.rs INLINE_001 json-schema.org
 crates/credentials-module/src/github_app_admin.rs GITHUB_APPS_BASE github.com
+crates/credentials-module/src/github_app_admin.rs GITHUB_HOOK_URL api.github.com
 crates/credentials-module/src/github_app_admin.rs GITHUB_MANIFEST_BASE api.github.com
 crates/credentials-module/src/github_app_admin.rs RELAY_OPEN_URL hooks.cortexkit.io
 crates/credentials-module/src/github_app_admin.rs RELAY_WEBHOOK_BASE hooks.cortexkit.io

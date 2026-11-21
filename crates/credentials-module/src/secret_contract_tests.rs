@@ -1778,6 +1778,8 @@ secret_error_golden! {
     ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
     Superseded => "superseded", "permanent", "result error";
     Expired => "expired", "permanent", "result error";
+    PolicyTooLarge => "policy_too_large", "permanent", "result error";
+    PolicyBindingConflict => "policy_binding_conflict", "permanent", "result error";
     PendingLimit => "pending_limit", "transient", "result error";
     StoreError => "store_error", "transient", "result error";
 }

@@ -63,6 +63,8 @@ pub enum SecretError {
     ManifestSetupIncomplete,
     Superseded,
     Expired,
+    PolicyTooLarge,
+    PolicyBindingConflict,
     PendingLimit,
     StoreError,
 }
@@ -88,6 +90,8 @@ impl SecretError {
             Self::ManifestSetupIncomplete => "manifest_setup_incomplete",
             Self::Superseded => "superseded",
             Self::Expired => "expired",
+            Self::PolicyTooLarge => "policy_too_large",
+            Self::PolicyBindingConflict => "policy_binding_conflict",
             Self::PendingLimit => "pending_limit",
             Self::StoreError => "store_error",
         }

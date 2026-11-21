@@ -1,7 +1,10 @@
+use super::agent_policy::{head_agent_policy_conn, AgentPolicySource};
+use super::agent_policy_admin::AgentPolicyApproval;
 use super::{
     append_audit_tx, gh_proposals, hex32, payload_hash, EncryptedStore, GhManifestProposal,
     GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID,
 };
+use crate::agent_policy::{manifest_projection, signed_input, AgentPolicy, Binding, PolicyError};
 use crate::agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
 use crate::audit::{AuditCtx, AuditOp, AuditRecord, GhManifestAudit};
 #[cfg(test)]
@@ -13,10 +16,10 @@ use serde_json::{json, Value};
 
 /// Rebuild both commitments from the immutable base. Hash agreement alone would
 /// allow a rewritten proposal to smuggle unrelated manifest edits past the phone.
-fn commitments_hold(
+fn committed_manifest(
     tx: &rusqlite::Transaction<'_>,
     p: &GhManifestProposal,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<GhManifest>> {
     let base: Option<(Vec<u8>, String)> = tx
         .query_row(
             "SELECT manifest_bytes,manifest_sha256 FROM gh_manifests WHERE version=?1",
@@ -25,29 +28,29 @@ fn commitments_hold(
         )
         .optional()?;
     let Some((base_bytes, base_hash)) = base else {
-        return Ok(false);
+        return Ok(None);
     };
     let (Ok(prior), Ok(manifest), Ok(permissions)) = (
         GhManifest::parse_reproducible(&base_bytes),
         GhManifest::parse_reproducible(&p.manifest_bytes),
         serde_json::from_slice(&p.installation_permissions),
     ) else {
-        return Ok(false);
+        return Ok(None);
     };
     if prior.version() != p.base_version
         || prior.manifest_sha256() != base_hash
         || manifest.manifest_sha256() != p.manifest_sha256
         || hex32(&payload_hash(&p.statement_bytes)) != p.statement_sha256
     {
-        return Ok(false);
+        return Ok(None);
     }
     let Ok(expected_manifest) =
         prior.build_next(&p.repo, &p.agent_id, manifest.issued_at_unix_secs())
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if expected_manifest.to_bytes() != p.manifest_bytes {
-        return Ok(false);
+        return Ok(None);
     }
     let Ok(statement) = ManifestBindingStatement::new(
         p.proposal_id.clone(),
@@ -59,11 +62,65 @@ fn commitments_hold(
         &prior,
         p.expires_at_ms,
     ) else {
-        return Ok(false);
+        return Ok(None);
     };
     Ok(statement
         .canonical_bytes()
-        .is_ok_and(|bytes| bytes == p.statement_bytes))
+        .is_ok_and(|bytes| bytes == p.statement_bytes)
+        .then_some(expected_manifest))
+}
+
+fn one_tap_policy(
+    mut head: AgentPolicy,
+    p: &GhManifestProposal,
+    manifest: &GhManifest,
+) -> Result<(AgentPolicy, Vec<u8>), SecretError> {
+    use SecretError::{PolicyBindingConflict, PolicyTooLarge};
+
+    // A parsed head's version fits within the JSON safe integer range, below i64::MAX.
+    head.version += 1;
+    let identity = format!("github_app:{}", p.app_slug);
+    let repo = p.repo.to_ascii_lowercase();
+    let key = ("github", p.agent_id.as_str());
+    let identity_conflict = match head
+        .bindings
+        .binary_search_by(|binding| (binding.service.as_str(), binding.agent.as_str()).cmp(&key))
+    {
+        Ok(index) => {
+            let binding = &mut head.bindings[index];
+            let index = binding
+                .resources
+                .partition_point(|resource| resource < &repo);
+            binding.resources.insert(index, repo);
+            binding.identity != identity
+        }
+        Err(index) => {
+            head.bindings.insert(
+                index,
+                Binding {
+                    service: "github".into(),
+                    agent: p.agent_id.clone(),
+                    identity,
+                    resources: vec![repo],
+                },
+            );
+            false
+        }
+    };
+    let bytes = head
+        .canonical_signing_bytes()
+        .map_err(|error| match error {
+            PolicyError::TooLarge => PolicyTooLarge,
+            _ => PolicyBindingConflict,
+        })?;
+    let policy = AgentPolicy::parse_canonical(&bytes).map_err(|_| PolicyBindingConflict)?;
+    if identity_conflict
+        || policy.github_projection()
+            != manifest_projection(manifest).map_err(|_| PolicyBindingConflict)?
+    {
+        return Err(PolicyBindingConflict);
+    }
+    Ok((policy, bytes))
 }
 
 fn reply(p: &GhManifestProposal) -> Value {
@@ -100,12 +157,12 @@ impl EncryptedStore {
             return Ok(Err(SecretError::ApprovalInvalid));
         };
         let issued = envelope.issued_at_ms as i64;
-        if envelope.statement_sha256 != p.statement_sha256
-            || issued < p.created_at_ms
-            || !commitments_hold(tx, &p)?
-        {
+        if envelope.statement_sha256 != p.statement_sha256 || issued < p.created_at_ms {
             return Ok(Err(SecretError::ApprovalInvalid));
         }
+        let Some(manifest) = committed_manifest(tx, &p)? else {
+            return Ok(Err(SecretError::ApprovalInvalid));
+        };
         let envelope_hash = hex32(&payload_hash(bytes));
         if state == "approved" {
             return Ok(
@@ -128,6 +185,15 @@ impl EncryptedStore {
         if state == "expired" || now >= p.expires_at_ms || issued >= p.expires_at_ms {
             return Ok(Err(SecretError::Expired));
         }
+        // Returning Ok(Err(SecretError)) commits the transaction, so validate the
+        // successor before any write.
+        let policy = match head_agent_policy_conn(tx).map_err(|_| rusqlite::Error::InvalidQuery)? {
+            Some(head) => match one_tap_policy(head, &p, &manifest) {
+                Ok(policy) => Some(policy),
+                Err(err) => return Ok(Err(err)),
+            },
+            None => None,
+        };
 
         let actor = authority.actor(fingerprint, true);
         let approval = append_audit_tx(
@@ -185,6 +251,24 @@ impl EncryptedStore {
                 alarm: None,
             },
         )?;
+        if let Some((policy, bytes)) = policy {
+            let input = signed_input(&bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let prepared = self
+                .prepare_agent_policy_in_tx(tx, &policy, &bytes, &input)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            self.sign_and_store_agent_policy_in_tx(
+                tx,
+                prepared,
+                AgentPolicyApproval {
+                    seq: approval.seq,
+                    source: AgentPolicySource::OneTap,
+                    manifest_version: manifest.version(),
+                    actor: &actor,
+                },
+                || now,
+            )
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        }
         Ok(Ok(reply(&p)))
     }
 }

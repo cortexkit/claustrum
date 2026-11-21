@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use super::agent_policy::{
@@ -19,7 +19,21 @@ use crate::agent_policy::{
 };
 use crate::audit::AgentPolicyAudit;
 use crate::gh_manifest::GhManifest;
-use crate::signing::{prepare_ed25519, public_key_ed25519, SignError};
+use crate::signing::{prepare_ed25519, public_key_ed25519, PreparedEd25519Signature, SignError};
+
+pub(super) struct PreparedAgentPolicy<'a> {
+    version: i64,
+    bytes: &'a [u8],
+    hash: String,
+    signature: PreparedEd25519Signature<'a>,
+}
+
+pub(super) struct AgentPolicyApproval<'a> {
+    pub seq: i64,
+    pub source: AgentPolicySource,
+    pub manifest_version: i64,
+    pub actor: &'a str,
+}
 
 fn refusal(reason: &str) -> StoreOpError {
     StoreOpError::Encode(reason.into())
@@ -91,6 +105,83 @@ fn policy_text(bytes: Vec<u8>) -> Result<String, StoreOpError> {
 }
 
 impl EncryptedStore {
+    pub(super) fn prepare_agent_policy_in_tx<'a>(
+        &self,
+        tx: &Transaction<'_>,
+        policy: &AgentPolicy,
+        bytes: &'a [u8],
+        input: &'a [u8],
+    ) -> Result<PreparedAgentPolicy<'a>, StoreOpError> {
+        let root = self
+            .gh_manifest_root_in_tx(tx)
+            .map_err(manifest_root_error)?;
+        let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| unusable_root())?;
+        let signature = prepare_ed25519(pem, input).map_err(|error| match error {
+            SignError::TooLarge { .. } => policy_error(PolicyError::TooLarge),
+            SignError::UnusableKey(_) => unusable_root(),
+        })?;
+        if signature.key_id() != policy.root_key_id {
+            return Err(refusal("policy_root_key_id_mismatch"));
+        }
+        Ok(PreparedAgentPolicy {
+            version: policy.version,
+            bytes,
+            hash: policy_sha256(bytes),
+            signature,
+        })
+    }
+
+    pub(super) fn sign_and_store_agent_policy_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        prepared: PreparedAgentPolicy<'_>,
+        approval: AgentPolicyApproval<'_>,
+        clock: impl FnOnce() -> i64,
+    ) -> Result<(String, [u8; 64]), StoreOpError> {
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AgentPolicyAudit::Sign {
+                policy_sha256: &prepared.hash,
+            }
+            .record(approval.actor, None),
+        )
+        .map_err(sql)?;
+        let signed = prepared.signature.sign();
+        let signature: [u8; 64] = STANDARD
+            .decode(&signed.signature_b64)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| StoreOpError::Corrupt("unusable policy signature".into()))?;
+        self.store_agent_policy_in_tx(
+            tx,
+            &AgentPolicyVersion {
+                version: prepared.version,
+                policy_bytes: prepared.bytes,
+                policy_sha256: &prepared.hash,
+                key_id: &signed.key_id,
+                signature: &signature,
+                signed_at_ms: clock(),
+                source: approval.source,
+                approval_seq: approval.seq,
+                manifest_version: approval.manifest_version,
+            },
+        )?;
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AgentPolicyAudit::Store {
+                version: prepared.version,
+                manifest_version: approval.manifest_version,
+                source: approval.source.as_str(),
+                policy_sha256: &prepared.hash,
+            }
+            .record(approval.actor, None),
+        )
+        .map_err(sql)?;
+        Ok((signed.key_id, signature))
+    }
+
     pub(crate) fn sign_agent_policy_admin(
         &self,
         policy_bytes: &str,
@@ -112,16 +203,9 @@ impl EncryptedStore {
             }
             require_head_bindings(&policy.bindings, head.as_ref())?;
 
-            let root = self.gh_manifest_root_in_tx(tx).map_err(manifest_root_error)?;
-            let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| unusable_root())?;
-            let prepared = prepare_ed25519(pem, &input).map_err(|error| match error {
-                SignError::TooLarge { .. } => policy_error(PolicyError::TooLarge),
-                SignError::UnusableKey(_) => unusable_root(),
-            })?;
-            if prepared.key_id() != policy.root_key_id {
-                return Err(refusal("policy_root_key_id_mismatch"));
-            }
-            let hash = policy_sha256(policy_bytes.as_bytes());
+            let prepared =
+                self.prepare_agent_policy_in_tx(tx, &policy, policy_bytes.as_bytes(), &input)?;
+            let hash = prepared.hash.clone();
             let actor = format!("{actor}/approver:{approver}");
             let approval = append_audit_tx(
                 tx,
@@ -133,42 +217,23 @@ impl EncryptedStore {
                     actor: actor.clone(),
                     alarm: None,
                 },
-            ).map_err(sql)?;
-            append_audit_tx(
+            )
+            .map_err(sql)?;
+            let (key_id, signature) = self.sign_and_store_agent_policy_in_tx(
                 tx,
-                &self.audit_key,
-                &AgentPolicyAudit::Sign { policy_sha256: &hash }.record(&actor, None),
-            ).map_err(sql)?;
-            let signed = prepared.sign();
-            let signature: [u8; 64] = STANDARD.decode(&signed.signature_b64)
-                .ok().and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| StoreOpError::Corrupt("unusable policy signature".into()))?;
-            let source = AgentPolicySource::Ceremony;
-            self.store_agent_policy_in_tx(tx, &AgentPolicyVersion {
-                version: policy.version,
-                policy_bytes: policy_bytes.as_bytes(),
-                policy_sha256: &hash,
-                key_id: &signed.key_id,
-                signature: &signature,
-                signed_at_ms: now_ms(),
-                source,
-                approval_seq: approval.seq,
-                manifest_version,
-            })?;
-            append_audit_tx(
-                tx,
-                &self.audit_key,
-                &AgentPolicyAudit::Store {
-                    version: policy.version,
+                prepared,
+                AgentPolicyApproval {
+                    seq: approval.seq,
+                    source: AgentPolicySource::Ceremony,
                     manifest_version,
-                    source: source.as_str(),
-                    policy_sha256: &hash,
-                }.record(&actor, None),
-            ).map_err(sql)?;
+                    actor: &actor,
+                },
+                now_ms,
+            )?;
             Ok(json!({
                 "version": policy.version,
                 "policy_sha256": hash,
-                "envelope": AgentPolicyEnvelope::new(policy_bytes.into(), signed.key_id, &signature),
+                "envelope": AgentPolicyEnvelope::new(policy_bytes.into(), key_id, &signature),
             }))
         })
     }

@@ -45,6 +45,13 @@ fn run(store: &EncryptedStore, op: &PhoneOperation, now: i64) -> Result<Value, S
 }
 
 fn ready(label: &str) -> (crate::test_support::TestTempDir, EncryptedStore, Vec<u8>) {
+    ready_with_manifest(label, V28)
+}
+
+fn ready_with_manifest(
+    label: &str,
+    manifest: &[u8],
+) -> (crate::test_support::TestTempDir, EncryptedStore, Vec<u8>) {
     let (dir, store) = taxonomy_tests::rig(label, SEED);
     let (record, public) = root_key();
     store
@@ -61,8 +68,8 @@ fn ready(label: &str) -> (crate::test_support::TestTempDir, EncryptedStore, Vec<
         .store_gh_manifest(
             &GhManifestVersion {
                 version: 28,
-                manifest_bytes: V28,
-                manifest_sha256: &hash(V28),
+                manifest_bytes: manifest,
+                manifest_sha256: &hash(manifest),
                 key_id: "0123456789abcdef",
                 signature: &[7; 64],
                 signed_at_ms: NOW,
@@ -94,11 +101,21 @@ fn ready(label: &str) -> (crate::test_support::TestTempDir, EncryptedStore, Vec<
 }
 
 fn propose(store: &EncryptedStore, repo: &str, now: i64) -> GhManifestProposal {
+    propose_for(store, "agent_4444444444444444", "repo-bot", repo, now)
+}
+
+fn propose_for(
+    store: &EncryptedStore,
+    agent: &str,
+    app_slug: &str,
+    repo: &str,
+    now: i64,
+) -> GhManifestProposal {
     let prepared = store
         .prepare_gh_manifest_proposal(GhManifestProposalInput {
-            agent_id: "agent_4444444444444444".into(),
+            agent_id: agent.into(),
             app_id: 42,
-            app_slug: "repo-bot".into(),
+            app_slug: app_slug.into(),
             repo: repo.into(),
             installation_permissions: BTreeMap::from([
                 ("contents".into(), "write".into()),
@@ -196,15 +213,16 @@ fn snapshot(store: &EncryptedStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
     store
         .with_raw_conn(|conn| {
             [
-                "gh_manifests",
-                "gh_manifest_proposals",
-                "gh_manifest_activations",
-                "gh_manifest_activation_audits",
-                "audit_log",
+                ("gh_manifests", "rowid"),
+                ("gh_manifest_proposals", "rowid"),
+                ("gh_manifest_activations", "rowid"),
+                ("gh_manifest_activation_audits", "rowid"),
+                ("audit_log", "rowid"),
+                ("agent_policies", "version"),
             ]
             .iter()
-            .map(|table| {
-                let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+            .map(|(table, order)| {
+                let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))?;
                 let count = stmt.column_count();
                 let rows = stmt
                     .query_map([], |r| {
@@ -226,9 +244,12 @@ fn refuses(store: &EncryptedStore, op: &PhoneOperation, now: i64, error: SecretE
     assert_eq!(
         snapshot(store),
         before,
-        "refusal must not sign or change the five protected tables"
+        "refusal must not sign or change the protected tables"
     );
 }
+
+#[path = "store_gh_approval_policy_tests.rs"]
+mod policy;
 
 #[test]
 fn gh_manifest_approval_commits_signature_audits_siblings_and_persistent_exact_resend() {

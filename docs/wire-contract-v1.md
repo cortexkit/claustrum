@@ -3874,6 +3874,8 @@ the message is fixed text and never echoes the request.
 | `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
 | `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
 | `expired` | `permanent` | result error | `manifest.approve` only (§17): the proposal, or the envelope's `issued_at_ms`, reached `expires_at_ms` |
+| `policy_too_large` | `permanent` | result error | `manifest.approve` only (§17): the successor policy exceeds the signing input limit or the policy document limit |
+| `policy_binding_conflict` | `permanent` | result error | `manifest.approve` only (§17): a conflicting GitHub App identity, invalid successor policy, or disagreement with the proposed manifest's bindings |
 | `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
 | `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
 | `permissions_operator_required` | none | transport Error | `permissions.list` or `permissions.revoke` from a caller other than `reserved:cingulate` or the MAC-authenticated operator; body per `permissions/v1` |
@@ -4680,6 +4682,12 @@ first, then `manifest_setup_incomplete`, then these checks in order:
    `superseded`.
 5. An expired proposal, `now >= expires_at_ms`, or
    `issued_at_ms >= expires_at_ms` gives `expired`.
+6. If a policy is stored, build the successor of the newest stored policy. If it
+   exceeds the signing input limit or the policy document limit, return
+   `policy_too_large`. Otherwise, a conflicting GitHub App identity, an invalid
+   successor policy or a mismatch with the proposed manifest's bindings gives
+   `policy_binding_conflict`. Both refusals leave the proposal pending and write
+   nothing.
 
 On success, the transaction signs the manifest with `signing:gh-manifest-root:1`,
 writes the approval, signing and storage audit rows, stores the version with
@@ -4807,7 +4815,7 @@ In addition, callers outside each operation's admitted principal receive uniform
 | `manifest.propose_binding` | `transient` | `one_tap_disabled`; `identity_unavailable`; `github_unavailable`; `stale_base`; `store_error` |
 | `manifest.approve` — phone preflight | `permanent` | `phone_not_registered`; `secret_home_elsewhere` with `remedy_member`; `remote_setup_incomplete` (with `remedy_member` when known), exactly as `secret.approve` |
 | `manifest.approve` — phone preflight | `transient` | `pairing_unavailable`; `store_error`, exactly as `secret.approve` |
-| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired` |
+| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired`; `policy_too_large`; `policy_binding_conflict` |
 | `manifest.approve` — after preflight | `transient` | `store_error` |
 | `manifest.latest` | `permanent` | `not_found` (nothing stored, or forwarded without a grant at the home); `remote_setup_incomplete` |
 | `manifest.latest` | `transient` | `home_unavailable`; `store_error` |

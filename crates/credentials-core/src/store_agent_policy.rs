@@ -14,7 +14,6 @@ use crate::signing::public_key_ed25519;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPolicySource {
     Ceremony,
-    #[allow(dead_code, reason = "reserved for phone-approved policy successors")]
     OneTap,
 }
 

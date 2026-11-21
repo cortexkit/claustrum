@@ -127,6 +127,14 @@ pub enum AdminOpBody {
     GitHubAppManifestPrepare { v: u32, agent: String },
     #[serde(rename = "admin.github_app_relay_slot_open")]
     GitHubAppRelaySlotOpen { v: u32 },
+    #[serde(rename = "admin.github_app_create_complete")]
+    GitHubAppCreateComplete {
+        v: u32,
+        code: String,
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<String>,
+    },
     #[serde(rename = "admin.agent_policy_sign")]
     AgentPolicySign {
         v: u32,
@@ -627,7 +635,8 @@ impl std::fmt::Debug for AdminOpBody {
             | AdminOpBody::GitHubAppRelaySlotOpen { v } => {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
-            AdminOpBody::GitHubAppManifestPrepare { v, .. } => f
+            AdminOpBody::GitHubAppManifestPrepare { v, .. }
+            | AdminOpBody::GitHubAppCreateComplete { v, .. } => f
                 .debug_struct(self.op_name())
                 .field("v", v)
                 .finish_non_exhaustive(),
@@ -1141,6 +1150,7 @@ impl AdminOpBody {
             | AdminOpBody::PolicyRootShow { v }
             | AdminOpBody::GitHubAppManifestPrepare { v, .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { v }
+            | AdminOpBody::GitHubAppCreateComplete { v, .. }
             | AdminOpBody::AgentPolicySign { v, .. }
             | AdminOpBody::AgentPolicyList { v }
             | AdminOpBody::AgentPolicyExport { v, .. }
@@ -1280,6 +1290,7 @@ impl AdminOpBody {
             | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
+            | AdminOpBody::GitHubAppCreateComplete { .. }
             | AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
@@ -1368,6 +1379,7 @@ impl AdminOpBody {
             | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
+            | AdminOpBody::GitHubAppCreateComplete { .. }
             | AdminOpBody::AgentPolicyList { .. }
             | AdminOpBody::AgentPolicyExport { .. }
             | AdminOpBody::AgentPolicyDerive { .. }
@@ -1447,6 +1459,7 @@ impl AdminOpBody {
             AdminOpBody::PolicyRootShow { .. } => "admin.policy_root_show",
             AdminOpBody::GitHubAppManifestPrepare { .. } => "admin.github_app_manifest_prepare",
             AdminOpBody::GitHubAppRelaySlotOpen { .. } => "admin.github_app_relay_slot_open",
+            AdminOpBody::GitHubAppCreateComplete { .. } => "admin.github_app_create_complete",
             AdminOpBody::AgentPolicySign { .. } => "admin.agent_policy_sign",
             AdminOpBody::AgentPolicyList { .. } => "admin.agent_policy_list",
             AdminOpBody::AgentPolicyExport { .. } => "admin.agent_policy_export",
@@ -1614,7 +1627,8 @@ impl AdminOpBody {
             | AdminOpBody::TransferAccept { .. }
             | AdminOpBody::RemoteAdd { .. }
             | AdminOpBody::MemberGrant { .. } => true,
-            AdminOpBody::GitHubAppRelaySlotOpen { .. } => true,
+            AdminOpBody::GitHubAppRelaySlotOpen { .. }
+            | AdminOpBody::GitHubAppCreateComplete { .. } => true,
         }
     }
 }
@@ -2447,6 +2461,7 @@ pub fn apply(
         }
         // Refused above, before any write: these need the daemon's outbound calls.
         op @ (AdminOpBody::GitHubAppRelaySlotOpen { .. }
+        | AdminOpBody::GitHubAppCreateComplete { .. }
         | AdminOpBody::FederationSelfSet { .. }
         | AdminOpBody::TransferInit { .. }
         | AdminOpBody::TransferSend { .. }

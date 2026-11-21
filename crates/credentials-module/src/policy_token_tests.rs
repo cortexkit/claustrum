@@ -6,7 +6,7 @@ use credentials_core::{
     federation::NewRemoteRecord,
     oauth::OAuthCredential,
     refresh_adapters::{github_app::INSTALLATIONS_URL, HttpResponse, HttpTransport, RefreshError},
-    store::{GrantOperation, SelectorKind},
+    store::{GitHubAppCreation, GrantOperation, SelectorKind},
 };
 use std::{
     collections::VecDeque,
@@ -710,6 +710,82 @@ async fn policy_token_record_replacement_invalidates_warm_cache_and_held_mints()
         assert_eq!(rig.call("aft", OP_POLICY_TOKEN, params()).await, current);
         github.counts(2, 2);
     }
+}
+
+fn reuse_slug_for_another_agent(rig: &Rig) {
+    rig.store
+        .remove_audited(APP, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    let refreshed = app_record(None);
+    let oauth = refreshed.oauth.as_ref().unwrap();
+    rig.store
+        .create_github_app_audited(
+            GitHubAppCreation {
+                slug: APP.strip_prefix("github_app:").unwrap(),
+                app_id: 20,
+                agent: "agent_ab64ea0873bbee0c",
+                pem: &oauth.refresh_token,
+                client_id: oauth.client_id.as_deref().unwrap(),
+                relay: None,
+            },
+            "test",
+        )
+        .unwrap();
+    // Model an ordinary refresh so an empty access payload cannot be the thing
+    // that prevents the replacement App from serving the old binding.
+    let incarnation: String = Connection::open(&rig.path)
+        .unwrap()
+        .query_row(
+            "SELECT incarnation FROM credentials WHERE credential_id = ?1",
+            [APP],
+            |row| row.get(0),
+        )
+        .unwrap();
+    rig.store
+        .commit_refresh(APP, 1, &incarnation, &refreshed, None)
+        .unwrap();
+    revoke(rig, "aft");
+    grant(rig, "aft", APP, GrantOperation::PolicyToken);
+}
+
+#[tokio::test]
+async fn policy_token_slug_reuse_for_another_agent_hides_mismatch_even_with_warm_cache() {
+    let (mut rig, github, _) = setup();
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await["token"],
+        "fixture-token-1"
+    );
+    reuse_slug_for_another_agent(&rig);
+    let mut wrong_version = params();
+    wrong_version["policy_version"] = json!(2);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, wrong_version).await,
+        refusal("policy_version_not_active", "permanent")
+    );
+    let before = first_uses(&rig);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("not_found", "permanent")
+    );
+    assert_eq!(first_uses(&rig), before);
+    github.counts(1, 1);
+}
+
+#[tokio::test]
+async fn policy_token_slug_reuse_for_another_agent_does_not_retry_an_inflight_mint() {
+    let (mut rig, github, _) = setup();
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params(), 1, 10))
+        .await;
+    signal(posted).await;
+    reuse_slug_for_another_agent(&rig);
+    release.send(()).unwrap();
+    assert_eq!(reply(&mut rig, 10).await, refusal("not_found", "permanent"));
+    assert!(first_uses(&rig).is_empty());
+    github.counts(1, 1);
 }
 
 #[tokio::test]

@@ -56,6 +56,7 @@ pub struct PolicyTokenRecordKey {
 pub struct PolicyTokenRecord {
     pub key: PolicyTokenRecordKey,
     envelope: Vec<u8>,
+    attested_agent: Option<String>,
 }
 
 pub struct PolicyTokenPlan {
@@ -203,12 +204,7 @@ fn prepare(
     if active_agent_policy_version_conn(conn)? != Some(request.policy_version) {
         return Ok(Err(Error::VersionNotActive));
     }
-    let policy_bytes: Vec<u8> = conn.query_row(
-        "SELECT policy_bytes FROM agent_policies WHERE version = ?1",
-        [request.policy_version],
-        |row| row.get(0),
-    )?;
-    let Ok(policy) = AgentPolicy::parse_canonical(&policy_bytes) else {
+    let Some(policy) = read_policy(conn, request.policy_version)? else {
         return Ok(Err(Error::StoreError));
     };
     let Some(binding) = policy
@@ -231,13 +227,31 @@ fn prepare(
         Ok(repositories) => repositories,
         Err(error) => return Ok(Err(error)),
     };
-    Ok(
-        read_record(conn, &request.identity)?.map(|record| PolicyTokenPlan {
-            record,
-            repositories,
-            permissions: credential.github_permissions.clone(),
-        }),
-    )
+    let record = match read_record(conn, &request.identity)? {
+        Ok(record) => record,
+        Err(error) => return Ok(Err(error)),
+    };
+    if record
+        .attested_agent
+        .as_ref()
+        .is_some_and(|agent| agent != &binding.agent)
+    {
+        return Ok(Err(Error::NotFound));
+    }
+    Ok(Ok(PolicyTokenPlan {
+        record,
+        repositories,
+        permissions: credential.github_permissions.clone(),
+    }))
+}
+
+fn read_policy(conn: &Connection, version: i64) -> rusqlite::Result<Option<AgentPolicy>> {
+    let bytes: Vec<u8> = conn.query_row(
+        "SELECT policy_bytes FROM agent_policies WHERE version = ?1",
+        [version],
+        |row| row.get(0),
+    )?;
+    Ok(AgentPolicy::parse_canonical(&bytes).ok())
 }
 
 fn select_repositories(
@@ -264,12 +278,12 @@ fn read_record(
     use PolicyTokenError as Error;
     let row = conn
         .query_row(
-            "SELECT state, incarnation, record_version, envelope FROM credentials WHERE credential_id = ?1",
+            "SELECT state, incarnation, record_version, envelope, github_app_agent FROM credentials WHERE credential_id = ?1",
             [identity],
-            |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get::<_, Vec<u8>>(3)?)),
+            |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get::<_, Vec<u8>>(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((state, incarnation, record_version, envelope)) = row else {
+    let Some((state, incarnation, record_version, envelope, attested_agent)) = row else {
         return Ok(Err(Error::NotInstalled));
     };
     let result = match RecordState::from_str(&state) {
@@ -280,6 +294,7 @@ fn read_record(
                 envelope_digest: sha256_hex_of_bytes(&envelope),
             },
             envelope,
+            attested_agent,
         }),
         RecordState::NeedsReauth | RecordState::Retired => Err(Error::NeedsReauth),
         RecordState::Corrupt => Err(Error::Corrupt),
@@ -310,11 +325,26 @@ fn handoff(
         Ok(record) => record,
         Err(error) => return Ok(Err(error)),
     };
-    if record.key != *key {
-        return Ok(Ok(PolicyTokenHandoff::RecordChanged(record)));
-    }
-    if expires_at_ms <= clock() {
+    let same_record = record.key == *key;
+    if same_record && expires_at_ms <= clock() {
         return Ok(Err(Error::Expired));
+    }
+    if let Some(agent) = &record.attested_agent {
+        // A changed record is a candidate for a second mint. Never pass it back
+        // to the route without checking that it still belongs to this binding.
+        let Some(policy) = read_policy(tx, request.policy_version)? else {
+            return Ok(Err(Error::StoreError));
+        };
+        if !policy.bindings.iter().any(|binding| {
+            binding.service == request.service
+                && binding.identity == request.identity
+                && &binding.agent == agent
+        }) {
+            return Ok(Err(Error::NotFound));
+        }
+    }
+    if !same_record {
+        return Ok(Ok(PolicyTokenHandoff::RecordChanged(record)));
     }
     record_scoped_first_use_tx(
         tx,

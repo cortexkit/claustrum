@@ -60,6 +60,91 @@ fn assert_pending(store: &EncryptedStore, proposal_id: &str) {
 }
 
 #[test]
+fn github_app_attestation_rejects_the_same_mismatch_on_every_policy_signing_path() {
+    use crate::store::{GitHubAppCreation, StoreOpError};
+
+    let (_dir, store, public) = ready("github-app-attestation");
+    let v29 = std::str::from_utf8(V28)
+        .unwrap()
+        .replace("\"manifest_version\": 28", "\"manifest_version\": 29");
+    store
+        .sign_gh_manifest_admin(&v29, "operator", "test")
+        .unwrap();
+    let policy = initial_policy(&public);
+    let candidate = String::from_utf8(policy.canonical_bytes().unwrap()).unwrap();
+    let pem = include_str!("../tests/fixtures/github_app/test_private_key_pkcs1.pem")
+        .to_owned()
+        .into();
+    let create = |slug, agent| {
+        store
+            .create_github_app_audited(
+                GitHubAppCreation {
+                    slug,
+                    agent,
+                    app_id: 41,
+                    pem: &pem,
+                    client_id: "test-client-id",
+                    relay: None,
+                },
+                "test",
+            )
+            .unwrap()
+    };
+    let remove_zulu = || {
+        store
+            .remove_audited("github_app:zulu-bot", AuditCtx::admin(AuditOp::Remove))
+            .unwrap()
+    };
+    for binding in &policy.bindings {
+        if binding.agent != EXISTING_AGENT {
+            create(
+                binding.identity.strip_prefix("github_app:").unwrap(),
+                &binding.agent,
+            );
+        }
+    }
+    let identities = policy
+        .bindings
+        .iter()
+        .map(|b| (b.agent.clone(), b.identity.clone()))
+        .collect();
+    create("zulu-bot", FIRST_AGENT);
+    let before = snapshot(&store);
+    for result in [
+        store.derive_agent_policy_admin(29, &identities).map(|_| ()),
+        store
+            .sign_agent_policy_admin(&candidate, 29, "operator", "test")
+            .map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(StoreOpError::Encode(ref code)) if code.starts_with("policy_identity_agent_mismatch:")),
+            "{result:?}"
+        );
+    }
+    assert_eq!(snapshot(&store), before);
+
+    remove_zulu();
+    create("zulu-bot", EXISTING_AGENT);
+    let derived = store.derive_agent_policy_admin(29, &identities).unwrap();
+    let parsed = AgentPolicy::parse_canonical(derived.as_bytes()).unwrap();
+    assert_eq!(parsed.bindings, policy.bindings);
+    store
+        .sign_agent_policy_admin(&derived, 29, "operator", "test")
+        .unwrap();
+
+    remove_zulu();
+    create("zulu-bot", FIRST_AGENT);
+    let p = propose(&store, "Octo/New", NOW);
+    let before = snapshot(&store);
+    let err = run(&store, &approve(&envelope(&p, NOW)), NOW).unwrap_err();
+    assert_eq!(err, SecretError::PolicyIdentityAgentMismatch);
+    assert_eq!(err.code(), "policy_identity_agent_mismatch");
+    assert_eq!(err.class(), "permanent");
+    assert_pending(&store, &p.proposal_id);
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
 fn configured_policy_root_signs_ceremony_and_one_tap_with_matching_approvals() {
     let (_dir, store, legacy_public) = ready("configured-policy-root-signing");
     let (record, public) = super::root_key();

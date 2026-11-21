@@ -189,11 +189,7 @@ impl EncryptedStore {
                 if !matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
                     return Ok((role, false, None));
                 }
-                let exists = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE github_app_agent = ?1)",
-                    [agent],
-                    |row| row.get::<_, bool>(0),
-                )?;
+                let exists = super::github_app_store::github_app_agent_exists_conn(&tx, agent)?;
                 let policy = if exists {
                     None
                 } else {
@@ -208,7 +204,7 @@ impl EncryptedStore {
         }
         if exists {
             return Err(StoreOpError::Encode(
-                "github_app_agent_exists: an App already holds this agent".into(),
+                super::github_app_store::AGENT_EXISTS.into(),
             ));
         }
         let rules = match policy {

@@ -65,6 +65,7 @@ pub enum SecretError {
     Expired,
     PolicyTooLarge,
     PolicyBindingConflict,
+    PolicyIdentityAgentMismatch,
     PendingLimit,
     StoreError,
 }
@@ -92,6 +93,7 @@ impl SecretError {
             Self::Expired => "expired",
             Self::PolicyTooLarge => "policy_too_large",
             Self::PolicyBindingConflict => "policy_binding_conflict",
+            Self::PolicyIdentityAgentMismatch => "policy_identity_agent_mismatch",
             Self::PendingLimit => "pending_limit",
             Self::StoreError => "store_error",
         }

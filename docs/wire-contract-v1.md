@@ -3897,6 +3897,7 @@ the message is fixed text and never echoes the request.
 | `expired` | `permanent` | result error | `manifest.approve` only (§17): the proposal, or the envelope's `issued_at_ms`, reached `expires_at_ms` |
 | `policy_too_large` | `permanent` | result error | `manifest.approve` only (§17): the successor policy exceeds the signing input limit or the policy document limit |
 | `policy_binding_conflict` | `permanent` | result error | `manifest.approve` only (§17): a conflicting GitHub App identity, invalid successor policy, or disagreement with the proposed manifest's bindings |
+| `policy_identity_agent_mismatch` | `permanent` | result error | `manifest.approve` only (§17): a GitHub App in the successor policy is attested for a different agent |
 | `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
 | `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
 | `permissions_operator_required` | none | transport Error | `permissions.list` or `permissions.revoke` from a caller other than `reserved:cingulate` or the MAC-authenticated operator; body per `permissions/v1` |
@@ -4836,7 +4837,7 @@ In addition, callers outside each operation's admitted principal receive uniform
 | `manifest.propose_binding` | `transient` | `one_tap_disabled`; `identity_unavailable`; `github_unavailable`; `stale_base`; `store_error` |
 | `manifest.approve` — phone preflight | `permanent` | `phone_not_registered`; `secret_home_elsewhere` with `remedy_member`; `remote_setup_incomplete` (with `remedy_member` when known), exactly as `secret.approve` |
 | `manifest.approve` — phone preflight | `transient` | `pairing_unavailable`; `store_error`, exactly as `secret.approve` |
-| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired`; `policy_too_large`; `policy_binding_conflict` |
+| `manifest.approve` — after preflight | `permanent` | `manifest_setup_incomplete`; `approval_invalid`; `superseded`; `expired`; `policy_too_large`; `policy_binding_conflict`; `policy_identity_agent_mismatch` |
 | `manifest.approve` — after preflight | `transient` | `store_error` |
 | `manifest.latest` | `permanent` | `not_found` (nothing stored, or forwarded without a grant at the home); `remote_setup_incomplete` |
 | `manifest.latest` | `transient` | `home_unavailable`; `store_error` |
@@ -5926,12 +5927,14 @@ delivery and acceptance. Store creation, replacement, invalidation and removal
 refuse the same permanent code for the reserved namespace and for the legacy id
 when it is the configured root.
 
-Two master-key operations with `v: 1` prepare creation of an agent's GitHub App:
+These `admin_op` operations use the master-key challenge and MAC above. They
+use `v: 1` and create an agent's GitHub App:
 
 | Operation | Parameters besides `v` | Result |
 |---|---|---|
 | `admin.github_app_manifest_prepare` | `agent` | `{name, default_permissions, default_events}` |
 | `admin.github_app_relay_slot_open` | None | `{slot, webhook_url, expires_at}` |
+| `admin.github_app_create_complete` | `code`, `agent`, optional `slot` | `{outcome: "created", slug, app_id, install_url}` or a result with a failure outcome (below) |
 
 Prepare writes nothing. It refuses `agent_invalid` unless `agent` is `agent_`
 followed by 16 lowercase hexadecimal digits, `github_app_agent_exists` if a
@@ -5952,11 +5955,46 @@ the exact webhook URL for that slot, and an expiry. Its refusals use the
 | `relay_reply_invalid` | permanent | Unexpected success status or invalid slot reply |
 | `audit_write_failed` | permanent | The relay opened a slot but recording the audit row failed; the unused slot expires |
 
+Create complete requires the serving daemon. It validates the agent and optional
+relay slot and checks that the agent has no App before POSTing the manifest code
+to GitHub's conversion endpoint. The code is 1–128 ASCII letters, digits,
+underscores or hyphens. A conversion reply over 64 KiB is not accepted. The reply
+must contain a positive integer `id`, a valid App `slug`, a usable RSA App PEM,
+and a non-empty `client_id`. A non-empty `webhook_secret` is required if a slot
+was supplied; otherwise it is ignored. No private material or manifest code is
+returned. `app_id` is a canonical decimal string.
+
+The following failures return `admin_refused`:
+
+| Code | Class | Condition |
+|---|---|---|
+| `agent_invalid` | permanent | Agent id is not in registry form |
+| `invalid_params` | permanent | Malformed code or relay slot; reported inside the `admin_refused` transport Error |
+| `github_app_agent_exists` | permanent | An App already holds the agent before conversion |
+| `relay_unavailable` | transient | The precheck could not finish; no conversion was attempted |
+| `github_app_code_invalid` | permanent | GitHub returned a client error |
+| `github_app_conversion_unknown` | permanent | GitHub conversion was not confirmed; do not reuse the code |
+
+After a success HTTP status from GitHub, a failure returns a normal response
+frame so the caller can distinguish whether the App was saved:
+
+| Outcome | Fields besides `outcome` | `cause` |
+|---|---|---|
+| `github_app_unsaved` | `cause`, optional validated `slug` and `app_id` | `reply_invalid`, `busy` (App lock deadline), `github_app_exists` (App or companion id already exists locally or remotely), `github_app_agent_exists` (agent already claimed at commit), or `store_failed` |
+| `relay_registration_failed` | `slug`, `app_id`, `install_url`, `cause` | `relay_unavailable` (mint, deadline, transport, redirect, `429` or server failure), `relay_unavailable_for_account` (missing machine key, `401` or `403`), `relay_slot_expired` (`404`), `relay_app_mismatch` (`409`), `relay_request_refused` (other client error), or `relay_reply_invalid` (unexpected or oversized success reply) |
+
+With a slot, the daemon keeps the App lock from the store commit through the
+initial relay `PUT`. Only a `200` reply within the 8 KiB reply limit confirms
+registration. A failed `PUT` does not roll back the App. Only the cause
+`relay_unavailable` offers a same-slot retry.
+
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,
 including identities. Derive uses the embedded GitHub revision 1 rule set described
 above and an `identities` object mapping exactly the manifest's agents to distinct
 active GitHub App credentials.
+Sign and derive refuse `policy_identity_agent_mismatch` (permanent) when a
+binding names a vault-created App attested for a different agent.
 After the first policy, manifest import is refused and manifest ceremony signing
 must keep the head policy's repository-to-agent map.
 

@@ -1176,6 +1176,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `rotate_master_key` | Re-wrap the vault under a new master key. |
 | `refresh_commit` | Commit new tokens from a vault-owned refresh. |
 | `github_app.relay_slot_open` | Record a confirmed GitHub App relay slot open; the payload holds a keyed digest of the slot. |
+| `github_app.create_complete` | Record a committed GitHub App creation, including its attestation and any webhook companion; the payload holds a keyed digest. The initial relay PUT adds no row. |
 | `report_auth_failure` | Record a consumer report that changes credential state. |
 | `report_condition` | Set or replace a provider login condition without changing credential state. |
 | `clear_condition` | Remove a provider login condition on consumer or operator request. |

@@ -169,6 +169,32 @@ pub trait HttpTransport: Send + Sync {
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
 
+    /// PUT an encoded body. Transports that do not support PUT refuse it.
+    async fn put(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _content_type: &str,
+        _body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        Err(RefreshError::Transport(
+            "HTTP PUT is unsupported by this transport".into(),
+        ))
+    }
+
+    /// PATCH an encoded body. Transports that do not support PATCH refuse it.
+    async fn patch(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _content_type: &str,
+        _body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        Err(RefreshError::Transport(
+            "HTTP PATCH is unsupported by this transport".into(),
+        ))
+    }
+
     /// GET an endpoint with caller-supplied headers. The default keeps existing
     /// transports source-compatible; adapters that need GET override it.
     async fn get(

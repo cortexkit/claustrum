@@ -1781,6 +1781,7 @@ secret_error_golden! {
     Expired => "expired", "permanent", "result error";
     PolicyTooLarge => "policy_too_large", "permanent", "result error";
     PolicyBindingConflict => "policy_binding_conflict", "permanent", "result error";
+    PolicyIdentityAgentMismatch => "policy_identity_agent_mismatch", "permanent", "result error";
     PendingLimit => "pending_limit", "transient", "result error";
     StoreError => "store_error", "transient", "result error";
 }

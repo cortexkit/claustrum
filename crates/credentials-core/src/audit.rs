@@ -84,6 +84,7 @@ pub enum AuditOp {
     GhManifestRetire,
     GhManifestOneTapSet,
     GitHubAppRelaySlotOpen,
+    GitHubAppCreateComplete,
 
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
@@ -284,6 +285,7 @@ impl AuditOp {
             AuditOp::GhManifestRetire => "gh_manifest_retire",
             AuditOp::GhManifestOneTapSet => "gh_manifest_one_tap_set",
             AuditOp::GitHubAppRelaySlotOpen => "github_app.relay_slot_open",
+            AuditOp::GitHubAppCreateComplete => "github_app.create_complete",
 
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
@@ -1052,6 +1054,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GhManifestRetire => AuditOp::GhManifestRetire.as_str(),
                 AuditOp::GhManifestOneTapSet => AuditOp::GhManifestOneTapSet.as_str(),
                 AuditOp::GitHubAppRelaySlotOpen => AuditOp::GitHubAppRelaySlotOpen.as_str(),
+                AuditOp::GitHubAppCreateComplete => AuditOp::GitHubAppCreateComplete.as_str(),
 
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),

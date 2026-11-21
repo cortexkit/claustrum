@@ -54,6 +54,29 @@ impl ReqwestTransport {
             .map_err(|e| RefreshError::Transport(e.to_string()))?;
         Ok(ReqwestTransport { client })
     }
+
+    async fn send_body(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        let mut req = self
+            .client
+            .request(method, url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| RefreshError::Transport(e.to_string()))?;
+        read_response(resp).await
+    }
 }
 
 #[async_trait]
@@ -65,19 +88,30 @@ impl HttpTransport for ReqwestTransport {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError> {
-        let mut req = self
-            .client
-            .post(url)
-            .header(reqwest::header::CONTENT_TYPE, content_type)
-            .body(body);
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let resp = req
-            .send()
+        self.send_body(reqwest::Method::POST, url, headers, content_type, body)
             .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?;
-        read_response(resp).await
+    }
+
+    async fn put(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        self.send_body(reqwest::Method::PUT, url, headers, content_type, body)
+            .await
+    }
+
+    async fn patch(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<HttpResponse, RefreshError> {
+        self.send_body(reqwest::Method::PATCH, url, headers, content_type, body)
+            .await
     }
 
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
@@ -160,6 +194,61 @@ mod tests {
 #[cfg(test)]
 mod redirect_rules {
     use super::*;
+
+    #[tokio::test]
+    async fn put_and_patch_send_their_body_and_do_not_follow_redirects() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let transport = ReqwestTransport::new().unwrap();
+        for method in ["PUT", "PATCH"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = BufReader::new(&mut stream);
+                let mut line = String::new();
+                request.read_line(&mut line).unwrap();
+                assert_eq!(line, format!("{method} /request HTTP/1.1\r\n"));
+                let mut authorized = false;
+                loop {
+                    line.clear();
+                    assert!(request.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    authorized |= line.eq_ignore_ascii_case("authorization: Bearer fixture\r\n");
+                }
+                assert!(authorized);
+                let mut data = [0; 7];
+                request.read_exact(&mut data).unwrap();
+                assert_eq!(&data, b"fixture");
+                drop(listener);
+                write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let url = format!("http://{address}/request");
+            let headers = [("Authorization", "Bearer fixture")];
+            let body = b"fixture".to_vec();
+            let response = match method {
+                "PUT" => {
+                    transport
+                        .put(&url, &headers, "application/json", body)
+                        .await
+                }
+                _ => {
+                    transport
+                        .patch(&url, &headers, "application/json", body)
+                        .await
+                }
+            };
+            server.join().unwrap();
+            assert_eq!(response.unwrap().status, 307);
+        }
+    }
+
     #[tokio::test]
     async fn token_post_surfaces_redirect_without_forwarding_body() {
         use std::io::{Read, Write};

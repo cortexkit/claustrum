@@ -740,6 +740,13 @@ impl AdminSurface {
                 AdminOpBody::GitHubAppRelaySlotOpen { .. } => {
                     self.github_apps.relay_slot_open(&self.engine).await
                 }
+                AdminOpBody::GitHubAppCreateComplete {
+                    code, agent, slot, ..
+                } => {
+                    self.github_apps
+                        .create_complete(&self.engine, code.into(), &agent, slot.as_deref())
+                        .await
+                }
                 other => self.dispatch_federation(other).await,
             };
         }
@@ -1249,6 +1256,7 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             "invalid_params",
             "agent_invalid",
             "github_app_agent_exists",
+            "policy_identity_agent_mismatch",
             "policy_unavailable",
         ] {
             if let Some(why) = message.strip_prefix(code).and_then(|m| m.strip_prefix(':')) {

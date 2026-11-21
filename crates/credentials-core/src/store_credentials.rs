@@ -291,6 +291,34 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
         now: i64,
     ) -> rusqlite::Result<Result<(), StoreOpError>> {
+        if let Err(error) = self.insert_new_record_in_tx(tx, credential_id, record, now)? {
+            return Ok(Err(error));
+        }
+        let payload_hash = hex32(&audit::payload_fingerprint(
+            &self.audit_key,
+            record.payload.expose(),
+        ));
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AuditRecord {
+                op: ctx.op,
+                credential_id: Some(credential_id.to_string()),
+                payload_hash: Some(payload_hash),
+                actor: ctx.actor.to_string(),
+                alarm: ctx.alarm,
+            },
+        )?;
+        Ok(Ok(()))
+    }
+
+    pub(super) fn insert_new_record_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        credential_id: &str,
+        record: &VaultRecord,
+        now: i64,
+    ) -> rusqlite::Result<Result<(), StoreOpError>> {
         let record = match Self::prepare_create_record(credential_id, record) {
             Ok(record) => record,
             Err(error) => return Ok(Err(error)),
@@ -300,12 +328,6 @@ impl EncryptedStore {
             Err(error) => return Ok(Err(error)),
         };
         let key_id_hex = self.key_id.to_hex();
-        let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&audit::payload_fingerprint(
-            &audit_key,
-            record.payload.expose(),
-        ));
-
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
         // existence query, no error-string matching). Zero changed => AlreadyExists.
@@ -354,17 +376,6 @@ impl EncryptedStore {
                 }
                 clear_intent_tx(tx, credential_id)?;
                 delete_local_condition_tx(tx, credential_id)?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: ctx.op,
-                        credential_id: Some(credential_id.to_string()),
-                        payload_hash: Some(payload_hash_hex),
-                        actor: ctx.actor.to_string(),
-                        alarm: ctx.alarm,
-                    },
-                )?;
             }
             n
         };

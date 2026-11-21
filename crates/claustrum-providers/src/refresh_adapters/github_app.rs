@@ -281,20 +281,37 @@ impl GithubAppAdapter {
         Self
     }
 
+    /// Check that a PKCS#1 or PKCS#8 PEM can be used by the App JWT signer.
+    /// Do not disclose parse details: the PEM and even its armour are untrusted.
+    pub fn valid_private_key_pem(pem: &str) -> bool {
+        Self::key_pair(pem).is_ok()
+    }
+
+    fn key_pair(pem: &str) -> Result<signature::RsaKeyPair, RefreshError> {
+        let (encoding, der) = private_key_der_from_pem(pem)?;
+        match encoding {
+            KeyEncoding::Pkcs8 => signature::RsaKeyPair::from_pkcs8(&der),
+            KeyEncoding::Pkcs1 => signature::RsaKeyPair::from_der(&der),
+        }
+        .map_err(|error| {
+            RefreshError::Decode(format!("invalid GitHub App {encoding:?} key: {error}"))
+        })
+    }
+
+    /// Mint an App-scoped bearer without making a GitHub request.
+    /// Errors omit untrusted key material, including invalid PEM armour.
+    pub fn build_app_jwt(cred: &OAuthCredential, now_secs: i64) -> Result<String, RefreshError> {
+        Self::mint_app_jwt(cred, now_secs)
+            .map_err(|_| RefreshError::Decode("could not sign GitHub App JWT".into()))
+    }
+
     fn mint_app_jwt(cred: &OAuthCredential, now_secs: i64) -> Result<String, RefreshError> {
         let client_id = cred
             .client_id
             .as_deref()
             .filter(|id| !id.is_empty())
             .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
-        let (encoding, der) = private_key_der_from_pem(cred.refresh_token.expose())?;
-        let key_pair = match encoding {
-            KeyEncoding::Pkcs8 => signature::RsaKeyPair::from_pkcs8(&der),
-            KeyEncoding::Pkcs1 => signature::RsaKeyPair::from_der(&der),
-        }
-        .map_err(|error| {
-            RefreshError::Decode(format!("invalid GitHub App {encoding:?} key: {error}"))
-        })?;
+        let key_pair = Self::key_pair(cred.refresh_token.expose())?;
 
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"alg":"RS256","typ":"JWT"}"#);
@@ -995,6 +1012,38 @@ mod tests {
         include_bytes!("../../../credentials-core/tests/fixtures/github_app/installations.json");
     const RECORDED_ACCESS_TOKENS: &[u8] =
         include_bytes!("../../../credentials-core/tests/fixtures/github_app/access_tokens.json");
+
+    #[test]
+    fn public_app_key_check_accepts_both_rsa_encodings() {
+        let pkcs1 = include_str!(
+            "../../../credentials-core/tests/fixtures/github_app/test_private_key_pkcs1.pem"
+        );
+        assert!(GithubAppAdapter::valid_private_key_pem(TEST_PRIVATE_KEY));
+        assert!(GithubAppAdapter::valid_private_key_pem(pkcs1));
+        assert!(!GithubAppAdapter::valid_private_key_pem(
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"
+        ));
+    }
+
+    #[test]
+    fn public_app_jwt_builder_uses_the_same_signer_and_flattens_key_errors() {
+        let mut cred = credential();
+        let jwt = GithubAppAdapter::build_app_jwt(&cred, JWT_NOW_SECS).unwrap();
+        let (input, signature) = jwt.rsplit_once('.').unwrap();
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(signature)
+            .unwrap();
+        signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, TEST_PUBLIC_KEY)
+            .verify(input.as_bytes(), &signature)
+            .unwrap();
+        cred.refresh_token = "-----BEGIN armour-canary-----\nAAAA\n-----END armour-canary-----"
+            .to_owned()
+            .into();
+        let error = GithubAppAdapter::build_app_jwt(&cred, JWT_NOW_SECS).unwrap_err();
+        assert!(
+            matches!(error, RefreshError::Decode(message) if message == "could not sign GitHub App JWT")
+        );
+    }
 
     #[tokio::test]
     async fn suspended_installation_token_exchange_requires_operator_repair() {

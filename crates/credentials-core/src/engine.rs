@@ -853,9 +853,17 @@ impl RefreshEngine {
         credential_id: &str,
         f: impl FnOnce(&EncryptedStore) -> Result<T, StoreOpError>,
     ) -> Result<T, StoreOpError> {
-        let lock = self.inflight_lock(credential_id);
-        let _guard = lock.lock().await;
+        let _guard = self.acquire_admin_lock(credential_id).await;
         f(&self.store)
+    }
+
+    /// Hold the same lock across a store mutation and its outbound follow-up.
+    /// The caller must bound the wait and keep the guard until that follow-up ends.
+    pub async fn acquire_admin_lock(
+        &self,
+        credential_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inflight_lock(credential_id).lock_owned().await
     }
 
     /// Look up or create the single-flight lock for a credential.

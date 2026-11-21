@@ -197,11 +197,19 @@ impl EncryptedStore {
             None => None,
         };
         let prepared_policy = if let Some((policy, bytes, input)) = &policy {
-            use PrepareAgentPolicyError::{Root, RootKeyIdMismatch, TooLarge, UnusableKey};
+            use PrepareAgentPolicyError::{
+                AttestationRead, IdentityAgentMismatch, Root, RootKeyIdMismatch, TooLarge,
+                UnusableKey,
+            };
             match self.prepare_agent_policy_in_tx(tx, policy, bytes, input) {
                 Ok(prepared) => Some(prepared),
                 Err(TooLarge) => return Ok(Err(SecretError::PolicyTooLarge)),
-                Err(Root(ManifestRootReadError::Sql(error))) => return Err(error),
+                Err(Root(ManifestRootReadError::Sql(error)) | AttestationRead(error)) => {
+                    return Err(error)
+                }
+                Err(IdentityAgentMismatch) => {
+                    return Ok(Err(SecretError::PolicyIdentityAgentMismatch))
+                }
                 Err(Root(ManifestRootReadError::Unusable(_)) | UnusableKey | RootKeyIdMismatch) => {
                     return Ok(Err(SecretError::ManifestSetupIncomplete));
                 }

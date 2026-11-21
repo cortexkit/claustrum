@@ -1647,6 +1647,10 @@ mod agent_policy;
 #[path = "store_agent_policy_admin.rs"]
 mod agent_policy_admin;
 
+#[path = "store_github_app.rs"]
+mod github_app_store;
+pub use github_app_store::GitHubAppCreation;
+
 #[path = "store_policy_token.rs"]
 mod policy_token;
 

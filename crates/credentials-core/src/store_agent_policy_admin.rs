@@ -9,6 +9,7 @@ use super::agent_policy::{
 };
 use super::gh_admin::{manifest_root_error, sql};
 use super::gh_manifests::ManifestRootReadError;
+use super::github_app_store::github_app_attested_agent;
 use super::{
     append_audit_tx, envelope, now_ms, AuditOp, AuditRecord, CredentialKind, EncryptedStore,
     RecordBinding, RecordState, StoreOpError, VaultRecord,
@@ -35,6 +36,8 @@ pub(super) enum PrepareAgentPolicyError {
     UnusableKey,
     RootKeyIdMismatch,
     TooLarge,
+    AttestationRead(rusqlite::Error),
+    IdentityAgentMismatch,
 }
 
 impl From<PrepareAgentPolicyError> for StoreOpError {
@@ -44,6 +47,8 @@ impl From<PrepareAgentPolicyError> for StoreOpError {
             PrepareAgentPolicyError::UnusableKey => unusable_root(),
             PrepareAgentPolicyError::RootKeyIdMismatch => refusal("policy_root_key_id_mismatch"),
             PrepareAgentPolicyError::TooLarge => policy_error(PolicyError::TooLarge),
+            PrepareAgentPolicyError::AttestationRead(error) => sql(error),
+            PrepareAgentPolicyError::IdentityAgentMismatch => identity_agent_mismatch(),
         }
     }
 }
@@ -61,6 +66,18 @@ fn refusal(reason: &str) -> StoreOpError {
 
 fn policy_error(error: PolicyError) -> StoreOpError {
     StoreOpError::Encode(error.to_string())
+}
+
+fn identity_agent_mismatch() -> StoreOpError {
+    refusal("policy_identity_agent_mismatch: a GitHub App is attested for a different agent")
+}
+
+fn identity_agrees_with_attestation(
+    conn: &Connection,
+    binding: &Binding,
+) -> rusqlite::Result<bool> {
+    Ok(github_app_attested_agent(conn, &binding.identity)?
+        .is_none_or(|agent| agent == binding.agent))
 }
 
 fn unusable_root() -> StoreOpError {
@@ -141,6 +158,13 @@ impl EncryptedStore {
         })?;
         if signature.key_id() != policy.root_key_id {
             return Err(RootKeyIdMismatch);
+        }
+        for binding in &policy.bindings {
+            if !identity_agrees_with_attestation(tx, binding)
+                .map_err(PrepareAgentPolicyError::AttestationRead)?
+            {
+                return Err(PrepareAgentPolicyError::IdentityAgentMismatch);
+            }
         }
         Ok(PreparedAgentPolicy {
             credential_id: root.credential_id,
@@ -328,12 +352,16 @@ impl EncryptedStore {
                         return Err(policy_error(PolicyError::SharedIdentity));
                     }
                     self.require_active_github_app(&tx, identity)?;
-                    bindings.push(Binding {
+                    let binding = Binding {
                         service: "github".into(),
                         agent,
                         identity: identity.clone(),
                         resources,
-                    });
+                    };
+                    if !identity_agrees_with_attestation(&tx, &binding).map_err(sql)? {
+                        return Err(identity_agent_mismatch());
+                    }
+                    bindings.push(binding);
                 }
                 require_head_bindings(&bindings, head.as_ref())?;
 

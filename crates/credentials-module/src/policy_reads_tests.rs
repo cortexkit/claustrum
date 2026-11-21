@@ -9,6 +9,9 @@ use credentials_core::{
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
+#[path = "policy_token_tests.rs"]
+mod policy_token_tests;
+
 const PAIRING: &str = "0123456789abcdef0123456789abcdef";
 const ABSENT: Value = Value::Null;
 
@@ -101,8 +104,12 @@ fn root(rig: &Rig) -> String {
 }
 
 fn manifest(rig: &Rig, version: i64) -> String {
+    manifest_with_bindings(rig, version, json!({"Org/R": "agent"}))
+}
+
+fn manifest_with_bindings(rig: &Rig, version: i64, bindings: Value) -> String {
     let manifest_bytes = serde_json::to_string_pretty(&json!({
-        "manifest_version": version, "issued_at_unix_secs": 1, "bindings": {"Org/R": "agent"},
+        "manifest_version": version, "issued_at_unix_secs": 1, "bindings": bindings,
     }))
     .unwrap()
         + "\n";
@@ -148,7 +155,7 @@ fn report_version(rig: &Rig, member: &str, version: i64, digest: &str, verdict: 
                 version,
                 payload_sha256: digest,
                 verdict,
-                reason: None,
+                reason: (verdict == GhManifestVerdict::Invalid).then_some("fixture_invalid"),
                 reported_at_ms: 100,
             },
             AuditCtx::admin(AuditOp::GhManifestActivation),

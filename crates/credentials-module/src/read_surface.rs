@@ -2250,6 +2250,7 @@ type IncarnationHooks = HashMap<&'static str, Box<dyn FnOnce() + Send>>;
 pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
     account_tokens: account_token::AccountTokens,
+    pub(crate) policy_tokens: Arc<crate::policy_token::PolicyTokens>,
     pub(crate) watches: crate::watch_scoped::WatchHub,
     pub(crate) usage: Arc<crate::usage_forwarder::UsageForwarder>,
     /// Serves the remote records (rotating logins whose home is another member's
@@ -2560,7 +2561,7 @@ fn list_scoped_first_use_operations(rows: &[ScopedListRow]) -> Vec<GrantOperatio
     exercised.into_iter().collect()
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -2785,6 +2786,7 @@ impl ReadSurface {
         ReadSurface {
             engine,
             account_tokens: account_token::AccountTokens::new(),
+            policy_tokens: Arc::default(),
             watches: crate::watch_scoped::WatchHub::default(),
             usage: Arc::new(crate::usage_forwarder::UsageForwarder::default()),
             remote,

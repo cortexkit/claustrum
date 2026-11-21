@@ -748,3 +748,102 @@ fn typed_policy_store_requires_the_one_tap_manifests_own_approval() {
         })
         .unwrap();
 }
+
+#[test]
+fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
+    use crate::store::{PolicyTokenError, PolicyTokenRequest};
+    use rusqlite::TransactionBehavior;
+
+    let (dir, store) = taxonomy_tests::rig("policy-token-handoff", 78);
+    let id = "github_app:agent";
+    let member = "fed-computer:22222222222222222222222222222222";
+    let mut writer = Connection::open(dir.join("store.db")).unwrap();
+    writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    writer
+        .execute(
+            "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 1)",
+            params![crate::federation::SELF_MEMBER_SETTING, member],
+        )
+        .unwrap();
+    raw_manifest(&writer, 41).unwrap();
+    let mut policy = policy_fixture(1, KEY_ID);
+    policy.bindings.push(crate::agent_policy::Binding {
+        service: "github".into(),
+        agent: "agent".into(),
+        identity: id.into(),
+        resources: vec!["org/r".into()],
+    });
+    let mut row = raw_policy(1, 41);
+    row[1] = policy.canonical_bytes().unwrap().into();
+    writer
+        .execute(
+            "INSERT INTO agent_policies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params_from_iter(row),
+        )
+        .unwrap();
+    writer.execute(
+        "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reported_at_ms) VALUES (?1, 41, ?2, 'valid', 1)",
+        params![member, HASH],
+    ).unwrap();
+    store
+        .create(
+            id,
+            &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"payload".to_vec(), None),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "aft",
+            SelectorKind::Exact,
+            id,
+            GrantOperation::PolicyToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let request = PolicyTokenRequest {
+        identity: id.into(),
+        service: "github".into(),
+        kind: "add_issue_comment".into(),
+        resource: "org/r".into(),
+        policy_version: 1,
+    };
+    let plan = store.prepare_policy_token("aft", Some(&request)).unwrap();
+    writer.execute("UPDATE gh_manifest_activations SET verdict = 'invalid', reason = 'fixture' WHERE member_id = ?1", [member]).unwrap();
+
+    let response = store.handoff_policy_token_with_probe(
+        "aft",
+        &request,
+        (&plan.record.key, 100),
+        || 1,
+        || {
+            // A competing writer would revoke the grant and reactivate the policy.
+            // It cannot write between the handoff's grant and active-policy checks.
+            let result = writer.transaction_with_behavior(TransactionBehavior::Immediate);
+            assert_eq!(
+                result.err().and_then(|error| error.sqlite_error_code()),
+                Some(ErrorCode::DatabaseBusy)
+            );
+        },
+    );
+    assert!(matches!(response, Err(PolicyTokenError::VersionNotActive)));
+
+    let tx = writer.transaction().unwrap();
+    tx.execute(
+        "DELETE FROM read_grants WHERE principal_id = 'aft' AND operation = 'policy_token'",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE gh_manifest_activations SET verdict = 'valid', reason = NULL WHERE member_id = ?1",
+        [member],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(matches!(
+        store.handoff_policy_token("aft", &request, &plan.record.key, 100, || 1),
+        Err(PolicyTokenError::NotFound)
+    ));
+    let releases: i64 = writer.query_row("SELECT count(*) FROM auth_events WHERE kind = 'scoped_first_use' AND detail = 'policy_token'", [], |r| r.get(0)).unwrap();
+    assert_eq!(releases, 0);
+}

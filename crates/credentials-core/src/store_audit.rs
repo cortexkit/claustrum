@@ -410,6 +410,40 @@ fn credential_auth_subject(id: &str) -> &str {
     }
 }
 
+/// Record the first use within the caller's transaction so a protected result can
+/// be withheld if the transaction cannot commit.
+pub(super) fn record_scoped_first_use_tx(
+    tx: &rusqlite::Transaction<'_>,
+    credential_id: &str,
+    principal_kind: &str,
+    principal_id: Option<&str>,
+    operation: &str,
+) -> rusqlite::Result<()> {
+    let credential_id = credential_auth_subject(credential_id);
+    let inserted = tx.execute(
+        "INSERT INTO auth_events \
+         (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
+         SELECT ?1, ?2, ?3, NULL, ?4, NULL, 1, ?5, ?6 \
+         WHERE NOT EXISTS ( \
+           SELECT 1 FROM auth_events \
+           WHERE credential_id = ?2 AND kind = ?3 AND detail = ?4 \
+             AND principal_kind = ?5 AND principal_id IS ?6 \
+         )",
+        rusqlite::params![
+            now_ms(),
+            credential_id,
+            AuthEventKind::ScopedFirstUse.as_str(),
+            operation,
+            principal_kind,
+            principal_id,
+        ],
+    )?;
+    if inserted != 0 {
+        trim_auth_events_tx(tx, credential_id)?;
+    }
+    Ok(())
+}
+
 // Secret diagnostics use disjoint subjects; generic credential writers must never enter them.
 pub(super) fn append_secret_auth_event_tx(
     tx: &rusqlite::Transaction,
@@ -652,31 +686,13 @@ impl EncryptedStore {
                 }
 
                 let tx = c.unchecked_transaction()?;
-                // The operation rides in `detail` rather than a new column: it is the
-                // same shape the refusal path uses for its reason, and a migration for a
-                // diagnostic field would cost more than it buys.
-                let inserted = tx.execute(
-                    "INSERT INTO auth_events \
-                     (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
-                     SELECT ?1, ?2, ?3, NULL, ?4, NULL, 1, ?5, ?6 \
-                     WHERE NOT EXISTS ( \
-                       SELECT 1 FROM auth_events \
-                       WHERE credential_id = ?2 AND kind = ?3 AND detail = ?4 \
-                         AND principal_kind = ?5 \
-                         AND (principal_id IS ?6) \
-                     )",
-                    rusqlite::params![
-                        now_ms(),
-                        credential_id,
-                        kind,
-                        operation,
-                        principal_kind,
-                        principal_id,
-                    ],
+                record_scoped_first_use_tx(
+                    &tx,
+                    credential_id,
+                    principal_kind,
+                    principal_id,
+                    operation,
                 )?;
-                if inserted != 0 {
-                    trim_auth_events_tx(&tx, credential_id)?;
-                }
                 tx.commit()
             })
             .map_err(StoreOpError::from)

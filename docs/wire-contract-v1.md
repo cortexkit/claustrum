@@ -5608,6 +5608,66 @@ examples; a running daemon chooses its own epoch.
 }
 ```
 
+### Policy-narrowed GitHub token
+
+`credential.policy_token` is a Query, not a watch. It takes exactly
+`{identity, service, kind, resource, policy_version}`. The version is an integer;
+the other members are strings. `identity` is a credential ID, not a handle.
+`kind` names one request kind, not an action. Only `reserved:plexus` and
+`reserved:aft` may call it. It serves on Single and Home vaults only and is never
+relayed. Other callers and non-serving vaults receive `not_found`/`permanent`.
+
+Before using the cache or making any GitHub request, the vault checks, in order:
+
+1. The attested caller has a persisted exact `policy_token` grant on `identity`.
+   A `read` grant does not suffice, and `policy_token` does not grant `read`.
+2. `service` is `github`.
+3. `policy_version` equals the active version from `policy.active`.
+4. The active policy has a binding for that service and identity.
+5. The rule set contains `kind`, with identity `agent`, a credential, and a
+   class other than `denied`.
+6. `resource` exactly matches a canonical lowercase repository in the binding.
+   Only `node_repository` may instead use `"binding"` to name the entire binding,
+   which must contain at most 500 repositories.
+7. The local App credential exists and is active. A remote copy does not count.
+
+Success is `{token, expires_at_ms, repositories, permissions}`. `token` is a
+GitHub installation bearer token, `expires_at_ms` is a Unix timestamp in
+milliseconds, `repositories` is the sorted lowercase selected set, and
+`permissions` is the kind's `credential.github_permissions` map. The vault
+checks the exchange reply against the requested repositories and permissions;
+unrequested `metadata: read` is allowed and omitted from the returned map. The
+token does not enforce the kind's individual request matcher; the caller does.
+The vault never falls back to a broad token.
+
+Token storage is in memory only. Requests with the same credential identity,
+incarnation, record version, sealed-record digest, repository set and permissions
+can share one mint and can reuse the result until five minutes before expiry.
+Before handing out any token, the vault rechecks its role, the accepted caller's
+exact grant, the active policy version, the credential row and token expiry, and
+commits the caller's scoped first-use event in that same transaction, which
+also checks that the vault still holds the writer lease.
+If the active row was replaced or changed during mint, the vault retries with
+the new row once; an unusable row or a failed authorization is not retried.
+
+| Class | Code | Meaning |
+|---|---|---|
+| `permanent` | `not_found` | Caller, role, grant, service, binding, kind, or resource refused |
+| `permanent` | `policy_version_not_active` | No policy is active, or the supplied version is not active |
+| `permanent` | `not_installed` | No local App credential |
+| `auth_required` | `needs_reauth` | Credential needs reauthentication or is retired |
+| `permanent` | `corrupt` | Credential is corrupt or its material cannot be decoded |
+| `transient` | `vault_locked` | Credential was sealed under a different master key |
+| `permanent` | `installation_unusable` | App material or the installation does not support the mint |
+| `permanent` | `installation_suspended` | GitHub marks the installation as suspended |
+| `permanent` | `policy_token_scope_unavailable` | Selected set exceeds the binding limit, or GitHub cannot issue the requested scope |
+| `permanent` | `policy_token_scope_mismatch` | The GitHub reply does not confirm the exact scope |
+| `transient` | `github_unavailable` | GitHub is unavailable, the reply is unusable or expired, or the row changed again |
+| `transient` | `store_error` | A store check or first-use commit failed |
+
+No refusal returns a token or a provider response body. An unreadable credential
+is not quarantined by this method, and mint failures do not change its state.
+
 ### Document and signature
 
 An agent policy defines which service identity belongs to each agent, the repositories

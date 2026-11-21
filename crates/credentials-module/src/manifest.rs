@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     manifest_active_report::{parse_active_report, record_own_manifest_active_report},
+    policy_token::{self, OP_POLICY_TOKEN},
     read_surface::ReadSurface,
     ModuleError,
 };
@@ -30,13 +31,14 @@ pub(crate) fn is_op(method: &str) -> bool {
             | OP_ACTIVE_STATUS
             | OP_POLICY_ACTIVE
             | OP_POLICY_WATCH
+            | OP_POLICY_TOKEN
     )
 }
 
 pub(crate) fn admitted(method: &str, principal: Option<&Principal>) -> bool {
     matches!(principal, Some(Principal::Reserved { module_id }) if match method {
         OP_LATEST | OP_REPORT_ACTIVE => module_id == "aft",
-        OP_WATCH | OP_POLICY_ACTIVE | OP_POLICY_WATCH => module_id == "aft" || module_id == "plexus",
+        OP_WATCH | OP_POLICY_ACTIVE | OP_POLICY_WATCH | OP_POLICY_TOKEN => module_id == "aft" || module_id == "plexus",
         OP_ACTIVE_STATUS => module_id == "plexus",
         _ => false,
     })
@@ -119,6 +121,17 @@ pub(crate) async fn serve(
 ) -> Result<(), ModuleError> {
     if !admitted(method, principal) {
         return crate::send_route_result(writer, header, crate::uniform_not_found()).await;
+    }
+    if let (OP_POLICY_TOKEN, Some(Principal::Reserved { module_id })) = (method, principal) {
+        return policy_token::serve(
+            header,
+            writer,
+            surface.store(),
+            &surface.policy_tokens,
+            module_id,
+            params,
+        )
+        .await;
     }
     let report = if method == OP_REPORT_ACTIVE {
         parse_active_report(params)

@@ -1631,6 +1631,9 @@ mod agent_policy;
 #[path = "store_agent_policy_admin.rs"]
 mod agent_policy_admin;
 
+#[path = "store_policy_token.rs"]
+mod policy_token;
+
 #[path = "store_gh_proposals.rs"]
 mod gh_proposals;
 
@@ -1645,6 +1648,10 @@ pub use declared_grants::{
 };
 
 pub use agent_policy::{ActiveAgentPolicy, AgentPolicySummary};
+pub use policy_token::{
+    PolicyTokenError, PolicyTokenHandoff, PolicyTokenPlan, PolicyTokenRecord, PolicyTokenRecordKey,
+    PolicyTokenRequest,
+};
 
 pub use gh_activations::{
     GhManifestActivationOutcome, GhManifestActivationReport, GhManifestActiveStatus,

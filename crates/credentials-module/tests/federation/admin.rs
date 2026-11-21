@@ -1542,6 +1542,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "manifest_propose_tests.rs",
         "manifest_tests.rs",
         "policy_reads_tests.rs",
+        "policy_token.rs",
+        "policy_token_tests.rs",
         "plan_warnings.rs",
         "watch_scoped.rs",
         "watch_scoped_tests.rs",

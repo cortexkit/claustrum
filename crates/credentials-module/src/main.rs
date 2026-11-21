@@ -35,6 +35,7 @@ mod manifest_identity;
 mod manifest_propose;
 mod module_secret;
 mod plan_warnings;
+mod policy_token;
 mod read_surface;
 mod secret_phone;
 mod secret_use;
@@ -3045,6 +3046,7 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.active".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "policy.watch".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: policy_token::OP_POLICY_TOKEN.into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -3497,6 +3499,7 @@ mod tests {
             "manifest.active_status",
             "policy.active",
             "policy.watch",
+            policy_token::OP_POLICY_TOKEN,
             "federation.manifest_latest",
             "federation.manifest_watch",
             "secret.request_flow_approval",
@@ -3524,6 +3527,7 @@ mod tests {
                     | "manifest.active_status"
                     | "policy.active"
                     | "policy.watch"
+                    | policy_token::OP_POLICY_TOKEN
                     | "federation.manifest_latest"
                     | "federation.manifest_watch"
             ) {
@@ -3542,6 +3546,9 @@ mod tests {
             Some(&OperationDelivery::WATCH)
         );
         assert!(!m.operation_delivery.contains_key("policy.active"));
+        assert!(!m
+            .operation_delivery
+            .contains_key(policy_token::OP_POLICY_TOKEN));
     }
 
     #[test]

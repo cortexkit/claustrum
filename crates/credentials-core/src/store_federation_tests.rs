@@ -3624,7 +3624,7 @@ fn remote_record_source_readers_default_to_operator_at_schema_38() {
         store.store.with_conn(read_schema_version).unwrap(),
         newest_migration_version()
     );
-    assert_eq!(newest_migration_version(), 52);
+    assert_eq!(newest_migration_version(), 53);
     for record in &expected {
         assert_eq!(
             store.remote_record(&record.credential_id).unwrap().as_ref(),

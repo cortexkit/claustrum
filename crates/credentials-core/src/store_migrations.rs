@@ -1002,6 +1002,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
                          SELECT 'policy_root_credential', credential_id, updated_at_ms FROM credentials \
                          WHERE credential_id = 'signing:gh-manifest-root:1' AND state = 'active';",
     },
+    Migration {
+        version: BROKER_ACTION_SCHEMA_VERSION,
+        statements: include_str!("broker_action_requests.sql"),
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

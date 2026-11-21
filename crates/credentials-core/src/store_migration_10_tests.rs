@@ -1002,11 +1002,12 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 52);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 53);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
         "agent_policies",
+        "broker_action_requests",
         "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
@@ -1167,8 +1168,9 @@ fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy
         } else {
             EncryptedStore::migrate(&copy).unwrap();
         }
-        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 52);
+        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 53);
         let mut after = every_table_row(&copy);
+        assert_eq!(after.remove("broker_action_requests"), Some(vec![]));
         let settings = after.get_mut("settings").unwrap();
         let seeded = settings.iter().position(|row| row[0] == seed[0]);
         assert_eq!(
@@ -1187,6 +1189,106 @@ fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy
 }
 
 #[test]
+fn migration_53_broker_action_adds_only_its_table_to_a_step_52_copy() {
+    let (root, sqlite) = sqlite("broker-action-upgrade", 229);
+    migrate_through_for_test(&sqlite, 52).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([229; 32])).unwrap();
+    store
+        .create_audited(
+            "github_app:sample",
+            &api_record(),
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "aft",
+            SelectorKind::Exact,
+            "github_app:sample",
+            GrantOperation::PolicyToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    store.with_raw_conn(|conn| {
+        let hash = "a".repeat(64);
+        conn.execute(
+            "INSERT INTO gh_manifests VALUES (1, X'01', ?1, '0123456789abcdef', zeroblob(64), 1, 'import', NULL)",
+            [&hash],
+        )?;
+        conn.execute(
+            "INSERT INTO agent_policies VALUES (1, X'02', ?1, '0123456789abcdef', zeroblob(64), 1, 'ceremony', 1, 1)",
+            [&hash],
+        )?;
+        Ok(())
+    }).unwrap();
+
+    let path = root
+        .join("broker-action-copy.db")
+        .to_string_lossy()
+        .into_owned();
+    store
+        .with_raw_conn(|conn| conn.execute("VACUUM INTO ?1", [&path]))
+        .unwrap();
+    let copy = open_sqlite(&StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: "broker-action-copy".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite { path },
+    })
+    .unwrap();
+    assert_eq!(schema_version_of(&copy), 52);
+    let before = table_rows(&copy, |_| true);
+    for table in [
+        "agent_policies",
+        "audit_log",
+        "credentials",
+        "gh_manifests",
+        "read_grants",
+    ] {
+        assert!(
+            !before[table].is_empty(),
+            "the copy must carry {table} rows"
+        );
+    }
+    let existing_schema = |db: &SqliteStore| {
+        db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema
+                 WHERE tbl_name <> 'broker_action_requests' ORDER BY type, name",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+    };
+    let before_schema = existing_schema(&copy);
+
+    migrate_through_for_test(&copy, 53).unwrap();
+
+    assert_eq!(schema_version_of(&copy), 53);
+    assert_eq!(existing_schema(&copy), before_schema);
+    let mut after = table_rows(&copy, |_| true);
+    assert_eq!(after.remove("broker_action_requests"), Some(vec![]));
+    // Only the migration runner's new version row may differ in an existing table.
+    let versions = after.get_mut("cortexkit_schema_version").unwrap();
+    let before_versions = &before["cortexkit_schema_version"];
+    assert_eq!(versions.len(), before_versions.len() + 1);
+    versions.retain(|row| before_versions.contains(row));
+    assert_eq!(after, before);
+    assert_eq!(schema_version_of(&store.store), 52);
+}
+
+#[test]
 fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     let (_root, sqlite) = sqlite("local-program-upgrade", 228);
     migrate_through_for_test(&sqlite, 45).unwrap();
@@ -1201,6 +1303,7 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     let mut after = every_table_row(&sqlite);
     for table in [
         "agent_policies",
+        "broker_action_requests",
         "credential_conditions",
         "fleet_discards",
         "fleet_epochs",
@@ -1246,18 +1349,24 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
 /// Used to show a DDL-only migration copied every row of every table unchanged. Sorted
 /// rather than in rowid order because a rebuilt table assigns fresh rowids, and the
 /// migration runner's own version table is left out because it is meant to change.
-fn every_table_row(store: &SqliteStore) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+fn every_table_row(store: &SqliteStore) -> TableRows {
+    table_rows(store, |name| {
+        !name.starts_with("sqlite_") && !name.starts_with("cortexkit")
+    })
+}
+
+type TableRows = BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>;
+
+fn table_rows(store: &SqliteStore, include: impl Fn(&str) -> bool) -> TableRows {
     store
         .with_conn(|conn| {
-            let mut names = conn.prepare(
-                "SELECT name FROM sqlite_master WHERE type = 'table' \
-                       AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'cortexkit%' ORDER BY name",
-            )?;
+            let mut names =
+                conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?;
             let names = names
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut tables = BTreeMap::new();
-            for name in names {
+            for name in names.into_iter().filter(|name| include(name)) {
                 let width = conn
                     .prepare(&format!("SELECT * FROM \"{name}\" LIMIT 0"))?
                     .column_count();
@@ -2327,6 +2436,26 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
                 column("source", "TEXT", true, None, false),
                 column("approval_seq", "INTEGER", true, None, false),
                 column("manifest_version", "INTEGER", true, None, false),
+            ],
+        ),
+        (
+            "broker_action_requests",
+            vec![
+                column("request_id", "TEXT", true, None, true),
+                column("principal", "TEXT", true, None, false),
+                column("agent_id", "TEXT", true, None, false),
+                column("scope_json", "TEXT", true, None, false),
+                column("statement_bytes", "BLOB", true, None, false),
+                column("statement_sha256", "TEXT", true, None, false),
+                column("policy_version", "INTEGER", true, None, false),
+                column("identity", "TEXT", true, None, false),
+                column("legs_json", "TEXT", true, None, false),
+                column("created_at_ms", "INTEGER", true, None, false),
+                column("expires_at_ms", "INTEGER", true, None, false),
+                column("approved_at_ms", "INTEGER", false, None, false),
+                column("device_fingerprint", "TEXT", false, None, false),
+                column("envelope_sha256", "TEXT", false, None, false),
+                column("issued_legs", "INTEGER", true, Some("0"), false),
             ],
         ),
         (

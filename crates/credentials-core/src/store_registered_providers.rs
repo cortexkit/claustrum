@@ -514,8 +514,8 @@ mod tests {
         let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([196; 32])).unwrap();
         EncryptedStore::migrate(&store.store).unwrap();
         // The daemon migrates through the nullable App metadata columns too.
-        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 52);
-        assert_eq!(newest_migration_version(), 52);
+        assert_eq!(store.store.with_conn(read_schema_version).unwrap(), 53);
+        assert_eq!(newest_migration_version(), 53);
         let after = snapshot(&store);
         assert_eq!(
             after.0.len(),
@@ -887,7 +887,7 @@ mod tests {
         assert!(store.registered_providers().unwrap().is_empty());
         // The migrate above runs to the newest step, so it must cross the descriptor
         // step this module adds. Later steps may follow it.
-        assert_eq!(newest_migration_version(), 52);
+        assert_eq!(newest_migration_version(), 53);
         assert!(newest_migration_version() >= REGISTERED_PROVIDER_DESCRIPTOR_SCHEMA_VERSION);
     }
 

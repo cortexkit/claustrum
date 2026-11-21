@@ -166,6 +166,8 @@ pub const HUB_ENTRIES_SCHEMA_VERSION: u32 = 50;
 pub const AGENT_POLICY_SCHEMA_VERSION: u32 = 51;
 /// Configured signing root and GitHub App creation attestation.
 pub const POLICY_ROOT_SCHEMA_VERSION: u32 = 52;
+/// Broker action requests, their approvals, and ordered issuance progress.
+const BROKER_ACTION_SCHEMA_VERSION: u32 = 53;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -1580,6 +1582,10 @@ mod coverage_phase_tests;
 #[cfg(test)]
 #[path = "store_migration_10_tests.rs"]
 mod migration_10_tests;
+
+#[cfg(test)]
+#[path = "store_broker_action_storage_tests.rs"]
+mod broker_action_storage_tests;
 
 #[cfg(test)]
 #[path = "deposit_cookie_tests.rs"]

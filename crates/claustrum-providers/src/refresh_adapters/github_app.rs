@@ -56,6 +56,9 @@ struct Installation {
     id: u64,
     client_id: String,
     app_slug: Option<String>,
+    #[serde(rename = "app_id")]
+    _app_id: Option<serde_json::Value>,
+    account: Option<serde_json::Value>,
     permissions: Option<serde_json::Value>,
     suspended_at: Option<String>,
     repository_selection: Option<String>,
@@ -87,7 +90,7 @@ struct MintedInstallation {
 }
 
 enum InstallationMintOutcome {
-    Minted(MintedInstallation),
+    Minted(Box<MintedInstallation>),
     Check(GithubAppCheck),
     Suspended,
 }
@@ -116,6 +119,25 @@ impl GithubInstallationError {
             Self::Discovery(error) | Self::TokenExchange(error) => error,
         }
     }
+}
+
+/// A token whose exchange reply confirmed exactly the requested GitHub scope.
+#[derive(Debug)]
+pub struct GithubNarrowedInstallationToken {
+    pub access_token: SecretString,
+    pub expires_at_ms: i64,
+    pub repositories: Vec<String>,
+    pub permissions: BTreeMap<String, String>,
+}
+
+/// Narrowed mint failures carry no response data. Only `GithubUnavailable` is retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubNarrowedInstallationError {
+    InstallationUnusable,
+    InstallationSuspended,
+    ScopeUnavailable,
+    ScopeMismatch,
+    GithubUnavailable,
 }
 
 /// Result of a read-only repository check. No bearer token leaves this check.
@@ -512,6 +534,154 @@ pub async fn mint_installation_token(
     }
 }
 
+/// Mint only for the caller's policy-selected `owner/repo` names and permissions.
+/// A failed narrowed exchange never falls back to the whole installation's grant.
+/// This mint does not change the stored credential or mark it as needing re-authentication.
+pub async fn mint_narrowed_installation_token(
+    record_id: &str,
+    cred: &OAuthCredential,
+    repositories: &[String],
+    permissions: &BTreeMap<String, String>,
+    http: &dyn HttpTransport,
+) -> Result<GithubNarrowedInstallationToken, GithubNarrowedInstallationError> {
+    use GithubNarrowedInstallationError as Error;
+
+    let mut repositories: Vec<_> = repositories
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    repositories.sort_unstable();
+    if repositories.is_empty() || repositories.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::ScopeUnavailable);
+    }
+    let names: Vec<_> = repositories
+        .iter()
+        .map(|full_name| {
+            full_name.split_once('/').filter(|(owner, name)| {
+                !owner.is_empty() && !name.is_empty() && !name.contains('/')
+            })
+        })
+        .collect::<Option<_>>()
+        .ok_or(Error::ScopeUnavailable)?;
+    let client_id = cred
+        .client_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or(Error::InstallationUnusable)?;
+    let jwt = GithubAppAdapter::mint_app_jwt(cred, now_secs())
+        .map_err(|_| Error::InstallationUnusable)?;
+    let authorization = format!("Bearer {jwt}");
+    let headers = GithubAppAdapter::auth_headers(&authorization);
+    let installation = match GithubAppAdapter::new()
+        .discover_installation(record_id, client_id, &headers, http)
+        .await
+        .map_err(|_| Error::GithubUnavailable)?
+    {
+        InstallationDiscovery::Found { installation, .. } => installation,
+        InstallationDiscovery::Check(_) => return Err(Error::InstallationUnusable),
+    };
+    if installation.suspended_at.is_some() {
+        return Err(Error::InstallationSuspended);
+    }
+    let login = installation
+        .account
+        .as_ref()
+        .and_then(|account| account.get("login"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|login| !login.is_empty())
+        .ok_or(Error::GithubUnavailable)?;
+    if names
+        .iter()
+        .any(|(owner, _)| !login.eq_ignore_ascii_case(owner))
+    {
+        return Err(Error::InstallationUnusable);
+    }
+
+    #[derive(Serialize)]
+    struct Scope<'a> {
+        repositories: Vec<&'a str>,
+        permissions: &'a BTreeMap<String, String>,
+    }
+    let body = serde_json::to_vec(&Scope {
+        repositories: names.into_iter().map(|(_, name)| name).collect(),
+        permissions,
+    })
+    .map_err(|_| Error::ScopeUnavailable)?;
+    let response = http
+        .post(
+            &access_tokens_url(installation.id),
+            &headers,
+            "application/json",
+            body,
+        )
+        .await
+        .map_err(|_| Error::GithubUnavailable)?;
+    match response.status {
+        201 => {}
+        422 => return Err(Error::ScopeUnavailable),
+        _ => return Err(Error::GithubUnavailable),
+    }
+
+    let mut reply: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&response.body).map_err(|_| Error::GithubUnavailable)?;
+    let Some(serde_json::Value::String(token)) = reply.remove("token") else {
+        return Err(Error::GithubUnavailable);
+    };
+    let access_token: SecretString = token.into();
+    let expires_at_ms = reply
+        .get("expires_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+        .ok_or(Error::GithubUnavailable)?
+        .timestamp_millis();
+    if access_token.expose().is_empty() || expires_at_ms <= chrono::Utc::now().timestamp_millis() {
+        return Err(Error::GithubUnavailable);
+    }
+    if !narrowed_repositories_match(reply.get("repositories"), &repositories) {
+        return Err(Error::ScopeMismatch);
+    }
+    let mut observed =
+        canonical_permissions(reply.get("permissions")).ok_or(Error::ScopeMismatch)?;
+    // GitHub grants metadata read even when it was not requested. If it was requested,
+    // it must match exactly, just like every other permission.
+    if !permissions.contains_key("metadata")
+        && observed
+            .get("metadata")
+            .is_some_and(|level| level == "read")
+    {
+        observed.remove("metadata");
+    }
+    if &observed != permissions {
+        return Err(Error::ScopeMismatch);
+    }
+    Ok(GithubNarrowedInstallationToken {
+        access_token,
+        expires_at_ms,
+        repositories,
+        permissions: permissions.clone(),
+    })
+}
+
+fn narrowed_repositories_match(value: Option<&serde_json::Value>, expected: &[String]) -> bool {
+    fn names(value: &serde_json::Value) -> Option<Vec<String>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|repo| Some(repo.get("full_name")?.as_str()?.to_ascii_lowercase()))
+            .collect()
+    }
+    let Some(mut observed) = value.and_then(names) else {
+        return false;
+    };
+    observed.sort_unstable();
+    // The request is duplicate-free; keeping reply duplicates in the sorted list rejects them.
+    observed == expected
+}
+
+fn access_tokens_url(installation_id: u64) -> String {
+    format!("{ACCESS_TOKENS_URL_PREFIX}{installation_id}/access_tokens")
+}
+
 async fn mint_installation_token_inner(
     record_id: &str,
     cred: &OAuthCredential,
@@ -539,10 +709,7 @@ async fn mint_installation_token_inner(
     if installation.suspended_at.is_some() {
         return Ok(InstallationMintOutcome::Suspended);
     }
-    let url = format!(
-        "{ACCESS_TOKENS_URL_PREFIX}{}/access_tokens",
-        installation.id
-    );
+    let url = access_tokens_url(installation.id);
     let response = http
         .post(&url, &headers, "application/json", b"{}".to_vec())
         .await
@@ -590,12 +757,14 @@ async fn mint_installation_token_inner(
         })?
         .timestamp_millis();
     let token_permissions = canonical_permissions(parsed.permissions.as_ref());
-    Ok(InstallationMintOutcome::Minted(MintedInstallation {
-        access_token: parsed.token.into(),
-        expires_at_ms,
-        token_permissions,
-        installation,
-    }))
+    Ok(InstallationMintOutcome::Minted(Box::new(
+        MintedInstallation {
+            access_token: parsed.token.into(),
+            expires_at_ms,
+            token_permissions,
+            installation,
+        },
+    )))
 }
 
 #[derive(Deserialize)]
@@ -761,6 +930,10 @@ fn now_secs() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "github_app_narrowed_tests.rs"]
+mod narrowed_tests;
 
 #[cfg(test)]
 #[path = "github_app_repository_tests.rs"]

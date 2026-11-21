@@ -13,6 +13,9 @@ use subc_protocol::{Flags, Priority, PROTOCOL_VERSION};
 
 use crate::tests::federation_fixture_support as federation_support;
 
+#[path = "policy_reads_tests.rs"]
+mod policy_reads;
+
 const SELF: &str = "fed-computer:22222222222222222222222222222222";
 const OTHER: &str = "fed-computer:33333333333333333333333333333333";
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -174,7 +177,7 @@ fn caller(module: &str) -> crate::federation::RouteCaller {
 
 fn request(method: &str, params: Value, channel: u16, corr: u64) -> Frame {
     let mut flags = Flags::new(false, Priority::Interactive, false);
-    if method == OP_WATCH {
+    if matches!(method, OP_WATCH | OP_POLICY_WATCH) {
         flags.0 |= subc_protocol::FLAG_SUBSCRIPTION;
     }
     Frame::build_with_version(

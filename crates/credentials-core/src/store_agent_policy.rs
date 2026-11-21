@@ -1,6 +1,10 @@
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde::Serialize;
 
-use super::{EncryptedStore, StoreOpError, GH_MANIFEST_ROOT_KEY_ID};
+use super::{
+    store_agent_secrets::secret_home_role_conn, EncryptedStore, SecretHomeRole, StoreOpError,
+    GH_MANIFEST_ROOT_KEY_ID,
+};
 use crate::agent_policy::{
     policy_sha256, signed_input, validate_signer_rule_sets, AgentPolicy, PolicyError,
 };
@@ -33,6 +37,20 @@ pub(crate) struct AgentPolicyVersion<'a> {
     pub source: AgentPolicySource,
     pub approval_seq: i64,
     pub manifest_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentPolicySummary {
+    pub version: i64,
+    pub policy_sha256: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct ActiveAgentPolicy {
+    pub version: i64,
+    pub policy_sha256: String,
+    pub manifest_version: i64,
+    pub policy_text: String,
 }
 
 #[derive(Debug)]
@@ -81,6 +99,23 @@ pub(super) fn has_agent_policy_conn(conn: &rusqlite::Connection) -> rusqlite::Re
     })
 }
 
+pub(super) fn paired_agent_policy_conn(
+    conn: &Connection,
+    manifest_version: i64,
+) -> rusqlite::Result<Option<AgentPolicySummary>> {
+    conn.query_row(
+        "SELECT version, policy_sha256 FROM agent_policies WHERE manifest_version = ?1",
+        [manifest_version],
+        |row| {
+            Ok(AgentPolicySummary {
+                version: row.get(0)?,
+                policy_sha256: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub(super) fn head_agent_policy_conn(
     conn: &rusqlite::Connection,
 ) -> Result<Option<AgentPolicy>, StoreOpError> {
@@ -126,6 +161,16 @@ pub(super) fn active_agent_policy_version_conn(
 }
 
 impl EncryptedStore {
+    /// Resolve the serving role and the ready pair from the same read snapshot.
+    /// Non-serving vaults return their role without reading any policy row.
+    pub fn active_agent_policy(
+        &self,
+    ) -> Result<(SecretHomeRole, Option<ActiveAgentPolicy>), StoreOpError> {
+        self.store
+            .with_conn(|conn| active_agent_policy_read(conn, || {}))
+            .map_err(StoreOpError::from)
+    }
+
     /// Verify the exact bytes and approval against the current root and paired manifest
     /// in the caller's writer transaction. No policy row is written before every check passes.
     pub(crate) fn store_agent_policy_in_tx(
@@ -207,6 +252,45 @@ impl EncryptedStore {
         )?;
         Ok(())
     }
+}
+
+fn active_agent_policy_read(
+    conn: &Connection,
+    after_role: impl FnOnce(),
+) -> rusqlite::Result<(SecretHomeRole, Option<ActiveAgentPolicy>)> {
+    let tx = conn.unchecked_transaction()?;
+    let role = secret_home_role_conn(&tx);
+    if !matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
+        return Ok((role, None));
+    }
+    after_role();
+    let row = active_agent_policy_version_conn(&tx)?
+        .map(|version| {
+            tx.query_row(
+                "SELECT version, policy_sha256, manifest_version, policy_bytes \
+                 FROM agent_policies WHERE version = ?1",
+                [version],
+                |row| {
+                    let bytes = row.get::<_, Vec<u8>>(3)?;
+                    let policy_text = String::from_utf8(bytes).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Blob,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(ActiveAgentPolicy {
+                        version: row.get(0)?,
+                        policy_sha256: row.get(1)?,
+                        manifest_version: row.get(2)?,
+                        policy_text,
+                    })
+                },
+            )
+        })
+        .transpose()?;
+    tx.commit()?;
+    Ok((role, row))
 }
 
 #[cfg(test)]

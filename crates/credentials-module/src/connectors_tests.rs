@@ -955,6 +955,8 @@ mod connectors_contract {
                 | "manifest.watch"
                 | "manifest.report_active"
                 | "manifest.active_status"
+                | "policy.active"
+                | "policy.watch"
                 | "federation.manifest_latest"
                 | "federation.manifest_watch"
                 | "secret.request_flow_approval"

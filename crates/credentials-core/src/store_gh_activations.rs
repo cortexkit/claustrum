@@ -1,4 +1,7 @@
-use super::{append_audit_tx, EncryptedStore, StoreOpError};
+use super::{
+    agent_policy::{has_agent_policy_conn, paired_agent_policy_conn, AgentPolicySummary},
+    append_audit_tx, EncryptedStore, StoreOpError,
+};
 use crate::audit::{AuditCtx, GhManifestAudit};
 use base64::Engine;
 use rusqlite::{params, OptionalExtension};
@@ -60,6 +63,10 @@ pub struct GhManifestActiveStatus {
     pub manifest_sha256: String,
     pub ready: bool,
     pub computers: Vec<GhManifestComputerStatus>,
+    /// Omit this field until the first policy exists. After that, an unpaired
+    /// manifest carries an explicit null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Option<AgentPolicySummary>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,12 +206,18 @@ impl EncryptedStore {
                 };
                 let computers = gh_manifest_expected_computers_conn(&tx)?;
                 let ready = gh_manifest_reports_ready(&computers, version, &manifest_sha256);
+                let policy = if has_agent_policy_conn(&tx)? {
+                    Some(paired_agent_policy_conn(&tx, version)?)
+                } else {
+                    None
+                };
                 tx.commit()?;
                 Ok(Some(GhManifestActiveStatus {
                     version,
                     manifest_sha256,
                     ready,
                     computers,
+                    policy,
                 }))
             })
             .map_err(StoreOpError::from)

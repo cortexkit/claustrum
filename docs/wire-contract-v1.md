@@ -4775,8 +4775,12 @@ hub collector. See the signed report and Node verifier in the
 [test samples](../crates/credentials-module/tests/fixtures/hub-wire-v1/).
 
 `manifest.active_status` takes exactly `{version}`. A version that is not stored
-refuses `unknown_version`/`transient`. Its success result is exactly
+refuses `unknown_version`/`transient`. Its success result has the following members:
 `{version, manifest_sha256, ready, computers: [{member_id, version, payload_sha256, verdict, reason, reported_at_ms}]}`.
+Once any agent policy has been stored, the result also includes `policy`: the
+policy paired with the requested manifest version as `{version, policy_sha256}`,
+or `null` if that manifest has no pair. The pair is reported whether or not the
+queried manifest is ready. While no policies are stored, `policy` is omitted.
 There is one entry per expected computer sorted by `member_id` bytes. A computer
 without a report has null report fields, not a missing entry. The expected set
 is the home's own member id, all members holding a `secret_use` grant and all
@@ -5501,6 +5505,91 @@ envelope can be decoded. Receipts for its incarnation remain until expiry with
 requester/nonce occupied. Re-enrollment never restores old authority.
 
 ## 17a. Signed agent policies
+
+### Reading and watching the active policy
+
+`policy.active {}` and `policy.watch {}` admit only `reserved:plexus` and
+`reserved:aft`. Both serve on Single and Home vaults only and never relay. Other
+callers, and admitted callers on Remote or RemoteSetupIncomplete vaults, receive
+`not_found`/`permanent`. A role or store read failure is `store_error`/`transient`
+for an admitted caller. Parameters must be an empty object.
+
+`policy.active` returns `{version, policy_sha256, manifest_version, policy_text}`.
+The active policy is the highest stored policy version whose paired manifest is
+ready under the `manifest.active_status` rule. Selection and the serving role are
+read from one snapshot. `manifest_version` is the paired GitHub manifest version;
+`policy_text` is the exact UTF-8 JSON string from the signed policy envelope. If no
+policy is active, including during a split rollout, all four members are null.
+
+`policy.watch` uses WATCH delivery and the shared local inventory watch contract:
+one subscription per route, a shared maximum of 64, `STREAM_END` on replacement or
+drain, and silent cancellation or route close. An open that fails caller or
+parameter validation does not replace an existing watch. An admitted open with
+valid parameters registers before its first snapshot; a subsequent role refusal
+ends that new watch with one `RESPONSE`, not `STREAM_DATA` or `STREAM_END`.
+
+Each `STREAM_DATA` body is exactly
+`{"version": <int|null>, "policy_sha256": <hex|null>, "kind": "changed", "epoch": "<32 lowercase hex>", "seq": <int>}`.
+Sequence 1 is the snapshot at open, with both policy members null when none is
+active. Later notices are sent only when that pair changes. Commits that can affect
+policy pairing, readiness, reporter admission or the serving role wake the watch.
+Writes coalesce over approximately 250 ms; intermediate changes may not be observed.
+A later non-serving role ends the subscription with one `RESPONSE`
+`not_found`/`permanent`. A transient snapshot failure after sequence 1 retains the
+last sent value and retries on the next commit. Notices are sheddable; to confirm
+the current value, read `policy.active` or reopen for a fresh sequence 1.
+`manifest.watch` retains its existing new-versions-only behavior.
+
+### Policy read samples
+
+These examples use a test-only signed policy. The watch epoch is fixed for the
+examples; a running daemon chooses its own epoch.
+
+<!-- golden:policy.active.none -->
+```json
+{
+  "result": {
+    "version": null,
+    "policy_sha256": null,
+    "manifest_version": null,
+    "policy_text": null
+  }
+}
+```
+
+<!-- golden:policy.active.ready -->
+```json
+{
+  "result": {
+    "version": 1,
+    "policy_sha256": "85f93cc525185d7b40916c2800c0baccf00602262d0766c15f208c5b9e4c1df8",
+    "manifest_version": 41,
+    "policy_text": "{\"bindings\":[{\"agent\":\"agent\",\"identity\":\"github_app:agent\",\"resources\":[\"org/r\"],\"service\":\"github\"}],\"issued_at_unix_secs\":1,\"root_key_id\":\"56fae12f77164627\",\"rule_sets\":{},\"schema\":\"ck-agent-policy/v1\",\"version\":1}"
+  }
+}
+```
+
+<!-- golden:policy.watch.initial -->
+```json
+{
+  "version": null,
+  "policy_sha256": null,
+  "kind": "changed",
+  "epoch": "00112233445566778899aabbccddeeff",
+  "seq": 1
+}
+```
+
+<!-- golden:policy.watch.changed -->
+```json
+{
+  "version": 1,
+  "policy_sha256": "85f93cc525185d7b40916c2800c0baccf00602262d0766c15f208c5b9e4c1df8",
+  "kind": "changed",
+  "epoch": "00112233445566778899aabbccddeeff",
+  "seq": 2
+}
+```
 
 ### Document and signature
 

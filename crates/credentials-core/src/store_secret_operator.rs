@@ -151,7 +151,7 @@ fn secret_home_settings_conn(
 }
 
 /// The role as seen by `conn`. A read failure is [`SecretHomeRole::StoreError`].
-pub(super) fn secret_home_role_conn(conn: &rusqlite::Connection) -> SecretHomeRole {
+pub(in crate::store) fn secret_home_role_conn(conn: &rusqlite::Connection) -> SecretHomeRole {
     match secret_home_settings_conn(conn) {
         Ok((setting, self_member)) => {
             resolve_secret_home_role(setting.as_deref(), self_member.as_deref())

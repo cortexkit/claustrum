@@ -36,12 +36,19 @@ struct Registry {
     draining: bool,
 }
 
+#[cfg(test)]
+type PolicySnapshotHook = Box<dyn FnOnce(serde_json::Value) -> serde_json::Value + Send>;
+
 pub(crate) struct WatchHub {
     entries: Arc<Mutex<Registry>>,
     snapshots: Arc<Semaphore>,
     manifest_upstreams: Arc<crate::federation::manifest_watch::Hub>,
     #[cfg(test)]
     pub(crate) completed: watch::Sender<u64>,
+    #[cfg(test)]
+    pub(crate) exited: watch::Sender<u64>,
+    #[cfg(test)]
+    pub(crate) policy_snapshot_hook: Mutex<Option<PolicySnapshotHook>>,
 }
 
 impl Default for WatchHub {
@@ -53,6 +60,10 @@ impl Default for WatchHub {
             manifest_upstreams: Arc::default(),
             #[cfg(test)]
             completed: watch::channel(0).0,
+            #[cfg(test)]
+            exited: watch::channel(0).0,
+            #[cfg(test)]
+            policy_snapshot_hook: Mutex::default(),
         }
     }
 }
@@ -72,6 +83,7 @@ enum Inventory {
     },
     Connectors(Arc<crate::admin_surface::AdminSurface>),
     Manifest,
+    Policy,
 }
 
 fn process_epoch() -> &'static str {
@@ -188,6 +200,15 @@ impl WatchHub {
         self.open_inventory(surface, writer, header, Inventory::Manifest)
     }
 
+    pub(crate) fn open_policy(
+        &self,
+        surface: Arc<ReadSurface>,
+        writer: mpsc::Sender<Frame>,
+        header: subc_protocol::EnvelopeHeader,
+    ) -> bool {
+        self.open_inventory(surface, writer, header, Inventory::Policy)
+    }
+
     fn open_inventory(
         &self,
         surface: Arc<ReadSurface>,
@@ -224,6 +245,8 @@ impl WatchHub {
         let manifest_upstreams = Arc::clone(&self.manifest_upstreams);
         #[cfg(test)]
         let completed = self.completed.clone();
+        #[cfg(test)]
+        let exited = self.exited.clone();
         tokio::spawn(async move {
             let mut subscription = Subscription {
                 surface,
@@ -247,6 +270,8 @@ impl WatchHub {
                 entries.entries.remove(&header.channel);
             }
             let _ = finished.send(());
+            #[cfg(test)]
+            exited.send_modify(|count| *count += 1);
         });
         true
     }
@@ -363,6 +388,18 @@ impl Subscription {
                         }),
                         Inventory::Manifest => {
                             let reply = crate::manifest::watch_snapshot(surface.store());
+                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
+                        }
+                        Inventory::Policy => {
+                            let reply = crate::manifest::policy_watch_snapshot(surface.store());
+                            #[cfg(test)]
+                            let reply = {
+                                let hook = surface.watches.policy_snapshot_hook.lock().unwrap().take();
+                                match hook {
+                                    Some(hook) => hook(reply),
+                                    None => reply,
+                                }
+                            };
                             if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
                         }
                     }).await;

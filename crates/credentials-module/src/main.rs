@@ -1324,8 +1324,10 @@ async fn handle_frame(
             if let federation::RouteCaller::Principal(principal) = &caller {
                 if request.body.as_ref().is_ok_and(|request| {
                     request.method == OP_WATCH_SCOPED
-                        || (request.method == manifest::OP_WATCH
-                            && manifest::admitted(&request.method, principal.as_ref())
+                        || (matches!(
+                            request.method.as_str(),
+                            manifest::OP_WATCH | manifest::OP_POLICY_WATCH
+                        ) && manifest::admitted(&request.method, principal.as_ref())
                             && request.params.as_object().is_some_and(|p| p.is_empty()))
                 }) {
                     let principal = principal.clone();
@@ -2858,7 +2860,12 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             "peer_classes": ["computer"],
         }]))]),
     )]))
-    .operation_delivery(BTreeMap::from([("connectors.watch".to_owned(), OperationDelivery::WATCH), (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH), (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH)]))
+    .operation_delivery(BTreeMap::from([
+        ("connectors.watch".to_owned(), OperationDelivery::WATCH),
+        (manifest::OP_WATCH.to_owned(), OperationDelivery::WATCH),
+        (manifest::OP_POLICY_WATCH.to_owned(), OperationDelivery::WATCH),
+        (federation::ingress::OP_MANIFEST_WATCH.to_owned(), OperationDelivery::WATCH),
+    ]))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -3036,6 +3043,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "manifest.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "manifest.report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "policy.active".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "policy.watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -3486,6 +3495,8 @@ mod tests {
             "manifest.watch",
             "manifest.report_active",
             "manifest.active_status",
+            "policy.active",
+            "policy.watch",
             "federation.manifest_latest",
             "federation.manifest_watch",
             "secret.request_flow_approval",
@@ -3511,6 +3522,8 @@ mod tests {
                     | "manifest.latest"
                     | "manifest.watch"
                     | "manifest.active_status"
+                    | "policy.active"
+                    | "policy.watch"
                     | "federation.manifest_latest"
                     | "federation.manifest_watch"
             ) {
@@ -3524,6 +3537,11 @@ mod tests {
             m.operation_delivery.get("manifest.watch"),
             Some(&OperationDelivery::WATCH)
         );
+        assert_eq!(
+            m.operation_delivery.get("policy.watch"),
+            Some(&OperationDelivery::WATCH)
+        );
+        assert!(!m.operation_delivery.contains_key("policy.active"));
     }
 
     #[test]

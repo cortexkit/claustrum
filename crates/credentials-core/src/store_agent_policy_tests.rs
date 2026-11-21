@@ -55,6 +55,70 @@ fn policy_state(conn: &Connection, manifest_version: i64) -> rusqlite::Result<(O
 }
 
 #[test]
+fn active_policy_reads_role_reports_and_pairing_from_one_snapshot() {
+    use crate::federation::SELF_MEMBER_SETTING;
+    use crate::store::SECRET_HOME_SETTING;
+
+    let (dir, store) = taxonomy_tests::rig("active-policy-snapshot", 77);
+    let member = "fed-computer:22222222222222222222222222222222";
+    let home = "fed-computer:33333333333333333333333333333333";
+    let writer = Connection::open(dir.join("store.db")).unwrap();
+    let setting = |name, value| {
+        writer
+            .execute(
+                "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 1) \
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                params![name, value],
+            )
+            .unwrap();
+    };
+    let report = |version| {
+        writer.execute(
+            "INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reported_at_ms) \
+             VALUES (?1, ?2, ?3, 'valid', 1) ON CONFLICT(member_id) DO UPDATE SET version = excluded.version",
+            params![member, version, HASH],
+        ).unwrap();
+    };
+    setting(SELF_MEMBER_SETTING, member);
+    setting(SECRET_HOME_SETTING, "self");
+    for (version, manifest_version) in [(1, 41), (2, 42)] {
+        raw_manifest(&writer, manifest_version).unwrap();
+        let mut row = raw_policy(version, manifest_version);
+        row[1] = format!("{{\"version\":{version}}}").into_bytes().into();
+        writer
+            .execute(
+                "INSERT INTO agent_policies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params_from_iter(row),
+            )
+            .unwrap();
+    }
+    report(41);
+    let policy = store
+        .with_raw_conn(|conn| active_agent_policy_read(conn, || report(42)))
+        .unwrap()
+        .1
+        .unwrap();
+    assert_eq!((policy.version, policy.manifest_version), (1, 41));
+    assert_eq!(store.active_agent_policy().unwrap().1.unwrap().version, 2);
+
+    report(41);
+    let (role, policy) = store
+        .with_raw_conn(|conn| {
+            active_agent_policy_read(conn, || {
+                // Distinct commits: there is never a serving snapshot where P2 is active.
+                setting(SECRET_HOME_SETTING, home);
+                report(42);
+            })
+        })
+        .unwrap();
+    assert!(matches!(role, SecretHomeRole::Home { .. }));
+    assert_eq!(policy.unwrap().policy_text, "{\"version\":1}");
+    let (role, policy) = store.active_agent_policy().unwrap();
+    assert!(matches!(role, SecretHomeRole::Remote { .. }));
+    assert!(policy.is_none());
+}
+
+#[test]
 fn migration_51_rejects_invalid_policy_columns_in_an_empty_table() {
     let (_dir, store) = taxonomy_tests::rig("policy-sql-column-checks", 61);
     store.with_raw_conn(|conn| {

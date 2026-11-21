@@ -1644,6 +1644,8 @@ pub use declared_grants::{
     DECLARED_GRANT_APPROVAL_TEMPLATES, DECLARED_GRANT_CATEGORY_NAMES, MAX_DECLARED_GRANTS,
 };
 
+pub use agent_policy::{ActiveAgentPolicy, AgentPolicySummary};
+
 pub use gh_activations::{
     GhManifestActivationOutcome, GhManifestActivationReport, GhManifestActiveStatus,
     GhManifestComputerStatus, GhManifestHandoffEnvelope, GhManifestLatest,

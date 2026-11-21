@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use credentials_core::store::{EncryptedStore, SecretHomeRole};
+use credentials_core::store::{ActiveAgentPolicy, EncryptedStore, SecretHomeRole};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_protocol::{EnvelopeHeader, Frame, FrameType, Principal};
@@ -18,18 +18,25 @@ pub(crate) const OP_LATEST: &str = "manifest.latest";
 pub(crate) const OP_WATCH: &str = "manifest.watch";
 pub(crate) const OP_REPORT_ACTIVE: &str = "manifest.report_active";
 pub(crate) const OP_ACTIVE_STATUS: &str = "manifest.active_status";
+pub(crate) const OP_POLICY_ACTIVE: &str = "policy.active";
+pub(crate) const OP_POLICY_WATCH: &str = "policy.watch";
 
 pub(crate) fn is_op(method: &str) -> bool {
     matches!(
         method,
-        OP_LATEST | OP_WATCH | OP_REPORT_ACTIVE | OP_ACTIVE_STATUS
+        OP_LATEST
+            | OP_WATCH
+            | OP_REPORT_ACTIVE
+            | OP_ACTIVE_STATUS
+            | OP_POLICY_ACTIVE
+            | OP_POLICY_WATCH
     )
 }
 
 pub(crate) fn admitted(method: &str, principal: Option<&Principal>) -> bool {
     matches!(principal, Some(Principal::Reserved { module_id }) if match method {
         OP_LATEST | OP_REPORT_ACTIVE => module_id == "aft",
-        OP_WATCH => module_id == "aft" || module_id == "plexus",
+        OP_WATCH | OP_POLICY_ACTIVE | OP_POLICY_WATCH => module_id == "aft" || module_id == "plexus",
         OP_ACTIVE_STATUS => module_id == "plexus",
         _ => false,
     })
@@ -39,13 +46,16 @@ fn refusal(code: &str, class: &str) -> Value {
     json!({"error":{"code":code,"class":class}})
 }
 
-fn role_refusal(store: &EncryptedStore, method: &str) -> Option<Value> {
-    match store.secret_home_role() {
+fn role_refusal(role: SecretHomeRole, method: &str) -> Option<Value> {
+    match role {
         SecretHomeRole::Single | SecretHomeRole::Home { .. } => None,
         SecretHomeRole::StoreError => Some(refusal("store_error", "transient")),
         SecretHomeRole::Remote { .. } if method == OP_REPORT_ACTIVE => None,
         SecretHomeRole::Remote { .. } | SecretHomeRole::RemoteSetupIncomplete { .. }
-            if method == OP_ACTIVE_STATUS =>
+            if matches!(
+                method,
+                OP_ACTIVE_STATUS | OP_POLICY_ACTIVE | OP_POLICY_WATCH
+            ) =>
         {
             Some(refusal("not_found", "permanent"))
         }
@@ -67,7 +77,7 @@ struct VersionParams {
 }
 
 pub(crate) fn watch_snapshot(store: &EncryptedStore) -> Value {
-    if let Some(reply) = role_refusal(store, OP_WATCH) {
+    if let Some(reply) = role_refusal(store.secret_home_role(), OP_WATCH) {
         return reply;
     }
     match store.latest_gh_manifest_metadata() {
@@ -76,6 +86,26 @@ pub(crate) fn watch_snapshot(store: &EncryptedStore) -> Value {
             json!({"version":version, "manifest_sha256":manifest_sha256})
         }
         Err(_) => refusal("store_error", "transient"),
+    }
+}
+
+fn read_policy(store: &EncryptedStore, method: &str) -> Result<Option<ActiveAgentPolicy>, Value> {
+    let (role, policy) = store
+        .active_agent_policy()
+        .map_err(|_| refusal("store_error", "transient"))?;
+    if let Some(reply) = role_refusal(role, method) {
+        return Err(reply);
+    }
+    Ok(policy)
+}
+
+pub(crate) fn policy_watch_snapshot(store: &EncryptedStore) -> Value {
+    match read_policy(store, OP_POLICY_WATCH) {
+        Ok(Some(policy)) => {
+            json!({"version": policy.version, "policy_sha256": policy.policy_sha256})
+        }
+        Ok(None) => json!({"version": null, "policy_sha256": null}),
+        Err(reply) => reply,
     }
 }
 
@@ -118,11 +148,17 @@ pub(crate) async fn serve(
         )
         .await;
     }
-    if method == OP_WATCH {
-        if !surface
-            .watches
-            .open_manifest(Arc::clone(surface), writer.clone(), header)
-        {
+    if matches!(method, OP_WATCH | OP_POLICY_WATCH) {
+        let opened = if method == OP_POLICY_WATCH {
+            surface
+                .watches
+                .open_policy(Arc::clone(surface), writer.clone(), header)
+        } else {
+            surface
+                .watches
+                .open_manifest(Arc::clone(surface), writer.clone(), header)
+        };
+        if !opened {
             let writer = writer.clone();
             tokio::spawn(async move {
                 let _ = crate::watch_scoped::refusal(
@@ -163,7 +199,14 @@ pub(crate) async fn serve(
     let store = Arc::clone(surface.store());
     let method = method.to_owned();
     let reply = tokio::task::spawn_blocking(move || {
-        if let Some(reply) = role_refusal(&store, &method) {
+        if method == OP_POLICY_ACTIVE {
+            return match read_policy(&store, OP_POLICY_ACTIVE) {
+                Ok(Some(policy)) => json!(policy),
+                Ok(None) => json!({"version": null, "policy_sha256": null, "manifest_version": null, "policy_text": null}),
+                Err(reply) => reply,
+            };
+        }
+        if let Some(reply) = role_refusal(store.secret_home_role(), &method) {
             return reply;
         }
         match method.as_str() {

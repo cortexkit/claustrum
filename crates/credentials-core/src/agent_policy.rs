@@ -12,7 +12,10 @@ use crate::gh_manifest::{
 };
 use crate::signing::MAX_SIGN_PAYLOAD;
 
+mod defaults;
 mod matching;
+
+pub use defaults::github_default_rule_set;
 
 pub const AGENT_POLICY_SCHEMA_V1: &str = "ck-agent-policy/v1";
 pub const AGENT_POLICY_SEPARATOR: &[u8] = b"ck-agent-policy/v1\0";

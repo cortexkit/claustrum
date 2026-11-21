@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Additional, Class, Constraints, Identity, PolicyError, Predicate, Request, RuleSet};
+use super::{
+    Additional, Approval, Class, Constraints, GraphqlRequest, Identity, Kind, PolicyError,
+    Predicate, Request, RuleSet,
+};
 use crate::gh_manifest::MAX_MANIFEST_JSON_INTEGER;
 
 const MAX_OWNER_BASE_BYTES: usize = 39;
@@ -295,10 +298,22 @@ struct RestMatch<'a> {
     query: Domain<'a>,
 }
 
+fn equivalent_graphql_reads(
+    left: (&Kind, &GraphqlRequest),
+    right: (&Kind, &GraphqlRequest),
+) -> bool {
+    let ((a, a_request), (b, b_request)) = (left, right);
+    [a, b].into_iter().all(|kind| {
+        kind.class == Class::Read && kind.approval == Approval::None && kind.ownership.is_none()
+    }) && a.identity == b.identity
+        && a.credential == b.credential
+        && a_request.arguments == b_request.arguments
+}
+
 pub(super) fn validate_requests(rules: &RuleSet) -> Result<(), PolicyError> {
     use PolicyError::*;
     let mut rest: BTreeMap<_, Vec<RestMatch<'_>>> = BTreeMap::new();
-    let mut graphql = BTreeMap::new();
+    let mut graphql: BTreeMap<_, Vec<(&Kind, &GraphqlRequest)>> = BTreeMap::new();
     let graphql_path = Path::parse("/graphql")?;
     for kind in &rules.kinds {
         let mut declared = BTreeSet::new();
@@ -373,12 +388,13 @@ pub(super) fn validate_requests(rules: &RuleSet) -> Result<(), PolicyError> {
                             return Err(InvalidGraphqlArgumentPath);
                         }
                     }
-                    if graphql
-                        .insert((g.operation, fields), &kind.kind)
-                        .is_some_and(|prior| prior != &kind.kind)
-                    {
+                    let entries = graphql.entry((g.operation, fields)).or_default();
+                    if entries.iter().copied().any(|prior| {
+                        prior.0.kind != kind.kind && !equivalent_graphql_reads(prior, (kind, g))
+                    }) {
                         return Err(RequestOverlap);
                     }
+                    entries.push((kind, g));
                 }
             }
         }

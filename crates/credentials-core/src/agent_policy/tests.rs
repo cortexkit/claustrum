@@ -858,6 +858,64 @@ fn graphql_overlap_uses_exact_set_not_order_or_predicates() {
     assert!(parse(&doc).is_ok());
 }
 
+fn policy_with_shared_graphql_reads() -> Value {
+    let mut doc = sample();
+    let kinds = doc["rule_sets"]["github"]["kinds"].as_array_mut().unwrap();
+    let mut read = json!({
+        "kind": "queue_state", "class": "read", "approval": "none", "identity": "agent",
+        "credential": {"github_permissions": {"pull_requests": "read"}},
+        "ownership": null, "consent": null,
+        "requests": [{"graphql": {"operation": "query", "fields": ["repository"],
+                     "arguments": {"repository": "repository_in_scope"}}}]
+    });
+    kinds.push(read.clone());
+    read["kind"] = json!("review_threads");
+    kinds.push(read);
+    doc
+}
+
+#[test]
+fn equivalent_graphql_read_kinds_can_share_exact_root_shape() {
+    parse(&policy_with_shared_graphql_reads()).unwrap();
+}
+
+#[test]
+fn graphql_read_kinds_with_different_authorization_cannot_share_a_shape() {
+    let check = |field: &str, value: Value| {
+        let mut doc = policy_with_shared_graphql_reads();
+        let kinds = doc["rule_sets"]["github"]["kinds"].as_array_mut().unwrap();
+        kinds.last_mut().unwrap()[field] = value;
+        assert_eq!(parse(&doc), Err(PolicyError::RequestOverlap), "{field}");
+    };
+    check("class", json!("speech"));
+    check("approval", json!("once"));
+    check(
+        "ownership",
+        json!({"check":"own_issue", "reads":["node_repository"]}),
+    );
+    check(
+        "credential",
+        json!({"github_permissions":{"issues":"read"}}),
+    );
+    check(
+        "requests",
+        json!([{"graphql":{"operation":"query", "fields":["repository"]}}]),
+    );
+
+    let mut doc = policy_with_shared_graphql_reads();
+    let kinds = doc["rule_sets"]["github"]["kinds"].as_array_mut().unwrap();
+    for kind in kinds.iter_mut().rev().take(2) {
+        kind["credential"] = Value::Null;
+    }
+    assert!(parse(&doc).is_ok());
+    doc["rule_sets"]["github"]["kinds"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["identity"] = json!("anonymous");
+    assert_eq!(parse(&doc), Err(PolicyError::RequestOverlap), "identity");
+}
+
 #[test]
 fn manifest_projection_lowercases_keys_and_refuses_a_collision() {
     fn manifest(bindings: &[(&str, &str)]) -> GhManifest {

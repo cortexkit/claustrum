@@ -5546,8 +5546,17 @@ A GitHub rule set has `rule_set: "github"`, an integer `revision`, `source`,
 `extractor: "github-rest-graphql/v1"`, `hosts`, `redirect_hosts`, `kinds` and
 `actions`. All members are required. `source` is an object containing `release`
 (1–64 ASCII characters from `[a-z0-9._-]`) and `sha256` (64 lowercase hex digits).
-The model validates the shape; the signer checks narrowing against the default named
-by `source.release`. Narrowing may remove kinds or actions, change an approval from
+The model validates the shape. To check narrowing, the signer finds the service's
+default rule set embedded in the vault release named by `source.release` and checks
+its identity against `source.sha256`. The identity is the SHA-256 of the default's
+RFC 8785 JSON Canonicalization Scheme bytes with the `source` member omitted.
+The vault embeds `crates/credentials-core/policy-defaults/github.json` at build
+time and adds `source` when loading the default. A narrowed rule set keeps the
+default's release name and digest, not a digest of the narrowed rules. GitHub
+revision 1 is from `cortexkit-defaults-2026.11`, with SHA-256
+`aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7`.
+
+Narrowing may remove kinds or actions, change an approval from
 `none` to `once`, remove permission entries or lower their level (`admin` → `write`
 → `read`), or remove request alternatives. Other changes are refused as narrowing.
 
@@ -5613,6 +5622,12 @@ once, including as a tail parameter. A typed `{owner}` without a typed `{repo}`
 is allowed only in an anonymous read. REST templates
 that can match `/graphql` at `api.github.com` are refused.
 
+For a REST kind whose path has no `{owner}/{repo}` pair, the resource comes only
+from the partner call. The token is still narrowed to the single bound repository
+named in that call. The v1 HTTP broker cannot infer a repository for such requests
+and does not broker them. A caller that already knows the bound repository can
+invoke the kind by name, as it does for the GitHub search kinds.
+
 `body` and `query` use the same object shape. Every member is optional:
 
 | Member | Meaning | Default |
@@ -5665,9 +5680,13 @@ possible segment, including the tail's segment and total length limits. A requir
 or fixed name that the other constraint does not permit, or different fixed values
 for the same name, makes constraints disjoint. For example, a kind forbidding
 `state` is disjoint from one fixing `state` to `"closed"`. GraphQL alternatives
-from distinct kinds overlap when their operation and exact root field sets agree;
-argument predicates do not make them disjoint in v1. No match or more than one
-matching kind is a denial at enforcement time.
+from distinct kinds overlap when their operation and exact root field sets agree,
+unless their kinds are equivalent for that request. Equivalent kinds must both
+be class `read`, approval `none`, and have null ownership. Their identities,
+credentials and argument predicates must be identical. Argument predicates do
+not otherwise make alternatives disjoint. No match, or multiple matches that
+are not equivalent, is a denial at enforcement time. Equivalent matches do not
+change the partner call's resource rules for a named kind.
 
 ### Bindings and signing-time checks
 

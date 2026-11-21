@@ -67,6 +67,7 @@ impl Samples {
             if !expected.is_empty() {
                 let class = match expected {
                     "approval_pending_limit" | "store_error" | "github_unavailable" => "transient",
+                    "needs_reauth" => "auth_required",
                     _ => "permanent",
                 };
                 assert_eq!(*result, refusal(expected, class), "{name}");
@@ -941,6 +942,80 @@ async fn token_cases(
         .await;
 }
 
+async fn record_change_cases(samples: &mut Samples, github: &Github) {
+    let params = changed(params(), "policy_version", json!(2));
+    for (name, state) in [
+        ("issue_needs_reauth", "needs_reauth"),
+        ("issue_retired", "retired"),
+    ] {
+        samples.rig.sql(&format!(
+            "UPDATE credentials SET state = '{state}' WHERE credential_id = '{APP}'"
+        ));
+        samples
+            .reserved(name, OP_POLICY_TOKEN, "aft", params.clone(), "needs_reauth")
+            .await;
+    }
+    samples.rig.sql(&format!(
+        "DELETE FROM credentials WHERE credential_id = '{APP}'"
+    ));
+    samples
+        .reserved(
+            "issue_deleted_record",
+            OP_POLICY_TOKEN,
+            "aft",
+            params.clone(),
+            "not_installed",
+        )
+        .await;
+    samples.rig.store.create(APP, &app_record(None)).unwrap();
+
+    for (name, twice) in [
+        ("issue_record_replaced_during_mint", false),
+        ("issue_record_changed_twice", true),
+    ] {
+        replace_record(&samples.rig, false);
+        let previous_gets = github.gets.load(Ordering::SeqCst);
+        let previous_posts = github.posts.lock().unwrap().len();
+        let (posted, release) = github.stall_next_post();
+        let second = twice.then(|| github.stall_next_post());
+        samples.request_debug(OP_POLICY_TOKEN, &params);
+        secret_phone::BROKER_ACTION_TEST_CLOCK_MS.set(Some(samples.clock.load(Ordering::SeqCst)));
+        let ingress = Ingress::new(&samples.rig);
+        ingress.bind(&samples.rig, 1, "aft");
+        ingress
+            .dispatch(
+                &samples.rig,
+                super::request(OP_POLICY_TOKEN, params.clone(), 1, 1),
+            )
+            .await;
+        signal(posted).await;
+        replace_record(&samples.rig, false);
+        release.send(()).unwrap();
+        if let Some((posted_again, release_again)) = second {
+            signal(posted_again).await;
+            replace_record(&samples.rig, true);
+            release_again.send(()).unwrap();
+        }
+        let response = frame(&mut samples.rig).await;
+        secret_phone::BROKER_ACTION_TEST_CLOCK_MS.set(None);
+        let result = samples.record(
+            name,
+            OP_POLICY_TOKEN,
+            "reserved:aft",
+            params.clone(),
+            (response.header.ty, body(&response)),
+            if twice { "github_unavailable" } else { "" },
+        );
+        if !twice {
+            assert_eq!(
+                result["token"],
+                format!("fixture-token-{}", previous_posts + 2)
+            );
+        }
+        github.counts(previous_gets + 2, previous_posts + 2);
+    }
+}
+
 async fn generate() -> Samples {
     let (rig, github, digest) = setup_actions();
     grant(&rig, "plexus", APP, GrantOperation::PolicyToken);
@@ -984,6 +1059,12 @@ async fn generate() -> Samples {
             "not_found",
         )
         .await;
+    samples
+        .rig
+        .store
+        .set_secret_home_audited(Some(SELF), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    record_change_cases(&mut samples, &github).await;
     samples
 }
 

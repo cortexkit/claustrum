@@ -333,13 +333,15 @@ fn login_condition_inventory_reads_schema_before_condition_tables_without_migrat
     let db = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
     db.execute_batch("DROP TABLE credential_conditions; DROP TABLE remote_record_conditions;")
         .unwrap();
-    assert_eq!(
+    // Simulate a store from before the condition step: remove that step's marker and
+    // every later one, so the newest recorded step is the one before conditions.
+    assert!(
         db.execute(
-            "DELETE FROM cortexkit_schema_version WHERE namespace = 'credentials' AND version = ?1",
+            "DELETE FROM cortexkit_schema_version WHERE namespace = 'credentials' AND version >= ?1",
             [CONDITION_SCHEMA_VERSION]
         )
-        .unwrap(),
-        1
+        .unwrap()
+            >= 1
     );
     let rows = vault.list_json();
     assert_eq!(rows.len(), 1);

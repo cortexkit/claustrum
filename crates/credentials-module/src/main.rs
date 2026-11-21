@@ -3038,7 +3038,6 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "manifest.active_status".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_latest".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "federation.manifest_watch".into(), description: None, kind: ManagementOperationKind::Query },
-            ManagementOperation { name: "federation.manifest_report_active".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
@@ -3489,7 +3488,6 @@ mod tests {
             "manifest.active_status",
             "federation.manifest_latest",
             "federation.manifest_watch",
-            "federation.manifest_report_active",
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
             "permissions.list",
@@ -3627,13 +3625,8 @@ mod tests {
                 federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
                 ManagementOperationKind::Mutate,
             ),
-            ("federation.remote_watch", ManagementOperationKind::Query),
             ("federation.manifest_latest", ManagementOperationKind::Query),
             ("federation.manifest_watch", ManagementOperationKind::Query),
-            (
-                "federation.manifest_report_active",
-                ManagementOperationKind::Mutate,
-            ),
         ] {
             assert!(federation::is_federation_op(op), "{op} must be allowlisted");
             assert!(
@@ -3642,11 +3635,6 @@ mod tests {
                  declared ops. Declared: {declared:?}"
             );
         }
-        assert_eq!(
-            manifest.operation_delivery.get("federation.remote_watch"),
-            Some(&subc_protocol::manifest::OperationDelivery::WATCH),
-            "remote inventory snapshots must be exposed as a watch"
-        );
         assert_eq!(
             manifest.operation_delivery.get("federation.manifest_watch"),
             Some(&OperationDelivery::WATCH)
@@ -20412,6 +20400,13 @@ mod tests {
     ///   warn!     incomplete declared inventory: fixed text only; no module id, digest, entry values, grants_json or request fields
     ///   warn!     fleet removal persistence failure: fixed retry text only, never
     ///             member ids, removal ids, wraps or error details
+    ///   info!     hub sharing off on the legacy launch path: fixed text only
+    ///   warn/info! hub connection: missing ck-bus grant, or hub unavailable and
+    ///             retrying; fixed text only, never credential or connection details
+    ///   warn!     hub login value over its size or generation limit, or unsealable:
+    ///             fixed text, member id and a limit boolean; never the value
+    ///   warn!     hub manifest report persistence, admission reconcile or activation
+    ///             write failure: fixed text and member id only; never report bytes
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
@@ -20456,6 +20451,22 @@ mod tests {
                 "/src/federation/sharing.rs"
             )),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/module_secret.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/hub_nats.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/hub_home_writer.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/hub_manifest_reporter.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/federation/hub_manifest_collector.rs"
+            )),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -20472,7 +20483,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 22, 0),
+            (1, 2, 30, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

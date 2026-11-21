@@ -311,23 +311,17 @@ impl Drop for Rig {
     }
 }
 
-// Keep paused Tokio time under the test's control while waiting on blocking store work.
 async fn wait<T>(signal: impl Future<Output = T>) -> T {
-    tokio::pin!(signal);
-    let limit = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        tokio::select! {
-            biased;
-            value = &mut signal => return value,
-            _ = tokio::task::yield_now() => assert!(std::time::Instant::now() < limit, "expected progress"),
-        }
-    }
+    // Leave room on the paused clock for retries that back off for up to ten minutes.
+    tokio::time::timeout(Duration::from_secs(3600), signal)
+        .await
+        .expect("expected progress")
 }
 
 async fn until(mut condition: impl FnMut() -> bool) {
     wait(async {
         while !condition() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await;
@@ -629,10 +623,8 @@ async fn local_collision_release_only_inserts_skipped_ids_without_a_new_put() {
             tick().await;
             assert!(rig.row(OTHER).is_none());
             rig.hub.set_online(true);
-            advance_until(|| rig.row(OTHER).is_some()).await;
-        } else {
-            until(|| rig.row(OTHER).is_some()).await;
         }
+        until(|| rig.row(OTHER).is_some()).await;
         assert_eq!(
             rig.row(OTHER).unwrap().source,
             RemoteRecordSource::HomeWatch
@@ -655,16 +647,6 @@ async fn local_collision_release_only_inserts_skipped_ids_without_a_new_put() {
             1
         );
     }
-}
-
-async fn advance_until(mut condition: impl FnMut() -> bool) {
-    wait(async {
-        while !condition() {
-            tick().await;
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -834,13 +816,13 @@ async fn watch_recovers_missed_writes_and_true_end_without_a_connection_tick() {
     assert!(rig.row(ID).is_some());
     rig.hub.set_online(true);
     rig.put(&login(2, vec![row(OTHER, 2)]));
-    advance_until(|| rig.generation() == Some(2)).await;
+    until(|| rig.generation() == Some(2)).await;
     assert!(rig.row(ID).is_none() && rig.row(OTHER).is_some());
     assert_eq!(rig.watch_opens(), 2);
 
     rig.hub.terminate_watches(SHARED_LOGINS);
     rig.put(&login(3, vec![row(ID, 3)]));
-    advance_until(|| rig.generation() == Some(3)).await;
+    until(|| rig.generation() == Some(3)).await;
     assert!(rig.row(ID).is_some() && rig.row(OTHER).is_none());
     assert_eq!(rig.watch_opens(), 3);
 }

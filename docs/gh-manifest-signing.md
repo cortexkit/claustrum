@@ -103,6 +103,33 @@ blocks only new proposals: already-pending approvals, delivery, reporting, impor
 ceremony signing still work. `ck auth manifest one-tap on|off|status` controls that setting;
 missing is off, and unreadable values are treated as off.
 
+### Agent policy ceremony
+
+Derive a candidate from the newest manifest and an identities JSON object mapping each
+agent to its active `github_app:<slug>` credential:
+
+```sh
+ck auth policy derive --manifest-version <M> --identities <file> --out <policy.json>
+ck auth policy sign --file <policy.json> --manifest-version <M> --approver <name>
+```
+
+Approve the exact canonical file before signing. The newest manifest must be unpaired
+and its repository-to-agent map must equal the policy's. Once a policy exists, policy
+ceremonies may change rules but not bindings or identities. Manifest import is then
+disabled, and manifest ceremonies must keep the head policy's repository-to-agent map.
+
+Policy signing is separate from general `credential.sign`, which refuses payloads
+starting with `ck-agent-policy/v1` followed by a zero byte. The policy ceremony appends
+`approval`, `agent_policy_sign`, and `agent_policy_store` together with the policy. The
+first two commit the SHA-256 of the canonical policy bytes; the store row also commits
+the policy version, paired manifest version and source. `ck auth policy list` shows the
+stored versions, the head and the active version (if its manifest is ready).
+
+After commit, sign writes `<data_dir>/signed-policies/v<P>-envelope.json` at mode `0600`
+using a temporary sibling and rename. If publication fails, recover that exact envelope
+with `ck auth policy export --version <P>` rather than signing again. Export works even
+if the version is no longer active.
+
 ### Transitions, not observations
 
 **An untrimmable log takes transitions only; a trimmable table takes every observation.**

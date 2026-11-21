@@ -165,6 +165,14 @@ impl AgentPolicy {
         Ok(bytes)
     }
 
+    /// Encode a generated document, checking the signing-input length before model validation.
+    pub(crate) fn canonical_signing_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        let bytes = encode_jcs(self)?;
+        check_signed_input_len(bytes.len())?;
+        self.validate()?;
+        Ok(bytes)
+    }
+
     fn validate(&self) -> Result<(), PolicyError> {
         use PolicyError::*;
         if self.schema != AGENT_POLICY_SCHEMA_V1 {
@@ -237,15 +245,19 @@ fn parse_canonical<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, P
 }
 
 fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, PolicyError> {
-    let mut value = serde_json::to_value(value)
-        .and_then(ManifestValue::deserialize)
-        .map_err(|_| PolicyError::InvalidShape)?;
-    validate_numbers(&value)?;
-    let bytes = jcs_bytes(&mut value)?;
+    let bytes = encode_jcs(value)?;
     if bytes.len() > MAX_POLICY_DOCUMENT_BYTES {
         return Err(PolicyError::TooLarge);
     }
     Ok(bytes)
+}
+
+fn encode_jcs(value: &impl Serialize) -> Result<Vec<u8>, PolicyError> {
+    let mut value = serde_json::to_value(value)
+        .and_then(ManifestValue::deserialize)
+        .map_err(|_| PolicyError::InvalidShape)?;
+    validate_numbers(&value)?;
+    jcs_bytes(&mut value)
 }
 
 fn validate_numbers(value: &ManifestValue) -> Result<(), PolicyError> {

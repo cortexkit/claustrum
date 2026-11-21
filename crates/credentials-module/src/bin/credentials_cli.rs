@@ -403,7 +403,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
                     && args
                         .get(1)
                         .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-                    || (matches!(verb.as_str(), "manifest" | "module-secret")
+                    || (matches!(verb.as_str(), "manifest" | "policy" | "module-secret")
                         && args.get(1).is_some()) =>
             {
                 println!("{}", help_verb(&args[..2].join(" ")))
@@ -422,7 +422,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
             && args
                 .first()
                 .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
-            || (matches!(command.as_str(), "manifest" | "module-secret")
+            || (matches!(command.as_str(), "manifest" | "policy" | "module-secret")
                 && args.first().is_some_and(|arg| !arg.starts_with('-')))
         {
             format!("{command} {}", args[0])
@@ -498,6 +498,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
         "module-secret" => module_secret_cli::cmd_module_secret(&global, &args),
         "manifest" => cli_support::manifest_cli::cmd_manifest(&global, &args),
+        "policy" => cli_support::policy_cli::cmd_policy(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -567,6 +568,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
     }
     if command == "manifest" {
         return cli_support::manifest_cli::guard_args(args).map(|()| ParsedOptions::default());
+    }
+    if command == "policy" {
+        return cli_support::policy_cli::guard_args(args).map(|()| ParsedOptions::default());
     }
     // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
     // the generic scan below cannot judge it. `secret_cli` does, against the table for the
@@ -790,7 +794,8 @@ fn usage_short() -> String {
        enroll              approve, label, list or revoke consumer enrollments\n\
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
-       manifest            import, sign and track GitHub routing manifests\n\
+        manifest            import, sign and track GitHub routing manifests\n\
+        policy              derive, sign, list and export fleet agent policies\n\
            put                 store a secret or company AI gateway key\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            ssh-key             allow or deny agent SSH use of a signing key\n\
@@ -855,6 +860,9 @@ fn help_verb(verb: &str) -> String {
     }
     if verb == "manifest" || verb.starts_with("manifest ") {
         return cli_support::manifest_cli::help_text(verb.strip_prefix("manifest "));
+    }
+    if verb == "policy" || verb.starts_with("policy ") {
+        return cli_support::policy_cli::help_text(verb.strip_prefix("policy "));
     }
     let body = match verb {
         "ssh-key" => {
@@ -3355,6 +3363,256 @@ mod deposit_cli_tests {
             },
             subc_conn: None,
         }
+    }
+
+    fn put_policy_test_identity(global: &GlobalArgs) {
+        use credentials_core::oauth::OAuthCredential;
+
+        open_for_admin(global, false)
+            .unwrap()
+            .create(
+                "github_app:sample",
+                &VaultRecord::new_oauth(
+                    "operator",
+                    "github_app",
+                    OAuthCredential {
+                        access_token: "sample".to_string().into(),
+                        refresh_token: "sample".to_string().into(),
+                        expires_at_ms: None,
+                        token_url: String::new(),
+                        client_id: Some("sample".into()),
+                        client_secret: None,
+                        scopes: Vec::new(),
+                    },
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn policy_cli_oversized_derivation_leaves_the_output_untouched() {
+        use credentials_core::signing::MAX_SIGN_PAYLOAD;
+        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
+        use serde_json::json;
+
+        let root = root("policy-derive-size");
+        let global = global(&root);
+        success(
+            &root,
+            &["mint-signing-key", "--id", GH_MANIFEST_ROOT_KEY_ID],
+        );
+        put_policy_test_identity(&global);
+        // The manifest fits the signer; including the seeded rules pushes the policy over.
+        let agent = "x".repeat(MAX_SIGN_PAYLOAD - 1_000);
+        let manifest = serde_json::to_string_pretty(&json!({
+            "manifest_version": 42, "issued_at_unix_secs": 1, "bindings": {"Org/R": &agent},
+        }))
+        .unwrap()
+            + "\n";
+        let manifest_path = root.join("manifest.json");
+        let identities_path = root.join("identities.json");
+        let out = root.join("policy.json");
+        std::fs::write(&manifest_path, manifest).unwrap();
+        std::fs::write(
+            &identities_path,
+            serde_json::to_vec(&json!({(agent): "github_app:sample"})).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&out, "existing file").unwrap();
+        success(
+            &root,
+            &[
+                "manifest",
+                "sign",
+                "--file",
+                manifest_path.to_str().unwrap(),
+                "--approver",
+                "owner",
+            ],
+        );
+        let tip = || open_for_admin(&global, false).unwrap().audit_tip().unwrap();
+        let before = tip();
+        let result = invoke(
+            &root,
+            &[
+                "policy",
+                "derive",
+                "--manifest-version",
+                "42",
+                "--identities",
+                identities_path.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("policy_too_large"));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "existing file");
+        assert_eq!(tip(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn policy_cli_derives_signs_lists_and_recovers_an_inactive_envelope() {
+        use credentials_core::agent_policy::AgentPolicy;
+        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
+        use serde_json::{json, Value};
+
+        let root = root("policy-cli");
+        let global = global(&root);
+        let json_output = |args: &[&str]| {
+            success(&root, args)
+                .lines()
+                .find_map(|line| serde_json::from_str::<Value>(line).ok())
+                .unwrap()
+        };
+        assert_eq!(
+            json_output(&["policy", "list"]),
+            json!({"policies": [], "head": null, "active": null})
+        );
+        success(
+            &root,
+            &["mint-signing-key", "--id", GH_MANIFEST_ROOT_KEY_ID],
+        );
+        let path = |file: &str| root.join(file).to_str().unwrap().to_owned();
+        let manifest_file = path("manifest.json");
+        let identities_file = path("identities.json");
+        let policy_file = path("policy.json");
+        let initial_manifest = |version| {
+            serde_json::to_string_pretty(&json!({
+            "manifest_version": version, "issued_at_unix_secs": 1, "bindings": {"Org/R": "agent"},
+        })).unwrap() + "\n"
+        };
+        let manifest_sign = |version| {
+            std::fs::write(&manifest_file, initial_manifest(version)).unwrap();
+            success(
+                &root,
+                &[
+                    "manifest",
+                    "sign",
+                    "--file",
+                    &manifest_file,
+                    "--approver",
+                    "owner",
+                ],
+            );
+        };
+        manifest_sign(41);
+        manifest_sign(42);
+        let derive = |version| {
+            invoke(
+                &root,
+                &[
+                    "policy",
+                    "derive",
+                    "--manifest-version",
+                    version,
+                    "--identities",
+                    &identities_file,
+                    "--out",
+                    &policy_file,
+                ],
+            )
+        };
+        let sign = |version| {
+            json_output(&[
+                "policy",
+                "sign",
+                "--file",
+                &policy_file,
+                "--manifest-version",
+                version,
+                "--approver",
+                "owner",
+            ])
+        };
+        std::fs::write(&identities_file, r#"{"agent":"github_app:sample"}"#).unwrap();
+        std::fs::write(&policy_file, "leave this alone").unwrap();
+        assert!(!derive("41").status.success());
+        assert!(!derive("42").status.success());
+        assert_eq!(
+            std::fs::read_to_string(&policy_file).unwrap(),
+            "leave this alone"
+        );
+        put_policy_test_identity(&global);
+        let derived = derive("42");
+        assert!(
+            derived.status.success(),
+            "{}",
+            String::from_utf8_lossy(&derived.stderr)
+        );
+        let policy = std::fs::read_to_string(&policy_file).unwrap();
+        assert!(!policy.ends_with('\n'));
+        assert_eq!(
+            AgentPolicy::parse_canonical(policy.as_bytes())
+                .unwrap()
+                .bindings[0]
+                .resources,
+            ["org/r"]
+        );
+        let first = sign("42");
+        assert_eq!(first["envelope"]["policy"], policy);
+        let published = global.data_dir.join("signed-policies/v1-envelope.json");
+        let original = std::fs::read(&published).unwrap();
+        let check_mode = || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert_eq!(
+                    std::fs::metadata(&published).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        };
+        check_mode();
+        assert!(!derive("42").status.success());
+        assert_eq!(std::fs::read_to_string(&policy_file).unwrap(), policy);
+        manifest_sign(43);
+        let derived = derive("43");
+        assert!(
+            derived.status.success(),
+            "{}",
+            String::from_utf8_lossy(&derived.stderr)
+        );
+        assert_eq!(sign("43")["version"], 2);
+        let tip = || open_for_admin(&global, false).unwrap().audit_tip().unwrap();
+        let before = tip();
+        let list = json_output(&["policy", "list"]);
+        assert_eq!(list["head"], 2);
+        assert_eq!(list["active"], Value::Null);
+        assert_eq!(
+            list["policies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["version"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        std::fs::remove_file(&published).unwrap();
+        assert_eq!(
+            json_output(&["policy", "export", "--version", "1"]),
+            first["envelope"]
+        );
+        assert_eq!(std::fs::read(&published).unwrap(), original);
+        check_mode();
+        let missing = invoke(&root, &["policy", "export", "--version", "9"]);
+        assert!(!missing.status.success());
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("not found"));
+        assert_eq!(tip(), before);
+        assert_eq!(
+            std::fs::read_dir(published.parent().unwrap())
+                .unwrap()
+                .count(),
+            2
+        );
+        for verb in ["sign", "list", "export", "derive"] {
+            let help = success(&root, &["help", "policy", verb]);
+            assert!(help.contains(&format!("ck auth policy {verb}")));
+            assert!(help.lines().all(|line| line.chars().count() <= 80));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

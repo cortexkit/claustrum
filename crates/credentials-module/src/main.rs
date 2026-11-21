@@ -16836,6 +16836,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_sign_refuses_only_the_complete_agent_policy_prefix() {
+        use base64::Engine as _;
+
+        let (surface, store, _, _root) = tmp_surface_with_store(183);
+        let id = "signing:policy-prefix-control:1";
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            test_ed25519_pem().into_bytes(),
+            None,
+        );
+        record.audit_each_signature = true;
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        let handle = mint_test_handle(&store, id);
+        let caller = crate::federation::ingress::ScopedCaller::hand_only(None);
+        let params = |payload: &[u8]| read_surface::SignParams {
+            handle: Some(handle.clone()),
+            credential_id: None,
+            enrollment_token: None,
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+        };
+        let control = params(b"ck-agent-policy/v1\x01suffix");
+        assert!(!surface
+            .sign(183, &caller, &control)
+            .await
+            .unwrap()
+            .signature_b64
+            .is_empty());
+        let tip = store.audit_tip().unwrap();
+        let reserved = params(b"ck-agent-policy/v1\0suffix");
+        assert!(matches!(
+            surface.sign(183, &caller, &reserved).await,
+            Err(read_surface::SignError::InvalidParams)
+        ));
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+
+    #[tokio::test]
     async fn gh_manifest_root_sign_is_not_found_in_every_address_mode_without_writes() {
         use credentials_core::store::{SetCategoryMode, GH_MANIFEST_ROOT_KEY_ID};
 

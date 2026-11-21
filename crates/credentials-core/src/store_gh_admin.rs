@@ -3,12 +3,13 @@ use super::{
     GhManifestHandoffEnvelope, GhManifestSource, GhManifestVersion, StoreOpError,
     GH_MANIFEST_ROOT_KEY_ID,
 };
+use crate::agent_policy::manifest_projection;
 use crate::gh_manifest::GhManifest;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
-fn sql(error: rusqlite::Error) -> StoreOpError {
+pub(super) fn sql(error: rusqlite::Error) -> StoreOpError {
     StoreOpError::Store(error.to_string())
 }
 
@@ -34,7 +35,7 @@ fn validate_version(
 impl EncryptedStore {
     // Preserve domain errors while making every error abort the transaction, even
     // when approval or signature audit rows have already been appended.
-    fn manifest_admin_transaction<T>(
+    pub(super) fn manifest_admin_transaction<T>(
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreOpError>,
     ) -> Result<T, StoreOpError> {
@@ -55,6 +56,9 @@ impl EncryptedStore {
         actor: &str,
     ) -> Result<Value, StoreOpError> {
         self.manifest_admin_transaction(|tx| {
+            if super::agent_policy::has_agent_policy_conn(tx).map_err(sql)? {
+                return Err(StoreOpError::Encode("manifest_import_after_policy".into()));
+            }
             let manifest = validate_version(tx, envelope.manifest_bytes.as_bytes())?;
             // Imports become trusted bases; a withdrawn root cannot restore trust.
             let root = self
@@ -120,6 +124,13 @@ impl EncryptedStore {
     ) -> Result<Value, StoreOpError> {
         self.manifest_admin_transaction(|tx| {
             let manifest = validate_version(tx, manifest_bytes.as_bytes())?;
+            if let Some(head) = super::agent_policy::head_agent_policy_conn(tx)? {
+                let projection = manifest_projection(&manifest)
+                    .map_err(|error| StoreOpError::Encode(error.to_string()))?;
+                if projection != head.github_projection() {
+                    return Err(StoreOpError::Encode("policy_binding_conflict".into()));
+                }
+            }
             self.gh_manifest_root_in_tx(tx)
                 .map_err(manifest_root_error)?;
             let hash = manifest.manifest_sha256();
@@ -174,7 +185,7 @@ impl EncryptedStore {
     }
 }
 
-fn manifest_root_error(error: StoreOpError) -> StoreOpError {
+pub(super) fn manifest_root_error(error: StoreOpError) -> StoreOpError {
     match error {
         StoreOpError::NotFound => StoreOpError::Encode("manifest_setup_incomplete".into()),
         error => error,

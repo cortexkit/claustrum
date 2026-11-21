@@ -4835,6 +4835,8 @@ integers use decimal text.
 | `gh_manifest_proposal_state` | A proposal leaving pending; same proposal subject | Framed `from, to` |
 | `gh_manifest_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain manifest SHA-256, without field framing |
 | `gh_manifest_store` | Stored version; `gh-manifest\|<version>` | Framed `source, manifest_sha256` |
+| `agent_policy_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain policy SHA-256, without field framing |
+| `agent_policy_store` | Stored policy version; `gh-manifest\|<manifest_version>` | Framed `version, manifest_version, source, policy_sha256` |
 | `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
 | `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |
 | `gh_manifest_one_tap_set` | A real change to `manifest.one_tap`; no subject | Framed `true` or `false` |
@@ -5539,6 +5541,8 @@ document.
 Signing refuses `policy_too_large` if the 19-byte separator plus the policy exceeds
 1 MiB, even when the document alone fits the model limit. This check precedes
 parsing and writing. The limit on the serialized online admin operation is separate.
+General `credential.sign` refuses any payload beginning with the complete 19-byte
+separator, even for a key that otherwise signs arbitrary bytes.
 
 ### Rule sets, kinds and actions
 
@@ -5705,6 +5709,31 @@ document, its root id and version, the pairing and the binding projection before
 committing a version. The minting service checks which version, binding and kind
 permit a credential; the enforcer still checks the request match, ownership and
 consent. A token is not bound to a single HTTP request.
+
+### Policy administration
+
+The master-key admin surface provides four operations with `v: 2`:
+
+| Operation | Parameters besides `v` | Result |
+|---|---|---|
+| `admin.agent_policy_sign` | `policy_bytes` (canonical JSON text), `manifest_version`, `approver` | `{version, policy_sha256, envelope}` |
+| `admin.agent_policy_list` | None | `{policies, head, active}` from one store snapshot |
+| `admin.agent_policy_export` | `version` | Retained envelope for that version, or `not_found` |
+| `admin.agent_policy_derive` | `manifest_version`, `identities` | Canonical policy text (unsigned) |
+
+Sign and derive require the newest manifest to have no paired policy. Sign requires
+the next policy version and, if a policy is stored, the same bindings as the head,
+including identities. Derive uses the embedded GitHub revision 1 rule set described
+above and an `identities` object mapping exactly the manifest's agents to distinct
+active GitHub App credentials.
+After the first policy, manifest import is refused and manifest ceremony signing
+must keep the head policy's repository-to-agent map.
+
+List orders rows by ascending `version`. Each row contains `version`,
+`policy_sha256`, `key_id`, `signed_at_ms`, `source`, `approval_seq` and
+`manifest_version` only. `head` and `active` are version numbers or `null`.
+The active version is the newest policy whose manifest is ready. List, export and
+derive never write a policy or an audit row.
 
 ## 18. Fleet epoch operations
 

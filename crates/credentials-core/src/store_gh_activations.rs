@@ -184,14 +184,71 @@ impl EncryptedStore {
         &self,
         version: i64,
     ) -> Result<Option<GhManifestActiveStatus>, StoreOpError> {
-        self.store.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let manifest_sha256: Option<String> = tx.query_row(
-                "SELECT manifest_sha256 FROM gh_manifests WHERE version = ?1",
-                [version], |row| row.get(0),
-            ).optional()?;
-            let Some(manifest_sha256) = manifest_sha256 else { return Ok(None); };
-            let computers = tx.prepare(
+        self.store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let manifest_sha256: Option<String> = tx
+                    .query_row(
+                        "SELECT manifest_sha256 FROM gh_manifests WHERE version = ?1",
+                        [version],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(manifest_sha256) = manifest_sha256 else {
+                    return Ok(None);
+                };
+                let computers = gh_manifest_expected_computers_conn(&tx)?;
+                let ready = gh_manifest_reports_ready(&computers, version, &manifest_sha256);
+                tx.commit()?;
+                Ok(Some(GhManifestActiveStatus {
+                    version,
+                    manifest_sha256,
+                    ready,
+                    computers,
+                }))
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read the latest version and its stored SHA-256 without loading the signed payload.
+    pub fn latest_gh_manifest_metadata(&self) -> Result<Option<(i64, String)>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                conn.query_row(
+            "SELECT version, manifest_sha256 FROM gh_manifests ORDER BY version DESC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Return the retained bytes without reserializing the manifest. None means
+    /// nothing has been stored; signatures use standard, padded base64.
+    pub fn latest_gh_manifest(&self) -> Result<Option<GhManifestLatest>, StoreOpError> {
+        let row = self.store.with_conn(|conn| conn.query_row(
+            "SELECT version, key_id, manifest_bytes, signature FROM gh_manifests ORDER BY version DESC LIMIT 1",
+            [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?)),
+        ).optional())?;
+        row.map(|(version, key_id, bytes, signature)| {
+            let manifest_bytes = String::from_utf8(bytes)
+                .map_err(|_| StoreOpError::Corrupt("manifest is not UTF-8".into()))?;
+            Ok(GhManifestLatest {
+                version,
+                envelope: GhManifestHandoffEnvelope {
+                    key_id,
+                    manifest_bytes,
+                    signature: base64::engine::general_purpose::STANDARD.encode(signature),
+                },
+            })
+        })
+        .transpose()
+    }
+}
+
+pub(super) fn gh_manifest_expected_computers_conn(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<GhManifestComputerStatus>> {
+    conn.prepare(
                 "WITH admitted AS (SELECT value AS member_id FROM settings WHERE name = ?1 AND value != '' \
                     UNION SELECT member_id FROM member_grants WHERE operation = 'secret_use'), \
                  expected AS (SELECT member_id FROM admitted \
@@ -216,51 +273,20 @@ impl EncryptedStore {
                     member_id: row.get(0)?, version: row.get(1)?, payload_sha256: row.get(2)?,
                     verdict, reason: row.get(4)?, reported_at_ms: row.get(5)?,
                 })
-            })?.collect::<rusqlite::Result<Vec<_>>>()?;
-            let ready = !computers.is_empty() && computers.iter().all(|computer| {
-                computer.version == Some(version)
-                    && computer.payload_sha256.as_deref() == Some(manifest_sha256.as_str())
-                    && computer.verdict == Some(GhManifestVerdict::Valid)
-            });
-            tx.commit()?;
-            Ok(Some(GhManifestActiveStatus { version, manifest_sha256, ready, computers }))
-        }).map_err(StoreOpError::from)
-    }
+            })?.collect()
+}
 
-    /// Read the latest version and its stored SHA-256 without loading the signed payload.
-    pub fn latest_gh_manifest_metadata(&self) -> Result<Option<(i64, String)>, StoreOpError> {
-        self.store
-            .with_conn(|conn| {
-                conn.query_row(
-            "SELECT version, manifest_sha256 FROM gh_manifests ORDER BY version DESC LIMIT 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()
-            })
-            .map_err(StoreOpError::from)
-    }
-
-    /// Return the retained bytes without reserializing the manifest. None means
-    /// nothing has been stored; signatures use standard, padded base64.
-    pub fn latest_gh_manifest(&self) -> Result<Option<GhManifestLatest>, StoreOpError> {
-        let row = self.store.with_conn(|conn| conn.query_row(
-            "SELECT version, key_id, manifest_bytes, signature FROM gh_manifests ORDER BY version DESC LIMIT 1",
-            [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?)),
-        ).optional())?;
-        row.map(|(version, key_id, bytes, signature)| {
-            let manifest_bytes = String::from_utf8(bytes)
-                .map_err(|_| StoreOpError::Corrupt("manifest is not UTF-8".into()))?;
-            Ok(GhManifestLatest {
-                version,
-                envelope: GhManifestHandoffEnvelope {
-                    key_id,
-                    manifest_bytes,
-                    signature: base64::engine::general_purpose::STANDARD.encode(signature),
-                },
-            })
+pub(super) fn gh_manifest_reports_ready(
+    computers: &[GhManifestComputerStatus],
+    version: i64,
+    manifest_sha256: &str,
+) -> bool {
+    !computers.is_empty()
+        && computers.iter().all(|computer| {
+            computer.version == Some(version)
+                && computer.payload_sha256.as_deref() == Some(manifest_sha256)
+                && computer.verdict == Some(GhManifestVerdict::Valid)
         })
-        .transpose()
-    }
 }
 
 #[cfg(test)]

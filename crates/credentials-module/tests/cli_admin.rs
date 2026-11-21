@@ -1649,8 +1649,12 @@ fn accepted_help_flags(verb: &str) -> Vec<String> {
             .map(str::to_string)
             .collect();
     }
-    if verb == "manifest" {
-        let source = include_str!("../src/bin/cli_support/manifest_cli.rs");
+    if matches!(verb, "manifest" | "policy") {
+        let source = if verb == "manifest" {
+            include_str!("../src/bin/cli_support/manifest_cli.rs")
+        } else {
+            include_str!("../src/bin/cli_support/policy_cli.rs")
+        };
         let table = source
             .split_once("fn value_flags(")
             .unwrap()
@@ -6025,11 +6029,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
     // additions include sign, the four federation verbs (transfer, remote, member,
     // federation), secret, ssh-key, provider-report, module-secret and
-    // clear-condition.
+    // clear-condition. Policy adds one top-level entry for its four subcommands.
     assert_eq!(
         verbs.len(),
-        44,
-        "the rendered verb-table scan narrowed; ssh-key is a public verb"
+        45,
+        "the rendered verb-table scan must include the policy command family"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

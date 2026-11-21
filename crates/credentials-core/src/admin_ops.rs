@@ -119,6 +119,23 @@ pub enum AdminOpBody {
     ManifestOneTapSet { v: u32, enabled: bool },
     #[serde(rename = "admin.manifest_one_tap_status")]
     ManifestOneTapStatus { v: u32 },
+    #[serde(rename = "admin.agent_policy_sign")]
+    AgentPolicySign {
+        v: u32,
+        policy_bytes: String,
+        manifest_version: i64,
+        approver: String,
+    },
+    #[serde(rename = "admin.agent_policy_list")]
+    AgentPolicyList { v: u32 },
+    #[serde(rename = "admin.agent_policy_export")]
+    AgentPolicyExport { v: u32, version: i64 },
+    #[serde(rename = "admin.agent_policy_derive")]
+    AgentPolicyDerive {
+        v: u32,
+        manifest_version: i64,
+        identities: std::collections::BTreeMap<String, String>,
+    },
     #[serde(rename = "admin.store")]
     Store {
         v: u32,
@@ -607,6 +624,28 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("enabled", enabled)
                 .finish(),
+            AdminOpBody::AgentPolicySign {
+                v,
+                manifest_version,
+                ..
+            }
+            | AdminOpBody::AgentPolicyDerive {
+                v,
+                manifest_version,
+                ..
+            } => f
+                .debug_struct(self.op_name())
+                .field("v", v)
+                .field("manifest_version", manifest_version)
+                .finish(),
+            AdminOpBody::AgentPolicyList { v } => {
+                f.debug_struct(self.op_name()).field("v", v).finish()
+            }
+            AdminOpBody::AgentPolicyExport { v, version } => f
+                .debug_struct(self.op_name())
+                .field("v", v)
+                .field("version", version)
+                .finish(),
             AdminOpBody::OperatorSign { v, id, .. } => f
                 .debug_struct("OperatorSign")
                 .field("v", v)
@@ -1081,6 +1120,10 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { v, .. }
             | AdminOpBody::ManifestOneTapSet { v, .. }
             | AdminOpBody::ManifestOneTapStatus { v }
+            | AdminOpBody::AgentPolicySign { v, .. }
+            | AdminOpBody::AgentPolicyList { v }
+            | AdminOpBody::AgentPolicyExport { v, .. }
+            | AdminOpBody::AgentPolicyDerive { v, .. }
             | AdminOpBody::StoreWithIdentityPolicy { v, .. }
             | AdminOpBody::SetIdentity { v, .. }
             | AdminOpBody::Invalidate { v, .. }
@@ -1168,6 +1211,10 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::AgentPolicySign { .. }
+            | AdminOpBody::AgentPolicyList { .. }
+            | AdminOpBody::AgentPolicyExport { .. }
+            | AdminOpBody::AgentPolicyDerive { .. }
             | AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderRemove { .. }
@@ -1283,7 +1330,8 @@ impl AdminOpBody {
             AdminOpBody::TransferInit { .. } | AdminOpBody::TransferRecover { .. } => {
                 Some(crate::federation::VAULT_TRANSFER_ID)
             }
-            AdminOpBody::ManifestSign { .. } | AdminOpBody::ManifestImport { .. } => {
+            AdminOpBody::ManifestSign { .. } | AdminOpBody::ManifestImport { .. }
+            | AdminOpBody::AgentPolicySign { .. } => {
                 Some(crate::store::GH_MANIFEST_ROOT_KEY_ID)
             }
             AdminOpBody::RevokeHandle { .. }
@@ -1292,6 +1340,9 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::AgentPolicyList { .. }
+            | AdminOpBody::AgentPolicyExport { .. }
+            | AdminOpBody::AgentPolicyDerive { .. }
             | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
             | AdminOpBody::RevokeHandleByHash { .. }
@@ -1364,6 +1415,10 @@ impl AdminOpBody {
             AdminOpBody::ManifestRetireMachine { .. } => "admin.manifest_retire_machine",
             AdminOpBody::ManifestOneTapSet { .. } => "admin.manifest_one_tap_set",
             AdminOpBody::ManifestOneTapStatus { .. } => "admin.manifest_one_tap_status",
+            AdminOpBody::AgentPolicySign { .. } => "admin.agent_policy_sign",
+            AdminOpBody::AgentPolicyList { .. } => "admin.agent_policy_list",
+            AdminOpBody::AgentPolicyExport { .. } => "admin.agent_policy_export",
+            AdminOpBody::AgentPolicyDerive { .. } => "admin.agent_policy_derive",
             AdminOpBody::ProviderSet { .. } => "admin.provider_set",
             AdminOpBody::ProviderRemove { .. } => "admin.provider_remove",
             AdminOpBody::Store { .. } => "admin.store",
@@ -1449,6 +1504,10 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::AgentPolicySign { .. }
+            | AdminOpBody::AgentPolicyList { .. }
+            | AdminOpBody::AgentPolicyExport { .. }
+            | AdminOpBody::AgentPolicyDerive { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
             | AdminOpBody::Invalidate { .. }
@@ -1652,6 +1711,24 @@ pub fn apply(
         AdminOpBody::ManifestOneTapStatus { .. } => {
             Ok(serde_json::json!({"one_tap": store.manifest_one_tap_status()}))
         }
+        AdminOpBody::AgentPolicySign {
+            policy_bytes,
+            manifest_version,
+            approver,
+            ..
+        } => store.sign_agent_policy_admin(&policy_bytes, manifest_version, &approver, actor),
+        AdminOpBody::AgentPolicyList { .. } => store.list_agent_policies_admin(),
+        AdminOpBody::AgentPolicyExport { version, .. } => {
+            serde_json::to_value(store.export_agent_policy_admin(version)?)
+                .map_err(|error| StoreOpError::Encode(error.to_string()))
+        }
+        AdminOpBody::AgentPolicyDerive {
+            manifest_version,
+            identities,
+            ..
+        } => store
+            .derive_agent_policy_admin(manifest_version, &identities)
+            .map(serde_json::Value::String),
         AdminOpBody::ProviderSet {
             v,
             service,
@@ -3187,6 +3264,39 @@ mod admin_schema_v2_tests {
             (
                 "ManifestOneTapStatus",
                 AdminOpBody::ManifestOneTapStatus { v: v2 },
+                v2,
+                None,
+            ),
+            (
+                "AgentPolicySign",
+                AdminOpBody::AgentPolicySign {
+                    v: v2,
+                    policy_bytes: "{}".into(),
+                    manifest_version: 42,
+                    approver: "owner".into(),
+                },
+                v2,
+                Some(crate::store::GH_MANIFEST_ROOT_KEY_ID),
+            ),
+            (
+                "AgentPolicyList",
+                AdminOpBody::AgentPolicyList { v: v2 },
+                v2,
+                None,
+            ),
+            (
+                "AgentPolicyExport",
+                AdminOpBody::AgentPolicyExport { v: v2, version: 1 },
+                v2,
+                None,
+            ),
+            (
+                "AgentPolicyDerive",
+                AdminOpBody::AgentPolicyDerive {
+                    v: v2,
+                    manifest_version: 42,
+                    identities: [("agent".into(), "github_app:sample".into())].into(),
+                },
                 v2,
                 None,
             ),

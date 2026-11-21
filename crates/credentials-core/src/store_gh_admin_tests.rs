@@ -18,11 +18,20 @@ fn rig(
     Ed25519KeyPair,
 ) {
     let (dir, store) = taxonomy_tests::rig(label, SEED);
-    let der = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
-    let pair = Ed25519KeyPair::from_pkcs8(der.as_ref()).unwrap();
+    // RFC 8032 test-vector seed in a v1 PKCS#8 envelope.
+    let seed = crate::enrollment::decode_lower_hex_32(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    )
+    .unwrap();
+    let der = [
+        &[48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32][..],
+        &seed,
+    ]
+    .concat();
+    let pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&der).unwrap();
     let pem = format!(
         "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-        STANDARD.encode(der.as_ref())
+        STANDARD.encode(&der)
     );
     store
         .create_audited(
@@ -72,6 +81,7 @@ fn snapshot(store: &EncryptedStore) -> Snapshot {
         .with_raw_conn(|conn| {
             [
                 "gh_manifests",
+                "agent_policies",
                 "gh_manifest_proposals",
                 "gh_manifest_activations",
                 "gh_manifest_activation_audits",
@@ -622,4 +632,341 @@ fn gh_manifest_admin_import_refuses_a_retired_root_without_writes() {
         })
         .unwrap();
     refuses(&store, import(&pair, V28), "manifest_setup_incomplete");
+}
+
+const POLICY_ONE: &str = r#"{"bindings":[{"agent":"worker","identity":"github_app:worker","resources":["org/r"],"service":"github"}],"issued_at_unix_secs":1,"root_key_id":"21fe31dfa154a261","rule_sets":{},"schema":"ck-agent-policy/v1","version":1}"#;
+const POLICY_HASH: &str = "d891be81ae8bd5dd7590df23c6d6595005e85b3ba0d30b6c529d550cfda4aad4";
+const POLICY_STORE_HASH: &str = "62a6ba3b3462c51f637ced5830763c1f01a355646afe6f6f6a95583a16bf465c";
+
+fn manifest(version: i64, bindings: &[(&str, &str)]) -> String {
+    let bindings = bindings.iter().copied().collect::<BTreeMap<_, _>>();
+    serde_json::to_string_pretty(
+        &json!({"manifest_version": version, "issued_at_unix_secs": 1, "bindings": bindings}),
+    )
+    .unwrap()
+        + "\n"
+}
+
+fn policy_sign(manifest_version: i64, policy: &str) -> AdminOpBody {
+    AdminOpBody::AgentPolicySign {
+        v: ADMIN_OP_SCHEMA_V2,
+        policy_bytes: policy.into(),
+        manifest_version,
+        approver: "named-owner".into(),
+    }
+}
+
+fn policy_list(store: &EncryptedStore) -> Value {
+    run(
+        store,
+        AdminOpBody::AgentPolicyList {
+            v: ADMIN_OP_SCHEMA_V2,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn policy_admin_failed_store_audit_rolls_back_approval_signature_and_pairing() {
+    let (_dir, store, _pair) = rig("policy-audit-failure");
+    run(&store, sign(&manifest(42, &[("Org/R", "worker")]))).unwrap();
+    store.with_raw_conn(|conn| conn.execute_batch(
+        "CREATE TRIGGER reject_policy_audit BEFORE INSERT ON audit_log \
+         WHEN NEW.op = 'agent_policy_store' BEGIN SELECT RAISE(ABORT, 'refused policy audit'); END;",
+    )).unwrap();
+    refuses(&store, policy_sign(42, POLICY_ONE), "refused policy audit");
+    store
+        .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER reject_policy_audit;"))
+        .unwrap();
+    assert_eq!(
+        run(&store, policy_sign(42, POLICY_ONE)).unwrap()["version"],
+        1
+    );
+    store.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn policy_admin_ceremony_preserves_pairing_and_pins_audit_and_envelope() {
+    let (_dir, store, pair) = rig("policy-ceremony");
+    assert_eq!(
+        policy_list(&store),
+        json!({"policies": [], "head": null, "active": null})
+    );
+    let bindings = [("Org/R", "worker")];
+    for version in [41, 42] {
+        run(&store, sign(&manifest(version, &bindings))).unwrap();
+    }
+    refuses(
+        &store,
+        policy_sign(41, POLICY_ONE),
+        "policy_manifest_not_newest",
+    );
+    assert!(matches!(
+        run(&store, policy_sign(40, POLICY_ONE)),
+        Err(StoreOpError::NotFound)
+    ));
+    for (bytes, reason) in [
+        (
+            POLICY_ONE.replace("org/r", "org/other"),
+            "policy_binding_conflict",
+        ),
+        (
+            POLICY_ONE.replace("21fe31dfa154a261", "0000000000000000"),
+            "policy_root_key_id_mismatch",
+        ),
+        (
+            POLICY_ONE.replace("\"version\":1", "\"version\":2"),
+            "invalid_policy_version",
+        ),
+        (format!("{POLICY_ONE}\n"), "policy is not canonical JSON"),
+    ] {
+        refuses(&store, policy_sign(42, &bytes), reason);
+    }
+    let result = run(&store, policy_sign(42, POLICY_ONE)).unwrap();
+    assert_eq!(result["version"], 1);
+    assert_eq!(result["policy_sha256"], POLICY_HASH);
+    assert_eq!(result["envelope"]["policy"], POLICY_ONE);
+    assert_eq!(result["envelope"]["key_id"], "21fe31dfa154a261");
+    let signature = STANDARD
+        .decode(result["envelope"]["signature_b64"].as_str().unwrap())
+        .unwrap();
+    let input = crate::agent_policy::signed_input(POLICY_ONE.as_bytes()).unwrap();
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pair.public_key().as_ref())
+        .verify(&input, &signature)
+        .unwrap();
+
+    store.with_raw_conn(|conn| {
+        let rows = conn.prepare("SELECT seq, op, credential_id, payload_hash, actor FROM audit_log ORDER BY seq DESC LIMIT 3")?
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.iter().rev().map(|(_, op, id, digest, actor)| (op.as_str(), id.as_str(), digest.as_str(), actor.as_str())).collect::<Vec<_>>(), [
+            ("approval", GH_MANIFEST_ROOT_KEY_ID, POLICY_HASH, "test-admin/approver:named-owner"),
+            ("agent_policy_sign", GH_MANIFEST_ROOT_KEY_ID, POLICY_HASH, "test-admin/approver:named-owner"),
+            ("agent_policy_store", "gh-manifest|42", POLICY_STORE_HASH, "test-admin/approver:named-owner"),
+        ]);
+        assert_eq!(conn.query_row("SELECT approval_seq FROM agent_policies", [], |row| row.get::<_, i64>(0))?, rows[2].0);
+        Ok(())
+    }).unwrap();
+
+    refuses(
+        &store,
+        policy_sign(42, POLICY_ONE),
+        "policy_manifest_already_paired",
+    );
+    let next = manifest(43, &bindings);
+    refuses(&store, import(&pair, &next), "manifest_import_after_policy");
+    refuses(
+        &store,
+        sign(&manifest(43, &[("Org/Other", "worker")])),
+        "policy_binding_conflict",
+    );
+    refuses(
+        &store,
+        sign(&manifest(43, &[("Org/R", "worker"), ("org/r", "worker")])),
+        "ManifestProjectionCollision",
+    );
+    run(&store, sign(&next)).unwrap();
+    let policy_two = POLICY_ONE.replace("\"version\":1", "\"version\":2");
+    refuses(
+        &store,
+        policy_sign(
+            43,
+            &policy_two.replace("github_app:worker", "github_app:other"),
+        ),
+        "policy_binding_conflict",
+    );
+    run(&store, policy_sign(43, &policy_two)).unwrap();
+
+    store
+        .set_federation_self_member_audited(MEMBER, AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    let report = |version, manifest_text: &str| {
+        store
+            .report_gh_manifest_active(
+                &super::super::GhManifestActivationReport {
+                    member_id: MEMBER,
+                    version,
+                    payload_sha256: &GhManifest::parse_reproducible(manifest_text.as_bytes())
+                        .unwrap()
+                        .manifest_sha256(),
+                    verdict: super::super::GhManifestVerdict::Valid,
+                    reason: None,
+                    reported_at_ms: 1,
+                },
+                AuditCtx::admin(AuditOp::GhManifestActivation),
+            )
+            .unwrap();
+    };
+    report(42, &manifest(42, &bindings));
+    let before = snapshot(&store);
+    let listed = policy_list(&store);
+    assert_eq!(listed["head"], 2);
+    assert_eq!(listed["active"], 1);
+    let policies = listed["policies"].as_array().unwrap();
+    assert_eq!(policies.len(), 2);
+    assert_eq!(
+        policies[0].as_object().unwrap().keys().collect::<Vec<_>>(),
+        [
+            "approval_seq",
+            "key_id",
+            "manifest_version",
+            "policy_sha256",
+            "signed_at_ms",
+            "source",
+            "version",
+        ]
+    );
+    assert_eq!(policies[0]["version"], 1);
+    assert_eq!(policies[0]["manifest_version"], 42);
+    assert_eq!(policies[0]["source"], "ceremony");
+    assert_eq!(policies[1]["version"], 2);
+    assert_eq!(snapshot(&store), before);
+    report(43, &next);
+    assert_eq!(policy_list(&store)["active"], 2);
+    let before = snapshot(&store);
+    let export = |version| {
+        run(
+            &store,
+            AdminOpBody::AgentPolicyExport {
+                v: ADMIN_OP_SCHEMA_V2,
+                version,
+            },
+        )
+    };
+    assert_eq!(export(1).unwrap(), result["envelope"]);
+    assert!(matches!(export(9), Err(StoreOpError::NotFound)));
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
+fn policy_admin_competing_ceremonies_cannot_both_commit() {
+    let (_dir, store, _pair) = rig("policy-manifest-ceremony-race");
+    run(&store, sign(&manifest(42, &[("org/r", "worker")]))).unwrap();
+    let new_manifest = manifest(43, &[("org/other", "worker")]);
+    assert!(GhManifest::parse_reproducible(new_manifest.as_bytes()).is_ok());
+    assert!(crate::agent_policy::AgentPolicy::parse_canonical(POLICY_ONE.as_bytes()).is_ok());
+    assert_eq!(store.latest_gh_manifest_metadata().unwrap().unwrap().0, 42);
+    assert!(policy_list(&store)["head"].is_null());
+
+    let start = std::sync::Barrier::new(2);
+    let (policy, manifest) = std::thread::scope(|scope| {
+        let policy = scope.spawn(|| {
+            start.wait();
+            run(&store, policy_sign(42, POLICY_ONE))
+        });
+        let manifest = scope.spawn(|| {
+            start.wait();
+            run(&store, sign(&new_manifest))
+        });
+        (policy.join().unwrap(), manifest.join().unwrap())
+    });
+    assert!(
+        match (&policy, &manifest) {
+            (Ok(_), Err(error)) => error.to_string().contains("policy_binding_conflict"),
+            (Err(error), Ok(_)) => error.to_string().contains("policy_manifest_not_newest"),
+            _ => false,
+        },
+        "unexpected outcomes: policy={policy:?}, manifest={manifest:?}"
+    );
+}
+
+#[test]
+fn policy_admin_derive_normalizes_and_refuses_identity_and_pairing_changes() {
+    let (_dir, store, _pair) = rig("policy-derive");
+    let bindings = [("Org/Z", "zeta"), ("Org/C", "alpha"), ("Org/A", "alpha")];
+    run(
+        &store,
+        sign(&manifest(40, &[("Org/R", "alpha"), ("org/r", "alpha")])),
+    )
+    .unwrap();
+    let derive_op =
+        |manifest_version, identities: &[(&str, &str)]| AdminOpBody::AgentPolicyDerive {
+            v: ADMIN_OP_SCHEMA_V2,
+            manifest_version,
+            identities: identities
+                .iter()
+                .map(|(agent, id)| (agent.to_string(), id.to_string()))
+                .collect(),
+        };
+    refuses(&store, derive_op(40, &[]), "ManifestProjectionCollision");
+    refuses(
+        &store,
+        policy_sign(40, POLICY_ONE),
+        "ManifestProjectionCollision",
+    );
+    run(&store, sign(&manifest(41, &bindings))).unwrap();
+    refuses(&store, derive_op(40, &[]), "policy_manifest_not_newest");
+    refuses(
+        &store,
+        derive_op(41, &[("alpha", "github_app:alpha")]),
+        "policy_identities_do_not_match_manifest_agents",
+    );
+    let ids = [("zeta", "github_app:zeta"), ("alpha", "github_app:alpha")];
+    let with_extra = [ids[0], ids[1], ("extra", "github_app:extra")];
+    refuses(
+        &store,
+        derive_op(41, &with_extra),
+        "policy_identities_do_not_match_manifest_agents",
+    );
+    refuses(
+        &store,
+        derive_op(41, &ids),
+        "policy_identity_not_active_github_app",
+    );
+    for id in [
+        "github_app:alpha",
+        "github_app:zeta",
+        "github_app:alternate",
+    ] {
+        store
+            .create_audited(
+                id,
+                &VaultRecord::new_oauth(
+                    "operator",
+                    "github_app",
+                    crate::oauth::OAuthCredential {
+                        access_token: "sample".to_string().into(),
+                        refresh_token: "test-only".to_string().into(),
+                        expires_at_ms: None,
+                        token_url: String::new(),
+                        client_id: Some("sample-id".into()),
+                        client_secret: None,
+                        scopes: Vec::new(),
+                    },
+                    Vec::new(),
+                ),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+    }
+    refuses(
+        &store,
+        derive_op(41, &[("zeta", "github_app:alpha"), ids[1]]),
+        "SharedIdentity",
+    );
+    let before = snapshot(&store);
+    let text = run(&store, derive_op(41, &ids)).unwrap();
+    assert_eq!(snapshot(&store), before);
+    let text = text.as_str().unwrap();
+    assert!(!text.ends_with('\n'));
+    let policy = crate::agent_policy::AgentPolicy::parse_canonical(text.as_bytes()).unwrap();
+    assert_eq!(policy.version, 1);
+    assert_eq!(policy.bindings[0].agent, "alpha");
+    assert_eq!(policy.bindings[0].resources, ["org/a", "org/c"]);
+    assert_eq!(policy.bindings[1].agent, "zeta");
+    assert_eq!(
+        run(&store, policy_sign(41, text)).unwrap()["envelope"]["policy"],
+        text
+    );
+    refuses(
+        &store,
+        derive_op(41, &ids),
+        "policy_manifest_already_paired",
+    );
+    run(&store, sign(&manifest(42, &bindings))).unwrap();
+    refuses(
+        &store,
+        derive_op(42, &[("zeta", "github_app:alternate"), ids[1]]),
+        "policy_binding_conflict",
+    );
 }

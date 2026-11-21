@@ -10,6 +10,7 @@ use crate::signing::public_key_ed25519;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPolicySource {
     Ceremony,
+    #[allow(dead_code, reason = "reserved for phone-approved policy successors")]
     OneTap,
 }
 
@@ -60,6 +61,68 @@ impl From<rusqlite::Error> for StoreAgentPolicyError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Sql(error)
     }
+}
+
+impl From<StoreAgentPolicyError> for StoreOpError {
+    fn from(error: StoreAgentPolicyError) -> Self {
+        use StoreAgentPolicyError::*;
+        match error {
+            Policy(error) => Self::Encode(error.to_string()),
+            Root(error) => error,
+            Sql(error) => super::gh_admin::sql(error),
+            invariant => Self::Corrupt(format!("policy storage validation failed: {invariant:?}")),
+        }
+    }
+}
+
+pub(super) fn has_agent_policy_conn(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_policies)", [], |row| {
+        row.get(0)
+    })
+}
+
+pub(super) fn head_agent_policy_conn(
+    conn: &rusqlite::Connection,
+) -> Result<Option<AgentPolicy>, StoreOpError> {
+    let bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT policy_bytes FROM agent_policies ORDER BY version DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(super::gh_admin::sql)?;
+    bytes
+        .map(|bytes| {
+            AgentPolicy::parse_canonical(&bytes).map_err(|error| {
+                StoreOpError::Corrupt(format!("stored policy is invalid: {error}"))
+            })
+        })
+        .transpose()
+}
+
+/// A ready manifest needs unanimous reports, so the first expected computer's
+/// reported version is the only candidate. Use the caller's read snapshot.
+pub(super) fn active_agent_policy_version_conn(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Option<i64>> {
+    use super::gh_activations::{gh_manifest_expected_computers_conn, gh_manifest_reports_ready};
+
+    let computers = gh_manifest_expected_computers_conn(conn)?;
+    let Some(manifest_version) = computers.first().and_then(|computer| computer.version) else {
+        return Ok(None);
+    };
+    let candidate: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT p.version, m.manifest_sha256 FROM agent_policies p \
+         JOIN gh_manifests m ON m.version = p.manifest_version WHERE m.version = ?1",
+            [manifest_version],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(candidate.and_then(|(version, digest)| {
+        gh_manifest_reports_ready(&computers, manifest_version, &digest).then_some(version)
+    }))
 }
 
 impl EncryptedStore {

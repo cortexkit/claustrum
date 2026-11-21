@@ -3,7 +3,7 @@ use crate::{commit_admin, CliError, GlobalArgs};
 use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
 use credentials_core::store::GhManifestHandoffEnvelope;
 use serde_json::Value;
-use std::{io::Write as _, path::PathBuf};
+use std::{io::Write as _, path::Path};
 
 fn value_flags(verb: &str) -> &'static [&'static str] {
     match verb {
@@ -58,7 +58,7 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn value(args: &[String], flag: &str) -> String {
+pub(super) fn value(args: &[String], flag: &str) -> String {
     args.as_chunks::<2>()
         .0
         .iter()
@@ -68,11 +68,15 @@ fn value(args: &[String], flag: &str) -> String {
 }
 
 fn version(args: &[String]) -> Result<i64, CliError> {
-    value(args, "--version")
+    positive_version(args, "--version")
+}
+
+pub(super) fn positive_version(args: &[String], flag: &str) -> Result<i64, CliError> {
+    value(args, flag)
         .parse::<i64>()
         .ok()
         .filter(|v| *v > 0)
-        .ok_or_else(|| CliError::Usage("--version must be a positive integer".into()))
+        .ok_or_else(|| CliError::Usage(format!("{flag} must be a positive integer")))
 }
 
 pub fn cmd_manifest(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -143,19 +147,32 @@ pub fn cmd_manifest(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
 }
 
 fn write_envelope(global: &GlobalArgs, version: i64, value: &Value) -> std::io::Result<()> {
-    use ring::rand::SecureRandom as _;
     let envelope: GhManifestHandoffEnvelope = serde_json::from_value(value.clone())?;
-    let mut bytes = serde_json::to_vec_pretty(&envelope)?;
+    publish_envelope(
+        &global.data_dir.join("signed-envelopes"),
+        version,
+        &envelope,
+    )
+}
+
+pub(super) fn publish_envelope(
+    directory: &Path,
+    version: i64,
+    envelope: &impl serde::Serialize,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(envelope)?;
     bytes.push(b'\n');
-    let directory = global.data_dir.join("signed-envelopes");
-    std::fs::create_dir_all(&directory)?;
-    let destination = directory.join(format!("v{version}-envelope.json"));
+    std::fs::create_dir_all(directory)?;
+    write_private_file(&directory.join(format!("v{version}-envelope.json")), &bytes)
+}
+
+pub(super) fn write_private_file(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use ring::rand::SecureRandom as _;
     let mut nonce = [0; 16];
     ring::rand::SystemRandom::new()
         .fill(&mut nonce)
         .map_err(|_| std::io::Error::other("temporary filename randomness unavailable"))?;
-    let temporary: PathBuf =
-        directory.join(format!(".v{version}-{}.tmp", crate::hex_lower(&nonce)));
+    let temporary = destination.with_file_name(format!(".auth-{}.tmp", crate::hex_lower(&nonce)));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -170,10 +187,10 @@ fn write_envelope(global: &GlobalArgs, version: i64, value: &Value) -> std::io::
             use std::os::unix::fs::PermissionsExt as _;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        cortexkit_lease::durable_replace(&temporary, &destination)
+        cortexkit_lease::durable_replace(&temporary, destination)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);

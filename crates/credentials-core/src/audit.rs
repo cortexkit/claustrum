@@ -78,6 +78,8 @@ pub enum AuditOp {
     GhManifestProposalState,
     GhManifestSign,
     GhManifestStore,
+    AgentPolicySign,
+    AgentPolicyStore,
     GhManifestActivation,
     GhManifestRetire,
     GhManifestOneTapSet,
@@ -275,6 +277,8 @@ impl AuditOp {
             AuditOp::GhManifestProposalState => "gh_manifest_proposal_state",
             AuditOp::GhManifestSign => "gh_manifest_sign",
             AuditOp::GhManifestStore => "gh_manifest_store",
+            AuditOp::AgentPolicySign => "agent_policy_sign",
+            AuditOp::AgentPolicyStore => "agent_policy_store",
             AuditOp::GhManifestActivation => "gh_manifest_activation",
             AuditOp::GhManifestRetire => "gh_manifest_retire",
             AuditOp::GhManifestOneTapSet => "gh_manifest_one_tap_set",
@@ -582,16 +586,6 @@ impl GhManifestAudit<'_> {
     /// Preserve the caller's actor and alarm, but derive the operation and subject
     /// from the committed metadata rather than trusting a separate operation tag.
     pub fn record(self, actor: &str, alarm: Option<AlarmReason>) -> AuditRecord {
-        fn hash(fields: &[&str]) -> String {
-            use sha2::{Digest, Sha256};
-
-            let mut bytes = Vec::new();
-            for field in fields {
-                crate::agent_secret::push_field(&mut bytes, field.as_bytes());
-            }
-            hex(&Sha256::digest(bytes))
-        }
-
         let (op, subject, payload_hash) = match self {
             Self::Propose {
                 proposal_id,
@@ -603,7 +597,7 @@ impl GhManifestAudit<'_> {
             } => (
                 AuditOp::GhManifestPropose,
                 format!("gh-manifest-proposal|{proposal_id}"),
-                hash(&[
+                hash_framed_fields(&[
                     agent_id,
                     repo,
                     &base_version.to_string(),
@@ -618,7 +612,7 @@ impl GhManifestAudit<'_> {
             } => (
                 AuditOp::GhManifestProposalState,
                 format!("gh-manifest-proposal|{proposal_id}"),
-                hash(&[from, to]),
+                hash_framed_fields(&[from, to]),
             ),
             Self::Sign { manifest_sha256 } => (
                 AuditOp::GhManifestSign,
@@ -632,7 +626,7 @@ impl GhManifestAudit<'_> {
             } => (
                 AuditOp::GhManifestStore,
                 format!("gh-manifest|{version}"),
-                hash(&[source, manifest_sha256]),
+                hash_framed_fields(&[source, manifest_sha256]),
             ),
             Self::Activation {
                 member_id,
@@ -641,7 +635,7 @@ impl GhManifestAudit<'_> {
             } => (
                 AuditOp::GhManifestActivation,
                 format!("gh-manifest-activation|{member_id}"),
-                hash(&[&version.to_string(), verdict]),
+                hash_framed_fields(&[&version.to_string(), verdict]),
             ),
             Self::Retire {
                 member_id,
@@ -649,7 +643,64 @@ impl GhManifestAudit<'_> {
             } => (
                 AuditOp::GhManifestRetire,
                 format!("gh-manifest-activation|{member_id}"),
-                hash(&[&retired_at_ms.to_string()]),
+                hash_framed_fields(&[&retired_at_ms.to_string()]),
+            ),
+        };
+        AuditRecord {
+            op,
+            credential_id: Some(subject),
+            payload_hash: Some(payload_hash),
+            actor: actor.to_owned(),
+            alarm,
+        }
+    }
+}
+
+fn hash_framed_fields(fields: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut bytes = Vec::new();
+    for field in fields {
+        crate::agent_secret::push_field(&mut bytes, field.as_bytes());
+    }
+    hex(&Sha256::digest(bytes))
+}
+
+/// Commit the policy bytes at signing and bind them to their manifest at storage.
+pub enum AgentPolicyAudit<'a> {
+    Sign {
+        policy_sha256: &'a str,
+    },
+    Store {
+        version: i64,
+        manifest_version: i64,
+        source: &'a str,
+        policy_sha256: &'a str,
+    },
+}
+
+impl AgentPolicyAudit<'_> {
+    pub fn record(self, actor: &str, alarm: Option<AlarmReason>) -> AuditRecord {
+        let (op, subject, payload_hash) = match self {
+            Self::Sign { policy_sha256 } => (
+                AuditOp::AgentPolicySign,
+                crate::store::GH_MANIFEST_ROOT_KEY_ID.to_owned(),
+                policy_sha256.to_owned(),
+            ),
+            Self::Store {
+                version,
+                manifest_version,
+                source,
+                policy_sha256,
+            } => (
+                AuditOp::AgentPolicyStore,
+                format!("gh-manifest|{manifest_version}"),
+                hash_framed_fields(&[
+                    &version.to_string(),
+                    &manifest_version.to_string(),
+                    source,
+                    policy_sha256,
+                ]),
             ),
         };
         AuditRecord {
@@ -985,6 +1036,8 @@ mod vocabulary_documentation_tests {
                 AuditOp::GhManifestProposalState => AuditOp::GhManifestProposalState.as_str(),
                 AuditOp::GhManifestSign => AuditOp::GhManifestSign.as_str(),
                 AuditOp::GhManifestStore => AuditOp::GhManifestStore.as_str(),
+                AuditOp::AgentPolicySign => AuditOp::AgentPolicySign.as_str(),
+                AuditOp::AgentPolicyStore => AuditOp::AgentPolicyStore.as_str(),
                 AuditOp::GhManifestActivation => AuditOp::GhManifestActivation.as_str(),
                 AuditOp::GhManifestRetire => AuditOp::GhManifestRetire.as_str(),
                 AuditOp::GhManifestOneTapSet => AuditOp::GhManifestOneTapSet.as_str(),
@@ -1114,6 +1167,8 @@ mod vocabulary_documentation_tests {
             AuditOp::GhManifestProposalState,
             AuditOp::GhManifestSign,
             AuditOp::GhManifestStore,
+            AuditOp::AgentPolicySign,
+            AuditOp::AgentPolicyStore,
             AuditOp::GhManifestActivation,
             AuditOp::GhManifestRetire,
             AuditOp::GhManifestOneTapSet,

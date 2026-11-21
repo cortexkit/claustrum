@@ -1626,11 +1626,10 @@ mod gh_approval;
 mod gh_manifests;
 
 #[path = "store_agent_policy.rs"]
-#[allow(
-    dead_code,
-    reason = "transactional writer for the agent-policy signing paths"
-)]
 mod agent_policy;
+
+#[path = "store_agent_policy_admin.rs"]
+mod agent_policy_admin;
 
 #[path = "store_gh_proposals.rs"]
 mod gh_proposals;

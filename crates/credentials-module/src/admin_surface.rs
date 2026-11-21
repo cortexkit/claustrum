@@ -2794,6 +2794,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_policy_admin_size_layers_online_and_under_the_offline_lease() {
+        use credentials_core::admin_ops::{apply, ADMIN_OP_SCHEMA_V2};
+        use credentials_core::agent_policy::{AgentPolicy, MAX_POLICY_DOCUMENT_BYTES};
+        use credentials_core::signing::{public_key_ed25519, MAX_SIGN_PAYLOAD};
+        use credentials_core::store::GH_MANIFEST_ROOT_KEY_ID;
+        use serde_json::json;
+
+        let seed = 12;
+        let r = rig(seed);
+        r.admin.record_bind(5, Principal::Direct);
+        let pem = crate::tests::test_ed25519_pem();
+        let key_id = public_key_ed25519(&pem).unwrap().key_id;
+        r.store
+            .create(
+                GH_MANIFEST_ROOT_KEY_ID,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
+            )
+            .unwrap();
+
+        let policy = |agent: &str| {
+            json!({
+            "schema": "ck-agent-policy/v1", "version": 1, "issued_at_unix_secs": 1,
+            "root_key_id": key_id, "rule_sets": {},
+            "bindings": [{"service": "github", "agent": agent, "identity": "github_app:size", "resources": ["org/r"]}],
+        }).to_string()
+        };
+        let mut agent = "\"".repeat((MAX_SIGN_PAYLOAD - 1024) / 2);
+        let at_limit = MAX_SIGN_PAYLOAD - 19;
+        agent.extend(std::iter::repeat_n('x', at_limit - policy(&agent).len()));
+        let text = policy(&agent);
+        let too_large = policy(&format!("{agent}x"));
+        assert_eq!(text.len(), at_limit);
+        assert_eq!(too_large.len(), at_limit + 1);
+        assert!(AgentPolicy::parse_canonical(text.as_bytes()).is_ok());
+        assert!(AgentPolicy::parse_canonical(too_large.as_bytes()).is_ok());
+
+        let manifest = serde_json::to_string_pretty(&json!({
+            "manifest_version": 42, "issued_at_unix_secs": 1, "bindings": { "Org/R": agent },
+        }))
+        .unwrap()
+            + "\n";
+        apply(
+            &r.store,
+            AdminOpBody::ManifestSign {
+                v: ADMIN_OP_SCHEMA_V2,
+                manifest_bytes: manifest,
+                approver: "owner".into(),
+            },
+            "test",
+        )
+        .unwrap();
+        let sign = |policy_bytes| AdminOpBody::AgentPolicySign {
+            v: ADMIN_OP_SCHEMA_V2,
+            policy_bytes,
+            manifest_version: 42,
+            approver: "owner".into(),
+        };
+        let op = sign(text.clone());
+        let body = serde_json::to_string(&op).unwrap();
+        assert!(
+            body.len() > MAX_OP_BODY_LEN,
+            "the escaped policy must exceed the online cap"
+        );
+        let tip = r.store.audit_tip().unwrap();
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Refused(reason) if reason == "admin op body too large"));
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
+
+        let Rig {
+            _root: root,
+            admin,
+            store,
+            ..
+        } = r;
+        drop(admin);
+        drop(store);
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let offline = EncryptedStore::open(
+            open_sqlite(&descriptor).unwrap(),
+            MasterKey::from_bytes([seed; MASTER_KEY_LEN]),
+        )
+        .unwrap();
+        let model_overflow = policy(&format!(
+            "{agent}{}",
+            "x".repeat(MAX_POLICY_DOCUMENT_BYTES - at_limit + 1)
+        ));
+        assert_eq!(model_overflow.len(), MAX_POLICY_DOCUMENT_BYTES + 1);
+        for refused in [too_large, model_overflow] {
+            assert!(matches!(apply(&offline, sign(refused), "offline-cli"),
+                Err(StoreOpError::Encode(reason)) if reason == "policy_too_large"));
+        }
+        assert_eq!(
+            apply(
+                &offline,
+                AdminOpBody::AgentPolicyList {
+                    v: ADMIN_OP_SCHEMA_V2
+                },
+                "offline-cli"
+            )
+            .unwrap()["policies"],
+            json!([])
+        );
+        assert_eq!(offline.audit_tip().unwrap(), tip);
+        assert_eq!(
+            apply(&offline, op, "offline-cli").unwrap()["envelope"]["policy"],
+            text
+        );
+    }
+
+    #[tokio::test]
     async fn compound_invalidate_revokes_handles_atomically() {
         let r = rig(10);
         r.admin.record_bind(5, Principal::Direct);

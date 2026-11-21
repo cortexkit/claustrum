@@ -105,8 +105,11 @@ pub(crate) fn bus_key_purpose(id: &str) -> Option<BusKeyPurpose> {
 }
 
 /// Check the protocol input before any vault-key signature or audit write.
-/// Ordinary signing keys retain their arbitrary-byte signing contract.
+/// Ordinary signing keys can sign arbitrary bytes outside reserved signing domains.
 pub fn validate_signing_input(id: &str, payload: &[u8]) -> Result<(), &'static str> {
+    if payload.starts_with(crate::agent_policy::AGENT_POLICY_SEPARATOR) {
+        return Err("agent policy payloads require the policy signer");
+    }
     let base64url = |bytes: &[u8]| {
         !bytes.is_empty()
             && bytes
@@ -266,6 +269,10 @@ pub struct PreparedEd25519Signature<'a> {
 }
 
 impl PreparedEd25519Signature<'_> {
+    pub(crate) fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
     /// Produce the signature only after any caller-required audit write succeeds.
     pub fn sign(self) -> Signature {
         let sig = self.key.sign(self.payload);

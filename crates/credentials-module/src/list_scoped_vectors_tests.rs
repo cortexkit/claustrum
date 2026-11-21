@@ -423,6 +423,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert_eq!(rows[2]["hosts"], json!(["api.anthropic.com"]));
     assert!(rows[2].get("fusiform_provider_id").is_none());
     cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
+    cases.push(github_app_identity_listing_vector().await);
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
@@ -476,7 +477,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         all.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
         std::fs::write(&sums_path, format!("{}\n", all.join("\n"))).unwrap();
         println!(
-            "emitted six list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and their SHA256SUMS lines"
+            "emitted seven list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and their SHA256SUMS lines"
         );
     } else {
         assert_eq!(
@@ -502,4 +503,69 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             "SHA256SUMS must list each file this test produces once, with these hashes"
         );
     }
+}
+
+async fn github_app_identity_listing_vector() -> serde_json::Value {
+    use credentials_core::refresh_adapters::github_app::GithubAppIdentity;
+
+    const ID: &str = "github_app:listing-vector";
+    let mut rig = Rig::new();
+    let mut record = roster_oauth_record();
+    record.refresh_adapter = Some("github_app".into());
+    rig.store.create(ID, &record).unwrap();
+    let incarnation = "0123456789abcdef0123456789abcdef";
+    rig.store.force_credential_incarnation_for_test(ID, incarnation);
+    rig.grant("app-list", ID);
+    grant_for(&rig.store, "app-read", ID, GrantOperation::Read);
+    grant_for(&rig.store, "app-policy", ID, GrantOperation::PolicyToken);
+    rig.bind(1, reserved("app-list"));
+    rig.bind(2, reserved("app-read"));
+    rig.bind(3, reserved("app-policy"));
+
+    let list = |caller: &str| {
+        rig.surface
+            .list_scoped(
+                &crate::federation::ingress::ScopedCaller::hand_only(Some(reserved(caller))),
+                &ListScopedParams { enrollment_token: None },
+            )
+            .unwrap()
+    };
+    for caller in ["app-list", "app-read", "app-policy"] {
+        let listing = list(caller);
+        assert_eq!(listing.credentials.len(), 1);
+        assert!(listing.credentials[0].github_app.is_none());
+    }
+    let policy_only_before = list("app-policy").view;
+    let mut completed = rig.surface.watches.completed.subscribe();
+    rig.open(1, 41, json!({})).await;
+    let before = rig.notice(1, 41, 1).await;
+    completed.changed().await.unwrap();
+
+    let app = GithubAppIdentity { app_id: "9007199254740993".into(), slug: "listing-vector".into() };
+    rig.store.commit_refresh(ID, 1, incarnation, &record, Some(&app)).unwrap();
+    let changed = rig.notice(1, 41, 2).await;
+    completed.changed().await.unwrap();
+    assert_ne!(before["view"], changed["view"]);
+    assert_eq!(before["keys"], changed["keys"]);
+
+    let pinned = rig.surface.list_scoped(
+        &crate::federation::ingress::ScopedCaller::hand_only(Some(reserved("app-policy"))),
+        &ListScopedParams { enrollment_token: None },
+    ).unwrap();
+    assert_eq!(pinned.view, policy_only_before);
+    assert!(pinned.credentials[0].github_app.is_none());
+    let expected_member = json!({"app_id": "9007199254740993", "slug": "listing-vector"});
+    rig.dispatch(2, 42, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let read = rig.next().await;
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&read.body).unwrap()["result"]["credentials"][0]["github_app"], expected_member);
+    rig.dispatch(1, 43, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let listing = rig.next().await;
+    let golden = list_vector_case("github_app_identity", OP_LIST_SCOPED, listing);
+    assert_eq!(golden["reply"]["result"]["view"], changed["view"]);
+    assert_eq!(golden["reply"]["result"]["credentials"][0]["github_app"], expected_member);
+
+    rig.store.commit_refresh(ID, 2, incarnation, &record, Some(&app)).unwrap();
+    completed.changed().await.unwrap();
+    assert!(rig.rx.try_recv().is_err(), "same App identity published a notice");
+    golden
 }

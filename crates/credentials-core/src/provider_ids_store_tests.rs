@@ -607,7 +607,13 @@ fn every_lifecycle_path_but_remove_keeps_the_provider_ids() {
     // a token refresh commit
     let version = store.meta(oauth_id).unwrap().record_version;
     store
-        .commit_refresh(oauth_id, version, &oauth_record())
+        .commit_refresh(
+            oauth_id,
+            version,
+            &store.credential_incarnation(oauth_id).unwrap(),
+            &oauth_record(),
+            None,
+        )
         .unwrap();
     kept(&store, "refresh");
     // reclassify, with and without force

@@ -10619,6 +10619,7 @@ mod tests {
         // golden row states it.
         use credentials_core::list_auth_method::list_auth_method;
         use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
+        use credentials_core::refresh_adapters::github_app::GithubAppIdentity;
         use credentials_core::store::{
             GrantOperation, ReadGrant, ScopedListRow, ScopedListSnapshot, SelectorKind,
         };
@@ -10635,6 +10636,10 @@ mod tests {
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
             provider: credentials_core::catalog::provider(stored.id).map(str::to_owned),
+            github_app: (stored.id == "github_app:plex-alfonso").then(|| GithubAppIdentity {
+                app_id: "4617236".into(),
+                slug: "plex-alfonso".into(),
+            }),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
             plan_tier_since_ms: None,
@@ -10901,6 +10906,15 @@ mod tests {
             "the row without auth_method is a readable GitHub App row, not a sealed one"
         );
         assert_eq!(github_app["operations"], json!(["read"]));
+        if std::env::var_os("UPDATE_ENROLLMENT_WIRE_FIXTURE").is_none() {
+            assert_eq!(
+                github_app["github_app"],
+                json!({"app_id": "4617236", "slug": "plex-alfonso"})
+            );
+            assert!(pinned_credentials.iter().all(|row| {
+                row["id"] == "github_app:plex-alfonso" || row.get("github_app").is_none()
+            }));
+        }
 
         assert_eq!(
             serde_json::to_string(&read_surface::ListScopedParams {
@@ -13829,10 +13843,26 @@ mod tests {
         grant_for(&store, "catalog-field-reader", id, GrantOperation::List);
         assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 100);
         record.detected_plan.as_mut().unwrap().observed_at_ms = 200;
-        store.commit_refresh(id, 1, &record).unwrap();
+        store
+            .commit_refresh(
+                id,
+                1,
+                &store.credential_incarnation(id).unwrap(),
+                &record,
+                None,
+            )
+            .unwrap();
         assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 100);
         record.detected_plan.as_mut().unwrap().tier = Some("plus".into());
-        store.commit_refresh(id, 2, &record).unwrap();
+        store
+            .commit_refresh(
+                id,
+                2,
+                &store.credential_incarnation(id).unwrap(),
+                &record,
+                None,
+            )
+            .unwrap();
         assert_eq!(catalog_field_row(&surface)["plan_tier_observed_at_ms"], 200);
     }
 

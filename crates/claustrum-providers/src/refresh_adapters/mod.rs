@@ -288,6 +288,17 @@ pub trait RefreshAdapter: Send + Sync {
         self.refresh(cred, http).await
     }
 
+    /// Refresh and return any GitHub App identity observed during the exchange.
+    async fn refresh_for_record_with_metadata(
+        &self,
+        record_id: &str,
+        cred: &OAuthCredential,
+        http: &dyn HttpTransport,
+    ) -> Result<(RefreshedTokens, Option<github_app::GithubAppIdentity>), RefreshError> {
+        let tokens = self.refresh_for_record(record_id, cred, http).await?;
+        Ok((tokens, None))
+    }
+
     /// Read-only validity probe used ONLY by recovery (never rotates). `None` (the
     /// default) means this provider exposes no non-mutating check, so a dangling
     /// intent resolves to `needs_reauth`.

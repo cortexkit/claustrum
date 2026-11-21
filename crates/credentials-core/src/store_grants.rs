@@ -708,10 +708,15 @@ impl EncryptedStore {
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                           SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                       )), ''), {}, {}, {}, {}, {} FROM credentials WHERE credential_id = ?1",
+                        )), ''), {}, {}, {}, {}, {}, {} FROM credentials WHERE credential_id = ?1",
                     provider_ids_column(schema_version), plan_tier_column(schema_version),
                     if schema_version >= 33 { "incarnation" } else { "''" },
-                    plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version)
+                    plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version),
+                    if schema_version >= AGENT_POLICY_SCHEMA_VERSION {
+                        "github_app_id, github_app_slug"
+                    } else {
+                        "NULL, NULL"
+                    },
                 ))?;
 
                 let mut rows = Vec::new();
@@ -731,6 +736,8 @@ impl EncryptedStore {
                             row.get::<_, String>(7)?,
                             row.get::<_, Option<i64>>(8)?,
                             row.get::<_, Option<i64>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, Option<String>>(11)?,
                         ))
                     }).optional()?;
                     let Some((
@@ -743,6 +750,8 @@ impl EncryptedStore {
                         incarnation,
                         operator_observed_at_ms,
                         operator_since_ms,
+                        github_app_id,
+                        github_app_slug,
                     )) = candidate else {
                         // An exact selector can name a row that is not stored locally.
                         continue;
@@ -759,6 +768,13 @@ impl EncryptedStore {
                     // recorded yet, and it must not be listed as if it were healthy.
                     let disclose_identity = operations.contains(&GrantOperation::Read)
                         || operations.contains(&GrantOperation::List);
+                    let github_app = if disclose_identity {
+                        github_app_id.zip(github_app_slug).map(|(app_id, slug)| {
+                            crate::refresh_adapters::github_app::GithubAppIdentity { app_id, slug }
+                        })
+                    } else {
+                        None
+                    };
                     let is_gateway = disclose_identity && gateway::has_settings(&tx, &id)?;
                     let decoded_record = if state != RecordState::Corrupt
                         && (include_keys || disclose_identity)
@@ -811,6 +827,7 @@ impl EncryptedStore {
                         identity.as_ref().and(plan_tier), detected_plan.as_ref(),
                     );
                     rows.push(ScopedListRow {
+                        github_app,
                         plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") { operator_since_ms } else { None },
                         provider: RegisteredProvider::service_for_id(&registered_providers, &id).map(str::to_owned),
                         incarnation,

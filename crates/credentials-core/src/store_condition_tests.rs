@@ -706,7 +706,18 @@ fn condition_person_material_clears_atomically_but_refresh_and_failed_replace_ke
     store
         .open_intent(ID, 1, &refresh_token_hash("refresh"))
         .unwrap();
-    assert_eq!(store.commit_refresh(ID, 1, &record).unwrap(), 2);
+    assert_eq!(
+        store
+            .commit_refresh(
+                ID,
+                1,
+                &store.credential_incarnation(ID).unwrap(),
+                &record,
+                None
+            )
+            .unwrap(),
+        2
+    );
     assert_eq!(current(&store, &incarnation), before);
 
     store.with_raw_conn(|conn| conn.execute_batch("CREATE TRIGGER reject_login BEFORE INSERT ON audit_log WHEN NEW.op = 'login' BEGIN SELECT RAISE(ABORT, 'login audit failed'); END")).unwrap();

@@ -795,7 +795,7 @@ mod scoped_watch {
         let mut refreshed = record.clone();
         refreshed.payload = b"fresh-token".to_vec().into();
         rig.store
-            .commit_refresh("oauth:watch-refresh", 1, &refreshed)
+            .commit_refresh("oauth:watch-refresh", 1, &rig.store.credential_incarnation("oauth:watch-refresh").unwrap(), &refreshed, None)
             .unwrap();
         assert_eq!(
             rig.store

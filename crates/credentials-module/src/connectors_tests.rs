@@ -1502,7 +1502,7 @@ mod connectors_contract {
             json!(ids)
         );
         record.identity.email = Some("a".repeat(255));
-        store.commit_refresh("oauth:gmail", 1, &record).unwrap();
+        store.commit_refresh("oauth:gmail", 1, &store.credential_incarnation("oauth:gmail").unwrap(), &record, None).unwrap();
         assert!(reply(&surface, &admin).await["rows"][0]
             .get("identity")
             .is_none());
@@ -1855,7 +1855,7 @@ mod connectors_contract {
         assert_eq!(first.as_object().unwrap().len(), 4);
         record.payload = b"refreshed-payload-canary".to_vec().into();
         record.oauth.as_mut().unwrap().access_token = "refreshed-token-canary".to_owned().into();
-        store.commit_refresh("oauth:anthropic", 1, &record).unwrap();
+        store.commit_refresh("oauth:anthropic", 1, &store.credential_incarnation("oauth:anthropic").unwrap(), &record, None).unwrap();
         completed.changed().await.unwrap();
         assert!(rx.try_recv().is_err(), "refresh published a notice");
         assert_eq!(reply(&surface, &admin).await["version"], before["version"]);

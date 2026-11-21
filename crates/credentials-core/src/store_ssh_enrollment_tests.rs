@@ -413,7 +413,13 @@ fn sealing_and_refresh_refuse_marks_on_non_signing_or_non_ed25519_records() {
     ));
     store.create("opaque:ssh", &key()).unwrap();
     assert!(matches!(
-        store.commit_refresh("opaque:ssh", 1, &marked),
+        store.commit_refresh(
+            "opaque:ssh",
+            1,
+            &store.credential_incarnation("opaque:ssh").unwrap(),
+            &marked,
+            None
+        ),
         Err(StoreOpError::InvalidAgentSsh)
     ));
     marked.kind = CredentialKind::Opaque;

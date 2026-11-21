@@ -1,6 +1,7 @@
 //! Refresh intents, held plans, and permission observations.
 
 use super::*;
+use crate::refresh_adapters::github_app::GithubAppIdentity;
 
 /// Delete a credential's refresh intent within an open transaction. Returns the
 /// number of rows removed (0 if there was no intent). Used both standalone and as
@@ -100,8 +101,8 @@ impl EncryptedStore {
     /// fsynced transaction, so the new tokens become visible AND the intent clears
     /// atomically, or neither does.
     ///
-    /// Fails [`StoreOpError::CasMismatch`] if the stored version is no longer
-    /// `expected_version` (a concurrent write moved it), and
+    /// Fails [`StoreOpError::CasMismatch`] if the stored row is no longer active
+    /// at `expected_version` in `expected_incarnation`, and
     /// [`StoreOpError::Fenced`] if a newer instance took the lease mid-commit (the
     /// lease-handover race) — in which case NOTHING is applied and the caller must
     /// discard the staged tokens and not retry (reconciliation on the new owner
@@ -110,23 +111,25 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
         expected_version: u64,
+        expected_incarnation: &str,
         new_record: &VaultRecord,
+        github_app: Option<&GithubAppIdentity>,
     ) -> Result<u64, StoreOpError> {
         let next_version = expected_version.saturating_add(1);
         let mut new_record = new_record.clone();
         // The sealed tier of the row this commit replaces decides whether the tier's
         // first-seen time carries over. Read it without `get`, which refuses
         // non-active rows and quarantines unreadable ones: this read must neither write
-        // nor change the refusal. It reads the same (version, active) the update below
-        // requires, so whenever the update succeeds this is the record it replaced; when
-        // the row moved or left `active`, the update refuses with `CasMismatch` as before.
+        // nor change the refusal. Use the same version, incarnation and state as the update
+        // so the tier is retained only from the record being replaced.
         let previous = self
             .store
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT envelope FROM credentials \
-                     WHERE credential_id = ?1 AND record_version = ?2 AND state = 'active'",
-                    rusqlite::params![credential_id, expected_version as i64],
+                     WHERE credential_id = ?1 AND record_version = ?2 AND state = 'active' \
+                       AND incarnation = ?3",
+                    rusqlite::params![credential_id, expected_version as i64, expected_incarnation],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()
@@ -154,19 +157,28 @@ impl EncryptedStore {
             new_record.payload.expose(),
         ));
 
+        let (app_id, app_slug) = github_app.map_or((None, None), |app| {
+            (Some(app.app_id.as_str()), Some(app.slug.as_str()))
+        });
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
-                      envelope = ?4, updated_at_ms = ?5 \
-                 WHERE credential_id = ?1 AND record_version = ?6 AND state = 'active'",
+                      envelope = ?4, updated_at_ms = ?5, \
+                      github_app_id = COALESCE(?8, github_app_id), \
+                      github_app_slug = COALESCE(?9, github_app_slug) \
+                 WHERE credential_id = ?1 AND record_version = ?6 AND state = 'active' \
+                   AND incarnation = ?7",
                 rusqlite::params![
                     credential_id,
                     next_version as i64,
                     key_id_hex,
                     blob,
                     now,
-                    expected_version as i64
+                    expected_version as i64,
+                    expected_incarnation,
+                    app_id,
+                    app_slug,
                 ],
             )?;
             // The new tokens, the intent-clear, and the audit entry commit together

@@ -628,6 +628,8 @@ pub struct ScopedCoverage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedListRow {
     pub provider: Option<String>,
+    /// App identity observed locally by refresh, disclosed only with read or list coverage.
+    pub github_app: Option<crate::refresh_adapters::github_app::GithubAppIdentity>,
     pub incarnation: String,
     pub plan_tier_observed_at_ms: Option<i64>,
     pub plan_tier_since_ms: Option<i64>,

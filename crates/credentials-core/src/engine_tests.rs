@@ -434,6 +434,234 @@ fn github_permissions_engine(
     )
 }
 
+const GITHUB_APP_LISTING_ID: &str = "github_app:plex-alfonso";
+const GITHUB_APP_INSTALLATIONS: &[u8] =
+    include_bytes!("../tests/fixtures/github_app/installations.json");
+
+fn github_app_listing_record() -> VaultRecord {
+    let mut record = github_app_record();
+    let oauth = record.oauth.as_mut().unwrap();
+    oauth.refresh_token = include_str!("../tests/fixtures/github_app/test_private_key.pem")
+        .to_owned()
+        .into();
+    oauth.client_id = Some("Iv23lilSfNz1vScb8un3".into());
+    record
+}
+
+fn github_app_listing_pair(store: &EncryptedStore) -> (Option<String>, Option<String>) {
+    store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT github_app_id, github_app_slug FROM credentials WHERE credential_id = ?1",
+                [GITHUB_APP_LISTING_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+fn github_app_listing_token_response(token: &str) -> crate::refresh_adapters::HttpResponse {
+    let mut body: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../tests/fixtures/github_app/access_tokens.json"
+    ))
+    .unwrap();
+    body["token"] = serde_json::json!(token);
+    crate::refresh_adapters::HttpResponse {
+        status: 201,
+        body: serde_json::to_vec(&body).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn github_app_refresh_keeps_the_pair_on_unusable_metadata_and_admin_writes_clear_it() {
+    use crate::refresh_adapters::fixture::FixtureTransport;
+    use crate::refresh_adapters::{github_app::GithubAppAdapter, HttpResponse};
+    use serde_json::json;
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = Arc::new(open_store(&descriptor, 97));
+    let id = GITHUB_APP_LISTING_ID;
+    let record = github_app_listing_record();
+    store.create(id, &record).unwrap();
+    assert_eq!(github_app_listing_pair(&store), (None, None));
+
+    let recorded: serde_json::Value = serde_json::from_slice(GITHUB_APP_INSTALLATIONS).unwrap();
+    let expected = (Some("4617236".into()), Some("plex-alfonso".into()));
+    let variants = [
+        Some(json!(4617236)),
+        None,
+        Some(json!({"id": 1})),
+        Some(json!("01")),
+        Some(json!(0)),
+        Some(json!(4617236)),
+    ];
+    let mut responses = Vec::new();
+    for (index, app_id) in variants.into_iter().enumerate() {
+        let mut installations = recorded.clone();
+        if let Some(app_id) = app_id {
+            installations[0]["app_id"] = app_id;
+        } else {
+            installations[0].as_object_mut().unwrap().remove("app_id");
+        }
+        responses.push(Ok(HttpResponse {
+            status: 200,
+            body: serde_json::to_vec(&installations).unwrap(),
+        }));
+        responses.push(Ok(github_app_listing_token_response(&format!(
+            "test-refresh-{index}"
+        ))));
+    }
+    let invalid = serde_json::to_string(&recorded)
+        .unwrap()
+        .replace("\"app_id\":4617236", "\"app_id\":04617236");
+    responses.push(Ok(HttpResponse {
+        status: 200,
+        body: invalid.into_bytes(),
+    }));
+    let http = Arc::new(FixtureTransport::new(responses));
+    let engine = RefreshEngine::new(
+        store.clone(),
+        vec![Arc::new(GithubAppAdapter::new())],
+        http.clone(),
+    );
+
+    for index in 0..5 {
+        let refreshed = engine.get(id, None, true).await.unwrap();
+        assert_eq!(refreshed.record_version, index + 2);
+        assert!(refreshed.payload.expose() == format!("test-refresh-{index}").as_bytes());
+        assert_eq!(github_app_listing_pair(&store), expected);
+    }
+
+    store
+        .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+        .unwrap();
+    assert_eq!(github_app_listing_pair(&store), (None, None));
+    assert_eq!(engine.get(id, None, true).await.unwrap().record_version, 8);
+    assert_eq!(github_app_listing_pair(&store), expected);
+    assert!(matches!(
+        engine.get(id, None, true).await,
+        Err(EngineError::RefreshFailed(RefreshError::Decode(_)))
+    ));
+    assert_eq!(
+        http.requests().len(),
+        13,
+        "invalid JSON must not reach token exchange"
+    );
+    assert_eq!(store.get(id).unwrap().record_version, 8);
+    assert_eq!(github_app_listing_pair(&store), expected);
+
+    let current = store.get(id).unwrap();
+    let expected_payload_hash = crate::store::payload_hash(current.payload.expose());
+    store
+        .overwrite_cas(id, &record, &expected_payload_hash)
+        .unwrap();
+    assert_eq!(github_app_listing_pair(&store), (None, None));
+}
+
+#[tokio::test]
+async fn github_app_refresh_commit_refuses_overwritten_and_recreated_rows() {
+    use crate::refresh_adapters::fixture::FixtureTransport;
+    use crate::refresh_adapters::{github_app::GithubAppAdapter, HttpResponse};
+    use tokio::sync::Notify;
+
+    struct HeldExchange {
+        responses: FixtureTransport,
+        requested: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl HttpTransport for HeldExchange {
+        async fn get(
+            &self,
+            url: &str,
+            headers: &[(&str, &str)],
+        ) -> Result<HttpResponse, RefreshError> {
+            self.responses.get(url, headers).await
+        }
+
+        async fn post(
+            &self,
+            url: &str,
+            headers: &[(&str, &str)],
+            content_type: &str,
+            body: Vec<u8>,
+        ) -> Result<HttpResponse, RefreshError> {
+            self.requested.notify_one();
+            self.release.notified().await;
+            self.responses.post(url, headers, content_type, body).await
+        }
+    }
+
+    for recreate in [false, true] {
+        let (_root, descriptor) = tmp_descriptor();
+        let store = Arc::new(open_store(&descriptor, 97));
+        let id = GITHUB_APP_LISTING_ID;
+        let mut record = github_app_listing_record();
+        store.create(id, &record).unwrap();
+        let incarnation = store.credential_incarnation(id).unwrap();
+        let http = Arc::new(HeldExchange {
+            responses: FixtureTransport::new(vec![
+                Ok(HttpResponse {
+                    status: 200,
+                    body: GITHUB_APP_INSTALLATIONS.to_vec(),
+                }),
+                Ok(github_app_listing_token_response(
+                    "staged-refresh-test-token",
+                )),
+            ]),
+            requested: Notify::new(),
+            release: Notify::new(),
+        });
+        let engine = RefreshEngine::new(
+            store.clone(),
+            vec![Arc::new(GithubAppAdapter::new())],
+            http.clone(),
+        );
+        let refresh = engine.get(id, None, true);
+        tokio::pin!(refresh);
+        tokio::select! {
+            _ = &mut refresh => panic!("refresh finished before the held exchange"),
+            _ = http.requested.notified() => {}
+        }
+        assert!(store.read_intent(id).unwrap().is_some());
+        record.payload = b"admin-replacement-test-token".to_vec().into();
+        record.oauth.as_mut().unwrap().access_token =
+            "admin-replacement-test-token".to_owned().into();
+        let version = if recreate {
+            store
+                .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+                .unwrap();
+            store.create(id, &record).unwrap();
+            assert_ne!(store.credential_incarnation(id).unwrap(), incarnation);
+            1
+        } else {
+            store
+                .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
+                .unwrap();
+            2
+        };
+        assert!(store.read_intent(id).unwrap().is_none());
+        store.open_intent(id, version, &"a".repeat(64)).unwrap();
+        let audit_len = store.read_audit(None).unwrap().len();
+        http.release.notify_one();
+        let result = refresh.await;
+        assert!(
+            matches!(result, Err(EngineError::Store(StoreOpError::CasMismatch))),
+            "recreate={recreate}"
+        );
+        assert_eq!(store.read_audit(None).unwrap().len(), audit_len);
+        let current = store.get(id).unwrap();
+        assert_eq!(current.record_version, if recreate { 1 } else { 2 });
+        assert!(current.payload.expose() == b"admin-replacement-test-token");
+        assert_eq!(github_app_listing_pair(&store), (None, None));
+        assert_eq!(
+            store.read_intent(id).unwrap().unwrap().old_refresh_hash,
+            "a".repeat(64)
+        );
+    }
+}
+
 fn stored_github_permissions(
     store: &EncryptedStore,
     credential_id: &str,
@@ -1482,7 +1710,13 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
     refreshed.oauth.as_mut().unwrap().access_token =
         "STAGED-must-never-be-served".to_string().into();
     refreshed.payload = b"STAGED-must-never-be-served".to_vec().into();
-    match store.commit_refresh("id", 1, &refreshed) {
+    match store.commit_refresh(
+        "id",
+        1,
+        &store.credential_incarnation("id").unwrap(),
+        &refreshed,
+        None,
+    ) {
         Err(StoreOpError::Fenced {
             holder_epoch,
             db_epoch,

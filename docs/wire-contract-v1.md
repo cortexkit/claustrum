@@ -913,6 +913,15 @@ and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
 `plan_tier_since_ms`, in each ordinary row.
 Gateway rows additionally carry `base_url` and `headers`.
 
+A local `github_app:<slug>` row covered by `read` or `list` carries
+`"github_app": {"app_id": "12345", "slug": "<slug>"}` once a refresh has recorded
+these values from the matched installation. `app_id` is the App's ID, not the
+installation's ID, and is a canonical decimal string (`[1-9][0-9]*`). `slug`
+is the suffix of the credential ID. The member is omitted before the first
+refresh that records the pair, after an admin overwrite, on rows reached only
+through other operations, and on remote rows. A refresh without valid App
+metadata keeps an already recorded pair.
+
 `auth_method` is `gateway` when the credential has gateway settings; otherwise it is
 derived from the unsealed record's `(CredentialKind, refresh_adapter)`.
 It is present only on read/list-covered rows when the table below yields a value; otherwise
@@ -966,8 +975,10 @@ optional strings, then `provider` as an optional string, `incarnation` as a stri
 and `plan_tier_observed_at_ms` as an optional decimal-string frame. Only when
 `plan_tier_since_ms` is present, append byte 3 and its length-prefixed decimal
 string. No bytes are appended for an absent date, preserving existing undated
-views. Next frame
-`fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
+views. After the condition extension (byte 4), if present, append byte 5 and
+length-prefixed strings for `github_app.app_id` and `github_app.slug`, in that order,
+only when `github_app` is visible. Otherwise append no bytes for this member.
+Next frame `fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
 byte 0 when absent, or byte 1, a u32 host count, and each host as a length-prefixed
 string in served order. The absent optional frame is used whenever the JSON key is
 omitted, never an empty string. Deployment leaves an empty inventory's view unchanged
@@ -1873,7 +1884,8 @@ route channel and binding epoch. Each notice is sheddable (`ADMISSION=2`):
   the caller previously watched the same route. A change while disconnected is not
   hidden by a remembered cursor.
 - `view` is exactly the `credential.list_scoped` view for this caller, computed by
-  `list_scoped_view`, not a second digest definition.
+  `list_scoped_view`, not a second digest definition. Learning a visible `github_app`
+  pair changes `view`, not `keys`; recording the same pair again changes neither.
 - `keys` is standard padded base64 SHA-256 over the bytes of
   `claustrum.watch_scoped.keys.v1`, byte `1`, a big-endian u32 row count, then each
   reachable signing/KEM row sorted by id bytes: its id as big-endian u32 UTF-8 byte

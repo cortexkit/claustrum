@@ -475,7 +475,8 @@ impl RefreshEngine {
             });
         }
 
-        self.do_refresh(credential_id, &served.record).await?;
+        self.do_refresh(credential_id, &incarnation, &served.record)
+            .await?;
         let refreshed = self.store.get_snapshot(credential_id, &incarnation)?;
         let unmapped_plan = UnmappedPlanObservation::committed(credential_id, &refreshed.record);
         Ok(GetWithRefreshStatus {
@@ -543,6 +544,7 @@ impl RefreshEngine {
     async fn do_refresh(
         &self,
         credential_id: &str,
+        incarnation: &str,
         record: &VaultRecord,
     ) -> Result<(), EngineError> {
         let oauth = record
@@ -565,10 +567,10 @@ impl RefreshEngine {
 
         // The provider call (rotating). Tokens are staged in memory only.
         match adapter
-            .refresh_for_record(credential_id, oauth, &*self.http)
+            .refresh_for_record_with_metadata(credential_id, oauth, &*self.http)
             .await
         {
-            Ok(tokens) if tokens.access_token.expose().is_empty() => {
+            Ok((tokens, _)) if tokens.access_token.expose().is_empty() => {
                 // A successful provider response with no access token is not a valid
                 // rotation. Clear txn1 while preserving the old record/version; otherwise
                 // the sealed record would later decrypt to a successful zero-byte read.
@@ -577,11 +579,12 @@ impl RefreshEngine {
                     "provider returned an empty access token".into(),
                 )))
             }
-            Ok(tokens) => {
+            Ok((tokens, github_app)) => {
                 // Only GitHub App mints return this vendor-specific diagnostic. Keep the
                 // field out of every other refresh path even if an adapter is miswired.
-                let github_app_permissions = (adapter_name
-                    == crate::refresh_adapters::github_app::ADAPTER_NAME)
+                let is_github_app =
+                    adapter_name == crate::refresh_adapters::github_app::ADAPTER_NAME;
+                let github_app_permissions = is_github_app
                     .then(|| tokens.github_app_permissions.clone())
                     .flatten();
                 let mut new_record = apply_refreshed(record, oauth, tokens);
@@ -612,10 +615,13 @@ impl RefreshEngine {
                     }
                 }
 
-                match self
-                    .store
-                    .commit_refresh(credential_id, record.record_version, &new_record)
-                {
+                match self.store.commit_refresh(
+                    credential_id,
+                    record.record_version,
+                    incarnation,
+                    &new_record,
+                    github_app.as_ref().filter(|_| is_github_app),
+                ) {
                     Ok(record_version) => {
                         if let ("anthropic", Some(new_oauth)) =
                             (adapter_name, new_record.oauth.as_ref())
@@ -661,9 +667,8 @@ impl RefreshEngine {
                     // do NOT retry, do NOT serve them. (The staged `new_record` drops
                     // here, scrubbing the token strings it owns.)
                     Err(e @ StoreOpError::Fenced { .. }) => Err(EngineError::Store(e)),
-                    // A concurrent admin write moved the version (and, per the
-                    // admin-clears-intent rule, already cleared our intent). Our
-                    // refresh is moot; surface it without touching state.
+                    // The row changed while the request was in flight. The refresh
+                    // is moot; leave the current row and its intent alone.
                     Err(StoreOpError::CasMismatch) => {
                         Err(EngineError::Store(StoreOpError::CasMismatch))
                     }

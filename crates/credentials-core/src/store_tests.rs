@@ -720,7 +720,15 @@ fn confidential_audit_payloads_are_keyed_and_preserve_legacy_chain() {
     store
         .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite))
         .unwrap();
-    store.commit_refresh(id, 3, &record).unwrap();
+    store
+        .commit_refresh(
+            id,
+            3,
+            &store.credential_incarnation(id).unwrap(),
+            &record,
+            None,
+        )
+        .unwrap();
     store
         .set_identity_audited(
             id,
@@ -1527,7 +1535,13 @@ fn held_detected_plans_stale_reader_cannot_discard_newer_observation() {
     store.create("oauth:anthropic", &oauth_record()).unwrap();
     let old = store.get("oauth:anthropic").unwrap();
     store
-        .commit_refresh("oauth:anthropic", old.record_version, &old)
+        .commit_refresh(
+            "oauth:anthropic",
+            old.record_version,
+            &store.credential_incarnation("oauth:anthropic").unwrap(),
+            &old,
+            None,
+        )
         .unwrap();
     let current = store.get("oauth:anthropic").unwrap();
     hold_test_plan(&store, &current);
@@ -1593,7 +1607,15 @@ fn held_detected_plans_keep_first_observation_and_clear_atomically_on_refresh() 
 
     let mut next = record.clone();
     next.detected_plan = Some(plan);
-    store.commit_refresh("oauth:anthropic", 1, &next).unwrap();
+    store
+        .commit_refresh(
+            "oauth:anthropic",
+            1,
+            &store.credential_incarnation("oauth:anthropic").unwrap(),
+            &next,
+            None,
+        )
+        .unwrap();
     assert_eq!(held_plan_rows(&store), 0);
     // A slow response from the previous token cannot recreate a consumed row.
     hold_test_plan(&store, &record);
@@ -1661,7 +1683,13 @@ fn held_detected_plans_do_not_take_the_writer_fence() {
         .is_some());
     assert!(!store.is_fenced_out());
     assert!(matches!(
-        store.commit_refresh("oauth:anthropic", 1, &record),
+        store.commit_refresh(
+            "oauth:anthropic",
+            1,
+            &store.credential_incarnation("oauth:anthropic").unwrap(),
+            &record,
+            None
+        ),
         Err(StoreOpError::Fenced { .. })
     ));
     assert_eq!(
@@ -2999,7 +3027,13 @@ fn refresh_commit_cannot_restore_non_active_records() {
             .unwrap();
         let before = store.read_audit(None).unwrap().len();
         assert!(matches!(
-            store.commit_refresh(id, 1, &oauth_record()),
+            store.commit_refresh(
+                id,
+                1,
+                &store.credential_incarnation(id).unwrap(),
+                &oauth_record(),
+                None
+            ),
             Err(StoreOpError::CasMismatch)
         ));
         assert_eq!(store.meta(id).unwrap().state, state);
@@ -3010,7 +3044,15 @@ fn refresh_commit_cannot_restore_non_active_records() {
     store.create("active", &oauth_record()).unwrap();
     store.open_intent("active", 1, "old-hash").unwrap();
     assert_eq!(
-        store.commit_refresh("active", 1, &oauth_record()).unwrap(),
+        store
+            .commit_refresh(
+                "active",
+                1,
+                &store.credential_incarnation("active").unwrap(),
+                &oauth_record(),
+                None
+            )
+            .unwrap(),
         2
     );
     assert!(store.read_intent("active").unwrap().is_none());

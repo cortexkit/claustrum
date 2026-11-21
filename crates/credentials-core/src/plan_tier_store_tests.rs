@@ -140,7 +140,15 @@ fn plan_since_follows_operator_identity_visibility_and_survives_token_refresh() 
         assert_eq!(row(principal).plan_tier, None);
         assert_eq!(row(principal).plan_tier_since_ms, None);
     }
-    store.commit_refresh(ID, 1, &incoming).unwrap();
+    store
+        .commit_refresh(
+            ID,
+            1,
+            &store.credential_incarnation(ID).unwrap(),
+            &incoming,
+            None,
+        )
+        .unwrap();
     assert_eq!(row("reader").plan_tier_since_ms, Some(50));
     set(&store, ID, None);
     assert_eq!(row("reader").plan_tier_since_ms, None);
@@ -182,10 +190,26 @@ fn plan_observed_time_tracks_value_changes_not_refreshes_and_clear_restores_dete
     assert_eq!(row().plan_tier_observed_at_ms, Some(100));
     let incarnation = row().incarnation;
     incoming.detected_plan = Some(detect("plus", 200));
-    store.commit_refresh(ID, 1, &incoming).unwrap();
+    store
+        .commit_refresh(
+            ID,
+            1,
+            &store.credential_incarnation(ID).unwrap(),
+            &incoming,
+            None,
+        )
+        .unwrap();
     assert_eq!(row().plan_tier_observed_at_ms, Some(100));
     incoming.detected_plan = Some(detect("pro_200", 300));
-    store.commit_refresh(ID, 2, &incoming).unwrap();
+    store
+        .commit_refresh(
+            ID,
+            2,
+            &store.credential_incarnation(ID).unwrap(),
+            &incoming,
+            None,
+        )
+        .unwrap();
     assert_eq!(row().plan_tier_observed_at_ms, Some(300));
     set(&store, ID, Some("max_20x"));
     let operator_time = store.meta(ID).unwrap().plan_tier_observed_at_ms.unwrap();
@@ -209,10 +233,26 @@ fn plan_observed_time_tracks_value_changes_not_refreshes_and_clear_restores_dete
         })
         .unwrap();
     incoming.detected_plan = Some(detect("pro_200", 400));
-    store.commit_refresh(ID, 3, &incoming).unwrap();
+    store
+        .commit_refresh(
+            ID,
+            3,
+            &store.credential_incarnation(ID).unwrap(),
+            &incoming,
+            None,
+        )
+        .unwrap();
     assert_eq!(row().plan_tier_observed_at_ms, None);
     incoming.detected_plan = Some(detect("plus", 500));
-    store.commit_refresh(ID, 4, &incoming).unwrap();
+    store
+        .commit_refresh(
+            ID,
+            4,
+            &store.credential_incarnation(ID).unwrap(),
+            &incoming,
+            None,
+        )
+        .unwrap();
     assert_eq!(row().plan_tier_observed_at_ms, Some(500));
     store
         .overwrite_unconditional_audited(ID, &incoming, AuditCtx::admin(AuditOp::Overwrite))
@@ -646,7 +686,15 @@ fn tier_lifecycle_preserves_refresh_and_removes_without_foreign_key_enforcement(
     oauth.identity.account_id = Some("account".into());
     store.create(id, &oauth).unwrap();
     set(&store, id, Some("max_5x"));
-    store.commit_refresh(id, 1, &oauth).unwrap();
+    store
+        .commit_refresh(
+            id,
+            1,
+            &store.credential_incarnation(id).unwrap(),
+            &oauth,
+            None,
+        )
+        .unwrap();
     assert_eq!(store.meta(id).unwrap().plan_tier.as_deref(), Some("max_5x"));
     store
         .retire_and_revoke_all_audited(id, AuditCtx::admin(AuditOp::Invalidate))

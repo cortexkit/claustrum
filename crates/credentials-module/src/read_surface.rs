@@ -304,6 +304,8 @@ pub struct ListScopedCredential {
     pub plan_tier_since_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<ScopedCondition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_app: Option<credentials_core::refresh_adapters::github_app::GithubAppIdentity>,
     pub categories: Vec<String>,
     #[serde(rename = "type")]
     pub credential_type: String,
@@ -2405,6 +2407,11 @@ pub(crate) fn list_scoped_view(
             push_string(&mut digest_input, &condition.reason);
             push_string(&mut digest_input, &condition.since_ms.to_string());
         }
+        if let Some(app) = &credential.github_app {
+            digest_input.push(5);
+            push_string(&mut digest_input, &app.app_id);
+            push_string(&mut digest_input, &app.slug);
+        }
         push_optional_string(
             &mut digest_input,
             credential.fusiform_provider_id.as_deref(),
@@ -2482,6 +2489,7 @@ fn project_list_scoped_with_providers(
                 hosts: ScopedDescriptor::for_record(&row.id, login_adapter, gateway, providers)
                     .map(ScopedDescriptor::into_hosts),
                 provider: row.provider,
+                github_app: row.github_app,
                 condition: conditions
                     .remove(&row.id)
                     .filter(|(incarnation, _)| incarnation == &row.incarnation)
@@ -5815,6 +5823,7 @@ mod list_scoped_tests {
         identity: Option<RecordIdentity>,
     ) -> ScopedListRow {
         ScopedListRow {
+            github_app: None,
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -5892,6 +5901,7 @@ mod list_scoped_tests {
 
     fn scoped_row_with_adapter(id: &str, adapter: Option<&str>) -> ScopedListRow {
         ScopedListRow {
+            github_app: None,
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -6206,6 +6216,7 @@ mod list_scoped_tests {
             out.extend_from_slice(value.as_bytes());
         }
         let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
+            github_app: None,
             fusiform_provider_id: None,
             hosts: None,
             provider: None,

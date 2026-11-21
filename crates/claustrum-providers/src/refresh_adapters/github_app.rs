@@ -56,12 +56,29 @@ struct Installation {
     id: u64,
     client_id: String,
     app_slug: Option<String>,
-    #[serde(rename = "app_id")]
-    _app_id: Option<serde_json::Value>,
+    app_id: Option<serde_json::Value>,
     account: Option<serde_json::Value>,
     permissions: Option<serde_json::Value>,
     suspended_at: Option<String>,
     repository_selection: Option<String>,
+}
+
+/// The matched App's public identity, distinct from its installation ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GithubAppIdentity {
+    pub app_id: String,
+    pub slug: String,
+}
+
+impl Installation {
+    fn app_identity(&self) -> Option<GithubAppIdentity> {
+        // Malformed identity metadata should not prevent use of a valid token.
+        let id = self.app_id.as_ref()?.as_u64().filter(|id| *id > 0)?;
+        Some(GithubAppIdentity {
+            app_id: id.to_string(),
+            slug: self.app_slug.clone()?,
+        })
+    }
 }
 
 enum InstallationDiscovery {
@@ -439,6 +456,17 @@ impl RefreshAdapter for GithubAppAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
+        self.refresh_for_record_with_metadata(record_id, cred, http)
+            .await
+            .map(|(tokens, _)| tokens)
+    }
+
+    async fn refresh_for_record_with_metadata(
+        &self,
+        record_id: &str,
+        cred: &OAuthCredential,
+        http: &dyn HttpTransport,
+    ) -> Result<(RefreshedTokens, Option<GithubAppIdentity>), RefreshError> {
         // Retrying an import with no App client ID cannot supply it. InvalidGrant
         // makes the engine mark the record needs_reauth until an operator repairs it.
         if cred.client_id.as_deref().is_none_or(str::is_empty) {
@@ -447,12 +475,15 @@ impl RefreshAdapter for GithubAppAdapter {
             ));
         }
         match mint_installation_token_inner(record_id, cred, http).await {
-            Ok(InstallationMintOutcome::Minted(token)) => Ok(RefreshedTokens {
-                access_token: token.access_token,
-                refresh_token: cred.refresh_token.clone(),
-                expires_at_ms: Some(token.expires_at_ms),
-                github_app_permissions: token.token_permissions,
-            }),
+            Ok(InstallationMintOutcome::Minted(token)) => Ok((
+                RefreshedTokens {
+                    access_token: token.access_token,
+                    refresh_token: cred.refresh_token.clone(),
+                    expires_at_ms: Some(token.expires_at_ms),
+                    github_app_permissions: token.token_permissions,
+                },
+                token.installation.app_identity(),
+            )),
             Ok(InstallationMintOutcome::Check(check)) => {
                 check.require_match()?;
                 unreachable!("mint returns only non-Ok checks")

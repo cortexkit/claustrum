@@ -2110,6 +2110,7 @@ impl RemoteReader {
                 detected_plan.as_ref(),
             );
             rows.push(ScopedListRow {
+                github_app: None,
                 plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") {
                     entry.plan_tier_since_ms
                 } else {

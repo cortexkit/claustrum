@@ -883,6 +883,56 @@ async fn antigravity_and_chatgpt_projections_match_the_homes_local_get_and_list(
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn remote_listing_omits_the_home_vaults_github_app_identity() {
+    use credentials_core::refresh_adapters::github_app::GithubAppIdentity;
+
+    const ID: &str = "github_app:remote-listing";
+    let rig = Rig::new("remote-app-listing").await;
+    let record = oauth_record("github_app", "test-access", "test-refresh", Some(HOUR_MS));
+    rig.login(ID, record.clone());
+    rig.grant_b_module(ID);
+    let before = rig.b_row(ID);
+    assert!(before.github_app.is_none());
+
+    let app = GithubAppIdentity {
+        app_id: "12345".into(),
+        slug: "remote-listing".into(),
+    };
+    let home = &rig.a.store;
+    home.commit_refresh(
+        ID,
+        1,
+        &home.credential_incarnation(ID).unwrap(),
+        &record,
+        Some(&app),
+    )
+    .unwrap();
+    home.create_read_grant_audited(
+        "reserved",
+        "broca",
+        SelectorKind::Exact,
+        ID,
+        GrantOperation::Read,
+        AuditCtx::admin(AuditOp::GrantCreate),
+    )
+    .unwrap();
+    let local = home
+        .list_scoped_snapshot(
+            "reserved",
+            "broca",
+            &credentials_core::store::DeclaredGrantSet::empty(),
+        )
+        .unwrap();
+    assert_eq!(local.rows[0].github_app.as_ref(), Some(&app));
+    assert_eq!(rig.b_row(ID), before);
+    assert_eq!(
+        rig.fetches(),
+        0,
+        "a listing must not fetch a token from the home vault"
+    );
+}
+
 /// B's row with A's incarnation, for comparing the rest field by field. Each vault
 /// mints its own incarnation for the row it stores, so B's remote registration and A's
 /// local record never share one; B's must still be a well-formed identity of its own.

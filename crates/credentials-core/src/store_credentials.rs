@@ -450,7 +450,8 @@ impl EncryptedStore {
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
-                      envelope = ?4, updated_at_ms = ?5 \
+                      envelope = ?4, updated_at_ms = ?5, \
+                      github_app_id = NULL, github_app_slug = NULL \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -642,7 +643,8 @@ impl EncryptedStore {
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
-                      envelope = ?4, updated_at_ms = ?5 \
+                      envelope = ?4, updated_at_ms = ?5, \
+                      github_app_id = NULL, github_app_slug = NULL \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,

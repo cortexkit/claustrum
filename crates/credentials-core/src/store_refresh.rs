@@ -165,8 +165,10 @@ impl EncryptedStore {
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
                       envelope = ?4, updated_at_ms = ?5, \
-                      github_app_id = COALESCE(?8, github_app_id), \
-                      github_app_slug = COALESCE(?9, github_app_slug) \
+                      github_app_id = CASE WHEN github_app_created_at_ms IS NULL \
+                        THEN COALESCE(?8, github_app_id) ELSE github_app_id END, \
+                      github_app_slug = CASE WHEN github_app_created_at_ms IS NULL \
+                        THEN COALESCE(?9, github_app_slug) ELSE github_app_slug END \
                  WHERE credential_id = ?1 AND record_version = ?6 AND state = 'active' \
                    AND incarnation = ?7",
                 rusqlite::params![

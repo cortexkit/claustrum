@@ -508,6 +508,7 @@ fn list_meta_from_conn(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.retain(|(id, _)| !is_github_app_companion_id(id));
     for (id, meta) in &mut rows {
         meta.gateway = gateway::from_conn(conn, id, schema_version)?;
     }

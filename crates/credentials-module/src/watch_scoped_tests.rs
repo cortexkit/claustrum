@@ -9,6 +9,8 @@ mod scoped_watch {
         surface: Arc<ReadSurface>,
         admin: Arc<admin_surface::AdminSurface>,
         store: Arc<EncryptedStore>,
+        db_path: std::path::PathBuf,
+        _root: TestTempDir,
         routes: Arc<RouteEpochs>,
         egress: Egress,
         rx: mpsc::Receiver<Frame>,
@@ -17,13 +19,15 @@ mod scoped_watch {
 
     impl Rig {
         fn new() -> Self {
-            let (surface, admin, store) = scoped_rig(149);
+            let (surface, admin, store, db_path, root) = scoped_rig_with_db(149);
             let (control, control_rx) = mpsc::channel(8);
             let (route, rx) = mpsc::channel(256);
             Self {
                 surface,
                 admin,
                 store,
+                db_path,
+                _root: root,
                 routes: Arc::new(RouteEpochs::default()),
                 egress: Egress { control, route },
                 rx,
@@ -992,6 +996,57 @@ mod scoped_watch {
         assert_eq!(refusal.body, rig.next().await.body);
         assert_scoped_not_found(&serde_json::from_slice(&refusal.body).unwrap());
         rig.quiet().await;
+    }
+
+    #[tokio::test]
+    async fn github_app_companion_is_not_found_through_grants_and_old_handles() {
+        use credentials_core::store::StoreOpError;
+
+        const ID: &str = "opaque:github-app-webhook:protected";
+        let mut rig = Rig::new();
+        rig.store.put_legacy_github_app_companion_for_tests(
+            ID,
+            &VaultRecord::new_static(CredentialKind::Opaque, "test", b"hidden".to_vec(), None),
+        ).unwrap();
+        rig.store.set_categories_audited(
+            ID, SetCategoryMode::Add, &["watch-test".into()], AuditCtx::admin(AuditOp::SetCategory),
+        ).unwrap();
+        for operation in [GrantOperation::Read, GrantOperation::List, GrantOperation::Sign] {
+            for selector_kind in [SelectorKind::Exact, SelectorKind::Category] {
+                assert!(matches!(rig.store.create_read_grant_audited(
+                    "reserved", "app-reader", selector_kind, ID, operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                ), Err(StoreOpError::NotFound)));
+            }
+            rig.store.create_read_grant_audited(
+                "reserved", "app-reader", SelectorKind::Category, "watch-test", operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            ).unwrap();
+        }
+        let handle = credentials_core::store::mint_handle().unwrap();
+        {
+            let conn = rusqlite::Connection::open(&rig.db_path).unwrap();
+            conn.execute(
+                "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) VALUES (?1, ?2, 0, 0)",
+                rusqlite::params![handle.hash, ID],
+            ).unwrap();
+        }
+        rig.bind(1, reserved("app-reader"));
+        for (method, params) in [
+            (OP_GET_SCOPED, json!({"credential_id":ID})),
+            (OP_GET, json!({"handle":handle.raw})),
+            (OP_SIGN, json!({"credential_id":ID,"payload_b64":"eA=="})),
+            (OP_SIGN, json!({"handle":handle.raw,"payload_b64":"eA=="})),
+        ] {
+            rig.dispatch(1, 61, FrameType::Request, method, params).await;
+            let frame = rig.next().await;
+            assert_scoped_not_found(&serde_json::from_slice(&frame.body).unwrap());
+        }
+        rig.dispatch(1, 62, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+        let listing: serde_json::Value = serde_json::from_slice(&rig.next().await.body).unwrap();
+        assert_eq!(listing["result"]["credentials"], json!([]));
+        assert!(!rig.store.list_meta().unwrap().iter().any(|(id, _)| id == ID));
+        assert!(!credentials_core::store::list_meta_read_only(&rig.db_path).unwrap().iter().any(|(id, _)| id == ID));
     }
 
     #[tokio::test]

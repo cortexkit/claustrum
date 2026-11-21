@@ -755,7 +755,7 @@ async fn deliver_inner(
         .incoming_transfer_by_hash(member, &sealed.body_hash())
         .map_err(|_| TransferRefusal::store_error())?
     {
-        check_incoming_policy_root_id(&known.credential_id)?;
+        check_incoming_reserved_id(&known.credential_id)?;
         return Ok(known.state);
     }
 
@@ -807,7 +807,7 @@ async fn deliver_inner(
         // An identical delivery may have been recorded and decided while this one
         // was looking up the sender's key. Return the state recorded for those bytes.
         if existing.body_hash == sealed.body_hash() {
-            check_incoming_policy_root_id(&existing.credential_id)?;
+            check_incoming_reserved_id(&existing.credential_id)?;
             return Ok(existing.state);
         }
         return Err(TransferRefusal::conflict().into());
@@ -816,7 +816,7 @@ async fn deliver_inner(
     // 7. Receive-side validation, then the pending row, indexed only now by the
     // authenticated transfer id.
     let (valid, size) = valid?;
-    check_incoming_policy_root_id(&aad.credential_id)?;
+    check_incoming_reserved_id(&aad.credential_id)?;
     let inserted = store
         .insert_incoming_transfer(&NewIncomingTransfer {
             sender_member: member.to_string(),
@@ -837,9 +837,15 @@ async fn deliver_inner(
     }
 }
 
-fn check_incoming_policy_root_id(id: &str) -> Result<(), TransferRefusal> {
+fn check_incoming_reserved_id(id: &str) -> Result<(), TransferRefusal> {
     if credentials_core::store::is_policy_root_id(id) {
         return Err(TransferRefusal::new("policy_root_protected", "permanent"));
+    }
+    if credentials_core::store::is_github_app_companion_id(id) {
+        return Err(TransferRefusal::new(
+            "github_app_companion_protected",
+            "permanent",
+        ));
     }
     Ok(())
 }
@@ -1563,6 +1569,9 @@ impl Transfers {
                 }
                 StoreOpError::PolicyRootProtected => {
                     TransferRefusal::new("policy_root_protected", "permanent")
+                }
+                StoreOpError::GitHubAppCompanionProtected => {
+                    TransferRefusal::new("github_app_companion_protected", "permanent")
                 }
                 StoreOpError::Encode(message)
                     if message.starts_with("transfer_replace_refused") =>

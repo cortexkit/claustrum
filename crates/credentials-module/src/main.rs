@@ -4246,7 +4246,20 @@ mod tests {
         Arc<admin_surface::AdminSurface>,
         Arc<EncryptedStore>,
     ) {
-        let (surface, store, db_path, _root) = tmp_surface_with_store(seed);
+        let (surface, admin, store, _, _root) = scoped_rig_with_db(seed);
+        (surface, admin, store)
+    }
+
+    fn scoped_rig_with_db(
+        seed: u8,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+        std::path::PathBuf,
+        TestTempDir,
+    ) {
+        let (surface, store, db_path, root) = tmp_surface_with_store(seed);
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
@@ -4259,7 +4272,7 @@ mod tests {
             vault_id,
             key.key_id(),
         ));
-        (surface, admin, store)
+        (surface, admin, store, db_path, root)
     }
 
     async fn scoped_route_request(
@@ -10621,9 +10634,9 @@ mod tests {
         // golden row states it.
         use credentials_core::list_auth_method::list_auth_method;
         use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
-        use credentials_core::refresh_adapters::github_app::GithubAppIdentity;
         use credentials_core::store::{
-            GrantOperation, ReadGrant, ScopedListRow, ScopedListSnapshot, SelectorKind,
+            GrantOperation, ListedGitHubApp, ReadGrant, ScopedListRow, ScopedListSnapshot,
+            SelectorKind,
         };
         struct Stored<'a> {
             id: &'a str,
@@ -10638,9 +10651,10 @@ mod tests {
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
             provider: credentials_core::catalog::provider(stored.id).map(str::to_owned),
-            github_app: (stored.id == "github_app:plex-alfonso").then(|| GithubAppIdentity {
+            github_app: (stored.id == "github_app:plex-alfonso").then(|| ListedGitHubApp {
                 app_id: "4617236".into(),
                 slug: "plex-alfonso".into(),
+                attestation: None,
             }),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,

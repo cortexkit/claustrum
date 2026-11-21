@@ -643,6 +643,9 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     github_app: Some(ListedGitHubApp {
                         app_id: "4617236".into(),
                         slug: "plex-alfonso".into(),
+                        created_by: None,
+                        created_at_ms: None,
+                        agent: None,
                     }),
                     fusiform_provider_id: None,
                     hosts: None,
@@ -717,6 +720,9 @@ fn github_app_listing_preserves_string_id_and_quarantines_malformed_rows() {
         Some(ListedGitHubApp {
             app_id: "9007199254740993".into(),
             slug: "listing-vector".into(),
+            created_by: None,
+            created_at_ms: None,
+            agent: None,
         })
     );
 
@@ -744,6 +750,47 @@ fn github_app_listing_preserves_string_id_and_quarantines_malformed_rows() {
         assert_eq!(listing.undecodable_credentials.len(), 1);
         assert!(listing.undecodable_credentials[0]
             .starts_with(&format!("github_app:listing-vector: {field} ")));
+    }
+}
+
+#[test]
+fn github_app_listing_requires_a_complete_well_typed_attestation() {
+    let reply = producer_vector_reply("list-scoped-v2.json", "github_app_attestation");
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    assert_eq!(listing.credentials.len(), 1);
+    assert_eq!(
+        listing.credentials[0].github_app,
+        Some(ListedGitHubApp {
+            app_id: "9007199254740993".into(),
+            slug: "attested-vector".into(),
+            created_by: Some("vault".into()),
+            created_at_ms: Some(1_700_000_000_000),
+            agent: Some("agent_0123456789abcdef".into()),
+        }),
+    );
+    for (field, wrong_type) in [
+        ("created_by", json!(false)),
+        ("created_at_ms", json!("1700000000000")),
+        ("agent", json!(null)),
+    ] {
+        for value in [None, Some(wrong_type)] {
+            let mut broken = reply.clone();
+            let app = broken["result"]["credentials"][0]["github_app"]
+                .as_object_mut()
+                .unwrap();
+            match value {
+                None => {
+                    app.remove(field);
+                }
+                Some(value) => {
+                    app.insert(field.into(), value);
+                }
+            }
+            let listing = decode_list_scoped_reply(broken).unwrap();
+            assert!(listing.credentials.is_empty());
+            assert_eq!(listing.undecodable_credentials.len(), 1);
+            assert!(listing.undecodable_credentials[0].contains("github_app"));
+        }
     }
 }
 

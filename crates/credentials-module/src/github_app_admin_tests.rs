@@ -1106,17 +1106,15 @@ async fn github_app_create_complete_rejects_local_companion_and_remote_collision
                 ["0".repeat(32)],
             ).unwrap();
         } else {
-            rig.store
-                .create(
-                    id,
-                    &VaultRecord::new_static(
-                        CredentialKind::Opaque,
-                        "test",
-                        b"existing".to_vec(),
-                        None,
-                    ),
-                )
-                .unwrap();
+            let record =
+                VaultRecord::new_static(CredentialKind::Opaque, "test", b"existing".to_vec(), None);
+            if id.starts_with("opaque:") {
+                rig.store
+                    .put_legacy_github_app_companion_for_tests(id, &record)
+                    .unwrap();
+            } else {
+                rig.store.create(id, &record).unwrap();
+            }
             rig.db
                 .execute(
                     "UPDATE credentials SET state='needs_reauth' WHERE credential_id=?1",
@@ -1296,6 +1294,7 @@ async fn github_app_create_complete_keeps_lock_through_put_timeout_or_interrupti
 
 const MANAGED: &str = "managed-app";
 const MANAGED_ID: &str = "github_app:managed-app";
+const MANAGED_COMPANION: &str = "opaque:github-app-webhook:managed-app";
 
 fn seed_app(rig: &Rig, with_relay: bool) {
     let key = SecretString::new(PKCS1_PEM.to_owned());
@@ -1316,6 +1315,111 @@ fn seed_app(rig: &Rig, with_relay: bool) {
     rig.http
         .rotation
         .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn github_app_companion_refuses_operator_ops_before_writes_or_sends() {
+    let rig = Rig::new(vec![], true);
+    seed_app(&rig, true);
+    let before = rig.counts();
+    let id = MANAGED_COMPANION;
+    let record = VaultRecord::new_static(
+        CredentialKind::Opaque,
+        "test",
+        b"replacement".to_vec(),
+        None,
+    );
+    for request in [
+        json!({"op":"admin.store","v":1,"id":id,"record":record,"audit_op":"put","mode":{"kind":"create"}}),
+        json!({"op":"admin.store_with_identity_policy","v":1,"id":id,"record":record,"audit_op":"overwrite","clear_identity":true}),
+        json!({"op":"admin.invalidate","v":1,"id":id}),
+        json!({"op":"admin.remove","v":1,"id":id}),
+        json!({"op":"admin.mint_handle","v":1,"id":id}),
+        json!({"op":"admin.set_category","v":2,"credential_id":id,"mode":"set","categories":["github-app-native"]}),
+        json!({"op":"admin.transfer_send","v":2,"credential_id":id,"to":format!("fed-computer:{}", "b".repeat(32))}),
+    ] {
+        let body = request.to_string();
+        assert_refused(
+            rig.call(&body).await,
+            "github_app_companion_protected/permanent",
+        );
+        let op = serde_json::from_str::<AdminOpBody>(&body).unwrap();
+        assert!(matches!(
+            apply(&rig.store, op, "offline"),
+            Err(StoreOpError::GitHubAppCompanionProtected)
+        ));
+    }
+    assert_eq!(rig.counts(), before);
+    assert!(rig.http.requests.lock().unwrap().is_empty());
+    assert_eq!(rig.store.get(id).unwrap().record_version, 1);
+}
+
+#[tokio::test]
+async fn github_app_replace_and_remove_clear_only_the_managed_companion() {
+    let record =
+        VaultRecord::new_static(CredentialKind::Opaque, "test", b"hand-added".to_vec(), None);
+    let replace = |id| {
+        json!({
+            "op":"admin.store_with_identity_policy", "v":1, "id":id,
+            "record":record, "audit_op":"overwrite", "clear_identity":true,
+        })
+    };
+    let remove = |id| json!({"op":"admin.remove", "v":1, "id":id});
+    const REMOVED: &str = "not_found/permanent";
+    for (op, retry_refusal, next_slug) in [
+        (
+            replace(MANAGED_ID),
+            "github_app_no_relay/permanent",
+            "new-app",
+        ),
+        (remove(MANAGED_ID), REMOVED, MANAGED),
+    ] {
+        let rig = Rig::new(vec![], true);
+        seed_app(&rig, true);
+        assert_eq!(rig.call(&op.to_string()).await.0, FrameType::Response);
+        assert!(matches!(
+            rig.store.get(MANAGED_COMPANION),
+            Err(StoreOpError::NotFound)
+        ));
+        assert!(!rig.store.github_app_agent_exists(AGENT).unwrap());
+        if retry_refusal != REMOVED {
+            let cleared: bool = rig.db.query_row(
+                "SELECT github_app_id IS NULL AND github_app_slug IS NULL AND github_app_created_at_ms IS NULL \
+                 AND github_app_agent IS NULL AND github_app_relay_slot IS NULL FROM credentials WHERE credential_id=?1",
+                [MANAGED_ID], |row| row.get(0),
+            ).unwrap();
+            assert!(cleared);
+        }
+        for op in [RETRY, ROTATE] {
+            assert_refused(rig.call(op).await, retry_refusal);
+        }
+        assert!(rig.http.requests.lock().unwrap().is_empty());
+        rig.store
+            .create_github_app_audited(
+                GitHubAppCreation {
+                    slug: next_slug,
+                    app_id: LARGE_APP_ID,
+                    agent: AGENT,
+                    pem: &PKCS1_PEM.to_owned().into(),
+                    client_id: "fixture-client-id",
+                    relay: Some((SLOT, &WEBHOOK_SECRET.to_owned().into())),
+                },
+                "test",
+            )
+            .unwrap();
+    }
+
+    let rig = Rig::new(vec![], true);
+    rig.store.create(MANAGED_ID, &record).unwrap();
+    rig.store
+        .put_legacy_github_app_companion_for_tests(MANAGED_COMPANION, &record)
+        .unwrap();
+    for op in [replace(MANAGED_ID), remove(MANAGED_ID)] {
+        assert_eq!(rig.call(&op.to_string()).await.0, FrameType::Response);
+        let neighbour = rig.store.get(MANAGED_COMPANION).unwrap();
+        assert_eq!(neighbour.record_version, 1);
+        assert!(neighbour.payload.expose() == record.payload.expose());
+    }
 }
 
 fn relay_state(rig: &Rig) -> GitHubAppRelay {

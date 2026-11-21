@@ -1445,6 +1445,14 @@ impl AdminOpBody {
         }
     }
 
+    /// Check before dispatch, including operations that never reach the synchronous applier.
+    pub fn check_github_app_companion(&self) -> Result<(), StoreOpError> {
+        if let Some(id) = self.lock_id() {
+            crate::store::check_github_app_companion_id(id)?;
+        }
+        Ok(())
+    }
+
     /// Serialize to the exact bytes the caller MACs and the module verifies. The
     /// caller sends THESE bytes verbatim; the module verifies THESE bytes before
     /// decoding — so serialization non-canonicality is irrelevant (the bytes are
@@ -1724,6 +1732,7 @@ pub fn apply(
             op.schema_version()
         )));
     }
+    op.check_github_app_companion()?;
     // The federation ops that need an awaited outbound call (a peer key lookup, a home
     // fetch, a delivery) cannot run here: `apply` is synchronous and runs wherever a
     // caller holds the write lease, including the offline CLI. They are dispatched by

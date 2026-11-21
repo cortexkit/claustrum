@@ -305,7 +305,7 @@ pub struct ListScopedCredential {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<ScopedCondition>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub github_app: Option<credentials_core::refresh_adapters::github_app::GithubAppIdentity>,
+    pub github_app: Option<credentials_core::store::ListedGitHubApp>,
     pub categories: Vec<String>,
     #[serde(rename = "type")]
     pub credential_type: String,
@@ -2394,6 +2394,16 @@ pub(crate) fn list_scoped_view(
             digest_input.push(5);
             push_string(&mut digest_input, &app.app_id);
             push_string(&mut digest_input, &app.slug);
+            if let Some(credentials_core::store::GitHubAppAttestation::Vault {
+                created_at_ms,
+                agent,
+            }) = &app.attestation
+            {
+                digest_input.push(6);
+                push_string(&mut digest_input, "vault");
+                push_string(&mut digest_input, &created_at_ms.to_string());
+                push_string(&mut digest_input, agent);
+            }
         }
         push_optional_string(
             &mut digest_input,
@@ -3848,6 +3858,9 @@ impl ReadSurface {
         operation: GrantOperation,
         usage: TransferKeyUse,
     ) -> Result<(&'static str, String), ReadError> {
+        if credentials_core::store::is_github_app_companion_id(credential_id) {
+            return Err(ReadError::NotFound);
+        }
         let principal = caller.as_ref();
         let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
             self.record_scoped_refusal(

@@ -14,6 +14,9 @@ pub(super) fn validate_read_grant(
     selector: &str,
     operation: GrantOperation,
 ) -> Result<(), StoreOpError> {
+    if is_github_app_companion_id(selector) {
+        return Err(StoreOpError::NotFound);
+    }
     if selector_kind == SelectorKind::Audience
         && selector == "cortexkit-hub"
         && operation == GrantOperation::AccountToken
@@ -469,7 +472,9 @@ impl EncryptedStore {
             )
             .map_err(|_| StoreOpError::BusKeyReserved)?;
         }
-        if crate::agent_secret::is_deposit_key(credential_id) {
+        if crate::agent_secret::is_deposit_key(credential_id)
+            || is_github_app_companion_id(credential_id)
+        {
             return Err(StoreOpError::NotFound);
         }
         let exact_only = bus_key || crate::federation::is_bus_seal_key_id(credential_id);
@@ -653,7 +658,8 @@ impl EncryptedStore {
                 )?;
                 declared.union_into(principal_kind, principal_id, &mut grants);
                 grants.retain(|grant| grant.selector_kind != SelectorKind::Exact
-                    || !crate::agent_secret::is_deposit_key(&grant.selector));
+                    || (!crate::agent_secret::is_deposit_key(&grant.selector)
+                        && !is_github_app_companion_id(&grant.selector)));
                 after_grants()?;
 
                 // Resolve coverage without fetching envelopes. A row reached by both
@@ -688,7 +694,8 @@ impl EncryptedStore {
                         let category: String = row.get(1)?;
                         if let Some(operations) = by_category.get(category.as_str()) {
                             let id: String = row.get(0)?;
-                            if !crate::agent_secret::is_deposit_key(&id) {
+                            if !crate::agent_secret::is_deposit_key(&id)
+                                && !is_github_app_companion_id(&id) {
                                 covered
                                     .entry(id)
                                     .or_default()
@@ -712,10 +719,12 @@ impl EncryptedStore {
                     provider_ids_column(schema_version), plan_tier_column(schema_version),
                     if schema_version >= 33 { "incarnation" } else { "''" },
                     plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version),
-                    if schema_version >= AGENT_POLICY_SCHEMA_VERSION {
-                        "github_app_id, github_app_slug"
-                    } else {
-                        "NULL, NULL"
+                     if schema_version >= POLICY_ROOT_SCHEMA_VERSION {
+                         "github_app_id, github_app_slug, github_app_created_at_ms, github_app_agent"
+                     } else if schema_version >= AGENT_POLICY_SCHEMA_VERSION {
+                         "github_app_id, github_app_slug, NULL, NULL"
+                     } else {
+                         "NULL, NULL, NULL, NULL"
                     },
                 ))?;
 
@@ -736,8 +745,10 @@ impl EncryptedStore {
                             row.get::<_, String>(7)?,
                             row.get::<_, Option<i64>>(8)?,
                             row.get::<_, Option<i64>>(9)?,
-                            row.get::<_, Option<String>>(10)?,
-                            row.get::<_, Option<String>>(11)?,
+                             row.get::<_, Option<String>>(10)?,
+                             row.get::<_, Option<String>>(11)?,
+                             row.get::<_, Option<i64>>(12)?,
+                             row.get::<_, Option<String>>(13)?,
                         ))
                     }).optional()?;
                     let Some((
@@ -750,8 +761,10 @@ impl EncryptedStore {
                         incarnation,
                         operator_observed_at_ms,
                         operator_since_ms,
-                        github_app_id,
-                        github_app_slug,
+                         github_app_id,
+                         github_app_slug,
+                         github_app_created_at_ms,
+                         github_app_agent,
                     )) = candidate else {
                         // An exact selector can name a row that is not stored locally.
                         continue;
@@ -769,9 +782,12 @@ impl EncryptedStore {
                     let disclose_identity = operations.contains(&GrantOperation::Read)
                         || operations.contains(&GrantOperation::List);
                     let github_app = if disclose_identity {
-                        github_app_id.zip(github_app_slug).map(|(app_id, slug)| {
-                            crate::refresh_adapters::github_app::GithubAppIdentity { app_id, slug }
-                        })
+                         github_app_id.zip(github_app_slug).map(|(app_id, slug)| ListedGitHubApp {
+                             app_id,
+                             slug,
+                             attestation: github_app_created_at_ms.zip(github_app_agent)
+                                 .map(|(created_at_ms, agent)| GitHubAppAttestation::Vault { created_at_ms, agent }),
+                         })
                     } else {
                         None
                     };

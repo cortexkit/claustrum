@@ -914,13 +914,19 @@ and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
 Gateway rows additionally carry `base_url` and `headers`.
 
 A local `github_app:<slug>` row covered by `read` or `list` carries
-`"github_app": {"app_id": "12345", "slug": "<slug>"}` once a refresh has recorded
-these values from the matched installation. `app_id` is the App's ID, not the
-installation's ID, and is a canonical decimal string (`[1-9][0-9]*`). `slug`
-is the suffix of the credential ID. The member is omitted before the first
-refresh that records the pair, after an admin overwrite, on rows reached only
-through other operations, and on remote rows. A refresh without valid App
-metadata keeps an already recorded pair.
+`"github_app": {"app_id": "12345", "slug": "<slug>"}` once a hand-added App's
+refresh has recorded these values from the matched installation. A vault-created
+App carries the pair from creation, plus `created_by: "vault"`, an integer
+`created_at_ms` (Unix epoch milliseconds), and `agent` (the registry agent id).
+The three attestation members are either all present or all absent; the Rust
+client rejects partial or ill-typed attestations. `app_id` is the App's ID, not
+the installation's ID, and is a canonical decimal string (`[1-9][0-9]*`).
+`slug` is the suffix of the credential ID. Refresh never changes an attested
+identity; for hand-added Apps, refresh without valid App metadata keeps the
+recorded pair. The member is omitted before a hand-added App records a pair,
+after an admin overwrite until a refresh records a new pair, on rows reached
+only through other operations (including `policy_token`), and on remote rows.
+The webhook companion does not appear in credential inventory.
 
 `auth_method` is `gateway` when the credential has gateway settings; otherwise it is
 derived from the unsealed record's `(CredentialKind, refresh_adapter)`.
@@ -977,7 +983,9 @@ and `plan_tier_observed_at_ms` as an optional decimal-string frame. Only when
 string. No bytes are appended for an absent date, preserving existing undated
 views. After the condition extension (byte 4), if present, append byte 5 and
 length-prefixed strings for `github_app.app_id` and `github_app.slug`, in that order,
-only when `github_app` is visible. Otherwise append no bytes for this member.
+only when `github_app` is visible. If it carries attestation, append byte 6 and
+length-prefixed strings for `created_by`, `created_at_ms` in decimal, and `agent`,
+in that order. An absent identity or attestation adds no bytes of its own.
 Next frame `fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
 byte 0 when absent, or byte 1, a u32 host count, and each host as a length-prefixed
 string in served order. The absent optional frame is used whenever the JSON key is
@@ -1885,7 +1893,8 @@ route channel and binding epoch. Each notice is sheddable (`ADMISSION=2`):
   hidden by a remembered cursor.
 - `view` is exactly the `credential.list_scoped` view for this caller, computed by
   `list_scoped_view`, not a second digest definition. Learning a visible `github_app`
-  pair changes `view`, not `keys`; recording the same pair again changes neither.
+  pair or attestation changes `view`, not `keys`; recording the same pair again
+  changes neither. The webhook companion enters neither digest.
 - `keys` is standard padded base64 SHA-256 over the bytes of
   `claustrum.watch_scoped.keys.v1`, byte `1`, a big-endian u32 row count, then each
   reachable signing/KEM row sorted by id bytes: its id as big-endian u32 UTF-8 byte
@@ -5990,6 +5999,15 @@ initial relay `PUT`. Only a `200` reply within the 8 KiB reply limit confirms
 registration. A failed `PUT` does not roll back the App. Only the cause
 `relay_unavailable` offers a same-slot retry.
 
+The webhook secret is held only by the vault, in `opaque:github-app-webhook:<slug>`.
+Scoped reads, signing, handle use and attempts to grant access to that id resolve
+as `not_found`. Operator operations on the companion and incoming transfers to
+that id refuse `github_app_companion_protected` (permanent). Invalidating the
+App preserves its attestation and agent claim. Replacing it clears the App's
+attestation and slot; removing it also frees the slug. Either write deletes the
+companion in the same transaction if the outgoing App was attested and had a
+relay slot. A hand-added App has no managed companion to delete.
+
 Retry and rotation require the serving daemon. They check the App's state and
 run under the `github_app:<slug>` lock, using the App id and slot recorded at
 creation. An invalid slug refuses `invalid_params`; a missing row refuses
@@ -6012,7 +6030,8 @@ or final store failure returns `github_app_hook_update_failed` (transient). A
 rerun resumes the same candidate, skipping `PUT` if its confirmation was
 already saved. The boolean `repeated_put` is true when this run re-sent a
 pending secret that an earlier run may already have sent. Each committed
-rotation step records a keyed digest in its audit row.
+rotation step records a keyed digest in its audit row. Relay-token mints do not
+write an `account_token` audit row.
 
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,

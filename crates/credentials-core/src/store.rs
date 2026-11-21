@@ -630,8 +630,8 @@ pub struct ScopedCoverage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedListRow {
     pub provider: Option<String>,
-    /// App identity observed locally by refresh, disclosed only with read or list coverage.
-    pub github_app: Option<crate::refresh_adapters::github_app::GithubAppIdentity>,
+    /// App identity disclosed only with read or list coverage.
+    pub github_app: Option<ListedGitHubApp>,
     pub incarnation: String,
     pub plan_tier_observed_at_ms: Option<i64>,
     pub plan_tier_since_ms: Option<i64>,
@@ -857,6 +857,7 @@ pub enum StoreOpError {
     /// `ck auth transfer init --replace` once the key is found off `Active`.
     TransferKeyProtected,
     PolicyRootProtected,
+    GitHubAppCompanionProtected,
     PolicyRootExists,
     PolicyRootEstablished,
     PolicyRootAbsent,
@@ -1056,6 +1057,7 @@ impl std::fmt::Display for StoreOpError {
                 "transfer_key_protected: the vault transfer key is active, so its record cannot be replaced, re-identified, invalidated, retired, reactivated or removed",
             ),
             StoreOpError::PolicyRootProtected => f.write_str("policy_root_protected/permanent: the policy root credential id is protected"),
+            StoreOpError::GitHubAppCompanionProtected => f.write_str("github_app_companion_protected/permanent: the vault manages GitHub App webhook credentials"),
             StoreOpError::PolicyRootExists => f.write_str("policy_root_exists/permanent: a policy root is already configured"),
             StoreOpError::PolicyRootEstablished => f.write_str("policy_root_established/permanent: signed manifest or policy versions already exist; initialization cannot recover a lost root"),
             StoreOpError::PolicyRootAbsent => f.write_str("policy_root_absent/permanent: no usable policy root is configured"),
@@ -1112,6 +1114,7 @@ impl StoreOpError {
             StoreOpError::HubAudienceReserved => Some("hub_audience_reserved"),
             StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             StoreOpError::PolicyRootProtected => Some("policy_root_protected"),
+            StoreOpError::GitHubAppCompanionProtected => Some("github_app_companion_protected"),
             StoreOpError::PolicyRootExists => Some("policy_root_exists"),
             StoreOpError::PolicyRootEstablished => Some("policy_root_established"),
             StoreOpError::PolicyRootAbsent => Some("policy_root_absent"),
@@ -1650,7 +1653,8 @@ mod agent_policy_admin;
 #[path = "store_github_app.rs"]
 mod github_app_store;
 pub use github_app_store::{
-    GitHubAppCreation, GitHubAppRelay, GitHubAppRelayError, WebhookRotation,
+    check_github_app_companion_id, is_github_app_companion_id, GitHubAppAttestation,
+    GitHubAppCreation, GitHubAppRelay, GitHubAppRelayError, ListedGitHubApp, WebhookRotation,
 };
 
 #[path = "store_policy_token.rs"]

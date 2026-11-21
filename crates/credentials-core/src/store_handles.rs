@@ -205,7 +205,9 @@ impl EncryptedStore {
                 })
             })
             .map_err(StoreOpError::from)?
-            .filter(|id| !crate::agent_secret::is_deposit_key(id))
+            .filter(|id| {
+                !crate::agent_secret::is_deposit_key(id) && !is_github_app_companion_id(id)
+            })
             .ok_or(StoreOpError::NotFound)
     }
 
@@ -232,7 +234,9 @@ impl EncryptedStore {
                 })
             })
             .map_err(StoreOpError::from)?
-            .filter(|(id, _)| !crate::agent_secret::is_deposit_key(id))
+            .filter(|(id, _)| {
+                !crate::agent_secret::is_deposit_key(id) && !is_github_app_companion_id(id)
+            })
             .ok_or(StoreOpError::NotFound)
     }
 
@@ -293,6 +297,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         if crate::federation::is_bus_key_id(credential_id) {
             return Err(StoreOpError::BusKeyReserved);
         }

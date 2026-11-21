@@ -396,6 +396,10 @@ pub struct ListedGitHubApp {
     /// Decimal App ID kept as a string so it can be used without precision loss.
     pub app_id: String,
     pub slug: String,
+    /// Present with `created_at_ms` and `agent` only for a vault-created App.
+    pub created_by: Option<String>,
+    pub created_at_ms: Option<u64>,
+    pub agent: Option<String>,
 }
 
 /// A login condition visible in a scoped listing, without the action link or reporter.
@@ -1967,9 +1971,40 @@ fn decode_optional_github_app(row: &Value) -> Result<Option<ListedGitHubApp>, St
     if !app.is_object() {
         return Err("github_app is not an object".into());
     }
+    let (created_by, created_at_ms, agent) = match (
+        app.get("created_by"),
+        app.get("created_at_ms"),
+        app.get("agent"),
+    ) {
+        (None, None, None) => (None, None, None),
+        (Some(created_by), Some(created_at_ms), Some(agent)) => (
+            Some(
+                created_by
+                    .as_str()
+                    .filter(|&s| s == "vault")
+                    .ok_or("github_app.created_by is not the string vault")?
+                    .to_owned(),
+            ),
+            Some(
+                created_at_ms
+                    .as_u64()
+                    .ok_or("github_app.created_at_ms is not a non-negative integer")?,
+            ),
+            Some(
+                agent
+                    .as_str()
+                    .ok_or("github_app.agent is not a string")?
+                    .to_owned(),
+            ),
+        ),
+        _ => return Err("github_app attestation is incomplete".into()),
+    };
     Ok(Some(ListedGitHubApp {
         app_id: listing_string(app, "app_id").map_err(|error| format!("github_app.{error}"))?,
         slug: listing_string(app, "slug").map_err(|error| format!("github_app.{error}"))?,
+        created_by,
+        created_at_ms,
+        agent,
     }))
 }
 

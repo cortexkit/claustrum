@@ -1171,6 +1171,84 @@ async fn policy_root_ids_refuse_incoming_opaque_delivery_and_already_pending_acc
     }
 }
 
+#[tokio::test]
+async fn github_app_companion_refuses_delivery_and_already_pending_accept() {
+    use credentials_core::store::{GitHubAppCreation, StoreOpError};
+
+    let rig = Rig::new("transfer-github-app-companion").await;
+    let store = rig.b.store();
+    store
+        .create_github_app_audited(
+            GitHubAppCreation {
+                slug: "managed-transfer",
+                app_id: 17,
+                agent: "agent_0123456789abcdef",
+                pem: &"test-pem".to_owned().into(),
+                client_id: "test-client",
+                relay: Some(("test-slot", &"test-webhook-secret".to_owned().into())),
+            },
+            "test",
+        )
+        .unwrap();
+    let tip = store.audit_tip().unwrap();
+    for (index, id) in [
+        "opaque:github-app-webhook:absent-transfer",
+        "opaque:github-app-webhook:managed-transfer",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let transfer_id = tid(220 + index as u32);
+        let params = rig.a.hand_seal(
+            &rig.b,
+            &transfer_id,
+            id,
+            &body(id, "opaque", b"other payload"),
+        );
+        assert_eq!(
+            rig.serve_b(&rig.a.member, &params).await,
+            "github_app_companion_protected"
+        );
+        assert!(store
+            .incoming_transfer(&rig.a.member, &transfer_id)
+            .unwrap()
+            .is_none());
+
+        record_pending_unchecked(store, &rig.a.member, &transfer_id, id, "opaque", &params);
+        assert_eq!(
+            rig.serve_b(&rig.a.member, &params).await,
+            "github_app_companion_protected"
+        );
+        for replace in [false, true] {
+            let refused = rig
+                .b
+                .transfers
+                .accept(&transfer_id, &rig.a.member, replace)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                refused.body(),
+                json!({"code":"github_app_companion_protected","class":"permanent"})
+            );
+        }
+        let row = store
+            .incoming_transfer(&rig.a.member, &transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncomingTransferState::Pending);
+        if index == 0 {
+            assert!(matches!(store.get(id), Err(StoreOpError::NotFound)));
+        } else {
+            assert_eq!(store.get(id).unwrap().record_version, 1);
+            let relay = store
+                .github_app_relay("managed-transfer")
+                .unwrap_or_else(|_| panic!("expected the original relay registration"));
+            assert!(relay.current().expose() == "test-webhook-secret");
+        }
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+}
+
 /// Validation runs again at accept: a pending row whose body is ineligible or
 /// malformed (recorded here without the delivery checks, the way a row from an older
 /// build or a damaged store would look) is refused `transfer_body_invalid`, marked

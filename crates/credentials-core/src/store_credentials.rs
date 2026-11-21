@@ -1,5 +1,6 @@
 //! Credential reads, writes, identity updates, and lifecycle transitions.
 
+use super::github_app_store::managed_github_app_companion;
 use super::*;
 
 /// Refuse a static record whose payload is a short-term Amazon Bedrock API key. Applied at
@@ -224,6 +225,7 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         // A retry as create must not bypass the write check for the vault's
         // active transfer key.
         self.check_vault_transfer_key_writable(credential_id)?;
@@ -474,6 +476,7 @@ impl EncryptedStore {
         expected_payload_hash: &[u8; 32],
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         refuse_incoming_agent_ssh(record)?;
         validate_deposit_credential_id(credential_id)?;
         // A CAS replace at the current version is still a replace: the transfer key's
@@ -516,11 +519,13 @@ impl EncryptedStore {
             {
                 return Ok(Ok(None));
             }
+            let companion = managed_github_app_companion(tx, credential_id)?;
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
                       envelope = ?4, updated_at_ms = ?5, \
-                      github_app_id = NULL, github_app_slug = NULL \
+                      github_app_id = NULL, github_app_slug = NULL, github_app_created_at_ms = NULL, \
+                      github_app_agent = NULL, github_app_relay_slot = NULL \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -535,6 +540,9 @@ impl EncryptedStore {
             // overwrite with fresh valid tokens must clear the old intent, or boot
             // reconciliation's hash-mismatch check would later undo this re-login.
             if n > 0 {
+                if let Some(companion) = companion {
+                    tx.execute("DELETE FROM credentials WHERE credential_id = ?1", [companion])?;
+                }
                 clear_intent_tx(tx, credential_id)?;
                 delete_local_condition_tx(tx, credential_id)?;
                 clear_plan_on_account_change_tx(
@@ -613,6 +621,7 @@ impl EncryptedStore {
         preserve_existing_identity: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         refuse_incoming_agent_ssh(record)?;
         refuse_short_term_bedrock_key(record)?;
         self.check_vault_transfer_key_writable(credential_id)?;
@@ -712,11 +721,13 @@ impl EncryptedStore {
                 .seal_record(credential_id, &sealed)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
+            let companion = managed_github_app_companion(tx, credential_id)?;
             let n = tx.execute(
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
                       envelope = ?4, updated_at_ms = ?5, \
-                      github_app_id = NULL, github_app_slug = NULL \
+                      github_app_id = NULL, github_app_slug = NULL, github_app_created_at_ms = NULL, \
+                      github_app_agent = NULL, github_app_relay_slot = NULL \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -728,6 +739,9 @@ impl EncryptedStore {
                 ],
             )?;
             if n > 0 {
+                if let Some(companion) = companion {
+                    tx.execute("DELETE FROM credentials WHERE credential_id = ?1", [companion])?;
+                }
                 clear_intent_tx(tx, credential_id)?;
                 delete_local_condition_tx(tx, credential_id)?;
                 clear_agent_ssh_state_tx(tx, credential_id)?;
@@ -1430,6 +1444,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<InvalidateOutcome, StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         self.check_vault_transfer_key_writable(credential_id)?;
         let now = now_ms();
         let audit_key = self.audit_key.clone();
@@ -1523,6 +1538,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<usize, StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         self.check_vault_transfer_key_writable(credential_id)?;
         let audit_key = self.audit_key.clone();
         let (removed, handles) = self.fenced_write_or_refuse(|tx| {
@@ -1535,6 +1551,7 @@ impl EncryptedStore {
                 [credential_id],
                 |row| row.get(0),
             )?;
+            let companion = managed_github_app_companion(tx, credential_id)?;
             clear_agent_ssh_state_tx(tx, credential_id)?;
             let n = tx.execute(
                 "DELETE FROM credentials WHERE credential_id = ?1",
@@ -1542,6 +1559,12 @@ impl EncryptedStore {
             )?;
             let mut handles = 0usize;
             if n > 0 {
+                if let Some(companion) = companion {
+                    tx.execute(
+                        "DELETE FROM credentials WHERE credential_id = ?1",
+                        [companion],
+                    )?;
+                }
                 clear_intent_tx(tx, credential_id)?;
                 // Handle rows are deleted outright (not just revoked): the credential
                 // is gone, so retaining hash rows would only grow an unusable table.

@@ -31,7 +31,7 @@ include!("../tests/support/gateway_vector_pin.rs");
 async fn gateway_scoped_vectors_are_producer_generated_and_pinned() {
     use credentials_core::{GatewayAuth, GatewayHeader, GatewaySettings};
 
-    let (surface, store, db, _root) = tmp_surface_with_store(149);
+    let (surface, store, db, root) = tmp_surface_with_store(149);
     let engine = Arc::new(RefreshEngine::new(
         Arc::clone(&store),
         Vec::new(),
@@ -50,6 +50,8 @@ async fn gateway_scoped_vectors_are_producer_generated_and_pinned() {
         surface,
         admin,
         store,
+        db_path: db,
+        _root: root,
         routes: Arc::new(RouteEpochs::default()),
         egress: Egress { control, route },
         rx,
@@ -85,7 +87,7 @@ async fn gateway_scoped_vectors_are_producer_generated_and_pinned() {
         let incarnation = format!("{:032x}", index + 1);
         rig.store.force_credential_incarnation_for_test(id, &incarnation);
         // Both rows describe one incarnation; fix both identities before producing bytes.
-        rusqlite::Connection::open(&db).unwrap().execute(
+        rusqlite::Connection::open(&rig.db_path).unwrap().execute(
             "UPDATE credential_gateway_settings SET incarnation = ?1 WHERE credential_id = ?2",
             [&incarnation, id],
         ).unwrap();
@@ -424,6 +426,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     assert!(rows[2].get("fusiform_provider_id").is_none());
     cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     cases.push(github_app_identity_listing_vector().await);
+    cases.push(github_app_attestation_listing_vector().await);
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
@@ -477,7 +480,8 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
         all.sort_by(|a, b| a.split_once("  ").unwrap().1.cmp(b.split_once("  ").unwrap().1));
         std::fs::write(&sums_path, format!("{}\n", all.join("\n"))).unwrap();
         println!(
-            "emitted seven list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and their SHA256SUMS lines"
+            "emitted {} list-scoped v2 cases, three get-scoped v1 cases, two non-gateway baselines and their SHA256SUMS lines",
+            cases.len(),
         );
     } else {
         assert_eq!(
@@ -567,5 +571,92 @@ async fn github_app_identity_listing_vector() -> serde_json::Value {
     rig.store.commit_refresh(ID, 2, incarnation, &record, Some(&app)).unwrap();
     completed.changed().await.unwrap();
     assert!(rig.rx.try_recv().is_err(), "same App identity published a notice");
+    golden
+}
+
+async fn github_app_attestation_listing_vector() -> serde_json::Value {
+    use credentials_core::store::GitHubAppCreation;
+
+    const ID: &str = "github_app:attested-vector";
+    const COMPANION: &str = "opaque:github-app-webhook:attested-vector";
+    const AGENT: &str = "agent_0123456789abcdef";
+    let mut rig = Rig::new();
+    rig.grant("app-list", ID);
+    grant_for(&rig.store, "app-policy", "github_app:policy-baseline", GrantOperation::PolicyToken);
+    rig.store.create("github_app:policy-baseline", &roster_oauth_record()).unwrap();
+    // A grant that predates the reservation must not expose the companion in either
+    // the grant list or the row set, even when it could otherwise resolve by exact id.
+    {
+        let conn = rusqlite::Connection::open(&rig.db_path).unwrap();
+        for caller in ["app-list", "app-policy"] {
+            conn.execute(
+                "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                 VALUES ('reserved', ?1, 'exact', ?2, 'read', 0)",
+                [caller, COMPANION],
+            ).unwrap();
+        }
+    }
+    rig.bind(1, reserved("app-list"));
+    rig.bind(2, reserved("app-policy"));
+    let policy = |rig: &Rig| {
+        let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(reserved("app-policy")));
+        rig.surface.list_scoped(&caller, &ListScopedParams { enrollment_token: None }).unwrap()
+    };
+    let policy_before = serde_json::to_value(policy(&rig)).unwrap();
+    assert_eq!(policy_before["credentials"].as_array().unwrap().len(), 1);
+    assert!(policy_before["credentials"][0].get("github_app").is_none());
+    let mut completed = rig.surface.watches.completed.subscribe();
+    let initial_count = *completed.borrow();
+    rig.open(1, 51, json!({})).await;
+    let before = rig.notice(1, 51, 1).await;
+    rig.open(2, 52, json!({})).await;
+    let policy_initial = rig.notice(2, 52, 1).await;
+    assert_eq!(policy_initial["view"], policy_before["view"]);
+    tokio::time::timeout(Duration::from_secs(3), completed.wait_for(|count| *count >= initial_count + 2))
+        .await.expect("both initial snapshots finish").unwrap();
+
+    rig.store.create_github_app_audited(GitHubAppCreation {
+        slug: "attested-vector",
+        app_id: 9007199254740993,
+        agent: AGENT,
+        pem: &"test-pem".to_owned().into(),
+        client_id: "test-client",
+        relay: Some(("test-slot", &"test-webhook-secret".to_owned().into())),
+    }, "test").unwrap();
+    let changed = rig.notice(1, 51, 2).await;
+    tokio::time::timeout(Duration::from_secs(3), completed.wait_for(|count| *count >= initial_count + 4))
+        .await.expect("both watches recompute after create").unwrap();
+    assert_ne!(before["view"], changed["view"]);
+    assert_eq!(before["keys"], changed["keys"]);
+    assert_eq!(serde_json::to_value(policy(&rig)).unwrap(), policy_before);
+    assert!(rig.rx.try_recv().is_err(), "PolicyToken-only watch changed at create");
+
+    rig.dispatch(1, 51, FrameType::Cancel, "", json!({})).await;
+    rig.dispatch(2, 52, FrameType::Cancel, "", json!({})).await;
+    const CREATED_AT: i64 = 1_700_000_000_000;
+    rusqlite::Connection::open(&rig.db_path).unwrap().execute(
+        "UPDATE credentials SET github_app_created_at_ms=?1 WHERE credential_id=?2",
+        rusqlite::params![CREATED_AT, ID],
+    ).unwrap();
+    let read_pinned_metadata = rig.surface.list_scoped(
+        &crate::federation::ingress::ScopedCaller::hand_only(Some(reserved("app-list"))),
+        &ListScopedParams { enrollment_token: None },
+    ).unwrap();
+    assert_eq!(read_pinned_metadata.credentials.len(), 1);
+    assert_eq!(read_pinned_metadata.credentials[0].id, ID);
+    assert_ne!(json!(read_pinned_metadata.view), changed["view"]);
+    rig.store.force_credential_incarnation_for_test(ID, "0123456789abcdef0123456789abcdef");
+    rig.dispatch(1, 53, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let listing = rig.next().await;
+    let golden = list_vector_case("github_app_attestation", OP_LIST_SCOPED, listing);
+    let result = &golden["reply"]["result"];
+    assert_eq!(result["credentials"].as_array().unwrap().len(), 1);
+    assert_eq!(result["credentials"][0]["id"], ID);
+    assert_eq!(result["grants"], 1);
+    assert_eq!(result["grant_tuples"][0]["selector"], ID);
+    assert_eq!(result["credentials"][0]["github_app"], json!({
+        "app_id": "9007199254740993", "slug": "attested-vector", "created_by": "vault",
+        "created_at_ms": CREATED_AT, "agent": AGENT,
+    }));
     golden
 }

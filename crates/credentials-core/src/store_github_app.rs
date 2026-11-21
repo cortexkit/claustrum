@@ -12,6 +12,55 @@ use crate::refresh_adapters::github_app::ADAPTER_NAME;
 use crate::secret::SecretString;
 
 pub(super) const AGENT_EXISTS: &str = "github_app_agent_exists: an App already holds this agent";
+const COMPANION_PREFIX: &str = "opaque:github-app-webhook:";
+
+pub fn is_github_app_companion_id(id: &str) -> bool {
+    id.starts_with(COMPANION_PREFIX)
+}
+
+pub fn check_github_app_companion_id(id: &str) -> Result<(), StoreOpError> {
+    if is_github_app_companion_id(id) {
+        return Err(StoreOpError::GitHubAppCompanionProtected);
+    }
+    Ok(())
+}
+
+/// The locally recorded App identity a read or list grant can disclose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedGitHubApp {
+    pub app_id: String,
+    pub slug: String,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<GitHubAppAttestation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "created_by")]
+pub enum GitHubAppAttestation {
+    #[serde(rename = "vault")]
+    Vault { created_at_ms: i64, agent: String },
+}
+
+/// Read this before clearing an App's attestation in the same transaction.
+/// A matching id alone is not evidence that a legacy record belongs to the App.
+pub(super) fn managed_github_app_companion(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> rusqlite::Result<Option<String>> {
+    let Some(slug) = id.strip_prefix("github_app:") else {
+        return Ok(None);
+    };
+    if super::read_schema_version(tx)? < super::POLICY_ROOT_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    let managed = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1 \
+                        AND github_app_created_at_ms IS NOT NULL AND github_app_relay_slot IS NOT NULL)",
+        [id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(managed.then(|| format!("{COMPANION_PREFIX}{slug}")))
+}
 
 pub(super) fn github_app_agent_exists_conn(
     conn: &Connection,
@@ -49,6 +98,25 @@ pub struct GitHubAppCreation<'a> {
 }
 
 impl EncryptedStore {
+    /// Model a row deposited before the webhook companion namespace was reserved.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn put_legacy_github_app_companion_for_tests(
+        &self,
+        id: &str,
+        record: &VaultRecord,
+    ) -> Result<(), StoreOpError> {
+        assert!(is_github_app_companion_id(id));
+        self.fenced_write_or_refuse(|tx| {
+            self.create_audited_in_tx(
+                tx,
+                id,
+                record,
+                crate::audit::AuditCtx::admin(AuditOp::Put),
+                now_ms(),
+            )
+        })
+    }
+
     /// Check all states, including invalidated Apps, before consuming a GitHub code.
     pub fn github_app_agent_exists(&self, agent: &str) -> Result<bool, StoreOpError> {
         Ok(self
@@ -81,7 +149,7 @@ impl EncryptedStore {
             ));
         }
         let id = format!("github_app:{slug}");
-        let companion_id = format!("opaque:github-app-webhook:{slug}");
+        let companion_id = format!("{COMPANION_PREFIX}{slug}");
         let oauth = OAuthCredential {
             access_token: String::new().into(),
             refresh_token: pem.clone(),
@@ -187,7 +255,7 @@ impl EncryptedStore {
     pub fn github_app_relay(&self, slug: &str) -> Result<GitHubAppRelay, GitHubAppRelayError> {
         use GitHubAppRelayError::{Inactive, NoRelay, NotFound, Store};
         let app = format!("github_app:{slug}");
-        let companion_id = format!("opaque:github-app-webhook:{slug}");
+        let companion_id = format!("{COMPANION_PREFIX}{slug}");
         let (state, app_incarnation, attested, slot, app_id) = self
             .store
             .with_conn(|conn| {
@@ -400,4 +468,107 @@ pub enum WebhookRotation {
     Stage(SecretString),
     ConfirmPut,
     Promote,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::refresh_adapters::github_app::GithubAppIdentity;
+    use crate::store::taxonomy_tests::rig;
+
+    #[test]
+    fn github_app_refresh_keeps_attested_identity_but_updates_hand_added_identity() {
+        let (_dir, store) = rig("github-app-refresh-identity", 212);
+        let id = "github_app:created-app";
+        let agent = "agent_0123456789abcdef";
+        let slot = "test-slot";
+        store
+            .create_github_app_audited(
+                GitHubAppCreation {
+                    slug: "created-app",
+                    app_id: 9007199254740993,
+                    agent,
+                    pem: &"test-pem".to_owned().into(),
+                    client_id: "test-client",
+                    relay: Some((slot, &"webhook-test-secret".to_owned().into())),
+                },
+                "test",
+            )
+            .unwrap();
+        let attestation = || {
+            store
+                .store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT github_app_id, github_app_slug, github_app_created_at_ms, \
+                                github_app_agent, github_app_relay_slot FROM credentials \
+                         WHERE credential_id = ?1",
+                        [id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                })
+                .unwrap()
+        };
+        let alleged_identity = GithubAppIdentity {
+            app_id: "17".into(),
+            slug: "other-app".into(),
+        };
+        let before = attestation();
+        assert_eq!(before.0, "9007199254740993");
+        assert_eq!(before.1, "created-app");
+        assert_eq!(before.3, agent);
+        assert_eq!(before.4, slot);
+
+        let refresh = |credential_id: &str, identity: Option<&GithubAppIdentity>| {
+            let mut record = store.get(credential_id).unwrap();
+            let version = record.record_version;
+            record.oauth.as_mut().unwrap().access_token = "new-test-token".to_owned().into();
+            assert_eq!(
+                store
+                    .commit_refresh(
+                        credential_id,
+                        version,
+                        &store.credential_incarnation(credential_id).unwrap(),
+                        &record,
+                        identity,
+                    )
+                    .unwrap(),
+                version + 1,
+            );
+        };
+        let different_id_only = GithubAppIdentity {
+            app_id: alleged_identity.app_id.clone(),
+            slug: "created-app".into(),
+        };
+        for identity in [None, Some(&different_id_only), Some(&alleged_identity)] {
+            refresh(id, identity);
+            assert_eq!(attestation(), before);
+        }
+        let hand_added = "github_app:hand-added";
+        store.create(hand_added, &store.get(id).unwrap()).unwrap();
+        let hand_added_report = GithubAppIdentity {
+            slug: "hand-added".into(),
+            ..alleged_identity
+        };
+        refresh(hand_added, Some(&hand_added_report));
+        let hand_added_identity = store
+            .store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT github_app_id, github_app_slug FROM credentials WHERE credential_id = ?1",
+                    [hand_added],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(hand_added_identity, ("17".into(), "hand-added".into()));
+    }
 }

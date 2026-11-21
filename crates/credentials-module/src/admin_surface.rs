@@ -734,6 +734,9 @@ impl AdminSurface {
                 op.schema_version()
             ));
         }
+        if let Err(error) = op.check_github_app_companion() {
+            return store_err(error);
+        }
         // Ops that await outbound calls never reach the synchronous `apply` path.
         if op.requires_daemon() {
             return match op {
@@ -1289,6 +1292,7 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             | StoreOpError::SecretRemoteSetupIncomplete { .. }
             | StoreOpError::SecretHomeNotEmpty { .. }
             | StoreOpError::PolicyRootProtected
+            | StoreOpError::GitHubAppCompanionProtected
             | StoreOpError::PolicyRootExists
             | StoreOpError::PolicyRootEstablished
             | StoreOpError::PolicyRootAbsent

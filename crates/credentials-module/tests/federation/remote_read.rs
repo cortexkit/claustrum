@@ -924,7 +924,10 @@ async fn remote_listing_omits_the_home_vaults_github_app_identity() {
             &credentials_core::store::DeclaredGrantSet::empty(),
         )
         .unwrap();
-    assert_eq!(local.rows[0].github_app.as_ref(), Some(&app));
+    let listed = local.rows[0].github_app.as_ref().unwrap();
+    assert_eq!(listed.app_id, app.app_id);
+    assert_eq!(listed.slug, app.slug);
+    assert!(listed.attestation.is_none());
     assert_eq!(rig.b_row(ID), before);
     assert_eq!(
         rig.fetches(),

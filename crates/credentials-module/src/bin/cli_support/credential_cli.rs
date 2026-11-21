@@ -105,6 +105,9 @@ pub(super) fn cmd_put(
     args: &[String],
     mut options: ParsedOptions,
 ) -> Result<(), CliError> {
+    if let Some(id) = options.optional("--id") {
+        credentials_core::store::check_github_app_companion_id(&id).map_err(CliError::Store)?;
+    }
     let gateway = put_gateway_settings(args, &options)?;
     let explicit_ids = if gateway.is_some() {
         provider_id_values(args)?
@@ -117,6 +120,7 @@ pub(super) fn cmd_put(
         return Ok(());
     }
     let id = options.required("--id")?;
+    credentials_core::store::check_github_app_companion_id(&id).map_err(CliError::Store)?;
     if let Some(settings) = &gateway {
         credentials_core::gateway::validate_gateway_settings(&id, settings, &explicit_ids)
             .map_err(CliError::Store)?;

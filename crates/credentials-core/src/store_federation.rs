@@ -1342,6 +1342,9 @@ impl EncryptedStore {
         let mut out = Vec::with_capacity(records.len());
         for record in records {
             let id = record.credential_id.as_str();
+            if is_github_app_companion_id(id) {
+                continue;
+            }
             let categories = {
                 let mut stmt = tx.prepare(
                     "SELECT category FROM remote_record_categories \
@@ -2416,6 +2419,7 @@ impl EncryptedStore {
         if is_policy_root_id(id) {
             return Err(StoreOpError::PolicyRootProtected);
         }
+        check_github_app_companion_id(id)?;
         if !transferable_record(&acceptance.record) {
             return Err(StoreOpError::Encode(
                 "a transfer creates only an api_key, dsn, cookie or opaque record".into(),

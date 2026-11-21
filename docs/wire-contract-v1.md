@@ -5636,9 +5636,10 @@ examples; a running daemon chooses its own epoch.
 
 ### Policy-narrowed GitHub token
 
-`credential.policy_token` is a Query, not a watch. It takes exactly
-`{identity, service, kind, resource, policy_version}`. The version is an integer;
-the other members are strings. `identity` is a credential ID, not a handle.
+`credential.policy_token` is a Query, not a watch. It takes a closed object
+`{identity, service, kind, resource, policy_version, approval_request_id?, request_sha256?}`.
+The version is an integer; the other members are strings. `identity` is a
+credential ID, not a handle.
 `kind` names one request kind, not an action. Only `reserved:plexus` and
 `reserved:aft` may call it. It serves on Single and Home vaults only and is never
 relayed. Other callers and non-serving vaults receive `not_found`/`permanent`.
@@ -5648,14 +5649,29 @@ Before using the cache or making any GitHub request, the vault checks, in order:
 1. The attested caller has a persisted exact `policy_token` grant on `identity`.
    A `read` grant does not suffice, and `policy_token` does not grant `read`.
 2. `service` is `github`.
-3. `policy_version` equals the active version from `policy.active`.
-4. The active policy has a binding for that service and identity.
-5. The rule set contains `kind`, with identity `agent`, a credential, and a
+3. If either approval member is present, both must be present: the 26-character
+   uppercase request ID (ULID) returned by `policy.request_action` and the leg's
+   digest of 64 lowercase hexadecimal digits. A missing partner or a malformed
+   value, including explicit `null`, gets transport `invalid_params`. If the supplied
+   version is active and that kind exists there with approval other than `once`,
+   the pair gets `invalid_params` without looking up the approval.
+4. With the pair, the request must exist, be approved and unexpired, and belong
+   to the minting module. Its policy version must still be active. Its identity
+   and the next unissued leg's kind, resource and digest must match the call.
+   No daemon scope `stamp` is sent on this call. The vault checked the agent
+   when minting the approval request and binds the issue to the minting module
+   and identity under the same policy.
+5. `policy_version` equals the active version from `policy.active`.
+6. The active policy has a binding for that service and identity.
+7. The rule set contains `kind`, with identity `agent`, a credential, and a
    class other than `denied`.
-6. `resource` exactly matches a canonical lowercase repository in the binding.
+8. `resource` exactly matches a canonical lowercase repository in the binding.
    Only `node_repository` may instead use `"binding"` to name the entire binding,
    which must contain at most 500 repositories.
-7. The local App credential exists and is active. A remote copy does not count.
+9. The local App credential exists and is active, and any attested agent matches
+   the binding. A remote copy does not count.
+10. If the kind requires `approval: once` and neither member was supplied, the
+    vault returns `approval_required`.
 
 Success is `{token, expires_at_ms, repositories, permissions}`. `token` is a
 GitHub installation bearer token, `expires_at_ms` is a Unix timestamp in
@@ -5672,8 +5688,11 @@ deleted and re-created credential with the same id is a different one), record
 version, sealed-record digest, repository set and permissions can share one mint
 and can reuse the result until five minutes before expiry.
 Before handing out any token, the vault rechecks its role, the accepted caller's
-exact grant, the active policy version, the credential row and token expiry, and
-commits the caller's scoped first-use event in that same transaction. That write
+exact grant, any approval for the prepared leg, the active policy version, the
+credential row and token expiry. It commits the caller's scoped first-use event
+in that same transaction. For an approved leg it also advances the issue count
+and appends one `broker_action_issue` audit row with the leg digest. Cached
+tokens go through the same checks. No refusal spends a leg. The write
 fails if this vault process no longer holds the store's single-writer lock (the
 lease that keeps the daemon and an offline `ck auth` from writing at once).
 If the active row was replaced or changed during mint, the vault retries with
@@ -5682,6 +5701,9 @@ the new row once; an unusable row or a failed authorization is not retried.
 | Class | Code | Meaning |
 |---|---|---|
 | `permanent` | `not_found` | Caller, role, grant, service, binding, kind, or resource refused |
+| `permanent` | `approval_required` | An otherwise eligible local request names a `once` kind but carries no approval; file an approval card |
+| `permanent` | `approval_invalid` | No live approved request matches this caller, identity, and next leg; an expired or spent approval cannot be reused |
+| `permanent` | `approval_policy_changed` | The approval's policy is no longer active; file a new card under the active policy |
 | `permanent` | `policy_version_not_active` | No policy is active, or the supplied version is not active |
 | `permanent` | `not_installed` | No local App credential |
 | `auth_required` | `needs_reauth` | Credential needs reauthentication or is retired |
@@ -5692,7 +5714,7 @@ the new row once; an unusable row or a failed authorization is not retried.
 | `permanent` | `policy_token_scope_unavailable` | Selected set exceeds the binding limit, or GitHub cannot issue the requested scope |
 | `permanent` | `policy_token_scope_mismatch` | The GitHub reply does not confirm the exact scope |
 | `transient` | `github_unavailable` | GitHub is unavailable, the reply is unusable or expired, or the row changed again |
-| `transient` | `store_error` | A store check or first-use commit failed |
+| `transient` | `store_error` | A store check or release commit failed |
 
 No refusal returns a token or a provider response body. An unreadable credential
 is not quarantined by this method, and mint failures do not change its state.

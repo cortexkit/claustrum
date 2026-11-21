@@ -574,6 +574,378 @@ fn phone_approval_params(bytes: &[u8], key: &SigningKey) -> Value {
         "signature_b64url":BASE64_URL_SAFE_NO_PAD.encode(sign(key, bytes))})
 }
 
+fn token_gate_clock(rig: &Rig) -> Arc<AtomicI64> {
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let now = Arc::clone(&clock);
+    *rig.surface.policy_tokens.clock.lock().unwrap() =
+        Some(Arc::new(move || now.load(Ordering::SeqCst)));
+    clock
+}
+
+fn approve_for_issue(rig: &Rig, request: &BrokerActionRequestReply) {
+    let key = SigningKey::from_slice(&[51; 32]).unwrap();
+    register_approver(rig, &key);
+    let bytes = serde_json::to_vec(&envelope(request, APPROVING_PHONE, NOW)).unwrap();
+    let signature = sign(&key, &bytes);
+    assert_eq!(
+        rig.store
+            .secret_phone_operation(
+                APPROVING_PHONE,
+                Some("pair-A"),
+                NOW,
+                &PhoneOperation::BrokerActionApprove {
+                    envelope: bytes,
+                    signature
+                },
+                || true,
+                || NOW,
+            )
+            .unwrap(),
+        approval_reply(request),
+    );
+}
+
+fn issue_params(request: &BrokerActionRequestReply) -> Value {
+    let mut body = params();
+    body["approval_request_id"] = json!(request.request_id);
+    body["request_sha256"] = json!("1".repeat(64));
+    body
+}
+
+fn issued_legs(rig: &Rig, request: &BrokerActionRequestReply) -> i64 {
+    Connection::open(&rig.path)
+        .unwrap()
+        .query_row(
+            "SELECT issued_legs FROM broker_action_requests WHERE request_id = ?1",
+            [&request.request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+async fn invalid_issue_params(rig: &mut Rig, params: Value) {
+    rig.request(caller("aft"), OP_POLICY_TOKEN, params, 1, 1)
+        .await;
+    let response = frame(rig).await;
+    assert_eq!(response.header.ty, FrameType::Error);
+    assert_eq!(body(&response)["code"], "invalid_params");
+}
+
+#[tokio::test]
+async fn broker_action_token_shape_and_no_approval_precedence() {
+    let (mut rig, github, _) = setup_actions();
+    let request = mint_at(&rig, NOW).unwrap();
+    let valid = issue_params(&request);
+    let before = approval_snapshot(&rig);
+    for malformed in [
+        without(valid.clone(), "approval_request_id"),
+        without(valid.clone(), "request_sha256"),
+        changed(valid.clone(), "approval_request_id", json!("not-a-ulid")),
+        changed(valid.clone(), "approval_request_id", json!(123)),
+        changed(valid.clone(), "approval_request_id", Value::Null),
+        changed(valid.clone(), "request_sha256", json!("a".repeat(63))),
+        changed(valid.clone(), "request_sha256", json!("A".repeat(64))),
+        changed(valid.clone(), "request_sha256", Value::Null),
+        changed(params(), "request_sha256", Value::Null),
+    ] {
+        invalid_issue_params(&mut rig, malformed).await;
+    }
+    let malformed = changed(valid.clone(), "request_sha256", Value::Null);
+    let not_found = refusal("not_found", "permanent");
+    assert_eq!(
+        rig.call("plexus", OP_POLICY_TOKEN, malformed.clone()).await,
+        not_found
+    );
+    assert_eq!(
+        rig.call(
+            "aft",
+            OP_POLICY_TOKEN,
+            changed(malformed, "service", json!("other"))
+        )
+        .await,
+        not_found
+    );
+    assert_eq!(
+        rig.call(
+            "aft",
+            OP_POLICY_TOKEN,
+            changed(params(), "resource", json!("org/unbound"))
+        )
+        .await,
+        not_found
+    );
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("approval_required", "permanent")
+    );
+    // Even an unavailable approval table must not affect an active non-once kind.
+    rig.sql("ALTER TABLE broker_action_requests RENAME TO unavailable_approvals");
+    invalid_issue_params(
+        &mut rig,
+        changed(valid, "kind", json!("update_issue_comment")),
+    )
+    .await;
+    rig.sql("ALTER TABLE unavailable_approvals RENAME TO broker_action_requests");
+    assert_eq!(approval_snapshot(&rig), before);
+    github.counts(0, 0);
+}
+
+#[tokio::test]
+async fn broker_action_token_releases_only_the_next_approved_leg_and_audits_it() {
+    let (mut rig, github, _) = setup_actions();
+    let clock = token_gate_clock(&rig);
+    grant(&rig, "plexus", APP, GrantOperation::PolicyToken);
+    grant(&rig, "aft", "github_app:other", GrantOperation::PolicyToken);
+    let request = rig
+        .store
+        .request_broker_action(Some("aft"), template(&one()), request_scope, || NOW)
+        .unwrap();
+    let first = issue_params(&request);
+    let mut second = first.clone();
+    second["request_sha256"] = json!("2".repeat(64));
+    second["kind"] = json!(CLOSE);
+    second["resource"] = json!("org/s");
+    let invalid = refusal("approval_invalid", "permanent");
+    let before = approval_snapshot(&rig);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, first.clone()).await,
+        invalid
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+    approve_for_issue(&rig, &request);
+
+    let before = approval_snapshot(&rig);
+    for (caller, bad) in [
+        ("aft", second.clone()),
+        (
+            "aft",
+            changed(first.clone(), "request_sha256", json!("3".repeat(64))),
+        ),
+        (
+            "aft",
+            changed(first.clone(), "identity", json!("github_app:other")),
+        ),
+        ("plexus", first.clone()),
+    ] {
+        assert_eq!(rig.call(caller, OP_POLICY_TOKEN, bad).await, invalid);
+        assert_eq!(approval_snapshot(&rig), before);
+    }
+    github.counts(0, 0);
+    clock.store(NOW + TTL - 1, Ordering::SeqCst);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, first.clone()).await["token"],
+        "fixture-token-1"
+    );
+    assert_eq!(issued_legs(&rig, &request), 1);
+    let before = approval_snapshot(&rig);
+    assert_eq!(rig.call("aft", OP_POLICY_TOKEN, first).await, invalid);
+    assert_eq!(approval_snapshot(&rig), before);
+
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, second.clone()).await["token"],
+        "fixture-token-2"
+    );
+    assert_eq!(issued_legs(&rig, &request), 2);
+    let before = approval_snapshot(&rig);
+    assert_eq!(rig.call("aft", OP_POLICY_TOKEN, second).await, invalid);
+    assert_eq!(approval_snapshot(&rig), before);
+    github.counts(2, 2);
+    assert_eq!(first_uses(&rig), ["aft"]);
+    let digest_order: Vec<_> = rig
+        .store
+        .read_audit(None)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.op != "broker_action_issue" {
+                return None;
+            }
+            assert_eq!(entry.credential_id.as_deref(), Some(APP));
+            assert_eq!(entry.actor, "reserved:aft");
+            assert!(!entry.alarm);
+            assert_eq!(entry.alarm_reason, None);
+            Some(entry.payload_hash.unwrap())
+        })
+        .collect();
+    assert_eq!(digest_order, ["1".repeat(64), "2".repeat(64)]);
+}
+
+#[tokio::test]
+async fn broker_action_token_two_prepared_calls_cannot_spend_the_same_leg() {
+    let (mut rig, github, _) = setup_actions();
+    token_gate_clock(&rig);
+    let mut action = template(&one());
+    action["legs"][1] = action["legs"][0].clone();
+    action["fields"].as_array_mut().unwrap().remove(0);
+    let approval = rig
+        .store
+        .request_broker_action(Some("aft"), action, request_scope, || NOW)
+        .unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params.clone(), 1, 10))
+        .await;
+    signal(posted).await;
+    let (joined, waiting) = oneshot::channel();
+    *rig.surface.policy_tokens.joined.lock().unwrap() = Some(joined);
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params, 1, 11))
+        .await;
+    signal(waiting).await;
+    assert_eq!(issued_legs(&rig, &approval), 0);
+    release.send(()).unwrap();
+
+    let first = frame(&mut rig).await;
+    let second = frame(&mut rig).await;
+    let mut correlations = [first.header.corr, second.header.corr];
+    correlations.sort_unstable();
+    assert_eq!(correlations, [10, 11]);
+    let mut results = [
+        body(&first)["result"].clone(),
+        body(&second)["result"].clone(),
+    ];
+    results.sort_by_key(|reply| reply.get("token").is_some());
+    assert_eq!(results[0], refusal("approval_invalid", "permanent"));
+    assert_eq!(results[1]["token"], "fixture-token-1");
+    assert_eq!(issued_legs(&rig, &approval), 1);
+    github.counts(1, 1);
+}
+
+fn activate_policy_without_approval(rig: &Rig) {
+    let active = rig.store.active_agent_policy().unwrap().1.unwrap();
+    let mut policy = AgentPolicy::parse_canonical(active.policy_text.as_bytes()).unwrap();
+    policy.version = 2;
+    policy
+        .rule_sets
+        .insert("github".into(), github_default_rule_set().unwrap());
+    let bytes = policy.canonical_bytes().unwrap();
+    let digest = manifest_with_bindings(rig, 42, json!({"org/r":"agent", "org/s":"agent"}));
+    Connection::open(&rig.path).unwrap().execute(
+        "INSERT INTO agent_policies (version, policy_bytes, policy_sha256, key_id, signature, signed_at_ms, source, approval_seq, manifest_version)
+         SELECT 2, ?1, ?2, key_id, signature, signed_at_ms, source, approval_seq, 42 FROM agent_policies WHERE version = 1",
+        rusqlite::params![bytes, policy_sha256(&bytes)],
+    ).unwrap();
+    ready(rig, SELF, 42, &digest);
+}
+
+#[tokio::test]
+async fn broker_action_token_policy_change_precedes_version_refusal_in_prepare_and_handoff() {
+    let (mut rig, github, _) = setup_actions();
+    token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params.clone(), 1, 10))
+        .await;
+    signal(posted).await;
+    activate_policy_without_approval(&rig);
+    let before = approval_snapshot(&rig);
+    release.send(()).unwrap();
+    let expected = refusal("approval_policy_changed", "permanent");
+    assert_eq!(reply(&mut rig, 10).await, expected);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params.clone()).await,
+        expected
+    );
+    invalid_issue_params(&mut rig, changed(params, "policy_version", json!(2))).await;
+    assert_eq!(approval_snapshot(&rig), before);
+    github.counts(1, 1);
+}
+
+#[tokio::test]
+async fn broker_action_token_expiry_at_handoff_and_prepare_writes_nothing() {
+    let (mut rig, github, _) = setup_actions();
+    let clock = token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params.clone(), 1, 10))
+        .await;
+    signal(posted).await;
+    clock.store(approval.expires_at_ms as i64, Ordering::SeqCst);
+    let before = approval_snapshot(&rig);
+    release.send(()).unwrap();
+    let invalid = refusal("approval_invalid", "permanent");
+    assert_eq!(reply(&mut rig, 10).await, invalid);
+    assert_eq!(rig.call("aft", OP_POLICY_TOKEN, params).await, invalid);
+    assert_eq!(approval_snapshot(&rig), before);
+    github.counts(1, 1);
+}
+
+#[tokio::test]
+async fn broker_action_token_record_change_and_provider_failure_leave_the_leg_unspent() {
+    let (mut rig, github, _) = setup_actions();
+    token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    let (retry_posted, retry_release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params.clone(), 1, 10))
+        .await;
+    signal(posted).await;
+    replace_record(&rig, false);
+    let before = approval_snapshot(&rig);
+    release.send(()).unwrap();
+    signal(retry_posted).await;
+    assert_eq!(approval_snapshot(&rig), before);
+    github
+        .exchange_faults
+        .lock()
+        .unwrap()
+        .push_back((403, json!({"message":"provider refusal"})));
+    retry_release.send(()).unwrap();
+    assert_eq!(
+        reply(&mut rig, 10).await,
+        refusal("github_unavailable", "transient")
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params).await["token"],
+        "fixture-token-3"
+    );
+    assert_eq!(issued_legs(&rig, &approval), 1);
+    github.counts(3, 3);
+}
+
+#[tokio::test]
+async fn broker_action_token_failed_issue_audit_rolls_back_the_release() {
+    let (mut rig, github, _) = setup_actions();
+    token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    rig.sql("CREATE TRIGGER fail_issue_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'broker_action_issue' BEGIN SELECT RAISE(ABORT, 'test issue write failure'); END");
+    let before = approval_snapshot(&rig);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params.clone()).await,
+        refusal("store_error", "transient")
+    );
+    assert_eq!(approval_snapshot(&rig), before);
+    rig.sql("DROP TRIGGER fail_issue_audit");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params).await["token"],
+        "fixture-token-2"
+    );
+    assert_eq!(issued_legs(&rig, &approval), 1);
+    github.counts(2, 2);
+}
+
 #[tokio::test]
 async fn broker_action_phone_checks_registered_key_and_binding_and_records_only_once() {
     let (rig, _, _) = setup_actions();

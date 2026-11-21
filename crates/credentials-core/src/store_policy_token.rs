@@ -3,19 +3,23 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
 use crate::{
-    agent_policy::{AgentPolicy, Class, Identity},
+    agent_policy::{AgentPolicy, Approval, Class, Identity},
+    audit::{AuditOp, AuditRecord},
+    broker_action::{valid_ulid, BrokerActionLeg},
     envelope::{self, EnvelopeError, RecordBinding},
+    federation::is_lower_hex_sha256,
     oauth::OAuthCredential,
     record::{CredentialKind, RecordState, VaultRecord},
 };
 
 use super::{
-    agent_policy::active_agent_policy_version_conn, audit_store::record_scoped_first_use_tx,
-    sha256_hex_of_bytes, store_agent_secrets::secret_home_role_conn, EncryptedStore,
-    GrantOperation, SecretHomeRole,
+    agent_policy::active_agent_policy_version_conn, append_audit_tx,
+    audit_store::record_scoped_first_use_tx, sha256_hex_of_bytes,
+    store_agent_secrets::secret_home_role_conn, EncryptedStore, GrantOperation, SecretHomeRole,
 };
 
 const MAX_POLICY_TOKEN_REPOSITORIES: usize = 500;
@@ -28,6 +32,37 @@ pub struct PolicyTokenRequest {
     pub kind: String,
     pub resource: String,
     pub policy_version: i64,
+    #[serde(default, deserialize_with = "present_value")]
+    pub approval_request_id: Option<Value>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub request_sha256: Option<Value>,
+}
+
+fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    // Preserve explicit null and other malformed values until after grant and service checks.
+    Value::deserialize(deserializer).map(Some)
+}
+
+struct ApprovalProof<'a> {
+    request_id: &'a str,
+    request_sha256: &'a str,
+}
+
+impl PolicyTokenRequest {
+    fn approval_proof(&self) -> Result<Option<ApprovalProof<'_>>, PolicyTokenError> {
+        match (&self.approval_request_id, &self.request_sha256) {
+            (None, None) => Ok(None),
+            (Some(Value::String(request_id)), Some(Value::String(request_sha256)))
+                if valid_ulid(request_id) && is_lower_hex_sha256(request_sha256) =>
+            {
+                Ok(Some(ApprovalProof {
+                    request_id,
+                    request_sha256,
+                }))
+            }
+            _ => Err(PolicyTokenError::InvalidParams),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +71,9 @@ pub enum PolicyTokenError {
     StoreError,
     InvalidParams,
     VersionNotActive,
+    ApprovalRequired,
+    ApprovalInvalid,
+    ApprovalPolicyChanged,
     ScopeUnavailable,
     NotInstalled,
     NeedsReauth,
@@ -63,6 +101,7 @@ pub struct PolicyTokenPlan {
     pub record: PolicyTokenRecord,
     pub repositories: Vec<String>,
     pub permissions: BTreeMap<String, String>,
+    pub approval_leg: Option<i64>,
 }
 
 pub enum PolicyTokenHandoff {
@@ -77,11 +116,12 @@ impl EncryptedStore {
         &self,
         module_id: &str,
         request: Option<&PolicyTokenRequest>,
+        clock: impl FnOnce() -> i64,
     ) -> Result<PolicyTokenPlan, PolicyTokenError> {
         self.store
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                let result = prepare(&tx, module_id, request)?;
+                let result = prepare(&tx, module_id, request, clock)?;
                 tx.commit()?;
                 Ok(result)
             })
@@ -127,21 +167,38 @@ impl EncryptedStore {
         request: &PolicyTokenRequest,
         key: &PolicyTokenRecordKey,
         expires_at_ms: i64,
-        clock: impl FnOnce() -> i64,
+        approval_leg: Option<i64>,
+        clock: impl Fn() -> i64,
     ) -> Result<PolicyTokenHandoff, PolicyTokenError> {
-        self.handoff_policy_token_with_probe(module_id, request, (key, expires_at_ms), clock, || {})
+        self.handoff_policy_token_with_probe(
+            module_id,
+            request,
+            (key, expires_at_ms, approval_leg),
+            clock,
+            || {},
+        )
     }
 
     pub(super) fn handoff_policy_token_with_probe(
         &self,
         module_id: &str,
         request: &PolicyTokenRequest,
-        candidate: (&PolicyTokenRecordKey, i64),
-        clock: impl FnOnce() -> i64,
+        candidate: (&PolicyTokenRecordKey, i64, Option<i64>),
+        clock: impl Fn() -> i64,
         after_grant: impl FnOnce(),
     ) -> Result<PolicyTokenHandoff, PolicyTokenError> {
-        self.fenced_write(|tx| handoff(tx, module_id, request, candidate, clock, after_grant))
-            .map_err(|_| PolicyTokenError::StoreError)?
+        self.fenced_write(|tx| {
+            handoff(
+                tx,
+                &self.audit_key,
+                module_id,
+                request,
+                candidate,
+                clock,
+                after_grant,
+            )
+        })
+        .map_err(|_| PolicyTokenError::StoreError)?
     }
 }
 
@@ -154,14 +211,16 @@ fn policy_token_binding_accepts_500_and_refuses_501() {
         kind: "node_repository".into(),
         resource: "binding".into(),
         policy_version: 1,
+        approval_request_id: None,
+        request_sha256: None,
     };
     let resources: Vec<_> = (0..501).map(|i| format!("org/r{i:03}")).collect();
     assert_eq!(
-        select_repositories(&request, resources[..500].to_vec()).unwrap(),
+        select_repositories(&request, &resources[..500]).unwrap(),
         resources[..500]
     );
     assert_eq!(
-        select_repositories(&request, resources),
+        select_repositories(&request, &resources),
         Err(PolicyTokenError::ScopeUnavailable)
     );
 }
@@ -194,6 +253,7 @@ fn prepare(
     conn: &Connection,
     module_id: &str,
     request: Option<&PolicyTokenRequest>,
+    clock: impl FnOnce() -> i64,
 ) -> rusqlite::Result<Result<PolicyTokenPlan, PolicyTokenError>> {
     use PolicyTokenError as Error;
     if let Err(error) = serving_role(conn) {
@@ -205,29 +265,55 @@ fn prepare(
     if !has_exact_grant(conn, module_id, &request.identity)? || request.service != "github" {
         return Ok(Err(Error::NotFound));
     }
-    if active_agent_policy_version_conn(conn)? != Some(request.policy_version) {
+    let proof = match request.approval_proof() {
+        Ok(proof) => proof,
+        Err(error) => return Ok(Err(error)),
+    };
+    let active_version = active_agent_policy_version_conn(conn)?;
+    let policy = if active_version == Some(request.policy_version) {
+        let Some(policy) = read_policy(conn, request.policy_version)? else {
+            return Ok(Err(Error::StoreError));
+        };
+        Some(policy)
+    } else {
+        None
+    };
+    let kind = policy.as_ref().and_then(|policy| {
+        policy
+            .rule_sets
+            .get(&request.service)?
+            .kinds
+            .iter()
+            .find(|kind| kind.kind == request.kind)
+    });
+    let approval_leg = if let Some(proof) = proof {
+        if kind.is_some_and(|kind| kind.approval != Approval::Once) {
+            return Ok(Err(Error::InvalidParams));
+        }
+        match check_approval(conn, module_id, request, &proof, active_version, clock())? {
+            Ok(leg) => Some(leg),
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        None
+    };
+    let Some(policy) = policy.as_ref() else {
         return Ok(Err(Error::VersionNotActive));
-    }
-    let Some(policy) = read_policy(conn, request.policy_version)? else {
-        return Ok(Err(Error::StoreError));
     };
     let Some(binding) = policy
         .bindings
-        .into_iter()
+        .iter()
         .find(|binding| binding.service == request.service && binding.identity == request.identity)
     else {
         return Ok(Err(Error::NotFound));
     };
-    let Some(credential) = policy
-        .rule_sets
-        .get(&request.service)
-        .and_then(|rules| rules.kinds.iter().find(|kind| kind.kind == request.kind))
+    let Some((kind, credential)) = kind
         .filter(|kind| kind.class != Class::Denied && kind.identity == Identity::Agent)
-        .and_then(|kind| kind.credential.as_ref())
+        .and_then(|kind| Some((kind, kind.credential.as_ref()?)))
     else {
         return Ok(Err(Error::NotFound));
     };
-    let repositories = match select_repositories(request, binding.resources) {
+    let repositories = match select_repositories(request, &binding.resources) {
         Ok(repositories) => repositories,
         Err(error) => return Ok(Err(error)),
     };
@@ -242,10 +328,14 @@ fn prepare(
     {
         return Ok(Err(Error::NotFound));
     }
+    if kind.approval == Approval::Once && approval_leg.is_none() {
+        return Ok(Err(Error::ApprovalRequired));
+    }
     Ok(Ok(PolicyTokenPlan {
         record,
         repositories,
         permissions: credential.github_permissions.clone(),
+        approval_leg,
     }))
 }
 
@@ -260,14 +350,14 @@ fn read_policy(conn: &Connection, version: i64) -> rusqlite::Result<Option<Agent
 
 fn select_repositories(
     request: &PolicyTokenRequest,
-    resources: Vec<String>,
+    resources: &[String],
 ) -> Result<Vec<String>, PolicyTokenError> {
     if request.resource == "binding" && request.kind == "node_repository" {
         if resources.len() > MAX_POLICY_TOKEN_REPOSITORIES {
             return Err(PolicyTokenError::ScopeUnavailable);
         }
         // The canonical policy already orders the binding's repositories.
-        Ok(resources)
+        Ok(resources.to_vec())
     } else if resources.binary_search(&request.resource).is_ok() {
         Ok(vec![request.resource.clone()])
     } else {
@@ -306,12 +396,62 @@ fn read_record(
     Ok(result)
 }
 
-fn handoff(
-    tx: &rusqlite::Transaction<'_>,
+fn check_approval(
+    conn: &Connection,
     module_id: &str,
     request: &PolicyTokenRequest,
-    (key, expires_at_ms): (&PolicyTokenRecordKey, i64),
-    clock: impl FnOnce() -> i64,
+    proof: &ApprovalProof<'_>,
+    active_version: Option<i64>,
+    now: i64,
+) -> rusqlite::Result<Result<i64, PolicyTokenError>> {
+    use PolicyTokenError as Error;
+    let actor = format!("reserved:{module_id}");
+    let row = conn
+        .query_row(
+            "SELECT policy_version, identity, legs_json, issued_legs
+             FROM broker_action_requests
+             WHERE request_id = ?1 AND approved_at_ms IS NOT NULL
+               AND expires_at_ms > ?2 AND principal = ?3",
+            params![proof.request_id, now, actor],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((version, identity, legs, issued_legs)) = row else {
+        return Ok(Err(Error::ApprovalInvalid));
+    };
+    if active_version != Some(version) {
+        return Ok(Err(Error::ApprovalPolicyChanged));
+    }
+    let matches_leg = serde_json::from_str::<Vec<BrokerActionLeg>>(&legs)
+        .ok()
+        .zip(usize::try_from(issued_legs).ok())
+        .is_some_and(|(legs, index)| {
+            legs.get(index).is_some_and(|leg| {
+                leg.kind == request.kind
+                    && leg.resource == request.resource
+                    && leg.request_sha256 == proof.request_sha256
+            })
+        });
+    if identity != request.identity || !matches_leg {
+        return Ok(Err(Error::ApprovalInvalid));
+    }
+    Ok(Ok(issued_legs))
+}
+
+fn handoff(
+    tx: &rusqlite::Transaction<'_>,
+    audit_key: &[u8; 32],
+    module_id: &str,
+    request: &PolicyTokenRequest,
+    (key, expires_at_ms, prepared_leg): (&PolicyTokenRecordKey, i64, Option<i64>),
+    clock: impl Fn() -> i64,
     after_grant: impl FnOnce(),
 ) -> rusqlite::Result<Result<PolicyTokenHandoff, PolicyTokenError>> {
     use PolicyTokenError as Error;
@@ -322,7 +462,20 @@ fn handoff(
         return Ok(Err(Error::NotFound));
     }
     after_grant();
-    if active_agent_policy_version_conn(tx)? != Some(request.policy_version) {
+    let active_version = active_agent_policy_version_conn(tx)?;
+    let proof = match request.approval_proof() {
+        Ok(proof) => proof,
+        Err(error) => return Ok(Err(error)),
+    };
+    if let Some(proof) = &proof {
+        match check_approval(tx, module_id, request, proof, active_version, clock())? {
+            // A second waiter cannot spend the next leg just because it has identical facts.
+            Ok(leg) if Some(leg) == prepared_leg => {}
+            Ok(_) => return Ok(Err(Error::ApprovalInvalid)),
+            Err(error) => return Ok(Err(error)),
+        }
+    }
+    if active_version != Some(request.policy_version) {
         return Ok(Err(Error::VersionNotActive));
     }
     let record = match read_record(tx, &request.identity)? {
@@ -349,6 +502,27 @@ fn handoff(
     }
     if !same_record {
         return Ok(Ok(PolicyTokenHandoff::RecordChanged(record)));
+    }
+    if let (Some(proof), Some(leg)) = (proof, prepared_leg) {
+        let advanced = tx.execute(
+            "UPDATE broker_action_requests SET issued_legs = issued_legs + 1
+             WHERE request_id = ?1 AND issued_legs = ?2",
+            params![proof.request_id, leg],
+        )?;
+        if advanced != 1 {
+            return Ok(Err(Error::ApprovalInvalid));
+        }
+        append_audit_tx(
+            tx,
+            audit_key,
+            &AuditRecord {
+                op: AuditOp::BrokerActionIssue,
+                credential_id: Some(request.identity.clone()),
+                payload_hash: Some(proof.request_sha256.to_owned()),
+                actor: format!("reserved:{module_id}"),
+                alarm: None,
+            },
+        )?;
     }
     record_scoped_first_use_tx(
         tx,

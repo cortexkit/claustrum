@@ -93,6 +93,9 @@ impl From<PolicyTokenError> for Refusal {
             // Only prepare can produce this; its caller sends a transport error.
             InvalidParams => Self::permanent("invalid_params"),
             VersionNotActive => Self::permanent("policy_version_not_active"),
+            ApprovalRequired => Self::permanent("approval_required"),
+            ApprovalInvalid => Self::permanent("approval_invalid"),
+            ApprovalPolicyChanged => Self::permanent("approval_policy_changed"),
             ScopeUnavailable => Self::permanent("policy_token_scope_unavailable"),
             NotInstalled => Self::permanent("not_installed"),
             NeedsReauth => Self::read("needs_reauth", ReadError::NeedsReauth),
@@ -256,6 +259,7 @@ impl PolicyTokens {
             mut record,
             repositories,
             permissions,
+            approval_leg,
         } = plan;
         for retry in [false, true] {
             let key = Arc::new(Key {
@@ -280,6 +284,7 @@ impl PolicyTokens {
                         &request,
                         &key.record,
                         expires_at_ms,
+                        approval_leg,
                         || cache.now(),
                     )
                 })
@@ -325,12 +330,13 @@ pub(crate) async fn serve(
     let prepared = {
         let store = Arc::clone(store);
         let module_id = Arc::clone(&module_id);
+        let cache = Arc::clone(cache);
         tokio::task::spawn_blocking(move || {
             let request = params
                 .is_object()
                 .then(|| serde_json::from_value(params).ok())
                 .flatten();
-            let plan = store.prepare_policy_token(&module_id, request.as_ref())?;
+            let plan = store.prepare_policy_token(&module_id, request.as_ref(), || cache.now())?;
             Ok((request.ok_or(PolicyTokenError::InvalidParams)?, plan))
         })
         .await

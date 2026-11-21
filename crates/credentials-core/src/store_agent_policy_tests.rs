@@ -1060,14 +1060,18 @@ fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
         kind: "add_issue_comment".into(),
         resource: "org/r".into(),
         policy_version: 1,
+        approval_request_id: None,
+        request_sha256: None,
     };
-    let plan = store.prepare_policy_token("aft", Some(&request)).unwrap();
+    let plan = store
+        .prepare_policy_token("aft", Some(&request), || 1)
+        .unwrap();
     writer.execute("UPDATE gh_manifest_activations SET verdict = 'invalid', reason = 'fixture' WHERE member_id = ?1", [member]).unwrap();
 
     let response = store.handoff_policy_token_with_probe(
         "aft",
         &request,
-        (&plan.record.key, 100),
+        (&plan.record.key, 100, plan.approval_leg),
         || 1,
         || {
             // A competing writer would revoke the grant and reactivate the policy.
@@ -1094,7 +1098,14 @@ fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
     .unwrap();
     tx.commit().unwrap();
     assert!(matches!(
-        store.handoff_policy_token("aft", &request, &plan.record.key, 100, || 1),
+        store.handoff_policy_token(
+            "aft",
+            &request,
+            &plan.record.key,
+            100,
+            plan.approval_leg,
+            || 1
+        ),
         Err(PolicyTokenError::NotFound)
     ));
     let releases: i64 = writer.query_row("SELECT count(*) FROM auth_events WHERE kind = 'scoped_first_use' AND detail = 'policy_token'", [], |r| r.get(0)).unwrap();

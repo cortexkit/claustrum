@@ -374,7 +374,12 @@ async fn policy_token_routes_hide_role_failures_and_never_relay() {
 async fn policy_token_returns_exact_scope_and_a_cache_hit_still_needs_a_grant() {
     let (mut rig, github, _) = setup();
     let expected_permissions = json!({"issues":"write", "pull_requests":"write"});
-    let first = rig.call("aft", OP_POLICY_TOKEN, params()).await;
+    rig.request(caller("aft"), OP_POLICY_TOKEN, params(), 1, 1)
+        .await;
+    let response = frame(&mut rig).await;
+    assert_eq!(response.header.ty, FrameType::Response);
+    assert_eq!(response.body.as_slice(), br#"{"result":{"expires_at_ms":4102444800000,"permissions":{"issues":"write","pull_requests":"write"},"repositories":["org/r"],"token":"fixture-token-1"}}"#);
+    let first = body(&response)["result"].clone();
     assert_eq!(
         first,
         json!({"token":"fixture-token-1","expires_at_ms":EXPIRY_MS,"repositories":["org/r"],"permissions":expected_permissions})

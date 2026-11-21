@@ -15,7 +15,14 @@ CREATE TABLE broker_action_requests (
     envelope_sha256 TEXT,
     issued_legs INTEGER NOT NULL DEFAULT 0 CHECK (
         typeof(issued_legs) = 'integer' AND issued_legs BETWEEN 0 AND json_array_length(legs_json)
-    )
+    ),
+    -- One verified envelope records all three approval columns at once.
+    CHECK (
+        (approved_at_ms IS NULL AND device_fingerprint IS NULL AND envelope_sha256 IS NULL)
+        OR (approved_at_ms IS NOT NULL AND device_fingerprint IS NOT NULL AND envelope_sha256 IS NOT NULL)
+    ),
+    -- A leg's token is issued only against a recorded approval.
+    CHECK (issued_legs = 0 OR approved_at_ms IS NOT NULL)
 ) WITHOUT ROWID;
 
 CREATE INDEX broker_action_requests_expiry ON broker_action_requests(expires_at_ms);

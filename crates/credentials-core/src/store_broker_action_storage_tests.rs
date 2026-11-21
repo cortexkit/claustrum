@@ -103,6 +103,22 @@ fn broker_action_storage_records_approval_once_and_issues_one_leg_at_a_time() {
                 )
             };
             assert_eq!(progress()?, (None, None, None, 0));
+            for change in [
+                "issued_legs = 1",
+                "approved_at_ms = 2",
+                "approved_at_ms = 2, device_fingerprint = 'phone'",
+                "device_fingerprint = 'phone', envelope_sha256 = 'envelope'",
+            ] {
+                let error = conn
+                    .execute(&format!("UPDATE broker_action_requests SET {change}"), [])
+                    .expect_err("a partial approval or an unapproved issue is refused");
+                assert_eq!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::ConstraintViolation),
+                    "{change}"
+                );
+            }
+            assert_eq!(progress()?, (None, None, None, 0));
             approve(conn, "request")?;
             for change in [
                 "approved_at_ms = NULL",

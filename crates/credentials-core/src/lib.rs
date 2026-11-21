@@ -17,6 +17,7 @@
 
 pub mod admin_auth;
 pub mod admin_ops;
+pub mod agent_policy;
 pub use claustrum_model::agent_secret;
 pub use claustrum_providers::apns;
 pub use claustrum_providers::apns_submit;

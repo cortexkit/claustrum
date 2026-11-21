@@ -4,7 +4,7 @@
 //! representation: enabling its preserve_order feature would change existing
 //! phone approval statement bytes for agent secrets throughout the workspace.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -55,7 +55,7 @@ impl ManifestValue {
         }
     }
 
-    fn sort_jcs_keys(&mut self) {
+    pub(crate) fn sort_jcs_keys(&mut self) {
         match self {
             Self::Object(entries) => {
                 entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
@@ -152,8 +152,9 @@ impl<'de> Deserialize<'de> for ManifestValue {
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut entries = Vec::new();
+                let mut seen = HashSet::new();
                 while let Some((key, value)) = map.next_entry::<String, ManifestValue>()? {
-                    if entries.iter().any(|(prior, _)| prior == &key) {
+                    if !seen.insert(key.clone()) {
                         return Err(serde::de::Error::custom("duplicate JSON object key"));
                     }
                     entries.push((key, value));
@@ -501,7 +502,7 @@ impl ManifestBindingEnvelope {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

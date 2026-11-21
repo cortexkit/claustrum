@@ -5498,6 +5498,195 @@ envelope can be decoded. Receipts for its incarnation remain until expiry with
 `aad_sha256 = "invalidated"` and empty `enc` and `ciphertext`, keeping the old
 requester/nonce occupied. Re-enrollment never restores old authority.
 
+## 17a. Signed agent policies
+
+### Document and signature
+
+An agent policy defines which service identity belongs to each agent, the repositories
+bound to that identity, and the request kinds and actions available on the service. A
+version is immutable. The top-level members, all required, are:
+
+| Member | Value |
+|---|---|
+| `schema` | `"ck-agent-policy/v1"` |
+| `version` | A positive integer |
+| `issued_at_unix_secs` | An integer Unix timestamp in seconds |
+| `root_key_id` | 16 lowercase hexadecimal digits |
+| `rule_sets` | Object mapping service names to rule sets; only `github` is supported |
+| `bindings` | Array of binding objects, in the order specified below |
+
+The document is UTF-8 RFC 8785 JSON Canonicalization Scheme (JCS) JSON. Object keys
+sort by UTF-16 code units; array order is preserved. There is no trailing newline.
+Duplicate object members, unknown members, and positional arrays in place of objects
+are refused. Every JSON number is an integer in ±(2^53−1); fractions and exponents
+are refused, including `1.0` and `1e0`. The document limit is 1 MiB.
+
+The signature envelope is:
+
+```json
+{"v":1,"policy":"<exact canonical JSON text>","key_id":"<16 lowercase hex digits>","signature_b64":"<base64 Ed25519 signature>"}
+```
+
+`policy` is a JSON string, not a nested object or base64. The Ed25519 signature is
+over the ASCII bytes `ck-agent-policy/v1`, one zero byte, and the exact UTF-8 bytes of
+the decoded `policy` string, with no additional framing. `signature_b64` encodes the
+64-byte signature in standard padded base64. `key_id` and `root_key_id` must both
+match the signing root's id: the first eight bytes of SHA-256 over the raw 32-byte
+public key, in lowercase hex. A verifier checks the signature on the received bytes
+under its trusted root and then parses the document; it never verifies a rewritten
+document.
+
+Signing refuses `policy_too_large` if the 19-byte separator plus the policy exceeds
+1 MiB, even when the document alone fits the model limit. This check precedes
+parsing and writing. The limit on the serialized online admin operation is separate.
+
+### Rule sets, kinds and actions
+
+A GitHub rule set has `rule_set: "github"`, an integer `revision`, `source`,
+`extractor: "github-rest-graphql/v1"`, `hosts`, `redirect_hosts`, `kinds` and
+`actions`. All members are required. `source` is an object containing `release`
+(1–64 ASCII characters from `[a-z0-9._-]`) and `sha256` (64 lowercase hex digits).
+The model validates the shape; the signer checks narrowing against the default named
+by `source.release`. Narrowing may remove kinds or actions, change an approval from
+`none` to `once`, remove permission entries or lower their level (`admin` → `write`
+→ `read`), or remove request alternatives. Other changes are refused as narrowing.
+
+`hosts` and `redirect_hosts` are sorted, unique and disjoint arrays of exact lowercase
+DNS names. Each has at least two labels, each of 1–63 ASCII lowercase letters, digits
+or hyphens, with no leading or trailing hyphen. A host is at most 253 bytes. Ports,
+wildcards and IP literals are refused. Redirect hosts are for GET requests only and
+never receive a credential.
+
+A kind has the required members `kind` (a unique non-empty name), `class`, `approval`,
+`identity`, `credential`, `ownership`, `requests` and `consent`.
+
+- `class` is `read`, `speech`, `operator` or `denied`. `approval` is `none` or
+  `once`; `operator` requires `once`. A `denied` kind only names a refusal, so it
+  has an empty `requests` array and null `credential`, `ownership` and `consent`.
+- `identity` is `agent` or `anonymous`. Anonymous non-denied kinds are public reads
+  and have no credential. `credential` is null or `{ "github_permissions": {...} }`.
+  The map must have 1–64 entries; permission names match `[a-z][a-z0-9_]{0,63}`
+  and levels are `read`, `write` or `admin`.
+- `ownership` is null or `{ "check": "<name>", "reads": ["<kind>", ...] }`.
+  Each pre-read names a `read` kind in this rule set and uses that kind's token.
+  In order, there is one pre-read for `own_comment`, `own_issue`, `own_pull_request`,
+  `own_pull_requests`, `own_stack_pull_requests` or `thread_in_repository`, and two
+  for `own_last_comment` or `own_thread_pull_request`. Other checks are refused.
+- `consent` is null unless `approval` is `once`. A non-null value is
+  `{ "fields": ["<name>", ...] }`. The kind must declare each name as a path
+  parameter or a required, optional or fixed body field. The approval prompt uses
+  its own labels; the policy cannot supply the text displayed next to a value.
+- `requests` holds the request alternatives for one kind. A non-denied kind must
+  have at least one. An entry has exactly one member: `rest` or `graphql`.
+
+An action is `{ "action": "<name>", "legs": [{ "kind": "<name>" }, ...] }`.
+Each action name is non-empty and unique. Legs run in array order. A leg may include
+`"optional": true`; omission means false. Every leg must name an existing,
+non-denied kind. At least one leg is required. An action derives its class (the
+highest of `read` < `speech` < `operator`) and approval (the stricter of `none` and
+`once`) from all its legs, including optional ones. These values are not stored on
+the action.
+
+### REST and GraphQL request alternatives
+
+A `rest` object has `method` (an HTTP token, matched exactly), `host` (one of
+`hosts`) and `path`, with optional `body` and `query` constraint objects. Paths start
+with `/`. Literal template segments are in decoded form, matched byte for byte and
+case-sensitively. For an incoming path, split on `/` and percent-decode each segment
+exactly once as UTF-8. Empty segments, `.` and `..`, `/` or backslash within a
+segment (even if encoded), and ASCII control characters are refused. A decoded `%`
+is literal, not another escape. Braces in a template delimit typed segments.
+
+| Segment | Decoded values |
+|---|---|
+| `{owner}` | `[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?`, optionally followed by `_[A-Za-z0-9]{1,16}` |
+| `{repo}` | 1–100 ASCII characters from `[A-Za-z0-9._-]`, except `.` and `..` |
+| `{number}` | Positive decimal with no leading zero, at most 2,147,483,647 |
+| `{id}` | Positive decimal with no leading zero, at most 9,007,199,254,740,991 |
+| `{sha}` | Exactly 40 or 64 lowercase hexadecimal digits |
+| `{name}` | 1–255 UTF-8 bytes of one normalized segment |
+| `{param*}` | One or more `name` segments, at most 1,024 bytes joined by `/` |
+
+A tail is allowed once, at the end only. Its parameter name matches
+`[a-z][a-z0-9_]{0,31}`. The names `owner` and `repo` may each appear at most
+once, including as a tail parameter. A typed `{owner}` without a typed `{repo}`
+is allowed only in an anonymous read. REST templates
+that can match `/graphql` at `api.github.com` are refused.
+
+`body` and `query` use the same object shape. Every member is optional:
+
+| Member | Meaning | Default |
+|---|---|---|
+| `required` | List of names that must appear | `[]` |
+| `optional` | List of names that may appear | `[]` |
+| `fixed` | Object mapping names that must appear to their only allowed values | `{}` |
+| `forbidden` | List of names that must not appear | `[]` |
+| `additional` | `deny` rejects every unlisted name; `allow` permits names not listed as forbidden | `"deny"` |
+
+The four name groups are disjoint and contain no duplicates. The `fixed` values for
+`query` must be strings. Those for `body` are strings, booleans, null or exact
+integers. A read with no `query` permits any query parameters; all other kinds with
+no `query` permit none. Query names are percent-decoded once and repeated names
+count once for name matching. A kind with no `body` does not inspect the body.
+A `body` constraint requires an uncompressed `application/json` object, at most
+1 MiB, with constraints applied to its top-level members. A non-read kind cannot
+set `body.additional` to `allow`.
+
+A `graphql` object has `operation` (`query` or `mutation`), `fields` (a non-empty
+array of unique GraphQL root field names), and optional `arguments` (an object
+mapping dotted argument paths to predicates). The request is a `POST` to
+`api.github.com/graphql` with a JSON object containing a `query` string of at most
+256 KiB, optional object `variables` and optional `operationName`. No batching or
+subscriptions. When there is more than one operation the name must select exactly
+one. The enforcer expands root fragments, resolves aliases, rejects root directives
+and matches the exact set of root field names. It evaluates arguments from literals
+or supplied variables and follows dotted paths into input objects. The only
+predicates are:
+
+- `repository_in_scope`, on the root `repository` field: lowercased `owner` and
+  `name` must name a bound repository.
+- `node_in_scope`, on an ID argument: the `node_repository` pre-read must resolve
+  the node to a bound repository; any failure rejects the match.
+
+When any alternative uses `node_in_scope`, the rule set must contain
+`node_repository`. Wherever present, that kind must have class `read`, approval
+`none`, identity `agent`, null ownership and consent, and exactly one alternative,
+`{"graphql":{"operation":"query","fields":["node"]}}`, with no argument
+predicates. Its permission map is exactly `metadata: read`, `issues: read` and
+`pull_requests: read`. It is the only kind allowed a token scoped to the binding's
+whole repository list, so the enforcer can query `repository { nameWithOwner }`
+before it knows the repository.
+
+The signer refuses overlap between distinct kinds. REST alternatives overlap when
+their methods and hosts agree, there is a normalized path both templates can match,
+and no body or query constraint makes the pair disjoint. Path overlap compares
+literal equality, whether a literal satisfies a type, or whether two types share a
+possible segment, including the tail's segment and total length limits. A required
+or fixed name that the other constraint does not permit, or different fixed values
+for the same name, makes constraints disjoint. For example, a kind forbidding
+`state` is disjoint from one fixing `state` to `"closed"`. GraphQL alternatives
+from distinct kinds overlap when their operation and exact root field sets agree;
+argument predicates do not make them disjoint in v1. No match or more than one
+matching kind is a denial at enforcement time.
+
+### Bindings and signing-time checks
+
+Each binding is an object with `service: "github"`, a non-empty `agent` name,
+`identity: "github_app:<slug>"` and `resources`. The slug is 1–100 lowercase ASCII
+letters, digits or hyphens. Each pair of service and agent appears at most once,
+and no two agents share an identity. `resources` is a non-empty, sorted array of
+unique lowercase `owner/repo` strings, using the `owner` and `repo` types above.
+No repository appears in two bindings. Resources sort by byte comparison and
+bindings by (`service`, `agent`) in ascending byte order; JCS doesn't reorder them.
+
+For a policy paired to a GitHub manifest, the two repository-to-agent maps must
+agree after ASCII-lowercasing the manifest's repository names. A manifest with
+keys that collide after lowercasing cannot be paired. Signing checks the canonical
+document, its root id and version, the pairing and the binding projection before
+committing a version. The minting service checks which version, binding and kind
+permit a credential; the enforcer still checks the request match, ownership and
+consent. A token is not bound to a single HTTP request.
+
 ## 18. Fleet epoch operations
 
 These ten management operations use the attested caller identity, never a caller

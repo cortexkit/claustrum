@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use credentials_core::{
+    agent_policy::valid_app_slug,
     gh_manifest::validate_installation_permissions,
     http::ReqwestTransport,
     refresh_adapters::{
@@ -24,7 +25,6 @@ use crate::{
 
 pub const OP_PROPOSE_BINDING: &str = "manifest.propose_binding";
 pub const PROPOSE_DEADLINE: Duration = Duration::from_secs(60);
-const APP_SLUG_LENGTH_LIMIT: usize = 100;
 const AGENT_ID_LENGTH_LIMIT: usize = 128;
 const REPO_PART_LENGTH_LIMIT: usize = 100;
 
@@ -58,14 +58,6 @@ impl Params {
                 .split_once('/')
                 .is_some_and(|(owner, name)| part(owner) && part(name))
     }
-}
-
-fn valid_app_slug(slug: &str) -> bool {
-    // GitHub App slugs use lowercase ASCII letters, digits and hyphens.
-    (1..=APP_SLUG_LENGTH_LIMIT).contains(&slug.len())
-        && slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 pub enum ProposeAnswer {

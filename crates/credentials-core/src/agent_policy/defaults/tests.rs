@@ -60,8 +60,9 @@ fn github_default_passes_model_checks_and_only_allows_unprompted_reads_and_speec
 
 #[test]
 fn github_default_actions_match_the_ordered_plexus_catalog_transcription() {
-    // Transcribed from the catalog export's request-kind sequence, independently
-    // of the embedded JSON. The bool marks a conditional write leg.
+    // Plexus's request kinds and their ordered write legs, typed from the same
+    // catalog export named in defaults.rs and kept apart from the embedded JSON,
+    // so an edit to the JSON alone fails here. The bool marks a conditional leg.
     type ExpectedAction = (&'static str, &'static [(&'static str, bool)]);
     let expected: [ExpectedAction; 21] = [
         ("comment", &[("add_issue_comment", false)]),

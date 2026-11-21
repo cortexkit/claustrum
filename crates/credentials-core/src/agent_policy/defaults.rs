@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 
 use super::{canonical_bytes, parse_canonical, policy_sha256, PolicyError, RuleSet};
 
-// Catalog export from Plexus 187baca911cc, SHA-256:
+// Transcribed from the action catalog of Plexus (CortexKit's GitHub module, the
+// public github.com/cortexkit/plexus repository) at commit 187baca911cc: an export
+// of its catalog entries with SHA-256
 // 1275025ad276e57f5ab702dc99f6c3f36350c4478302690caee396271744d8e1.
 // update_issue_comment checks the target's author; Plexus selects the last own
 // comment for edit-last. Search has no repository in its URL: Plexus supplies

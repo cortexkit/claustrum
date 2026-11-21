@@ -1653,6 +1653,8 @@ impl std::fmt::Debug for ReadRequest {
                 | federation::ingress::OP_REPORT_CONDITION
                 | federation::ingress::OP_CLEAR_CONDITION
                 | broker_action::OP_REQUEST_ACTION
+                | secret_phone::OP_APPROVE_ACTION
+                | policy_token::OP_POLICY_TOKEN
         ) {
             request.finish_non_exhaustive()
         } else {

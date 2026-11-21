@@ -1,0 +1,2518 @@
+{
+  "cases": [
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 1800000600000,
+          "request_id": "01MCC5RM010000000000000000",
+          "statement_b64url": "eyJhY3Rpb24iOiJhZGRfaXNzdWVfY29tbWVudCIsImFnZW50X2lkIjoiYWdlbnQiLCJjb250ZXh0IjoidW5pcXVlbHktc2Vuc2l0aXZlLWNvbW1hbmQtdGV4dCIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Im51bWJlciIsInZhbHVlIjoic3ludGhldGljLWlzc3VlLW51bWJlci1jYW5hcnkifSx7Im5hbWUiOiJib2R5IiwidmFsdWUiOnsidGV4dCI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1maWVsZC10ZXh0In19XSwiaG9zdCI6ImFwaS5naXRodWIuY29tIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOnBsZXgtYWxmb25zbyIsImtpbmQiOiJhZGRfaXNzdWVfY29tbWVudCIsIm1ldGhvZCI6IlBPU1QiLCJwb2xpY3lfc2hhMjU2IjoiMTMzZjg5ZDc3Y2NhZTRlN2JlN2MxY2UxY2Y0NzNkMjcwNjgyNjQ3ZjhlMjZjNjJhNDJkZGZmZGI4YzYyOGE4NyIsInBvbGljeV92ZXJzaW9uIjoxLCJyZXF1ZXN0X2lkIjoiMDFNQ0M1Uk0wMTAwMDAwMDAwMDAwMDAwMDAiLCJyZXF1ZXN0X3NoYTI1NiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJyZXNvdXJjZSI6Im9yZy9yIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsIiwicmVmIjoidW5pcXVlbHktc2Vuc2l0aXZlLXNjb3BlLXJlZiJ9LCJzZXJ2aWNlIjoiZ2l0aHViIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tc3RhdGVtZW50L3YxIn0",
+          "statement_sha256": "0c12947e52a5fba8410df5408c636421f18681add97d3ef56104913d6cb5e916"
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_head",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 1800000600000,
+          "request_id": "01MCC5RM010000000000000001",
+          "statement_b64url": "eyJhY3Rpb24iOiJ0cmlhZ2UiLCJhZ2VudF9pZCI6ImFnZW50IiwiY29udGV4dCI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1jb21tYW5kLXRleHQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwNjAwMDAwLCJmaWVsZHMiOlt7Im5hbWUiOiJudW1iZXIiLCJ2YWx1ZSI6InN5bnRoZXRpYy1pc3N1ZS1udW1iZXItY2FuYXJ5In0seyJuYW1lIjoiYm9keSIsInZhbHVlIjp7InRleHQiOiJ1bmlxdWVseS1zZW5zaXRpdmUtZmllbGQtdGV4dCJ9fSx7Im5hbWUiOiJzdGF0ZV9yZWFzb24iLCJ2YWx1ZSI6InN5bnRoZXRpYy1zdGF0ZS1yZWFzb24tY2FuYXJ5In1dLCJob3N0IjoiYXBpLmdpdGh1Yi5jb20iLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6cGxleC1hbGZvbnNvIiwibGVncyI6W3sia2luZCI6ImFkZF9pc3N1ZV9jb21tZW50IiwibWV0aG9kIjoiUE9TVCIsInJlcXVlc3Rfc2hhMjU2IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInJlc291cmNlIjoib3JnL3IifSx7ImtpbmQiOiJjbG9zZV9pc3N1ZSIsIm1ldGhvZCI6IlBBVENIIiwicmVxdWVzdF9zaGEyNTYiOiIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicmVzb3VyY2UiOiJvcmcvcyJ9LHsia2luZCI6ImFkZF9pc3N1ZV9jb21tZW50IiwibWV0aG9kIjoiUE9TVCIsInJlcXVlc3Rfc2hhMjU2IjoiMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMyIsInJlc291cmNlIjoib3JnL3IifV0sInBvbGljeV9zaGEyNTYiOiIxMzNmODlkNzdjY2FlNGU3YmU3YzFjZTFjZjQ3M2QyNzA2ODI2NDdmOGUyNmM2MmE0MmRkZmZkYjhjNjI4YTg3IiwicG9saWN5X3ZlcnNpb24iOjEsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMSIsInJlc291cmNlIjoib3JnL3IiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6IndvcmtlciIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbCIsInJlZiI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1zY29wZS1yZWYifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+          "statement_sha256": "78858ab04d9f26d6df9707f45c7c12d43995bebf0a18f9c7cd2122ed20df57bc"
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_worker_three_legs",
+      "params": {
+        "action": "triage",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "state_reason",
+            "value": "synthetic-state-reason-canary"
+          },
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "legs": [
+          {
+            "kind": "add_issue_comment",
+            "method": "POST",
+            "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "resource": "org/r"
+          },
+          {
+            "kind": "close_issue",
+            "method": "PATCH",
+            "request_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resource": "org/s"
+          },
+          {
+            "kind": "add_issue_comment",
+            "method": "POST",
+            "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+            "resource": "org/r"
+          }
+        ],
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "worker-agent",
+            "on_behalf_of_agent": "agent"
+          },
+          "kind": "worker",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 1800000600000,
+          "request_id": "01MCC5RM010000000000000002",
+          "statement_b64url": "eyJhY3Rpb24iOiJhZGRfaXNzdWVfY29tbWVudCIsImFnZW50X2lkIjoiYWdlbnQiLCJjb250ZXh0IjoidW5pcXVlbHktc2Vuc2l0aXZlLWNvbW1hbmQtdGV4dCIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Im51bWJlciIsInZhbHVlIjoic3ludGhldGljLWlzc3VlLW51bWJlci1jYW5hcnkifSx7Im5hbWUiOiJib2R5IiwidmFsdWUiOnsidGV4dCI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1maWVsZC10ZXh0In19XSwiaG9zdCI6ImFwaS5naXRodWIuY29tIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOnBsZXgtYWxmb25zbyIsImtpbmQiOiJhZGRfaXNzdWVfY29tbWVudCIsIm1ldGhvZCI6IlBPU1QiLCJwb2xpY3lfc2hhMjU2IjoiMTMzZjg5ZDc3Y2NhZTRlN2JlN2MxY2UxY2Y0NzNkMjcwNjgyNjQ3ZjhlMjZjNjJhNDJkZGZmZGI4YzYyOGE4NyIsInBvbGljeV92ZXJzaW9uIjoxLCJyZXF1ZXN0X2lkIjoiMDFNQ0M1Uk0wMTAwMDAwMDAwMDAwMDAwMDIiLCJyZXF1ZXN0X3NoYTI1NiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJyZXNvdXJjZSI6Im9yZy9yIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJlcGhlbWVyYWwiLCJvd25lciI6InJlc2VydmVkOnByZWZyb250YWwiLCJyZWYiOiJ1bmlxdWVseS1zZW5zaXRpdmUtc2NvcGUtcmVmIn0sInNlcnZpY2UiOiJnaXRodWIiLCJ2IjoiY2stYnJva2VyLWFjdGlvbi1zdGF0ZW1lbnQvdjEifQ",
+          "statement_sha256": "8c2bad0ad6513417193325a481d2b2405e59e4d07aafac59a6f0858314050f92"
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_flow_stamp",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent",
+            "flow_id": "fixture-flow",
+            "run_id": "fixture-run"
+          },
+          "kind": "ephemeral",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "parent": {
+            "owner": {
+              "kind": "reserved",
+              "module_id": "prefrontal"
+            },
+            "ref": "fixture-parent",
+            "scope_epoch": 3
+          },
+          "parent_state": "linked",
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_caller",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:other"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_missing_grant",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:ungranted",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_unmapped_stamp",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {},
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid policy.request_action parameters"
+      },
+      "frame": "error",
+      "method": "policy.request_action",
+      "name": "mint_malformed_stamp",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": null
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid policy.request_action parameters"
+      },
+      "frame": "error",
+      "method": "policy.request_action",
+      "name": "mint_malformed_body",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "Post",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_service",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "other",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_no_binding",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:unbound",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_agent",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "wrong"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_unknown_kind",
+      "params": {
+        "action": "unknown",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "unknown",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_host",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com:8443",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_unbound_resource",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/unbound",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_not_required"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_no_approval_required",
+      "params": {
+        "action": "node_repository",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "node_repository",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "consent_fields_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_missing_field",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "consent_fields_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_duplicate_field",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "number",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "consent_fields_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_unknown_field",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "unexpected",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid policy.request_action parameters"
+      },
+      "frame": "error",
+      "method": "policy.request_action",
+      "name": "mint_oversized_statement",
+      "params_omitted": "mint_head params with the body field value replaced by 524288 copies of x",
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_credential_agent",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_missing_credential",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "store_error"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_store_error",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "approval_pending_limit"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_agent_pending_limit",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "approval_pending_limit"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_total_pending_limit",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "policy_absent"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_policy_absent",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_build",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid secret params"
+      },
+      "frame": "error",
+      "method": "policy.approve_action",
+      "name": "approve_phone_malformed_body",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv",
+        "statement_b64url": "eyJhY3Rpb24iOiJhZGRfaXNzdWVfY29tbWVudCIsImFnZW50X2lkIjoiYWdlbnQiLCJjb250ZXh0IjoidW5pcXVlbHktc2Vuc2l0aXZlLWNvbW1hbmQtdGV4dCIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Im51bWJlciIsInZhbHVlIjoic3ludGhldGljLWlzc3VlLW51bWJlci1jYW5hcnkifSx7Im5hbWUiOiJib2R5IiwidmFsdWUiOnsidGV4dCI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1maWVsZC10ZXh0In19XSwiaG9zdCI6ImFwaS5naXRodWIuY29tIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOnBsZXgtYWxmb25zbyIsImtpbmQiOiJhZGRfaXNzdWVfY29tbWVudCIsIm1ldGhvZCI6IlBPU1QiLCJwb2xpY3lfc2hhMjU2IjoiMTMzZjg5ZDc3Y2NhZTRlN2JlN2MxY2UxY2Y0NzNkMjcwNjgyNjQ3ZjhlMjZjNjJhNDJkZGZmZGI4YzYyOGE4NyIsInBvbGljeV92ZXJzaW9uIjoxLCJyZXF1ZXN0X2lkIjoiMDFNQ0M1Uk0wMTAwMDAwMDAwMDAwMDAwMDAiLCJyZXF1ZXN0X3NoYTI1NiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJyZXNvdXJjZSI6Im9yZy9yIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsIiwicmVmIjoidW5pcXVlbHktc2Vuc2l0aXZlLXNjb3BlLXJlZiJ9LCJzZXJ2aWNlIjoiZ2l0aHViIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tc3RhdGVtZW50L3YxIn0"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_pairing",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_lookup_unavailable",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_key",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQCbfL8rMfYeztGGryvrQT7G3yUAZsQiIneGzpjxx_aOsQIhAJShkPhqSy3eAH4gejw41X09hGxmX82AmnVcIQUpgeA2"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_digest",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEUCIDa0w98s-FUlLdguoXFvkJff0XCFRgB0CF_0cD2rtBXzAiEAmLKXuQlAWq1ud5H81JsTVdiI1xXka1bc4pkMNnVrfRQ"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_fingerprint",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEQCIE6FvDjoHGWyelWs-UwUYAKv44-AohyyCfJY61TruDtgAiAEPf4x8w-hLP7-kt7wJzMOU7szvuROdPpOWRJmjDQbVA"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_wrong_domain",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEUCIQCrE4OR8AKPrhgtw2qASw2Bb4giOprONz_Zh-vCc71C2QIgAb3NlM-DOPMjOtDLDBzEE3c5KkKxSEIYdpXmA5hfbZ4"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_non_allow",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImRlY2xpbmUiLCJkZXZpY2VfZmluZ2VycHJpbnQiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsImlzc3VlZF9hdF9tcyI6MTgwMDAwMDAwMDAwMCwicmVxdWVzdF9pZCI6IjAxTUNDNVJNMDEwMDAwMDAwMDAwMDAwMDAwIiwic3RhdGVtZW50X3NoYTI1NiI6IjBjMTI5NDdlNTJhNWZiYTg0MTBkZjU0MDhjNjM2NDIxZjE4NjgxYWRkOTdkM2VmNTYxMDQ5MTNkNmNiNWU5MTYiLCJ2IjoiY2stYnJva2VyLWFjdGlvbi1lbnZlbG9wZS92MSJ9",
+        "signature_b64url": "MEYCIQDNdVtu4x7U6wbvf7876ZsW7XryvQbdHZaGzj48ptlvmwIhAL4fvk0EIGu5zySL5Nbx_evKgYO7EtxZ-apAnnKe8N29"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_unknown_request",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwNCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEQCIDYQUtPGKBx5fIKH_SyDyu1gxd4vxXDq7OGZriWBdO4yAiARpmslZptPFqBSWPlD9wD8f1GUsPhMFd86fZVboyCLwg"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_before_creation",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTk5OTk5OTk5OTksInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEUCIQDkjQaWr2lLglzvKWsMPppCzw5w-kDtR9Vv6u1kzwPoagIgcEnVNQ_WG_uFR4BEE-5Op7PJfZwpqCoYZrhTHCMSwTM"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_skew",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAxMjAwMDEsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEQCIDl8Eh1I58ZUNsBzqNbduWs7gUZOpotA-EgE3E-JmrToAiABysgrAhfxqFIKDYBrQChw8N_Wc0pcg_Ry96w1M9jR-g"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_noncanonical_envelope",
+      "params": {
+        "envelope_b64url": "ewogICJkZWNpc2lvbiI6ICJhbGxvdyIsCiAgImRldmljZV9maW5nZXJwcmludCI6ICIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsCiAgImlzc3VlZF9hdF9tcyI6IDE4MDAwMDAwMDAwMDAsCiAgInJlcXVlc3RfaWQiOiAiMDFNQ0M1Uk0wMTAwMDAwMDAwMDAwMDAwMDAiLAogICJzdGF0ZW1lbnRfc2hhMjU2IjogIjBjMTI5NDdlNTJhNWZiYTg0MTBkZjU0MDhjNjM2NDIxZjE4NjgxYWRkOTdkM2VmNTYxMDQ5MTNkNmNiNWU5MTYiLAogICJ2IjogImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEiCn0",
+        "signature_b64url": "MEUCIBYOAMNUNBfgH2I-vs2vI5HCOLCgdu9V3aMBZ-A_vtgkAiEA5ivRTJ9YBfyDhf7exsS219Knm3Q8spQODBde_YyLvNo"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000600000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_expired",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDA1OTk5OTksInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEQCIELjzmQUPdFZWXwPGs1XYUec_3CInDMsdRWNNr7pXaz1AiBLRlZDNSbD1BoQARwuFNa-Ho52NyofiPkWQTY-OMdkkw"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "request_id": "01MCC5RM010000000000000000",
+          "statement_sha256": "0c12947e52a5fba8410df5408c636421f18681add97d3ef56104913d6cb5e916",
+          "status": "approved"
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "request_id": "01MCC5RM010000000000000000",
+          "statement_sha256": "0c12947e52a5fba8410df5408c636421f18681add97d3ef56104913d6cb5e916",
+          "status": "approved"
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_replay",
+      "params": {
+        "card_ref": "fixture-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEYCIQDFE8gLYPRnYX-BLzzpVi2XERzsKbGW3TguadCoBg7CnAIhAMvhLe5MK3wqteHl5yInphfwvKdzeMw0a-ihx9e1mOWv"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_changed_replay",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDEsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMCIsInN0YXRlbWVudF9zaGEyNTYiOiIwYzEyOTQ3ZTUyYTVmYmE4NDEwZGY1NDA4YzYzNjQyMWYxODY4MWFkZDk3ZDNlZjU2MTA0OTEzZDZjYjVlOTE2IiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEUCIQD35unUz8Svo0pq_XnvcdVRw5MyYMvuh_W1cvEOFbQP_QIgErn2z2EEGmeYRMmU0ewRwKOBic4xqMd-RONtywIgKrE"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_disabled",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_wrong_route",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid secret params"
+      },
+      "frame": "error",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_signature_present",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": null
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid secret params"
+      },
+      "frame": "error",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_unknown_member",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "statement": "{\"action\":\"add_issue_comment\",\"agent_id\":\"agent\",\"context\":\"uniquely-sensitive-command-text\",\"expires_at_ms\":1800000600000,\"fields\":[{\"name\":\"number\",\"value\":\"synthetic-issue-number-canary\"},{\"name\":\"body\",\"value\":{\"text\":\"uniquely-sensitive-field-text\"}}],\"host\":\"api.github.com\",\"identity\":\"github_app:plex-alfonso\",\"kind\":\"add_issue_comment\",\"method\":\"POST\",\"policy_sha256\":\"133f89d77ccae4e7be7c1ce1cf473d270682647f8e26c62a42ddffdb8c628a87\",\"policy_version\":1,\"request_id\":\"01MCC5RM010000000000000002\",\"request_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"resource\":\"org/r\",\"scope\":{\"epoch\":7,\"kind\":\"ephemeral\",\"owner\":\"reserved:prefrontal\",\"ref\":\"uniquely-sensitive-scope-ref\"},\"service\":\"github\",\"v\":\"ck-broker-action-statement/v1\"}"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_wrong_fingerprint",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_store_error",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "request_id": "01MCC5RM010000000000000002",
+          "statement_sha256": "8c2bad0ad6513417193325a481d2b2405e59e4d07aafac59a6f0858314050f92",
+          "status": "approved"
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "request_id": "01MCC5RM010000000000000002",
+          "statement_sha256": "8c2bad0ad6513417193325a481d2b2405e59e4d07aafac59a6f0858314050f92",
+          "status": "approved"
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_desktop_replay",
+      "params": {
+        "card_ref": "desktop-card",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiI4YzJiYWQwYWQ2NTEzNDE3MTkzMzI1YTQ4MWQyYjI0MDVlNTllNGQwN2FhZmFjNTlhNmYwODU4MzE0MDUwZjkyIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "route": "desktop:development"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_required"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_no_approval_members",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid credential.policy_token parameters"
+      },
+      "frame": "error",
+      "method": "credential.policy_token",
+      "name": "issue_missing_request_id",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid credential.policy_token parameters"
+      },
+      "frame": "error",
+      "method": "credential.policy_token",
+      "name": "issue_missing_digest",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid credential.policy_token parameters"
+      },
+      "frame": "error",
+      "method": "credential.policy_token",
+      "name": "issue_malformed_request_id",
+      "params": {
+        "approval_request_id": "uniquely-sensitive-command-text",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid credential.policy_token parameters"
+      },
+      "frame": "error",
+      "method": "credential.policy_token",
+      "name": "issue_malformed_digest",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "eyJhY3Rpb24iOiJhZGRfaXNzdWVfY29tbWVudCIsImFnZW50X2lkIjoiYWdlbnQiLCJjb250ZXh0IjoidW5pcXVlbHktc2Vuc2l0aXZlLWNvbW1hbmQtdGV4dCIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Im51bWJlciIsInZhbHVlIjoic3ludGhldGljLWlzc3VlLW51bWJlci1jYW5hcnkifSx7Im5hbWUiOiJib2R5IiwidmFsdWUiOnsidGV4dCI6InVuaXF1ZWx5LXNlbnNpdGl2ZS1maWVsZC10ZXh0In19XSwiaG9zdCI6ImFwaS5naXRodWIuY29tIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOnBsZXgtYWxmb25zbyIsImtpbmQiOiJhZGRfaXNzdWVfY29tbWVudCIsIm1ldGhvZCI6IlBPU1QiLCJwb2xpY3lfc2hhMjU2IjoiMTMzZjg5ZDc3Y2NhZTRlN2JlN2MxY2UxY2Y0NzNkMjcwNjgyNjQ3ZjhlMjZjNjJhNDJkZGZmZGI4YzYyOGE4NyIsInBvbGljeV92ZXJzaW9uIjoxLCJyZXF1ZXN0X2lkIjoiMDFNQ0M1Uk0wMTAwMDAwMDAwMDAwMDAwMDAiLCJyZXF1ZXN0X3NoYTI1NiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJyZXNvdXJjZSI6Im9yZy9yIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDpwcmVmcm9udGFsIiwicmVmIjoidW5pcXVlbHktc2Vuc2l0aXZlLXNjb3BlLXJlZiJ9LCJzZXJ2aWNlIjoiZ2l0aHViIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tc3RhdGVtZW50L3YxIn0",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_ungranted",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:other"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_service",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "other"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_unbound_resource_without_approval",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/unbound",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "code": "invalid_params",
+        "message": "params not decodable: invalid credential.policy_token parameters"
+      },
+      "frame": "error",
+      "method": "credential.policy_token",
+      "name": "issue_proof_for_no_approval_kind",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "update_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_unknown_request",
+      "params": {
+        "approval_request_id": "01HF7YAT000000000000000004",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_unapproved",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_caller",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_identity",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:unbound",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_kind",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "close_issue",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_resource",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/s",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_digest",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000600000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_expired",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000002",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "request_id": "01MCC5RM010000000000000001",
+          "statement_sha256": "78858ab04d9f26d6df9707f45c7c12d43995bebf0a18f9c7cd2122ed20df57bc",
+          "status": "approved"
+        }
+      },
+      "frame": "response",
+      "method": "policy.approve_action",
+      "name": "approve_phone_three_legs",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMU1DQzVSTTAxMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiI3ODg1OGFiMDRkOWYyNmQ2ZGY5NzA3ZjQ1YzdjMTJkNDM5OTViZWJmMGExOGY5YzdjZDIxMjJlZDIwZGY1N2JjIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+        "signature_b64url": "MEUCIQDo8egR4XBXniYatyrEhBzSjN_8AQKwN_hENv5Mw9qf7AIgHUEi9Pk-g3mvI872xkM1BHyultHRLDDz3e5oat7kquk"
+      },
+      "route": "fed-phone:11111111111111111111111111111111:production"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_leg_out_of_order",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "close_issue",
+        "policy_version": 1,
+        "request_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "resource": "org/s",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "github_unavailable"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_provider_error",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "store_error"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_store_error",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/r"
+          ],
+          "token": "fixture-token-3"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_one_leg",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/r"
+          ],
+          "token": "fixture-token-3"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_first_of_three",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_leg_replay",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/s"
+          ],
+          "token": "fixture-token-4"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_second_of_three",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "close_issue",
+        "policy_version": 1,
+        "request_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "resource": "org/s",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/r"
+          ],
+          "token": "fixture-token-3"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_third_of_three",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_approval_spent",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_invalid"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_three_legs_spent",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000001",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_policy_changed"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_policy_changed",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000002",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "policy_version_not_active"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_old_policy_without_proof",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/r"
+          ],
+          "token": "fixture-token-3"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_none_kind",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 2,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_serving_role",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000002",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "policy.request_action",
+      "name": "mint_wrong_serving_role",
+      "params": {
+        "action": "add_issue_comment",
+        "context": "uniquely-sensitive-command-text",
+        "fields": [
+          {
+            "name": "body",
+            "value": {
+              "text": "uniquely-sensitive-field-text"
+            }
+          },
+          {
+            "name": "number",
+            "value": "synthetic-issue-number-canary"
+          }
+        ],
+        "host": "api.github.com",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "method": "POST",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github",
+        "stamp": {
+          "attributes": {
+            "agent_id": "agent"
+          },
+          "kind": "head",
+          "owner": {
+            "kind": "reserved",
+            "module_id": "prefrontal"
+          },
+          "owner_authorized": true,
+          "ref": "uniquely-sensitive-scope-ref",
+          "scope_epoch": 7
+        }
+      },
+      "route": "reserved:aft"
+    }
+  ],
+  "phone_approval_pub_sec1_hex": "0451a7580833898ea1b183cbd7350a4099078c6ef1c1e18e970cd7683035f25e7d0110522712b0b5a7cff081685486984a94e6831edac46e7360fa9d834a7a81a1"
+}

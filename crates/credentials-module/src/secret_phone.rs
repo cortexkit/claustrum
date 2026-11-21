@@ -65,6 +65,24 @@ fn wall_now_ms() -> i64 {
         .as_millis() as i64
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BROKER_ACTION_TEST_CLOCK_MS: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn broker_action_clock() -> impl Fn() -> i64 {
+    // Capture the test override before the transaction moves to the blocking pool.
+    #[cfg(test)]
+    let fixed = BROKER_ACTION_TEST_CLOCK_MS.get();
+    move || {
+        #[cfg(test)]
+        if let Some(fixed) = fixed {
+            return fixed;
+        }
+        wall_now_ms()
+    }
+}
+
 pub enum PhoneAnswer {
     Reply(Value),
     InvalidParams(String),
@@ -136,11 +154,12 @@ pub async fn serve_dev_desktop(
     };
     let manifest = method == "manifest.approve";
     let broker_action = method == OP_APPROVE_ACTION;
+    let broker_clock = broker_action_clock();
     answer_for_method(
         method,
         tokio::task::spawn_blocking(move || {
             if broker_action {
-                store.broker_action_dev_desktop_approval(&envelope, wall_now_ms)
+                store.broker_action_dev_desktop_approval(&envelope, broker_clock)
             } else {
                 store.secret_dev_desktop_approval(
                     &envelope,
@@ -200,7 +219,16 @@ pub(crate) async fn serve_with_lookup(
             }
         }
     };
-    let now = wall_now_ms();
+    let broker_clock = broker_action_clock();
+    let broker_action = method == OP_APPROVE_ACTION;
+    let clock = move || {
+        if broker_action {
+            broker_clock()
+        } else {
+            wall_now_ms()
+        }
+    };
+    let now = clock();
     let fingerprint = fingerprint.to_owned();
     // Do not timeout the blocking job: it checks admission after acquiring SQLite's
     // write transaction, and an admitted transaction must finish even after the budget.
@@ -213,7 +241,7 @@ pub(crate) async fn serve_with_lookup(
                 now,
                 &op,
                 || before_deadline(tokio::time::Instant::now(), deadline),
-                wall_now_ms,
+                clock,
             )
         })
         .await

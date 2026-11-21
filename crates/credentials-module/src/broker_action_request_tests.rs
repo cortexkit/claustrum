@@ -13,6 +13,9 @@ use credentials_core::{
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use sha2::{Digest, Sha256};
 
+#[path = "broker_action_samples_tests.rs"]
+mod broker_action_samples_tests;
+
 const NOW: i64 = 1_800_000_000_000;
 const TTL: i64 = 600_000;
 const FIELD_CANARY: &str = "uniquely-sensitive-field-text";
@@ -1291,6 +1294,10 @@ fn broker_action_approval_is_rolled_back_if_the_audit_append_fails() {
 }
 
 fn seed_pending(rig: &Rig, count: usize) {
+    seed_pending_for(rig, count, None);
+}
+
+fn seed_pending_for(rig: &Rig, count: usize, agent: Option<&str>) {
     let mut db = Connection::open(&rig.path).unwrap();
     let tx = db.transaction().unwrap();
     for i in 0..count {
@@ -1298,7 +1305,7 @@ fn seed_pending(rig: &Rig, count: usize) {
                         request_id, principal, agent_id, scope_json, statement_bytes, statement_sha256,
                         policy_version, identity, legs_json, created_at_ms, expires_at_ms
                     ) VALUES (?1, 'reserved:plexus', ?2, '{}', X'00', 'digest', 1, ?3, '[{}]', ?4, ?5)",
-            rusqlite::params![format!("{i:026}"), format!("other-agent-{i}"), APP, NOW, NOW + TTL]).unwrap();
+            rusqlite::params![format!("{i:026}"), agent.map(str::to_owned).unwrap_or_else(|| format!("other-agent-{i}")), APP, NOW, NOW + TTL]).unwrap();
     }
     tx.commit().unwrap();
 }

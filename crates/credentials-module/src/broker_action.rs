@@ -55,13 +55,9 @@ pub(crate) async fn serve(
     };
     let store = Arc::clone(store);
     let params = params.clone();
+    let clock = crate::secret_phone::broker_action_clock();
     let answer = tokio::task::spawn_blocking(move || {
-        store.request_broker_action(
-            module_id.as_deref(),
-            params,
-            request_scope,
-            crate::read_surface::now_ms,
-        )
+        store.request_broker_action(module_id.as_deref(), params, request_scope, clock)
     })
     .await
     .unwrap_or(Err(Error::StoreError));

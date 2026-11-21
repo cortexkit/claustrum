@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use super::{
     store_agent_secrets::secret_home_role_conn, EncryptedStore, SecretHomeRole, StoreOpError,
-    GH_MANIFEST_ROOT_KEY_ID,
 };
 use crate::agent_policy::{
     policy_sha256, signed_input, validate_signer_rule_sets, AgentPolicy, PolicyError,
@@ -190,7 +189,7 @@ impl EncryptedStore {
         }
 
         let root = self.gh_manifest_root_in_tx(tx).map_err(Root)?;
-        let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| UnusableRoot)?;
+        let pem = std::str::from_utf8(root.record.payload.expose()).map_err(|_| UnusableRoot)?;
         let public = public_key_ed25519(pem).map_err(|_| UnusableRoot)?;
         if row.key_id != public.key_id {
             return Err(KeyIdMismatch);
@@ -226,7 +225,7 @@ impl EncryptedStore {
         let approved: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM audit_log \
              WHERE seq = ?1 AND op = 'approval' AND credential_id = ?2 AND payload_hash = ?3)",
-            params![row.approval_seq, GH_MANIFEST_ROOT_KEY_ID, approved_digest],
+            params![row.approval_seq, root.credential_id, approved_digest],
             |record| record.get(0),
         )?;
         if !approved {

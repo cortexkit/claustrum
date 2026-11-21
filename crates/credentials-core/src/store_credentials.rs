@@ -224,6 +224,33 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        self.create_audited_with(credential_id, record, ctx, |_, _| Ok(()))
+    }
+
+    /// Deposit a legacy manifest root after migration has already run in a test vault.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn put_legacy_manifest_root_for_tests(
+        &self,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        self.create_audited_with(GH_MANIFEST_ROOT_KEY_ID, record, ctx, |tx, now| {
+            tx.execute(
+                "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at_ms=excluded.updated_at_ms",
+                rusqlite::params![super::gh_manifests::POLICY_ROOT_CREDENTIAL_SETTING, GH_MANIFEST_ROOT_KEY_ID, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn create_audited_with(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+        after_insert: impl FnOnce(&rusqlite::Transaction<'_>, i64) -> rusqlite::Result<()>,
+    ) -> Result<(), StoreOpError> {
         refuse_incoming_agent_ssh(record)?;
         validate_deposit_credential_id(credential_id)?;
         // A create for the transfer key's id must not slip past the replace fence by
@@ -315,6 +342,7 @@ impl EncryptedStore {
                         alarm: ctx.alarm,
                     },
                 )?;
+                after_insert(tx, now)?;
             }
             Ok(n)
         })?;

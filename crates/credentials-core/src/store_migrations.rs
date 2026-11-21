@@ -985,6 +985,23 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         version: AGENT_POLICY_SCHEMA_VERSION,
         statements: include_str!("agent_policies.sql"),
     },
+    Migration {
+        // Select the active legacy root by id and state. Both values are available
+        // even when the caller runs migrations without the vault's master key.
+        version: POLICY_ROOT_SCHEMA_VERSION,
+        statements: "ALTER TABLE credentials ADD COLUMN github_app_created_at_ms INTEGER; \
+                     ALTER TABLE credentials ADD COLUMN github_app_agent TEXT; \
+                     ALTER TABLE credentials ADD COLUMN github_app_relay_slot TEXT CHECK (\
+                         (github_app_created_at_ms IS NULL AND github_app_agent IS NULL AND github_app_relay_slot IS NULL) \
+                         OR (github_app_created_at_ms IS NOT NULL AND github_app_agent IS NOT NULL \
+                             AND credential_id GLOB 'github_app:*')\
+                     ); \
+                     CREATE UNIQUE INDEX credentials_github_app_agent ON credentials(github_app_agent) \
+                         WHERE github_app_agent IS NOT NULL; \
+                     INSERT INTO settings (name, value, updated_at_ms) \
+                         SELECT 'policy_root_credential', credential_id, updated_at_ms FROM credentials \
+                         WHERE credential_id = 'signing:gh-manifest-root:1' AND state = 'active';",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

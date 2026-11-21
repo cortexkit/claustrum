@@ -1,5 +1,6 @@
 use super::*;
 use crate::record::{CredentialKind, VaultRecord};
+use crate::store::GH_MANIFEST_ROOT_KEY_ID;
 use crate::store::{taxonomy_tests, GhManifestSource, GhManifestVersion};
 use rusqlite::types::Value;
 use sha2::{Digest, Sha256};
@@ -91,11 +92,7 @@ fn add_root(store: &EncryptedStore) {
         None,
     );
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &record,
-            AuditCtx::admin(AuditOp::Put),
-        )
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
         .unwrap();
 }
 

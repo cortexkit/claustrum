@@ -164,6 +164,8 @@ pub const CONDITION_SCHEMA_VERSION: u32 = 49;
 pub const HUB_ENTRIES_SCHEMA_VERSION: u32 = 50;
 /// Signed agent policies, policy-token grants, and GitHub App identity metadata.
 pub const AGENT_POLICY_SCHEMA_VERSION: u32 = 51;
+/// Configured signing root and GitHub App creation attestation.
+pub const POLICY_ROOT_SCHEMA_VERSION: u32 = 52;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;

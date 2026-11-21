@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 const EXISTING_AGENT: &str = "agent_1111111111111111";
 const FIRST_AGENT: &str = "agent_0000000000000000";
+const CONFIGURED_ROOT: &str = "signing:policy-root:1";
 const BINDINGS_V28: &str = concat!(
     r#"[{"agent":"agent_1111111111111111","identity":"github_app:zulu-bot","resources":["zulu/existing"],"service":"github"},"#,
     r#"{"agent":"agent_2222222222222222","identity":"github_app:alpha-bot","resources":["alpha/other"],"service":"github"},"#,
@@ -56,6 +57,154 @@ fn assert_pending(store: &EncryptedStore, proposal_id: &str) {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn configured_policy_root_signs_ceremony_and_one_tap_with_matching_approvals() {
+    let (_dir, store, legacy_public) = ready("configured-policy-root-signing");
+    let (record, public) = super::root_key();
+    let key_id = key_id_for_public(&public);
+    assert_ne!(key_id, key_id_for_public(&legacy_public));
+    store.create(CONFIGURED_ROOT, &record).unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE settings SET value=?1 WHERE name='policy_root_credential'",
+                [CONFIGURED_ROOT],
+            )
+        })
+        .unwrap();
+
+    let v29 = std::str::from_utf8(V28)
+        .unwrap()
+        .replace("\"manifest_version\": 28", "\"manifest_version\": 29");
+    store
+        .sign_gh_manifest_admin(&v29, "operator", "test")
+        .unwrap();
+    sign_policy(&store, &initial_policy(&public), 29);
+    let p = propose(&store, "Octo/New", NOW);
+    assert_eq!(
+        run(&store, &approve(&envelope(&p, NOW)), NOW).unwrap()["version"],
+        30
+    );
+
+    let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public);
+    store.with_raw_conn(|conn| {
+        for (version, source) in [(29, "ceremony"), (30, "one_tap")] {
+            let (manifest, manifest_sig, manifest_approval): (Vec<u8>, Vec<u8>, i64) = conn.query_row(
+                "SELECT manifest_bytes, signature, approval_audit_seq FROM gh_manifests WHERE version=?1 AND key_id=?2 AND source=?3",
+                rusqlite::params![version, key_id, source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            verifier.verify(&manifest, &manifest_sig).unwrap();
+            let (policy, policy_sig, policy_approval): (Vec<u8>, Vec<u8>, i64) = conn.query_row(
+                "SELECT policy_bytes, signature, approval_seq FROM agent_policies WHERE manifest_version=?1 AND key_id=?2 AND source=?3",
+                rusqlite::params![version, key_id, source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            verifier.verify(&[AGENT_POLICY_SEPARATOR, &policy].concat(), &policy_sig).unwrap();
+            assert_eq!(AgentPolicy::parse_canonical(&policy).unwrap().root_key_id, key_id);
+            assert_eq!(manifest_approval == policy_approval, source == "one_tap");
+            for seq in [manifest_approval, policy_approval] {
+                let subject: String = conn.query_row("SELECT credential_id FROM audit_log WHERE seq=?1 AND op='approval'", [seq], |r| r.get(0))?;
+                assert_eq!(subject, CONFIGURED_ROOT);
+            }
+        }
+        for op in ["gh_manifest_sign", "agent_policy_sign"] {
+            let mut stmt = conn.prepare("SELECT credential_id FROM audit_log WHERE op=?1 ORDER BY seq")?;
+            let subjects = stmt.query_map([op], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(subjects, [CONFIGURED_ROOT; 2]);
+        }
+        Ok(())
+    }).unwrap();
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
+fn configured_policy_root_rejects_missing_and_sign_granted_ordinary_keys_in_every_signer() {
+    use crate::store::{
+        GhManifestHandoffEnvelope, GhManifestProposalError, GrantOperation, SelectorKind,
+        StoreOpError,
+    };
+
+    let v28 =
+        "{\n  \"manifest_version\": 28,\n  \"issued_at_unix_secs\": 1,\n  \"bindings\": {}\n}\n";
+    let v29 = v28.replace("28", "29");
+    let (_dir, store, legacy_public) =
+        ready_with_manifest("configured-policy-root-rejection", v28.as_bytes());
+    let p = propose(&store, "Octo/New", NOW);
+    let op = approve(&envelope(&p, NOW));
+    let ordinary_id = "signing:ordinary:1";
+    let (ordinary, public) = super::root_key();
+    store.create(ordinary_id, &ordinary).unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "signer",
+            SelectorKind::Exact,
+            ordinary_id,
+            GrantOperation::Sign,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let ordinary_pem = std::str::from_utf8(ordinary.payload.expose()).unwrap();
+    let signed = crate::signing::prepare_ed25519(ordinary_pem, v29.as_bytes())
+        .unwrap()
+        .sign();
+    let import = GhManifestHandoffEnvelope {
+        key_id: signed.key_id,
+        manifest_bytes: v29.clone(),
+        signature: signed.signature_b64,
+    };
+
+    for (setting, public) in [
+        (Some(ordinary_id), public.as_slice()),
+        (None, legacy_public.as_slice()),
+    ] {
+        store
+            .with_raw_conn(|conn| {
+                if let Some(id) = setting {
+                    conn.execute(
+                        "UPDATE settings SET value=?1 WHERE name='policy_root_credential'",
+                        [id],
+                    )?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM settings WHERE name='policy_root_credential'",
+                        [],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let before = snapshot(&store);
+        let policy = AgentPolicy {
+            bindings: Vec::new(),
+            ..initial_policy(public)
+        };
+        let policy_bytes = String::from_utf8(policy.canonical_bytes().unwrap()).unwrap();
+        for result in [
+            store
+                .sign_gh_manifest_admin(&v29, "operator", "test")
+                .map(|_| ()),
+            store.import_gh_manifest_admin(&import, "test").map(|_| ()),
+            store
+                .sign_agent_policy_admin(&policy_bytes, 28, "operator", "test")
+                .map(|_| ()),
+            store
+                .derive_agent_policy_admin(28, &BTreeMap::new())
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(StoreOpError::Encode(code)) if code == "manifest_setup_incomplete"),
+                "{setting:?}: {result:?}"
+            );
+        }
+        assert_eq!(
+            store.check_gh_manifest_setup(),
+            Err(GhManifestProposalError::ManifestSetupIncomplete)
+        );
+        refuses(&store, &op, NOW, SecretError::ManifestSetupIncomplete);
+        assert_eq!(snapshot(&store), before);
+    }
 }
 
 #[test]

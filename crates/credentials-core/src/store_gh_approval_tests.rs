@@ -1,6 +1,7 @@
 use super::*;
 use crate::gh_manifest::MANIFEST_BINDING_ENVELOPE_V1_TAG;
 use crate::record::{CredentialKind, VaultRecord};
+use crate::store::GH_MANIFEST_ROOT_KEY_ID;
 use crate::store::{taxonomy_tests, GhManifestProposalInput, PhoneOperation};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use ring::signature::KeyPair as _;
@@ -55,11 +56,7 @@ fn ready_with_manifest(
     let (dir, store) = taxonomy_tests::rig(label, SEED);
     let (record, public) = root_key();
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &record,
-            AuditCtx::admin(AuditOp::Put),
-        )
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
         .unwrap();
     store
         .set_federation_self_member_audited(MEMBER, AuditCtx::admin(AuditOp::FederationSelfSet))

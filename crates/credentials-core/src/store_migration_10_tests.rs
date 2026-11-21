@@ -1002,7 +1002,7 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 51);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 52);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
@@ -1022,12 +1022,148 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         assert_eq!(after.remove(table), Some(vec![]));
     }
     for row in after.get_mut("credentials").unwrap() {
-        for _ in ["github_app_id", "github_app_slug"] {
+        for _ in [
+            "github_app_id",
+            "github_app_slug",
+            "github_app_created_at_ms",
+            "github_app_agent",
+            "github_app_relay_slot",
+        ] {
             assert_eq!(row.pop(), Some(rusqlite::types::Value::Null));
         }
     }
     assert_eq!(after, before);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
+fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy() {
+    use base64::Engine as _;
+    use rusqlite::{params, types::Value};
+
+    let (root, sqlite) = sqlite("root-setting-upgrade", 229);
+    migrate_through_for_test(&sqlite, 51).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([229; 32])).unwrap();
+    let der =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pem = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+    );
+    store
+        .create(
+            GH_MANIFEST_ROOT_KEY_ID,
+            &VaultRecord::new_static(CredentialKind::SigningKey, "test", pem.into_bytes(), None),
+        )
+        .unwrap();
+    store.create("github_app:sample", &api_record()).unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "migration-fixture",
+            SelectorKind::Exact,
+            "github_app:sample",
+            GrantOperation::PolicyToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    store.with_raw_conn(|conn| {
+        let hash = "a".repeat(64);
+        let signature = [7_u8; 64];
+        conn.execute_batch("UPDATE credentials SET github_app_id='123', github_app_slug='sample' WHERE credential_id='github_app:sample';")?;
+        conn.execute(
+            "INSERT INTO gh_manifests VALUES (1, X'01', ?1, '0123456789abcdef', ?2, 1, 'import', NULL)",
+            params![hash, signature.as_slice()],
+        )?;
+        conn.execute(
+            "INSERT INTO agent_policies VALUES (1, X'02', ?1, '0123456789abcdef', ?2, 1, 'ceremony', 1, 1)",
+            params![hash, signature.as_slice()],
+        )?;
+        Ok(())
+    }).unwrap();
+    let original = every_table_row(&store.store);
+    let legacy_timestamp = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT updated_at_ms FROM credentials WHERE credential_id=?1",
+                [GH_MANIFEST_ROOT_KEY_ID],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(original["credentials"].len(), 2);
+    for table in ["agent_policies", "read_grants", "gh_manifests"] {
+        assert_eq!(original[table].len(), 1);
+    }
+    let seed = vec![
+        Value::Text("policy_root_credential".into()),
+        Value::Text(GH_MANIFEST_ROOT_KEY_ID.into()),
+        Value::Integer(legacy_timestamp),
+    ];
+
+    for (label, legacy_state, with_key) in [
+        ("keyless", Some("active"), false),
+        ("keyed", Some("active"), true),
+        ("retired", Some("retired"), false),
+        ("absent", None, false),
+    ] {
+        let path = root
+            .join(format!("{label}.db"))
+            .to_string_lossy()
+            .into_owned();
+        store
+            .with_raw_conn(|conn| conn.execute("VACUUM INTO ?1", [&path]))
+            .unwrap();
+        let copy = open_sqlite(&StorageDescriptor {
+            module_id: "claustrum".into(),
+            storage_namespace: format!("root-setting-{label}"),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite { path },
+        })
+        .unwrap();
+        copy.with_conn(|conn| {
+            assert_eq!(read_schema_version(conn)?, 51);
+            match legacy_state {
+                Some("active") => (),
+                Some(state) => {
+                    conn.execute(
+                        "UPDATE credentials SET state=?1 WHERE credential_id=?2",
+                        params![state, GH_MANIFEST_ROOT_KEY_ID],
+                    )?;
+                }
+                None => {
+                    conn.execute(
+                        "DELETE FROM credentials WHERE credential_id=?1",
+                        [GH_MANIFEST_ROOT_KEY_ID],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let before = every_table_row(&copy);
+        if with_key {
+            EncryptedStore::migrate_with_key(&copy, &MasterKey::from_bytes([229; 32])).unwrap();
+        } else {
+            EncryptedStore::migrate(&copy).unwrap();
+        }
+        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 52);
+        let mut after = every_table_row(&copy);
+        let settings = after.get_mut("settings").unwrap();
+        let seeded = settings.iter().position(|row| row[0] == seed[0]);
+        assert_eq!(
+            seeded.map(|index| settings.remove(index)).as_ref(),
+            (legacy_state == Some("active")).then_some(&seed),
+            "{label}"
+        );
+        for row in after.get_mut("credentials").unwrap() {
+            for _ in 0..3 {
+                assert_eq!(row.pop(), Some(Value::Null), "{label}");
+            }
+        }
+        assert_eq!(after, before, "{label}");
+    }
+    assert_eq!(every_table_row(&store.store), original);
 }
 
 #[test]
@@ -2332,6 +2468,9 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
     assert!(columns_of(&store, "credentials").ends_with(&[
         column("github_app_id", "TEXT", false, None, false),
         column("github_app_slug", "TEXT", false, None, false),
+        column("github_app_created_at_ms", "INTEGER", false, None, false),
+        column("github_app_agent", "TEXT", false, None, false),
+        column("github_app_relay_slot", "TEXT", false, None, false),
     ]));
 
     // The state vocabulary is DRIVEN rather than read off the DDL text: a CHECK

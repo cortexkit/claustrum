@@ -147,11 +147,7 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
     let (original, first_public) = root_key();
     let (replacement, second_public) = root_key();
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &original,
-            AuditCtx::admin(AuditOp::Put),
-        )
+        .put_legacy_manifest_root_for_tests(&original, AuditCtx::admin(AuditOp::Put))
         .unwrap();
     let (writer_held, writer_ready) = mpsc::channel();
     let (attempting, attempted) = mpsc::channel();
@@ -241,7 +237,7 @@ fn gh_manifest_sign_serializes_key_replacement_before_or_after_all_signed_rows()
 fn gh_manifest_sign_rolls_back_with_its_caller_and_fails_closed_on_audit_error() {
     let (_root, store) = taxonomy_tests::rig("manifest-sign-rollback", 180);
     store
-        .create(GH_MANIFEST_ROOT_KEY_ID, &root_key().0)
+        .put_legacy_manifest_root_for_tests(&root_key().0, AuditCtx::admin(AuditOp::Put))
         .unwrap();
     let before = snapshot(&store);
     assert!(store
@@ -282,9 +278,9 @@ fn gh_manifest_sign_requires_an_active_usable_signing_key_without_writes() {
     };
     refuse();
     store
-        .create(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"not a key".to_vec(), None),
+            AuditCtx::admin(AuditOp::Put),
         )
         .unwrap();
     refuse();
@@ -628,6 +624,7 @@ fn manifest_audit_records_pin_subjects_field_order_and_framing() {
         ),
         (
             GhManifestAudit::Sign {
+                credential_id: GH_MANIFEST_ROOT_KEY_ID,
                 manifest_sha256: HASH,
             },
             "gh_manifest_sign",

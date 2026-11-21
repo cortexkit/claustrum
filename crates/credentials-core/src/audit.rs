@@ -564,6 +564,7 @@ pub enum GhManifestAudit<'a> {
         to: &'a str,
     },
     Sign {
+        credential_id: &'a str,
         manifest_sha256: &'a str,
     },
     Store {
@@ -614,9 +615,12 @@ impl GhManifestAudit<'_> {
                 format!("gh-manifest-proposal|{proposal_id}"),
                 hash_framed_fields(&[from, to]),
             ),
-            Self::Sign { manifest_sha256 } => (
+            Self::Sign {
+                credential_id,
+                manifest_sha256,
+            } => (
                 AuditOp::GhManifestSign,
-                crate::store::GH_MANIFEST_ROOT_KEY_ID.to_owned(),
+                credential_id.to_owned(),
                 manifest_sha256.to_owned(),
             ),
             Self::Store {
@@ -669,6 +673,7 @@ fn hash_framed_fields(fields: &[&str]) -> String {
 /// Commit the policy bytes at signing and bind them to their manifest at storage.
 pub enum AgentPolicyAudit<'a> {
     Sign {
+        credential_id: &'a str,
         policy_sha256: &'a str,
     },
     Store {
@@ -682,9 +687,12 @@ pub enum AgentPolicyAudit<'a> {
 impl AgentPolicyAudit<'_> {
     pub fn record(self, actor: &str, alarm: Option<AlarmReason>) -> AuditRecord {
         let (op, subject, payload_hash) = match self {
-            Self::Sign { policy_sha256 } => (
+            Self::Sign {
+                credential_id,
+                policy_sha256,
+            } => (
                 AuditOp::AgentPolicySign,
-                crate::store::GH_MANIFEST_ROOT_KEY_ID.to_owned(),
+                credential_id.to_owned(),
                 policy_sha256.to_owned(),
             ),
             Self::Store {

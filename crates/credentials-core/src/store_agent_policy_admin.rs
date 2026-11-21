@@ -11,7 +11,7 @@ use super::gh_admin::{manifest_root_error, sql};
 use super::gh_manifests::ManifestRootReadError;
 use super::{
     append_audit_tx, envelope, now_ms, AuditOp, AuditRecord, CredentialKind, EncryptedStore,
-    RecordBinding, RecordState, StoreOpError, VaultRecord, GH_MANIFEST_ROOT_KEY_ID,
+    RecordBinding, RecordState, StoreOpError, VaultRecord,
 };
 use crate::agent_policy::{
     github_default_rule_set, manifest_projection, policy_sha256, signed_input,
@@ -23,6 +23,7 @@ use crate::gh_manifest::GhManifest;
 use crate::signing::{prepare_ed25519, public_key_ed25519, PreparedEd25519Signature, SignError};
 
 pub(super) struct PreparedAgentPolicy<'a> {
+    credential_id: String,
     version: i64,
     bytes: &'a [u8],
     hash: String,
@@ -133,7 +134,7 @@ impl EncryptedStore {
     ) -> Result<PreparedAgentPolicy<'a>, PrepareAgentPolicyError> {
         use PrepareAgentPolicyError::{Root, RootKeyIdMismatch, TooLarge, UnusableKey};
         let root = self.read_gh_manifest_root_in_tx(tx).map_err(Root)?;
-        let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| UnusableKey)?;
+        let pem = std::str::from_utf8(root.record.payload.expose()).map_err(|_| UnusableKey)?;
         let signature = prepare_ed25519(pem, input).map_err(|error| match error {
             SignError::TooLarge { .. } => TooLarge,
             SignError::UnusableKey(_) => UnusableKey,
@@ -142,6 +143,7 @@ impl EncryptedStore {
             return Err(RootKeyIdMismatch);
         }
         Ok(PreparedAgentPolicy {
+            credential_id: root.credential_id,
             version: policy.version,
             bytes,
             hash: policy_sha256(bytes),
@@ -160,6 +162,7 @@ impl EncryptedStore {
             tx,
             &self.audit_key,
             &AgentPolicyAudit::Sign {
+                credential_id: &prepared.credential_id,
                 policy_sha256: &prepared.hash,
             }
             .record(approval.actor, None),
@@ -230,7 +233,7 @@ impl EncryptedStore {
                 &self.audit_key,
                 &AuditRecord {
                     op: AuditOp::Approval,
-                    credential_id: Some(GH_MANIFEST_ROOT_KEY_ID.into()),
+                    credential_id: Some(prepared.credential_id.clone()),
                     payload_hash: Some(hash.clone()),
                     actor: actor.clone(),
                     alarm: None,
@@ -337,8 +340,8 @@ impl EncryptedStore {
                 let root = self
                     .gh_manifest_root_in_tx(&tx)
                     .map_err(manifest_root_error)?;
-                let pem =
-                    std::str::from_utf8(root.payload.expose()).map_err(|_| unusable_root())?;
+                let pem = std::str::from_utf8(root.record.payload.expose())
+                    .map_err(|_| unusable_root())?;
                 let public = public_key_ed25519(pem).map_err(|_| unusable_root())?;
                 let policy = AgentPolicy {
                     schema: AGENT_POLICY_SCHEMA_V1.into(),

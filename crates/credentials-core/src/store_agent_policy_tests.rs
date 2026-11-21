@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_policy::{github_default_rule_set, AGENT_POLICY_SCHEMA_V1};
 use crate::gh_manifest::GhManifest;
 use crate::key::MasterKey;
+use crate::store::GH_MANIFEST_ROOT_KEY_ID;
 use crate::store::{
     append_audit_tx, migrate_through_for_test, read_schema_version, taxonomy_tests, AuditCtx,
     AuditOp, AuditRecord, CredentialKind, GhManifestSource, GhManifestVersion, GrantOperation,
@@ -232,6 +233,49 @@ fn migration_51_binds_github_app_metadata_to_one_credential() {
 }
 
 #[test]
+fn migration_52_github_app_attestation_requires_a_pair_and_reserves_the_agent_in_any_state() {
+    let (_dir, store) = taxonomy_tests::rig("github-app-attestation-schema", 93);
+    for id in ["github_app:first", "github_app:second", "apikey:sample"] {
+        store.create(id, &taxonomy_tests::api_record()).unwrap();
+    }
+    store
+        .with_raw_conn(|conn| {
+            let write = |id, created_at: Option<i64>, agent: Option<&str>, slot: Option<&str>| {
+                conn.execute(
+                    "UPDATE credentials SET github_app_created_at_ms=?1, github_app_agent=?2, \
+                 github_app_relay_slot=?3 WHERE credential_id=?4",
+                    params![created_at, agent, slot, id],
+                )
+            };
+            let first = "github_app:first";
+            let second = "github_app:second";
+            let agent = Some("agent_0000000000000001");
+            let slot = Some("slot");
+            for (id, time, agent, slot, label) in [
+                (first, None, None, slot, "slot without attestation"),
+                (first, Some(1), None, None, "creation time alone"),
+                (first, None, agent, None, "agent alone"),
+                ("apikey:sample", Some(1), agent, slot, "non-App attestation"),
+            ] {
+                assert_constraint(write(id, time, agent, slot), label);
+            }
+            assert_eq!(write(first, Some(1), agent, None)?, 1);
+            conn.execute(
+                "UPDATE credentials SET state='needs_reauth' WHERE credential_id=?1",
+                [first],
+            )?;
+            assert_constraint(
+                write(second, Some(2), agent, slot),
+                "agent held by invalidated App",
+            );
+            assert_eq!(write(first, None, None, None)?, 1);
+            assert_eq!(write(second, Some(2), agent, slot)?, 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn migration_51_preserves_every_grant_and_generation_in_a_schema_50_vault() {
     let (_dir, sqlite) = taxonomy_tests::sqlite("policy-grants-upgrade", 64);
     migrate_through_for_test(&sqlite, 50).unwrap();
@@ -267,7 +311,7 @@ fn migration_51_preserves_every_grant_and_generation_in_a_schema_50_vault() {
     assert_eq!(grants.len(), 7);
     assert_eq!(generation, initial_generation + 7);
     assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 50);
-    EncryptedStore::migrate(&store.store).unwrap();
+    migrate_through_for_test(&store.store, 51).unwrap();
     assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 51);
     assert_eq!(store.list_read_grants().unwrap(), grants);
     assert_eq!(store.grants_generation().unwrap(), generation);
@@ -323,24 +367,28 @@ fn migration_51_preserves_every_grant_and_generation_in_a_schema_50_vault() {
     assert_eq!(store.grants_generation().unwrap(), generation + 1);
 }
 
-fn install_root(store: &EncryptedStore) -> Ed25519KeyPair {
+fn root_key() -> (VaultRecord, Ed25519KeyPair) {
     let der = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
     let pair = Ed25519KeyPair::from_pkcs8(der.as_ref()).unwrap();
     let pem = format!(
         "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
         BASE64_STANDARD.encode(der.as_ref())
     );
+    (
+        VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            pem.into_bytes(),
+            None,
+        ),
+        pair,
+    )
+}
+
+fn install_root(store: &EncryptedStore) -> Ed25519KeyPair {
+    let (record, pair) = root_key();
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
-            &VaultRecord::new_static(
-                CredentialKind::SigningKey,
-                "operator",
-                pem.into_bytes(),
-                None,
-            ),
-            AuditCtx::admin(AuditOp::Put),
-        )
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
         .unwrap();
     pair
 }
@@ -450,6 +498,61 @@ impl SignedFixture {
             ..*row
         }
     }
+}
+
+#[test]
+fn configured_policy_root_refuses_a_planted_legacy_approval() {
+    let (_dir, store) = taxonomy_tests::rig("configured-policy-root-approval", 94);
+    install_root(&store);
+    let (record, pair) = root_key();
+    let id = "signing:policy-root:1";
+    store.create(id, &record).unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE settings SET value=?1 WHERE name='policy_root_credential'",
+                [id],
+            )?;
+            raw_manifest(conn, 1)?;
+            Ok(())
+        })
+        .unwrap();
+    let key_id = crate::signing::key_id_for_public(pair.public_key().as_ref());
+    let evidence = SignedFixture::new(&pair, policy_fixture(1, &key_id).canonical_bytes().unwrap());
+    store
+        .fenced_write(|tx| {
+            let row = AgentPolicyVersion {
+                version: 1,
+                manifest_version: 1,
+                key_id: &key_id,
+                signed_at_ms: 100,
+                source: AgentPolicySource::Ceremony,
+                approval_seq: audit_fixture(
+                    &store,
+                    tx,
+                    AuditOp::Approval,
+                    GH_MANIFEST_ROOT_KEY_ID,
+                    &evidence.digest,
+                )?,
+                policy_bytes: &evidence.bytes,
+                policy_sha256: &evidence.digest,
+                signature: &evidence.signature,
+            };
+            assert!(matches!(
+                store.store_agent_policy_in_tx(tx, &row),
+                Err(StoreAgentPolicyError::ApprovalMismatch)
+            ));
+            assert_eq!(policy_state(tx, 1)?, (None, false));
+
+            let approved = AgentPolicyVersion {
+                approval_seq: audit_fixture(&store, tx, AuditOp::Approval, id, &evidence.digest)?,
+                ..row
+            };
+            store.store_agent_policy_in_tx(tx, &approved).unwrap();
+            assert_eq!(policy_state(tx, 1)?, (Some(1), true));
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

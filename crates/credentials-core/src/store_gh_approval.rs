@@ -3,7 +3,7 @@ use super::agent_policy_admin::{AgentPolicyApproval, PrepareAgentPolicyError};
 use super::gh_manifests::ManifestRootReadError;
 use super::{
     append_audit_tx, gh_proposals, hex32, payload_hash, EncryptedStore, GhManifestProposal,
-    GhManifestSource, GhManifestVersion, GH_MANIFEST_ROOT_KEY_ID,
+    GhManifestSource, GhManifestVersion,
 };
 use crate::agent_policy::{manifest_projection, signed_input, AgentPolicy, Binding, PolicyError};
 use crate::agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
@@ -141,9 +141,9 @@ impl EncryptedStore {
         bytes: &[u8],
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
-        if !gh_proposals::setup_complete(tx)? {
+        let Some(credential_id) = gh_proposals::setup_root_credential_id(tx)? else {
             return Ok(Err(SecretError::ManifestSetupIncomplete));
-        }
+        };
         let envelope = match authority.manifest(bytes, fingerprint, now) {
             Ok(envelope) => envelope,
             Err(error) => return Ok(Err(error)),
@@ -216,7 +216,7 @@ impl EncryptedStore {
             &self.audit_key,
             &AuditRecord {
                 op: AuditOp::Approval,
-                credential_id: Some(GH_MANIFEST_ROOT_KEY_ID.into()),
+                credential_id: Some(credential_id),
                 payload_hash: Some(p.manifest_sha256.clone()),
                 actor: actor.clone(),
                 alarm: None,

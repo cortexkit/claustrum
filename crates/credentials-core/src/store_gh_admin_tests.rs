@@ -1,6 +1,7 @@
 use super::*;
 use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2};
 use crate::record::{CredentialKind, VaultRecord};
+use crate::store::GH_MANIFEST_ROOT_KEY_ID;
 use crate::store::{taxonomy_tests, GhManifestProposalInput};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use std::collections::BTreeMap;
@@ -34,8 +35,7 @@ fn rig(
         STANDARD.encode(&der)
     );
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::SigningKey,
                 "operator",
@@ -313,8 +313,7 @@ fn gh_manifest_admin_sign_requires_an_active_root_and_rolls_back_unusable_key() 
     let (_dir, store) = taxonomy_tests::rig("manifest-admin-setup", SEED);
     refuses(&store, sign(V28), "manifest_setup_incomplete");
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::ApiKey,
                 "operator",
@@ -337,8 +336,7 @@ fn gh_manifest_admin_sign_requires_an_active_root_and_rolls_back_unusable_key() 
     refuses(&store, sign(V28), "manifest_setup_incomplete");
     let (_dir, store) = taxonomy_tests::rig("manifest-admin-broken-root", SEED);
     store
-        .create_audited(
-            GH_MANIFEST_ROOT_KEY_ID,
+        .put_legacy_manifest_root_for_tests(
             &VaultRecord::new_static(
                 CredentialKind::SigningKey,
                 "operator",

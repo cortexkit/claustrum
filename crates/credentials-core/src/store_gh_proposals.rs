@@ -1,7 +1,5 @@
-use super::{
-    append_audit_tx, hex32, now_ms, payload_hash, EncryptedStore, StoreOpError,
-    GH_MANIFEST_ROOT_KEY_ID,
-};
+use super::gh_manifests::{is_policy_root_id, POLICY_ROOT_CREDENTIAL_SETTING};
+use super::{append_audit_tx, hex32, now_ms, payload_hash, EncryptedStore, StoreOpError};
 use crate::audit::{AuditCtx, AuditOp, AuditRecord, GhManifestAudit};
 use crate::gh_manifest::{GhManifest, ManifestBindingStatement, ManifestValue};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -103,17 +101,16 @@ pub struct GhManifestProposal {
     pub expires_at_ms: i64,
 }
 
-pub(super) fn setup_complete(conn: &Connection) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id=?1 AND state='active') \
+pub(super) fn setup_root_credential_id(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    let id = conn.query_row(
+        "SELECT root.value FROM settings AS root WHERE root.name=?1 AND typeof(root.value)='text' \
+         AND EXISTS(SELECT 1 FROM credentials WHERE credential_id=root.value AND state='active') \
          AND EXISTS(SELECT 1 FROM gh_manifests) \
          AND EXISTS(SELECT 1 FROM settings WHERE name=?2 AND value != '')",
-        params![
-            GH_MANIFEST_ROOT_KEY_ID,
-            crate::federation::SELF_MEMBER_SETTING
-        ],
-        |row| row.get(0),
-    )
+        params![POLICY_ROOT_CREDENTIAL_SETTING, crate::federation::SELF_MEMBER_SETTING],
+        |row| row.get::<_, String>(0),
+    ).optional()?;
+    Ok(id.filter(|id| is_policy_root_id(id)))
 }
 
 impl EncryptedStore {
@@ -203,9 +200,9 @@ impl EncryptedStore {
     /// vault's own federation member id. Without that id, the local manifest
     /// consumer (AFT) cannot report activation of the resulting version.
     pub fn check_gh_manifest_setup(&self) -> Result<(), GhManifestProposalError> {
-        match self.store.with_conn(setup_complete) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(GhManifestProposalError::ManifestSetupIncomplete),
+        match self.store.with_conn(setup_root_credential_id) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(GhManifestProposalError::ManifestSetupIncomplete),
             Err(_) => Err(GhManifestProposalError::StoreError),
         }
     }
@@ -218,7 +215,7 @@ impl EncryptedStore {
     ) -> Result<PreparedGhManifestProposal, GhManifestProposalError> {
         self.store.with_conn(|conn| {
             use GhManifestProposalError as Error;
-            if !setup_complete(conn)? {
+            if setup_root_credential_id(conn)?.is_none() {
                 return Ok(Err(Error::ManifestSetupIncomplete));
             }
             let (version, bytes, hash): (i64, Vec<u8>, String) = conn.query_row(

@@ -2,11 +2,22 @@ use super::{
     append_audit_tx, envelope, hex32, payload_hash, CredentialKind, EncryptedStore, RecordBinding,
     RecordState, StoreOpError, VaultRecord,
 };
+use crate::audit::{AuditCtx, GhManifestAudit};
 use rusqlite::OptionalExtension;
 
-/// The manifest root is exercised only by the transactional manifest signer.
+/// The fleet's legacy root credential. Admin operations also use this id to take
+/// the same lock before opening a transaction, regardless of the configured root.
 pub const GH_MANIFEST_ROOT_KEY_ID: &str = "signing:gh-manifest-root:1";
-use crate::audit::{AuditCtx, GhManifestAudit};
+pub(super) const POLICY_ROOT_CREDENTIAL_SETTING: &str = "policy_root_credential";
+
+pub(super) fn is_policy_root_id(id: &str) -> bool {
+    id == GH_MANIFEST_ROOT_KEY_ID || id.starts_with("signing:policy-root:")
+}
+
+pub(super) struct ManifestRoot {
+    pub credential_id: String,
+    pub record: VaultRecord,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GhManifestSource {
@@ -64,11 +75,11 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
     ) -> Result<crate::signing::Signature, StoreOpError> {
         let sql_error = |e: rusqlite::Error| StoreOpError::Store(e.to_string());
-        let record = self.gh_manifest_root_in_tx(tx)?;
-        crate::signing::validate_signing_input(GH_MANIFEST_ROOT_KEY_ID, manifest_bytes)
+        let root = self.gh_manifest_root_in_tx(tx)?;
+        crate::signing::validate_signing_input(&root.credential_id, manifest_bytes)
             .map_err(|reason| StoreOpError::Encode(format!("invalid_params: {reason}")))?;
         let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
-        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
+        let pem = std::str::from_utf8(root.record.payload.expose()).map_err(|_| corrupt())?;
         let prepared =
             crate::signing::prepare_ed25519(pem, manifest_bytes).map_err(|e| match e {
                 crate::signing::SignError::TooLarge { .. } => StoreOpError::Encode(e.to_string()),
@@ -78,6 +89,7 @@ impl EncryptedStore {
             tx,
             &self.audit_key,
             &GhManifestAudit::Sign {
+                credential_id: &root.credential_id,
                 manifest_sha256: &hex32(&payload_hash(manifest_bytes)),
             }
             .record(ctx.actor, ctx.alarm),
@@ -91,20 +103,30 @@ impl EncryptedStore {
     pub(super) fn gh_manifest_root_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
-    ) -> Result<VaultRecord, StoreOpError> {
+    ) -> Result<ManifestRoot, StoreOpError> {
         self.read_gh_manifest_root_in_tx(tx).map_err(Into::into)
     }
 
     pub(super) fn read_gh_manifest_root_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
-    ) -> Result<VaultRecord, ManifestRootReadError> {
+    ) -> Result<ManifestRoot, ManifestRootReadError> {
         use ManifestRootReadError::{Sql, Unusable};
         let not_found = || Unusable(StoreOpError::NotFound);
+        let credential_id: String = tx
+            .query_row(
+                "SELECT value FROM settings WHERE name = ?1 AND typeof(value) = 'text'",
+                [POLICY_ROOT_CREDENTIAL_SETTING],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Sql)?
+            .filter(|id| is_policy_root_id(id))
+            .ok_or_else(not_found)?;
         let (version, state, blob): (i64, String, Vec<u8>) = tx
             .query_row(
                 "SELECT record_version, state, envelope FROM credentials WHERE credential_id = ?1",
-                [GH_MANIFEST_ROOT_KEY_ID],
+                [&credential_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
@@ -119,7 +141,7 @@ impl EncryptedStore {
             &self.key,
             &blob,
             &RecordBinding {
-                credential_id: GH_MANIFEST_ROOT_KEY_ID,
+                credential_id: &credential_id,
                 record_version: version as u64,
             },
         )
@@ -129,7 +151,10 @@ impl EncryptedStore {
         if record.kind != CredentialKind::SigningKey {
             return Err(not_found());
         }
-        Ok(record)
+        Ok(ManifestRoot {
+            credential_id,
+            record,
+        })
     }
 
     /// Store an already verified version, its audit row and all older pending

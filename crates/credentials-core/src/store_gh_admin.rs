@@ -1,7 +1,6 @@
 use super::{
     append_audit_tx, now_ms, AuditCtx, AuditOp, AuditRecord, EncryptedStore,
     GhManifestHandoffEnvelope, GhManifestSource, GhManifestVersion, StoreOpError,
-    GH_MANIFEST_ROOT_KEY_ID,
 };
 use crate::agent_policy::manifest_projection;
 use crate::gh_manifest::GhManifest;
@@ -65,7 +64,7 @@ impl EncryptedStore {
                 .gh_manifest_root_in_tx(tx)
                 .map_err(manifest_root_error)?;
             let corrupt = || StoreOpError::Corrupt("unusable manifest signing key".into());
-            let pem = std::str::from_utf8(root.payload.expose()).map_err(|_| corrupt())?;
+            let pem = std::str::from_utf8(root.record.payload.expose()).map_err(|_| corrupt())?;
             let public = crate::signing::public_key_ed25519(pem).map_err(|_| corrupt())?;
             let public_bytes = public
                 .public_key_hex
@@ -131,7 +130,8 @@ impl EncryptedStore {
                     return Err(StoreOpError::Encode("policy_binding_conflict".into()));
                 }
             }
-            self.gh_manifest_root_in_tx(tx)
+            let root = self
+                .gh_manifest_root_in_tx(tx)
                 .map_err(manifest_root_error)?;
             let hash = manifest.manifest_sha256();
             let actor = format!("{actor}/approver:{approver}");
@@ -140,7 +140,7 @@ impl EncryptedStore {
                 &self.audit_key,
                 &AuditRecord {
                     op: AuditOp::Approval,
-                    credential_id: Some(GH_MANIFEST_ROOT_KEY_ID.into()),
+                    credential_id: Some(root.credential_id),
                     payload_hash: Some(hash.clone()),
                     actor: actor.clone(),
                     alarm: None,

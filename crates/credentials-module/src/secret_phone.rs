@@ -242,13 +242,7 @@ fn base64(value: &str) -> Result<Vec<u8>, SecretError> {
         .map_err(|_| SecretError::InvalidParams)
 }
 
-pub fn valid_ulid(value: &str) -> bool {
-    value.len() == 26
-        && value.as_bytes()[0] <= b'7'
-        && value
-            .bytes()
-            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
-}
+pub use credentials_core::broker_action::valid_ulid;
 
 pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, SecretError> {
     match method {

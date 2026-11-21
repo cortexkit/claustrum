@@ -1,0 +1,154 @@
+{
+  "desktop-allow": {
+    "method": "consent.answer",
+    "params": {
+      "choiceId": "allow",
+      "clientFeatures": [
+        "broker-action-approval"
+      ],
+      "elicitationId": "el_1",
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+    },
+    "reply": {
+      "result": {
+        "alreadyAnswered": false,
+        "elicitation": {
+          "answeredAtMs": 1800000000000,
+          "answeredChoiceId": "allow",
+          "answeredDevice": "00000000000000000000000000000000",
+          "brokerAction": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "brokerActionAnswer": {
+            "decision": "allow",
+            "envelope_sha256": "2aa17780771b3017bdc1f359b950213379417334827b147d7eb4d1fa55e38ad4",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "createdAtMs": 1800000000000,
+          "default": "decline",
+          "elicitationId": "el_1",
+          "expiresAtMs": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "lateExecution": "notify_only",
+          "materialDamage": false,
+          "onExpiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requesterLabel": "reserved:aft",
+          "requesterName": "AFT",
+          "scope": {},
+          "state": "answered",
+          "subject": {
+            "agentId": "agent-alf",
+            "headAgentId": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        },
+        "ok": true
+      }
+    }
+  },
+  "desktop-get": {
+    "method": "consent.get",
+    "params": {
+      "clientFeatures": [
+        "broker-action-approval"
+      ],
+      "elicitationId": "el_1"
+    },
+    "reply": {
+      "result": {
+        "brokerAction": {
+          "action": "close_issue",
+          "agent_id": "agent-alf",
+          "identity": "github_app:example-garden",
+          "request_id": "01HF7YAT000000000000000001",
+          "resource": "example-garden/demo-notes",
+          "service": "github",
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+          "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+        },
+        "createdAtMs": 1800000000000,
+        "default": "decline",
+        "elicitationId": "el_1",
+        "expiresAtMs": 1800000600000,
+        "facts": [],
+        "kind": "broker_action",
+        "lateExecution": "notify_only",
+        "materialDamage": false,
+        "onExpiry": "deny",
+        "options": [
+          {
+            "effect": "grant",
+            "id": "allow",
+            "label": "Allow once"
+          },
+          {
+            "effect": "decline",
+            "id": "decline",
+            "label": "Decline"
+          }
+        ],
+        "prompt": "Review the action to be sent.",
+        "requesterLabel": "reserved:aft",
+        "requesterName": "AFT",
+        "scope": {},
+        "state": "pending",
+        "subject": {
+          "agentId": "agent-alf",
+          "headAgentId": "agent-alf",
+          "label": "ALF"
+        },
+        "target": {
+          "kind": "broker_action",
+          "label": "Broker action"
+        },
+        "title": "Allow this action once?",
+        "urgency": "normal"
+      }
+    }
+  },
+  "desktop-signed-refused": {
+    "method": "consent.answer",
+    "params": {
+      "choiceId": "allow",
+      "clientFeatures": [
+        "broker-action-approval"
+      ],
+      "elicitationId": "el_1",
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ",
+      "signature_b64url": "AQIDBA"
+    },
+    "reply": {
+      "error": {
+        "code": "elicitation_invalid_request",
+        "message": "broker_action answers cannot carry signatures"
+      }
+    }
+  }
+}

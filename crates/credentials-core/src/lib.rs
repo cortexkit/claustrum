@@ -23,6 +23,7 @@ pub use claustrum_providers::apns;
 pub use claustrum_providers::apns_submit;
 pub mod audit;
 pub use claustrum_providers::bedrock;
+pub mod broker_action;
 pub use claustrum_providers::catalog;
 pub mod contract;
 pub use claustrum_model::credential_id;

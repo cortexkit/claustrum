@@ -17,6 +17,7 @@ mod matching;
 mod narrowing;
 
 pub use defaults::github_default_rule_set;
+pub(crate) use matching::valid_resource;
 pub(crate) use narrowing::validate_signer_rule_sets;
 
 pub const AGENT_POLICY_SCHEMA_V1: &str = "ck-agent-policy/v1";
@@ -484,7 +485,7 @@ impl RuleSet {
     }
 }
 
-fn valid_host(host: &str) -> bool {
+pub(crate) fn valid_host(host: &str) -> bool {
     host.len() <= MAX_POLICY_HOST_BYTES
         && host.contains('.')
         && host.parse::<std::net::IpAddr>().is_err()

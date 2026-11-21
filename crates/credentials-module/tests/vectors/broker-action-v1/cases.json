@@ -1,0 +1,948 @@
+{
+  "cases": {
+    "allow": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmUwMTIzNDU2Nzg5YWJjZGZlMDEyMzQ1Njc4OWFiY2QiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "reply": {
+        "result": {
+          "alreadyAnswered": false,
+          "elicitation": {
+            "answeredAtMs": 1800000000000,
+            "answeredChoiceId": "allow",
+            "answeredDevice": "fe0123456789abcdfe0123456789abcd",
+            "brokerAction": {
+              "action": "close_issue",
+              "agent_id": "agent-alf",
+              "identity": "github_app:example-garden",
+              "request_id": "01HF7YAT000000000000000001",
+              "resource": "example-garden/demo-notes",
+              "service": "github",
+              "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+              "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+            },
+            "brokerActionAnswer": {
+              "decision": "allow",
+              "envelope_sha256": "3584bc920e3fabb0eb73113e5d07f598b5889f0a9e14c2ff34970c1a48ab9fe0",
+              "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+            },
+            "createdAtMs": 1800000000000,
+            "default": "decline",
+            "elicitationId": "el_1",
+            "expiresAtMs": 1800000600000,
+            "facts": [],
+            "kind": "broker_action",
+            "lateExecution": "notify_only",
+            "materialDamage": false,
+            "onExpiry": "deny",
+            "options": [
+              {
+                "effect": "grant",
+                "id": "allow",
+                "label": "Allow once"
+              },
+              {
+                "effect": "decline",
+                "id": "decline",
+                "label": "Decline"
+              }
+            ],
+            "prompt": "Review the action to be sent.",
+            "requesterLabel": "reserved:aft",
+            "requesterName": "AFT",
+            "scope": {},
+            "state": "answered",
+            "subject": {
+              "agentId": "agent-alf",
+              "headAgentId": "agent-alf",
+              "label": "ALF"
+            },
+            "target": {
+              "kind": "broker_action",
+              "label": "Broker action"
+            },
+            "title": "Allow this action once?",
+            "urgency": "normal"
+          },
+          "ok": true
+        }
+      }
+    },
+    "answer-after-expiry": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "decline",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_expired",
+          "message": "broker_action.expires_at_ms has passed"
+        }
+      }
+    },
+    "answer-at-expiry": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmUwMTIzNDU2Nzg5YWJjZGZlMDEyMzQ1Njc4OWFiY2QiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_expired",
+          "message": "broker_action.expires_at_ms has passed"
+        }
+      }
+    },
+    "binding-device_fingerprint": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "elicitation_invalid_request: invalid broker_action.device_fingerprint"
+        }
+      }
+    },
+    "binding-request_id": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmUwMTIzNDU2Nzg5YWJjZGZlMDEyMzQ1Njc4OWFiY2QiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMiIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "elicitation_invalid_request: invalid broker_action.request_id"
+        }
+      }
+    },
+    "binding-statement_sha256": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmUwMTIzNDU2Nzg5YWJjZGZlMDEyMzQ1Njc4OWFiY2QiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjEifQ"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "elicitation_invalid_request: invalid broker_action.statement_sha256"
+        }
+      }
+    },
+    "binding-v": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "allow",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1",
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiZmUwMTIzNDU2Nzg5YWJjZGZlMDEyMzQ1Njc4OWFiY2QiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInN0YXRlbWVudF9zaGEyNTYiOiIzZDg1ZGMzMmFmMDU0ZWZmYmI1NWFmNDhhOTE4NDFiODdjOWNkMzBhM2IwZTBhMmQyNzc0ZDNiZDRiZGJjMDJkIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tZW52ZWxvcGUvdjIifQ"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "elicitation_invalid_request: invalid broker_action.v"
+        }
+      }
+    },
+    "context-character": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6InNhbXBsZeKArmNvbnRleHQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwNjAwMDAwLCJmaWVsZHMiOlt7Im5hbWUiOiJJc3N1ZSIsInZhbHVlIjo3fSx7Im5hbWUiOiJTdGF0ZSIsInZhbHVlIjoiY2xvc2VkIn1dLCJob3N0IjoiYXBpLmdpdGh1Yi5leGFtcGxlIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOmV4YW1wbGUtZ2FyZGVuIiwia2luZCI6ImNsb3NlX2lzc3VlIiwibWV0aG9kIjoiUEFUQ0giLCJwb2xpY3lfc2hhMjU2IjoiMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMSIsInBvbGljeV92ZXJzaW9uIjo3LCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXF1ZXN0X3NoYTI1NiI6Ijg5OTllNzBlNGYwYzM3ZjE4ZmI0NDk0MDRkYThmZTRmYTE1OTYyNjRjYjZlY2M1NDYwYTAyMDI5MjQzOWI1YTQiLCJyZXNvdXJjZSI6ImV4YW1wbGUtZ2FyZGVuL2RlbW8tbm90ZXMiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOmFmdCIsInJlZiI6InNhbXBsZS1oZWFkIn0sInNlcnZpY2UiOiJnaXRodWIiLCJ2IjoiY2stYnJva2VyLWFjdGlvbi1zdGF0ZW1lbnQvdjEifQ"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.context"
+        }
+      }
+    },
+    "decline": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "decline",
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "result": {
+          "alreadyAnswered": false,
+          "elicitation": {
+            "answeredAtMs": 1800000000000,
+            "answeredChoiceId": "decline",
+            "answeredDevice": "fe0123456789abcdfe0123456789abcd",
+            "brokerAction": {
+              "action": "close_issue",
+              "agent_id": "agent-alf",
+              "identity": "github_app:example-garden",
+              "request_id": "01HF7YAT000000000000000001",
+              "resource": "example-garden/demo-notes",
+              "service": "github",
+              "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+              "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+            },
+            "brokerActionAnswer": {
+              "decision": "decline",
+              "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+            },
+            "createdAtMs": 1800000000000,
+            "default": "decline",
+            "elicitationId": "el_1",
+            "expiresAtMs": 1800000600000,
+            "facts": [],
+            "kind": "broker_action",
+            "lateExecution": "notify_only",
+            "materialDamage": false,
+            "onExpiry": "deny",
+            "options": [
+              {
+                "effect": "grant",
+                "id": "allow",
+                "label": "Allow once"
+              },
+              {
+                "effect": "decline",
+                "id": "decline",
+                "label": "Decline"
+              }
+            ],
+            "prompt": "Review the action to be sent.",
+            "requesterLabel": "reserved:aft",
+            "requesterName": "AFT",
+            "scope": {},
+            "state": "answered",
+            "subject": {
+              "agentId": "agent-alf",
+              "headAgentId": "agent-alf",
+              "label": "ALF"
+            },
+            "target": {
+              "kind": "broker_action",
+              "label": "Broker action"
+            },
+            "title": "Allow this action once?",
+            "urgency": "normal"
+          },
+          "ok": true
+        }
+      }
+    },
+    "dedup": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "result": {
+          "elicitation_id": "el_1"
+        }
+      }
+    },
+    "dedup-after-answer": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "result": {
+          "elicitation_id": "el_1"
+        }
+      }
+    },
+    "desktop-get-refused": {
+      "method": "consent.get",
+      "params": {
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_not_found",
+          "message": "elicitation not found"
+        }
+      }
+    },
+    "different-owner": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_request_conflict",
+          "message": "elicitation_request_conflict: broker action statement is already filed"
+        }
+      }
+    },
+    "expiry-override-refused": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "expires_in_ms": 800000,
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.expires_in_ms"
+        }
+      }
+    },
+    "file-legs": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV93aXRoX25vdGUiLCJhZ2VudF9pZCI6ImFnZW50LWFsZiIsImNvbnRleHQiOiJleGFtcGxlIGlzc3VlIGNsb3NlIDciLCJleHBpcmVzX2F0X21zIjoxODAwMDAwNjAwMDAwLCJmaWVsZHMiOlt7Im5hbWUiOiJJc3N1ZSIsInZhbHVlIjo3fSx7Im5hbWUiOiJTdGF0ZSIsInZhbHVlIjoiY2xvc2VkIn1dLCJob3N0IjoiYXBpLmdpdGh1Yi5leGFtcGxlIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOmV4YW1wbGUtZ2FyZGVuIiwibGVncyI6W3sia2luZCI6ImNsb3NlX2lzc3VlIiwibWV0aG9kIjoiUEFUQ0giLCJyZXF1ZXN0X3NoYTI1NiI6Ijg5OTllNzBlNGYwYzM3ZjE4ZmI0NDk0MDRkYThmZTRmYTE1OTYyNjRjYjZlY2M1NDYwYTAyMDI5MjQzOWI1YTQiLCJyZXNvdXJjZSI6ImV4YW1wbGUtZ2FyZGVuL2RlbW8tbm90ZXMifSx7ImtpbmQiOiJjb21tZW50IiwibWV0aG9kIjoiUE9TVCIsInJlcXVlc3Rfc2hhMjU2IjoiODdmNDE1YzVkYWEzNzBmMzJjOTY2ZmM0Y2ZjZjgxY2MwY2I2NzdhZGUzMWY2MmIwMWQyYTk3MmVmMTM3YzFjYiIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyJ9LHsia2luZCI6InJlbW92ZV9sYWJlbCIsIm1ldGhvZCI6IkRFTEVURSIsInJlcXVlc3Rfc2hhMjU2IjoiZWY2ZmRhNDQ0ZTFiMmI5MThiYTQ3NmNiMGI3YzM0YTY0ODdkZDM5ZGVhZjI4Y2ViYjhmZmFkYzAyMzRhZTUyNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyJ9XSwicG9saWN5X3NoYTI1NiI6IjAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEiLCJwb2xpY3lfdmVyc2lvbiI6NywicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAyIiwicmVzb3VyY2UiOiJleGFtcGxlLWdhcmRlbi9kZW1vLW5vdGVzIiwic2NvcGUiOnsiZXBvY2giOjcsImtpbmQiOiJoZWFkIiwib3duZXIiOiJyZXNlcnZlZDphZnQiLCJyZWYiOiJzYW1wbGUtaGVhZCJ9LCJzZXJ2aWNlIjoiZ2l0aHViIiwidiI6ImNrLWJyb2tlci1hY3Rpb24tc3RhdGVtZW50L3YxIn0"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "result": {
+          "elicitation_id": "el_2"
+        }
+      }
+    },
+    "file-one-leg": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "result": {
+          "elicitation_id": "el_1"
+        }
+      }
+    },
+    "filing-at-expiry": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_expired",
+          "message": "elicitation_expired: broker_action.expires_at_ms has passed"
+        }
+      }
+    },
+    "float": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6IlNhbXBsZSIsInZhbHVlIjp7Im5lc3RlZCI6WzAuNV19fV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.fields.value"
+        }
+      }
+    },
+    "invalid-encoding": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9="
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.statement_b64url"
+        }
+      }
+    },
+    "mismatched-agent": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_requester_refused",
+          "message": "requester reserved:aft is refused"
+        }
+      }
+    },
+    "missing-scope": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_requester_refused",
+          "message": "requester reserved:aft is refused"
+        }
+      }
+    },
+    "noncanonical": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "ewogICJhY3Rpb24iOiAiY2xvc2VfaXNzdWUiLAogICJhZ2VudF9pZCI6ICJhZ2VudC1hbGYiLAogICJjb250ZXh0IjogImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsCiAgImV4cGlyZXNfYXRfbXMiOiAxODAwMDAwNjAwMDAwLAogICJmaWVsZHMiOiBbCiAgICB7CiAgICAgICJuYW1lIjogIklzc3VlIiwKICAgICAgInZhbHVlIjogNwogICAgfSwKICAgIHsKICAgICAgIm5hbWUiOiAiU3RhdGUiLAogICAgICAidmFsdWUiOiAiY2xvc2VkIgogICAgfQogIF0sCiAgImhvc3QiOiAiYXBpLmdpdGh1Yi5leGFtcGxlIiwKICAiaWRlbnRpdHkiOiAiZ2l0aHViX2FwcDpleGFtcGxlLWdhcmRlbiIsCiAgImtpbmQiOiAiY2xvc2VfaXNzdWUiLAogICJtZXRob2QiOiAiUEFUQ0giLAogICJwb2xpY3lfc2hhMjU2IjogIjAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEiLAogICJwb2xpY3lfdmVyc2lvbiI6IDcsCiAgInJlcXVlc3RfaWQiOiAiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLAogICJyZXF1ZXN0X3NoYTI1NiI6ICI4OTk5ZTcwZTRmMGMzN2YxOGZiNDQ5NDA0ZGE4ZmU0ZmExNTk2MjY0Y2I2ZWNjNTQ2MGEwMjAyOTI0MzliNWE0IiwKICAicmVzb3VyY2UiOiAiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsCiAgInNjb3BlIjogewogICAgImVwb2NoIjogNywKICAgICJraW5kIjogImhlYWQiLAogICAgIm93bmVyIjogInJlc2VydmVkOmFmdCIsCiAgICAicmVmIjogInNhbXBsZS1oZWFkIgogIH0sCiAgInNlcnZpY2UiOiAiZ2l0aHViIiwKICAidiI6ICJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSIKfQ"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.statement_b64url"
+        }
+      }
+    },
+    "oversize": {
+      "method": "consent.request",
+      "params_recipe": {
+        "count": 524288,
+        "decoded_statement_pointer": "/fields/0/value",
+        "from": "file-one-leg",
+        "repeat": "x"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.statement_b64url"
+        }
+      }
+    },
+    "phone-get": {
+      "method": "consent.get",
+      "params": {
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "result": {
+          "brokerAction": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "createdAtMs": 1800000000000,
+          "default": "decline",
+          "elicitationId": "el_1",
+          "expiresAtMs": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "lateExecution": "notify_only",
+          "materialDamage": false,
+          "onExpiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requesterLabel": "reserved:aft",
+          "requesterName": "AFT",
+          "scope": {},
+          "state": "pending",
+          "subject": {
+            "agentId": "agent-alf",
+            "headAgentId": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    },
+    "phone-get-after-retention": {
+      "method": "consent.get",
+      "params": {
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_not_found",
+          "message": "elicitation not found"
+        }
+      }
+    },
+    "phone-get-missed": {
+      "method": "consent.get",
+      "params": {
+        "clientFeatures": [
+          "broker-action-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "result": {
+          "answeredAtMs": 1800000600000,
+          "brokerAction": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "createdAtMs": 1800000000000,
+          "default": "decline",
+          "elicitationId": "el_1",
+          "expiresAtMs": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "lateExecution": "notify_only",
+          "materialDamage": false,
+          "onExpiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requesterLabel": "reserved:aft",
+          "requesterName": "AFT",
+          "scope": {},
+          "state": "expired",
+          "subject": {
+            "agentId": "agent-alf",
+            "headAgentId": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    },
+    "requester-allow": {
+      "method": "consent.await",
+      "params": {
+        "elicitation_id": "el_1",
+        "timeout_ms": 0
+      },
+      "reply": {
+        "result": {
+          "answered_at_ms": 1800000000000,
+          "answered_choice_id": "allow",
+          "answered_device": "fe0123456789abcdfe0123456789abcd",
+          "broker_action": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "broker_action_answer": {
+            "decision": "allow",
+            "envelope_sha256": "3584bc920e3fabb0eb73113e5d07f598b5889f0a9e14c2ff34970c1a48ab9fe0",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "created_at_ms": 1800000000000,
+          "default": "decline",
+          "elicitation_id": "el_1",
+          "expires_at_ms": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "late_execution": "notify_only",
+          "material_damage": false,
+          "on_expiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requester_label": "reserved:aft",
+          "scope": {},
+          "state": "answered",
+          "subject": {
+            "agent_id": "agent-alf",
+            "head_agent_id": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    },
+    "requester-decline": {
+      "method": "consent.get",
+      "params": {
+        "elicitation_id": "el_1"
+      },
+      "reply": {
+        "result": {
+          "answered_at_ms": 1800000000000,
+          "answered_choice_id": "decline",
+          "answered_device": "fe0123456789abcdfe0123456789abcd",
+          "broker_action": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "broker_action_answer": {
+            "decision": "decline",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "created_at_ms": 1800000000000,
+          "default": "decline",
+          "elicitation_id": "el_1",
+          "expires_at_ms": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "late_execution": "notify_only",
+          "material_damage": false,
+          "on_expiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requester_label": "reserved:aft",
+          "scope": {},
+          "state": "answered",
+          "subject": {
+            "agent_id": "agent-alf",
+            "head_agent_id": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    },
+    "requester-expiry": {
+      "method": "consent.await",
+      "params": {
+        "elicitation_id": "el_1",
+        "timeout_ms": 0
+      },
+      "reply": {
+        "result": {
+          "answered_at_ms": 1800000600000,
+          "broker_action": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "created_at_ms": 1800000000000,
+          "default": "decline",
+          "elicitation_id": "el_1",
+          "expires_at_ms": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "late_execution": "notify_only",
+          "material_damage": false,
+          "on_expiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requester_label": "reserved:aft",
+          "scope": {},
+          "state": "expired",
+          "subject": {
+            "agent_id": "agent-alf",
+            "head_agent_id": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    },
+    "too-many-fields": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH0seyJuYW1lIjoiU2FtcGxlIiwidmFsdWUiOjB9LHsibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH0seyJuYW1lIjoiU2FtcGxlIiwidmFsdWUiOjB9LHsibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH0seyJuYW1lIjoiU2FtcGxlIiwidmFsdWUiOjB9LHsibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH0seyJuYW1lIjoiU2FtcGxlIiwidmFsdWUiOjB9LHsibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH0seyJuYW1lIjoiU2FtcGxlIiwidmFsdWUiOjB9LHsibmFtZSI6IlNhbXBsZSIsInZhbHVlIjowfSx7Im5hbWUiOiJTYW1wbGUiLCJ2YWx1ZSI6MH1dLCJob3N0IjoiYXBpLmdpdGh1Yi5leGFtcGxlIiwiaWRlbnRpdHkiOiJnaXRodWJfYXBwOmV4YW1wbGUtZ2FyZGVuIiwia2luZCI6ImNsb3NlX2lzc3VlIiwibWV0aG9kIjoiUEFUQ0giLCJwb2xpY3lfc2hhMjU2IjoiMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMSIsInBvbGljeV92ZXJzaW9uIjo3LCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZXF1ZXN0X3NoYTI1NiI6Ijg5OTllNzBlNGYwYzM3ZjE4ZmI0NDk0MDRkYThmZTRmYTE1OTYyNjRjYjZlY2M1NDYwYTAyMDI5MjQzOWI1YTQiLCJyZXNvdXJjZSI6ImV4YW1wbGUtZ2FyZGVuL2RlbW8tbm90ZXMiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOmFmdCIsInJlZiI6InNhbXBsZS1oZWFkIn0sInNlcnZpY2UiOiJnaXRodWIiLCJ2IjoiY2stYnJva2VyLWFjdGlvbi1zdGF0ZW1lbnQvdjEifQ"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.fields"
+        }
+      }
+    },
+    "unauthorized-filer": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_requester_refused",
+          "message": "requester reserved:broca is refused"
+        }
+      }
+    },
+    "unknown-statement-key": {
+      "method": "consent.request",
+      "params": {
+        "broker_action": {
+          "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInVuZXhwZWN0ZWQiOnRydWUsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9"
+        },
+        "kind": "broker_action"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_invalid_request",
+          "message": "invalid broker_action.unexpected"
+        }
+      }
+    },
+    "unsupported-answer": {
+      "method": "consent.answer",
+      "params": {
+        "choiceId": "decline",
+        "clientFeatures": [
+          "manifest-binding-approval"
+        ],
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_broker_action_approval_required",
+          "message": "broker action requires an approving device with clientFeatures broker-action-approval"
+        }
+      }
+    },
+    "unsupported-get": {
+      "method": "consent.get",
+      "params": {
+        "elicitationId": "el_1"
+      },
+      "reply": {
+        "error": {
+          "code": "elicitation_not_found",
+          "message": "elicitation not found"
+        }
+      }
+    },
+    "withdraw": {
+      "method": "consent.withdraw",
+      "params": {
+        "elicitation_id": "el_1"
+      },
+      "reply": {
+        "result": {
+          "answered_at_ms": 1800000000000,
+          "broker_action": {
+            "action": "close_issue",
+            "agent_id": "agent-alf",
+            "identity": "github_app:example-garden",
+            "request_id": "01HF7YAT000000000000000001",
+            "resource": "example-garden/demo-notes",
+            "service": "github",
+            "statement_b64url": "eyJhY3Rpb24iOiJjbG9zZV9pc3N1ZSIsImFnZW50X2lkIjoiYWdlbnQtYWxmIiwiY29udGV4dCI6ImV4YW1wbGUgaXNzdWUgY2xvc2UgNyIsImV4cGlyZXNfYXRfbXMiOjE4MDAwMDA2MDAwMDAsImZpZWxkcyI6W3sibmFtZSI6Iklzc3VlIiwidmFsdWUiOjd9LHsibmFtZSI6IlN0YXRlIiwidmFsdWUiOiJjbG9zZWQifV0sImhvc3QiOiJhcGkuZ2l0aHViLmV4YW1wbGUiLCJpZGVudGl0eSI6ImdpdGh1Yl9hcHA6ZXhhbXBsZS1nYXJkZW4iLCJraW5kIjoiY2xvc2VfaXNzdWUiLCJtZXRob2QiOiJQQVRDSCIsInBvbGljeV9zaGEyNTYiOiIwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxIiwicG9saWN5X3ZlcnNpb24iOjcsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcXVlc3Rfc2hhMjU2IjoiODk5OWU3MGU0ZjBjMzdmMThmYjQ0OTQwNGRhOGZlNGZhMTU5NjI2NGNiNmVjYzU0NjBhMDIwMjkyNDM5YjVhNCIsInJlc291cmNlIjoiZXhhbXBsZS1nYXJkZW4vZGVtby1ub3RlcyIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6YWZ0IiwicmVmIjoic2FtcGxlLWhlYWQifSwic2VydmljZSI6ImdpdGh1YiIsInYiOiJjay1icm9rZXItYWN0aW9uLXN0YXRlbWVudC92MSJ9",
+            "statement_sha256": "3d85dc32af054effbb55af48a91841b87c9cd30a3b0e0a2d2774d3bd4bdbc02d"
+          },
+          "created_at_ms": 1800000000000,
+          "default": "decline",
+          "elicitation_id": "el_1",
+          "expires_at_ms": 1800000600000,
+          "facts": [],
+          "kind": "broker_action",
+          "late_execution": "notify_only",
+          "material_damage": false,
+          "on_expiry": "deny",
+          "options": [
+            {
+              "effect": "grant",
+              "id": "allow",
+              "label": "Allow once"
+            },
+            {
+              "effect": "decline",
+              "id": "decline",
+              "label": "Decline"
+            }
+          ],
+          "prompt": "Review the action to be sent.",
+          "requester_label": "reserved:aft",
+          "scope": {},
+          "state": "withdrawn",
+          "subject": {
+            "agent_id": "agent-alf",
+            "head_agent_id": "agent-alf",
+            "label": "ALF"
+          },
+          "target": {
+            "kind": "broker_action",
+            "label": "Broker action"
+          },
+          "title": "Allow this action once?",
+          "urgency": "normal"
+        }
+      }
+    }
+  },
+  "request_digests": {
+    "close": {
+      "body": "{\"state\":\"closed\"}",
+      "host": "api.github.example",
+      "method": "PATCH",
+      "request_sha256": "8999e70e4f0c37f18fb449404da8fe4fa1596264cb6ecc5460a020292439b5a4",
+      "target": "/repos/example-garden/demo-notes/issues/7?notify=false"
+    },
+    "comment": {
+      "body": "{\"body\":\"Closing the sample issue.\"}",
+      "host": "api.github.example",
+      "method": "POST",
+      "request_sha256": "87f415c5daa370f32c966fc4cfcf81cc0cb677ade31f62b01d2a972ef137c1cb",
+      "target": "/repos/example-garden/demo-notes/issues/7/comments"
+    },
+    "remove_label": {
+      "body": "",
+      "host": "api.github.example",
+      "method": "DELETE",
+      "request_sha256": "ef6fda444e1b2b918ba476cb0b7c34a6487dd39deaf28cebb8ffadc0234ae524",
+      "target": "/repos/example-garden/demo-notes/issues/7/labels/needs%20review"
+    }
+  }
+}

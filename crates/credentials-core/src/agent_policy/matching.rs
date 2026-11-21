@@ -101,7 +101,7 @@ fn normalized_segment(s: &str) -> bool {
             .any(|b| b.is_ascii_control() || matches!(b, b'/' | b'\\'))
 }
 
-pub(super) fn valid_resource(resource: &str) -> bool {
+pub(crate) fn valid_resource(resource: &str) -> bool {
     !resource.bytes().any(|b| b.is_ascii_uppercase())
         && resource.split_once('/').is_some_and(|(owner, repo)| {
             Parameter::Owner.matches(owner) && Parameter::Repo.matches(repo)

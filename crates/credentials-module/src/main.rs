@@ -3565,9 +3565,16 @@ mod tests {
             Some(&OperationDelivery::WATCH)
         );
         assert!(!m.operation_delivery.contains_key("policy.active"));
-        assert!(!m
-            .operation_delivery
-            .contains_key(policy_token::OP_POLICY_TOKEN));
+        for name in [
+            policy_token::OP_POLICY_TOKEN,
+            broker_action::OP_REQUEST_ACTION,
+            secret_phone::OP_APPROVE_ACTION,
+        ] {
+            assert!(
+                !m.operation_delivery.contains_key(name),
+                "broker action operation must not declare watch delivery: {name}"
+            );
+        }
     }
 
     #[test]
@@ -20516,7 +20523,8 @@ mod tests {
     ///             challenge, upstream body or signer material
     ///   info!     unsigned desktop development admission for a connectors read:
     ///             fixed admission name only, never request or credential fields
-    ///   info!     admitted development desktop approval: fixed text only, no ids
+    ///   info!     admitted development desktop approval (including `policy.approve_action`):
+    ///             fixed text only, no ids
     ///   warn/debug! hub login reconciliation: fixed text and home/row ids only,
     ///               never a login value, condition or underlying error
     ///   warn!     manifest activation downgrade: member id and two version integers,
@@ -20538,6 +20546,10 @@ mod tests {
     ///   warn!     hub manifest report persistence, admission reconcile or activation
     ///             write failure: fixed text and member id only; never report bytes
     ///
+    /// `policy.request_action` and `credential.policy_token` have no log sites. Phone
+    /// approvals have no operation-specific logs; `policy.approve_action` uses the
+    /// same fixed admission message as other approvals on the development desktop.
+    ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
@@ -20551,6 +20563,8 @@ mod tests {
     /// `println!` is counted net of `eprintln!` because one contains the other.
     #[test]
     fn every_daemon_output_site_is_enumerated() {
+        let request_action = include_str!("broker_action.rs");
+        let policy_token = include_str!("policy_token.rs");
         let sources = [
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/read_surface.rs")),
@@ -20605,6 +20619,8 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/github_app_admin.rs"
             )),
+            request_action,
+            policy_token,
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -20647,6 +20663,19 @@ mod tests {
                 "target: \"approvals\", \"admitted development desktop approval\"".into()
             )]
         );
+        for (source, op) in [
+            (request_action, "policy.request_action"),
+            (policy_token, "credential.policy_token"),
+        ] {
+            assert!(
+                source.contains(&format!("\"{op}\"")),
+                "missing source for {op}"
+            );
+            assert!(
+                output_site_arguments(source, &shapes).is_empty(),
+                "{op} must not log request or reply data"
+            );
+        }
         assert_eq!(output_site_arguments(sources[15], &shapes), vec![
             ("info".into(), "target: \"federation\", \"vault sharing snapshot reconciliation recovered\"".into()),
             ("warn".into(), "target: \"federation\", \"fleet removals not recorded; retrying\"".into()),

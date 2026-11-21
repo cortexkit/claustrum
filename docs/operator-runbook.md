@@ -1263,9 +1263,18 @@ For SSH grants, `secret_grant_create`, `secret_grant_revoke` and
 `secret\|<name>` target. Local-use releases and signatures audit every use, including
 uses under remembered grants; they never use `secret_first_release`.
 
-If `policy.request_action` returns `approval_pending_limit`, wait for an existing
-request to expire or have all its legs issued before retrying. Expired requests
-stop counting immediately, even when their rows are still kept for diagnosis.
+For [broker action approvals](wire-contract-v1.md#request-broker-action-approval),
+the request row records a mint, not a human decision. Declines are recorded
+only in Cingulate. The issue row records the vault releasing a token for one
+leg; it does not prove that an enforcer sent the request or that GitHub accepted
+it. Exact approval replays do not append another approval row.
+
+If `policy.request_action` returns `approval_pending_limit`, wait for an
+existing request to expire or have all its legs issued before retrying.
+Expired requests stop counting immediately, even when their rows are kept
+for diagnosis. A spent approval cannot be reused. For an expired approval
+or `approval_policy_changed`, mint under the current policy and file a new
+card before trying to send the action again.
 
 Secret grants are also visible through the `permissions/v1` provider. Cingulate uses
 `permissions.list` and `permissions.revoke`; the local operator uses those operation

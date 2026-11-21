@@ -989,9 +989,11 @@ mod connectors_contract {
                     Some((GrantOperation::Deposit, "category browser-session", true))
                 }
                 OP_ACCOUNT_TOKEN => Some((GrantOperation::AccountToken, "audience", true)),
-                crate::policy_token::OP_POLICY_TOKEN | crate::broker_action::OP_REQUEST_ACTION => {
-                    Some((GrantOperation::PolicyToken, "credential_id (not handle)", false))
+                "credential.policy_token" | "policy.request_action" => {
+                    Some((GrantOperation::PolicyToken, "exact identity (not handle)", false))
                 }
+                // Approval uses device authority, not a declared grant selector.
+                "policy.approve_action" => None,
                 OP_SIGN => Some((GrantOperation::Sign, "credential_id (not handle)", false)),
                 OP_OPEN => Some((GrantOperation::Open, "credential_id", false)),
                 OP_SEAL => Some((GrantOperation::Seal, "exact credential_id", false)),
@@ -1000,7 +1002,6 @@ mod connectors_contract {
                 | "secret.deposit"
                 | "secret.approve"
                 | "manifest.approve"
-                | crate::secret_phone::OP_APPROVE_ACTION
                 | "secret.list"
                 | "secret.delete"
                 | "secret.revoke_grant"

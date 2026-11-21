@@ -174,10 +174,8 @@ MAX_GATEWAY_HEADER_NAME_BYTES crates/credentials-core/src/gateway.rs gateway_hea
 MAX_GATEWAY_HEADER_VALUE_BYTES crates/credentials-core/src/gateway.rs gateway_header_value_accepts_1024_bytes_and_refuses_1025
 MAX_GATEWAY_SLUG_BYTES crates/credentials-core/src/gateway.rs gateway_provider_slug_accepts_32_bytes_and_refuses_33
 
-# Explicitly unchecked thresholds. These are known gaps, not coverage claims.
-# New constants still fail unless deliberately recorded in a reviewed change.
-MAX_EXACT crates/credentials-module/src/federation/ingress.rs the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call
-MAX_SECRET_BASIC_USER_BYTES crates/claustrum-model/src/agent_secret_validation.rs basic_auth_user_accepts_128_bytes_and_refuses_129_and_invalid_grammar
+# Broker action approval: ten minutes, 16 pending per agent and 256 total,
+# 512 KiB decoded, 16 fields, 16 legs and 200 context characters.
 MAX_STATEMENT_BYTES crates/credentials-core/src/broker_action.rs broker_action_statement_accepts_524288_decoded_bytes_and_refuses_524289
 MAX_STATEMENT_FIELDS crates/credentials-core/src/broker_action.rs broker_action_statement_accepts_16_fields_in_order_and_refuses_17
 MAX_STATEMENT_LEGS crates/credentials-core/src/broker_action.rs broker_action_statement_accepts_1_and_16_legs_but_refuses_0_and_17
@@ -185,3 +183,8 @@ MAX_CONTEXT_CHARS crates/credentials-core/src/broker_action.rs broker_action_sta
 BROKER_ACTION_LIFETIME_LIMIT_MS crates/credentials-core/src/store_broker_action.rs broker_action_pending_counts_until_but_not_at_the_ten_minute_deadline
 MAX_PENDING_BROKER_ACTIONS_PER_AGENT crates/credentials-core/src/store_broker_action.rs broker_action_mint_accepts_16_pending_per_agent_and_refuses_17
 MAX_PENDING_BROKER_ACTIONS crates/credentials-core/src/store_broker_action.rs broker_action_mint_accepts_256_pending_overall_and_refuses_257
+
+# Explicitly unchecked thresholds. These are known gaps, not coverage claims.
+# New constants still fail unless deliberately recorded in a reviewed change.
+MAX_EXACT crates/credentials-module/src/federation/ingress.rs the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call
+MAX_SECRET_BASIC_USER_BYTES crates/claustrum-model/src/agent_secret_validation.rs basic_auth_user_accepts_128_bytes_and_refuses_129_and_invalid_grammar

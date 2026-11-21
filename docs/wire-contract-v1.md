@@ -5704,7 +5704,7 @@ the new row once; an unusable row or a failed authorization is not retried.
 |---|---|---|
 | `permanent` | `not_found` | Caller, role, grant, service, binding, kind, or resource refused |
 | `permanent` | `approval_required` | An otherwise eligible local request names a `once` kind but carries no approval; request one with `policy.request_action` and have the person approve it on an approving device |
-| `permanent` | `approval_invalid` | No live approved request matches this caller, identity, and next leg; an expired or spent approval cannot be reused |
+| `permanent` | `approval_invalid` | No live approved request matches this caller, identity, and next leg; check the approval status and leg order, and file a new card if the approval expired or was spent |
 | `permanent` | `approval_policy_changed` | The approval's policy is no longer active; request a new approval under the active policy |
 | `permanent` | `policy_version_not_active` | No policy is active, or the supplied version is not active |
 | `permanent` | `not_installed` | No local App credential |
@@ -5718,8 +5718,20 @@ the new row once; an unusable row or a failed authorization is not retried.
 | `transient` | `github_unavailable` | GitHub is unavailable, the reply is unusable or expired, or the row changed again |
 | `transient` | `store_error` | A store check or release commit failed |
 
-No refusal returns a token or a provider response body. An unreadable credential
-is not quarantined by this method, and mint failures do not change its state.
+Application refusals use only `{"error":{"code","class"}}`. For transport
+`invalid_params`, correct the request shape; omit both approval members for a
+kind that does not require approval. No refusal returns a token or a provider
+response body. An unreadable credential is not quarantined by this method,
+and mint failures do not change its state.
+
+For a `once` kind, mint the statement with
+[`policy.request_action`](#request-broker-action-approval) and file it as a
+broker action card in Cingulate. An approving device calls
+[`policy.approve_action`](#approve-a-broker-action) before recording its allow
+in Cingulate. A Cingulate answer alone cannot release a token. If the vault
+refuses the token, do not send the request. For a multi-leg action that stopped
+partway through, any retry after fresh reads needs a new card for the unsent
+legs only.
 
 ### Request broker action approval
 
@@ -5737,11 +5749,18 @@ is never relayed and never contacts GitHub. Only `reserved:aft` and
 `fields` holds up to 16 closed `{name, value}` objects. Values are JSON, with
 only integers in ±(2^53−1) as numbers, including inside arrays and objects.
 `service` and `action` are nonempty strings. Each method is one or more ASCII
-uppercase letters; each `request_sha256`
-is 64 lowercase hexadecimal digits supplied by the enforcer, not computed by the
-vault. The host uses the policy host grammar and may have a port in 1–65535
-without a leading zero; `:443` is not permitted. If present, `context` is nonempty
-display text of at most 200 characters with no Unicode Cc, Cf, Zl or Zp character.
+uppercase letters. The host uses the policy host grammar and may have a port in
+1–65535 without a leading zero; `:443` is not permitted. If present, `context`
+is nonempty display-only text of at most 200 characters with no Unicode Cc,
+Cf, Zl or Zp character. Mask secret values before supplying it.
+
+The enforcer computes each `request_sha256` before adding the credential
+header. Hash the ASCII tag `ck-broker-request/v1` followed by a zero byte and
+four parts, each prefixed with its 32-bit big-endian byte length: uppercase
+ASCII method, lowercase ASCII host (port only when non-default), exact request
+target (path and, if present, `?` and raw query), and exact body (zero bytes if
+absent). Send the SHA-256 as 64 lowercase hexadecimal digits. The vault checks
+the digest's shape, not the underlying request bytes.
 
 The sender relays the daemon's `stamp` verbatim using the `secret.use` stamp
 grammar. The vault trusts the two senders to relay it unchanged. It takes
@@ -5780,6 +5799,15 @@ Checks run in order. Every refusal writes nothing. Application refusals are
    returns `approval_pending_limit` (transient). A request is pending until
    expiry or until all its legs have issued. Wait for a slot before retrying.
 
+For `policy_absent`, check that a signed policy is active before retrying.
+For `not_found`, check routing, the stamp's agent attribution, and the grant
+and policy binding; the refusal does not identify which check failed. For
+`approval_not_required`, follow the token path without approval for a kind
+that does not require it; for explicit legs, only include kinds requiring
+`once` in the card. For `consent_fields_invalid`, rebuild the field list from
+the active policy's consent template. For `invalid_params`, correct the body,
+including values that would exceed the statement limits.
+
 Success is `{request_id, statement_b64url, statement_sha256, expires_at_ms}`.
 The request id is a fresh ULID, and expiry is exactly ten minutes after minting.
 The statement is unpadded base64url of the exact RFC 8785 JSON bytes.
@@ -5787,7 +5815,9 @@ The statement is unpadded base64url of the exact RFC 8785 JSON bytes.
 carries the active policy version and digest, and the request details in the
 shape above, except it replaces `stamp` with `agent_id` and `scope` and adds
 `v: "ck-broker-action-statement/v1"`, `request_id`, `policy_version`,
-`policy_sha256` and `expires_at_ms`. No approval or token is issued by the mint.
+`policy_sha256` and `expires_at_ms`. The statement is closed: with `legs`,
+its top-level `kind`, `method` and `request_sha256` are absent. No approval or
+token is issued by the mint.
 A successful mint commits one `broker_action_request` audit row. Its credential
 is the App identity, its actor is the calling reserved module, and its
 `payload_hash` is `statement_sha256`. It has no alarm.
@@ -5824,6 +5854,13 @@ match, after signature and time-window verification. It does not extend the
 request or write another row. Any other refusal on an admitted route with a
 well-formed body returns `{"error":{"code":"approval_invalid","class":"permanent"}}`.
 No refusal writes an approval, audit row, or phone observation.
+
+For `not_found`, use the serving vault and an admitted approval route. For
+`invalid_params`, correct the body for that route. For `approval_invalid`,
+check the phone pairing and approval key, the device clock, and the exact
+request ID and digest on the card. An expired card cannot take a new approval;
+file a new card if the action still needs to be sent. Do not record an allow
+in Cingulate when the vault refuses the approval.
 
 Success is `{status: "approved", request_id, statement_sha256}`. The first
 success records the approval and one `broker_action_approve` audit row together.

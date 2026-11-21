@@ -5641,12 +5641,15 @@ token does not enforce the kind's individual request matcher; the caller does.
 The vault never falls back to a broad token.
 
 Token storage is in memory only. Requests with the same credential identity,
-incarnation, record version, sealed-record digest, repository set and permissions
-can share one mint and can reuse the result until five minutes before expiry.
+incarnation (a random value the vault assigns each time a credential is created, so a
+deleted and re-created credential with the same id is a different one), record
+version, sealed-record digest, repository set and permissions can share one mint
+and can reuse the result until five minutes before expiry.
 Before handing out any token, the vault rechecks its role, the accepted caller's
 exact grant, the active policy version, the credential row and token expiry, and
-commits the caller's scoped first-use event in that same transaction, which
-also checks that the vault still holds the writer lease.
+commits the caller's scoped first-use event in that same transaction. That write
+fails if this vault process no longer holds the store's single-writer lock (the
+lease that keeps the daemon and an offline `ck auth` from writing at once).
 If the active row was replaced or changed during mint, the vault retries with
 the new row once; an unusable row or a failed authorization is not retried.
 

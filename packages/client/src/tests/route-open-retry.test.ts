@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { createHash, randomBytes } from 'node:crypto'
-import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +16,7 @@ import {
   PROTOCOL_VERSION,
   SERVER_PROOF_DOMAIN,
 } from '@cortexkit/subc-client'
-import { ClaustrumClient } from '../index'
+import { ClaustrumClient, storageFingerprint } from '../index'
 
 // How long the fake daemon refuses route.open with module_warming, the refusal the
 // real daemon sends while the vault is still starting after a restart. Older subc
@@ -170,7 +170,10 @@ for (const withStoragePath of [false, true]) {
     try {
       await client.getCredential('handle-1')
 
-      const fingerprint = createHash('sha256').update(await realpath(storagePath)).digest('hex')
+      // Reuse the client's own fingerprint: on Windows, fs.promises.realpath expands
+      // 8.3 short names (RUNNER~1) that realpathSync keeps, so a test-side hash differs.
+      // This test checks which members the identity carries, not the fingerprint.
+      const fingerprint = storageFingerprint(storagePath)
       expect(daemon.routeIdentities).toStrictEqual([
         { harness: 'opencode', session: `store-${fingerprint}` },
       ])

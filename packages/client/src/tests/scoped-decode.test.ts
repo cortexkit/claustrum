@@ -41,7 +41,6 @@ class FakeDaemon {
 async function clientWith(responses: unknown[]): Promise<{ client: ClaustrumClient; daemon: FakeDaemon }> {
   const daemon = new FakeDaemon(responses)
   const client = await ClaustrumClient.connect({
-    projectRoot: '/project/root',
     storagePath: '/project/root/store.db',
     connector: async () => daemon as never,
   })

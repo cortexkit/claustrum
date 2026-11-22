@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { randomBytes } from 'node:crypto'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,6 +29,7 @@ type FakeSubcDaemon = {
   server: Server
   connectionFile: string
   routeOpens: { refused: number; accepted: number }
+  routeIdentities: unknown[]
   dataRequests: unknown[]
 }
 
@@ -48,6 +49,7 @@ async function startWarmingDaemon(warmingWindowMs: number): Promise<FakeSubcDaem
   const key = randomBytes(32)
   const daemonId = randomBytes(16)
   const routeOpens = { refused: 0, accepted: 0 }
+  const routeIdentities: unknown[] = []
   const dataRequests: unknown[] = []
   const sockets = new Set<Socket>()
   // The warming window starts at the first route.open, the moment a caller first
@@ -109,6 +111,7 @@ async function startWarmingDaemon(warmingWindowMs: number): Promise<FakeSubcDaem
         if (header.ty !== FrameType.Request) continue
         const request = JSON.parse(body.toString('utf8')) as Record<string, unknown>
         if (header.channel === 0 && request.op === 'route.open') {
+          routeIdentities.push(request.identity)
           firstOpenAt ??= Date.now()
           if (Date.now() - firstOpenAt < warmingWindowMs) {
             routeOpens.refused += 1
@@ -153,15 +156,37 @@ async function startWarmingDaemon(warmingWindowMs: number): Promise<FakeSubcDaem
     await new Promise<void>((resolve) => server.close(() => resolve()))
     await rm(dir, { recursive: true, force: true })
   })
-  return { server, connectionFile, routeOpens, dataRequests }
+  return { server, connectionFile, routeOpens, routeIdentities, dataRequests }
+}
+
+for (const withStoragePath of [false, true]) {
+  test(`route.open omits project_root ${withStoragePath ? 'with storagePath' : 'by default'}`, async () => {
+    const daemon = await startWarmingDaemon(0)
+    const storagePath = withStoragePath ? daemon.connectionFile : process.cwd()
+    const client = await ClaustrumClient.connect({
+      connectionFile: daemon.connectionFile,
+      ...(withStoragePath ? { storagePath } : {}),
+    })
+    try {
+      await client.getCredential('handle-1')
+
+      const fingerprint = createHash('sha256').update(await realpath(storagePath)).digest('hex')
+      expect(daemon.routeIdentities).toStrictEqual([
+        { harness: 'opencode', session: `store-${fingerprint}` },
+      ])
+    } finally {
+      client.close()
+    }
+  })
 }
 
 describe('ClaustrumClient route.open retry', () => {
   test('waits out a vault warm-up longer than the old six-attempt retry cap', async () => {
     const daemon = await startWarmingDaemon(WARMING_WINDOW_MS)
+    const identity = { project_root: '/tmp/project', harness: 'opencode', session: 'store-test' }
     const client = await ClaustrumClient.connect({
       connectionFile: daemon.connectionFile,
-      identity: { project_root: '/tmp/project', harness: 'opencode', session: 'store-test' },
+      identity,
       logger: () => undefined,
     })
     try {
@@ -175,6 +200,7 @@ describe('ClaustrumClient route.open retry', () => {
       // least six refusals proves the call outlived that attempt cap.
       expect(daemon.routeOpens.refused).toBeGreaterThanOrEqual(6)
       expect(daemon.routeOpens.accepted).toBe(1)
+      expect(daemon.routeIdentities.at(-1)).toStrictEqual(identity)
       expect(daemon.dataRequests).toEqual([
         { method: 'credential.get', params: { handle: 'handle-1', force_refresh: false } },
       ])

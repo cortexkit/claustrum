@@ -50,6 +50,10 @@ async function withRoute(scripts: Script[], listReply: unknown, run: (client: Cl
             value === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(value)))))
           // Channel zero uses subc's control envelope, not the vault's read envelope.
           if (header.channel === 0) {
+            if (body.op === 'server.describe') {
+              send(FrameType.Response, { capabilities: ['route-close-reasons/v1'] })
+              continue
+            }
             expect(body.op).toBe('route.open')
             send(FrameType.Response, { route_channel: ++channel, route_epoch: 1 })
             continue

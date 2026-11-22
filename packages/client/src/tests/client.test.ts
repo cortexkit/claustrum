@@ -453,7 +453,6 @@ describe('ClaustrumClient', () => {
       { result: { payload: [111, 107], record_version: 7 } },
     ])
     const client = await ClaustrumClient.connect({
-      projectRoot: '/project/root',
       storagePath: linkedStoragePath,
       connector: async () => daemon as never,
     })
@@ -463,15 +462,10 @@ describe('ClaustrumClient', () => {
     const expectedFingerprint = createHash('sha256')
       .update(await realpath(linkedStoragePath))
       .digest('hex')
-    expect(daemon.calls[0]).toMatchObject({
-      options: {
-        consumerIdentity: null,
-        identity: {
-          project_root: '/project/root',
-          harness: 'opencode',
-          session: `store-${expectedFingerprint}`,
-        },
-      },
+    expect(daemon.calls[0]?.options.consumerIdentity).toBeNull()
+    expect(daemon.calls[0]?.options.identity).toStrictEqual({
+      harness: 'opencode',
+      session: `store-${expectedFingerprint}`,
     })
     client.close()
   })

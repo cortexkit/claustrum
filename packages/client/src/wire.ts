@@ -60,7 +60,6 @@ export type ClaustrumConnector = (options: {
 export type ClaustrumClientOptions = {
   connectionFile?: string
   handshakeTimeoutMs?: number
-  projectRoot?: string
   storagePath?: string
   identity?: BindIdentity
   connector?: ClaustrumConnector
@@ -401,10 +400,7 @@ export class ClaustrumClient {
   static async connect(options: ClaustrumClientOptions = {}): Promise<ClaustrumClient> {
     const connectionFile = resolveClaustrumConnectionPath(options.connectionFile)
     const connector = options.connector ?? ((connectOptions) => SubcClient.connect(connectOptions))
-    const identity = options.identity ?? storeIdentity(
-      options.projectRoot ?? process.cwd(),
-      options.storagePath ?? process.cwd(),
-    )
+    const identity = options.identity ?? storeIdentity(options.storagePath ?? process.cwd())
     const client = await connector({
       connectionFile,
       handshakeTimeoutMs: options.handshakeTimeoutMs,

@@ -21,9 +21,8 @@ export function storageFingerprint(storagePath: string): string {
   return createHash('sha256').update(canonicalPath).digest('hex')
 }
 
-export function storeIdentity(projectRoot: string, storagePath: string): BindIdentity {
+export function storeIdentity(storagePath: string): BindIdentity {
   return {
-    project_root: projectRoot,
     harness: 'opencode',
     session: `store-${storageFingerprint(storagePath)}`,
   }

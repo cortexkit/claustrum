@@ -103,6 +103,10 @@ async function startVault(dir: string, answer: Answer): Promise<Vault> {
             reply.body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(reply.body)))))
           // Channel zero uses subc's control envelope, not the vault's read envelope.
           if (header.channel === 0) {
+            if (body.op === 'server.describe') {
+              send({ type: FrameType.Response, body: { capabilities: ['route-close-reasons/v1'] } })
+              continue
+            }
             expect(body.op).toBe('route.open')
             send({ type: FrameType.Response, body: { route_channel: ++channel, route_epoch: 1 } })
             continue

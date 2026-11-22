@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.22.0
+
+- Route opens omit `project_root` from the default identity. This prevents
+  `invalid_project_root` when the subc daemon cannot resolve the caller's working
+  directory or private state directory.
+  [Refs openai-auth#288](https://github.com/cortexkit/openai-auth/issues/288).
+- **Breaking:** The `projectRoot` option is removed; stop passing it to
+  `ClaustrumClient.connect`. Use `storeIdentity(storagePath)` with no project-root
+  argument. An explicit `identity` still passes through unchanged.
+- Require `@cortexkit/subc-client` ^0.26.8.
+
 ## 0.21.0
 
 A vault without login conditions lists no `condition` and answers both new

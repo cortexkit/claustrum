@@ -81,6 +81,14 @@ The SDK negotiates FIFO request/watch windows and retries only daemon-origin
 `route_busy` refusals within the request deadline. Claustrum adds no busy retry;
 older daemons keep the SDK's previous behavior.
 
+**Changed in 0.22.0:** The client requires `@cortexkit/subc-client` ^0.26.8 and
+omits `project_root` from the default route identity. The daemon no longer has
+to resolve the caller's working directory or private state directory. Stop
+passing `projectRoot` to `ClaustrumClient.connect`. Keep passing `storagePath`
+to distinguish stores: the client hashes the canonical storage path to set the
+route session ID. If you call `storeIdentity` directly, use `storeIdentity(storagePath)`.
+An explicit `identity` is sent unchanged.
+
 ## Reading credential material
 
 The wire payload is opaque bytes. `getCredential(handle, minTtlMs?)` and

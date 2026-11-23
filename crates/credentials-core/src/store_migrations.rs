@@ -1006,6 +1006,26 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         version: BROKER_ACTION_SCHEMA_VERSION,
         statements: include_str!("broker_action_requests.sql"),
     },
+    Migration {
+        version: CREDENTIAL_ORG_SCHEMA_VERSION,
+        statements: "CREATE TABLE credential_orgs (\
+                         credential_id TEXT NOT NULL PRIMARY KEY, \
+                         record_version INTEGER NOT NULL, \
+                         incarnation TEXT NOT NULL, \
+                         org_id TEXT NOT NULL, \
+                         observed_at_ms INTEGER NOT NULL\
+                     ); \
+                     CREATE TRIGGER credential_orgs_version AFTER UPDATE OF record_version, incarnation ON credentials \
+                     WHEN OLD.record_version != NEW.record_version OR OLD.incarnation != NEW.incarnation BEGIN \
+                         DELETE FROM credential_orgs WHERE credential_id = OLD.credential_id; \
+                     END; \
+                     CREATE TRIGGER credential_orgs_remove AFTER DELETE ON credentials BEGIN \
+                         DELETE FROM credential_orgs WHERE credential_id = OLD.credential_id; \
+                     END; \
+                     CREATE TRIGGER credential_orgs_insert AFTER INSERT ON credentials BEGIN \
+                         DELETE FROM credential_orgs WHERE credential_id = NEW.credential_id; \
+                     END;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.

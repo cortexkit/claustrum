@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.0
+
+- `listScoped` exposes the learned API-key organization as optional `orgId`.
+  Older vaults can omit it; a malformed value rejects the listing as `invalid_response`.
+
 ## 0.22.0
 
 - Route opens omit `project_root` from the default identity. This prevents

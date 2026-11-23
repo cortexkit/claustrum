@@ -715,7 +715,7 @@ impl EncryptedStore {
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                           SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                        )), ''), {}, {}, {}, {}, {}, {} FROM credentials WHERE credential_id = ?1",
+                        )), ''), {}, {}, {}, {}, {}, {}, {} FROM credentials WHERE credential_id = ?1",
                     provider_ids_column(schema_version), plan_tier_column(schema_version),
                     if schema_version >= 33 { "incarnation" } else { "''" },
                     plan_tier_observed_column(schema_version), plan_tier_since_column(schema_version),
@@ -726,6 +726,7 @@ impl EncryptedStore {
                      } else {
                          "NULL, NULL, NULL, NULL"
                     },
+                    if schema_version >= CREDENTIAL_ORG_SCHEMA_VERSION { orgs::ORG_ID_COLUMN } else { "NULL" },
                 ))?;
 
                 let mut rows = Vec::new();
@@ -749,6 +750,7 @@ impl EncryptedStore {
                              row.get::<_, Option<String>>(11)?,
                              row.get::<_, Option<i64>>(12)?,
                              row.get::<_, Option<String>>(13)?,
+                             row.get::<_, Option<String>>(14)?,
                         ))
                     }).optional()?;
                     let Some((
@@ -765,6 +767,7 @@ impl EncryptedStore {
                          github_app_slug,
                          github_app_created_at_ms,
                          github_app_agent,
+                         org_id,
                     )) = candidate else {
                         // An exact selector can name a row that is not stored locally.
                         continue;
@@ -859,6 +862,7 @@ impl EncryptedStore {
                         operations: operations.into_iter().collect(),
                         plan_tier,
                         plan_tier_source,
+                        org_id: if identity.is_some() { org_id } else { None },
                         identity,
                         refresh_adapter,
                         provider_ids,

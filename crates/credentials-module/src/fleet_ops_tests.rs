@@ -286,7 +286,7 @@ async fn fleet_daemon_start_creates_missing_keys_once_and_preserves_existing_env
     .unwrap();
     let mut originals = std::collections::BTreeMap::new();
     for _ in 0..2 {
-        let (surface, admin, poll) = build_surface(
+        let (surface, admin, poll, _) = build_surface(
             &ack,
             credentials_core::MODULE_ID,
             root.join("claustrum.jsonc"),

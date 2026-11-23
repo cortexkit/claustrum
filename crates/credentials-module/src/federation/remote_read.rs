@@ -2111,6 +2111,7 @@ impl RemoteReader {
             );
             rows.push(ScopedListRow {
                 github_app: None,
+                org_id: None,
                 plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") {
                     entry.plan_tier_since_ms
                 } else {

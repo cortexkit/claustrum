@@ -1194,6 +1194,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `overwrite` | Replace a credential under an unconditional or compare-and-set write path. |
 | `set_identity` | Re-seal unchanged credential material with updated non-secret account identity. |
 | `set_plan` | Change an operator tier assertion, or clear it atomically when a replacement changes accounts. |
+| `learn_org` | Record the organization observed for the current API-key version without changing the sealed record. |
 | `invalidate` | Mark a credential as needing re-authentication. |
 | `rotate_master_key` | Re-wrap the vault under a new master key. |
 | `refresh_commit` | Commit new tokens from a vault-owned refresh. |

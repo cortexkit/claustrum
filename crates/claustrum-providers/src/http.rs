@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::refresh_adapters::{HttpResponse, HttpTransport, RefreshError};
+use crate::refresh_adapters::{HttpProbeResponse, HttpResponse, HttpTransport, RefreshError};
 
 // Token/profile replies are small JSON objects; GitHub installation discovery is
 // the larger, list-shaped reply. One MiB leaves headroom for token strings and
@@ -77,6 +77,20 @@ impl ReqwestTransport {
             .map_err(|e| RefreshError::Transport(e.to_string()))?;
         read_response(resp).await
     }
+
+    async fn send_get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<reqwest::Response, RefreshError> {
+        let mut req = self.client.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.send()
+            .await
+            .map_err(|e| RefreshError::Transport(e.to_string()))
+    }
 }
 
 #[async_trait]
@@ -115,15 +129,38 @@ impl HttpTransport for ReqwestTransport {
     }
 
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
-        let mut req = self.client.get(url);
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?;
-        read_response(resp).await
+        read_response(self.send_get(url, headers).await?).await
+    }
+
+    async fn probe_get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        response_header: Option<&str>,
+    ) -> Result<HttpProbeResponse, RefreshError> {
+        let response = self.send_get(url, headers).await?;
+        let Some(name) = response_header else {
+            return Ok(HttpProbeResponse {
+                status: read_response(response).await?.status,
+                header: None,
+            });
+        };
+        let status = response.status().as_u16();
+        let header = if (200..=299).contains(&status) {
+            let values = response.headers().get_all(name);
+            let mut values = values.iter();
+            // Multiple values do not identify a single organization.
+            values.next().map(|first| {
+                if values.next().is_none() {
+                    first.as_bytes().to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+        } else {
+            None
+        };
+        Ok(HttpProbeResponse { status, header })
     }
 }
 
@@ -147,6 +184,58 @@ async fn read_response(mut response: reqwest::Response) -> Result<HttpResponse, 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn probe_get_captures_only_the_named_header_without_reading_the_body() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let transport = ReqwestTransport::new().unwrap();
+        for (status, headers, expected) in [
+            (
+                200,
+                "X-Wanted: org-id\r\nX-Ignored: other\r\n",
+                Some(b"org-id".as_slice()),
+            ),
+            (200, "X-Ignored: other\r\n", None),
+            (
+                200,
+                "X-Wanted: one\r\nX-Wanted: two\r\n",
+                Some(b"".as_slice()),
+            ),
+            (401, "X-Wanted: org-id\r\n", None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = BufReader::new(&mut stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    assert!(request.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                // EOF immediately after the headers would fail a body read.
+                write!(stream, "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: 20\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let url = format!("http://{address}/probe");
+            let response = transport
+                .probe_get(&url, &[], Some("x-wanted"))
+                .await
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.header.as_deref(), expected);
+        }
+    }
+
     /// The HTTP/1.1 pin is present in the shipped transport.
     ///
     /// Asserted against this file's own source, which is unusual and is the only

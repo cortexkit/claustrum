@@ -62,7 +62,7 @@ impl Rig {
         .unwrap();
         let path = root.join("claustrum.jsonc");
         // With the gate, building the store must not apply even the missing-file default.
-        let (surface, admin, poll) =
+        let (surface, admin, poll, _) =
             crate::build_surface(&ack, credentials_core::MODULE_ID, path.clone())
                 .await
                 .unwrap();

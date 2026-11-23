@@ -97,6 +97,40 @@ test('list_scoped preserves the producer App ID string and rejects malformed Git
   }
 })
 
+test('list_scoped decodes the learned organization sample and refuses malformed ids', async () => {
+  const vector = JSON.parse(readFileSync(join(
+    import.meta.dir,
+    '../../../../crates/credentials-module/tests/vectors/list-scoped-v2.json',
+  ), 'utf8')) as { cases: { case: string; reply: { result: { credentials: Record<string, unknown>[] } } }[] }
+  let reply = vector.cases.find((entry) => entry.case === 'catalog_and_lifecycle')!.reply
+  const client = await clientFor('credential.list_scoped', undefined, () => reply)
+  try {
+    const legacy = await client.listScoped()
+    expect(legacy.rows).toHaveLength(4)
+    for (const row of legacy.rows) expect(row).not.toHaveProperty('orgId')
+
+    reply = vector.cases.find((entry) => entry.case === 'learned_org')!.reply
+    const learned = await client.listScoped()
+    expect(learned.rows).toHaveLength(1)
+    expect(learned.rows[0]).toMatchObject({
+      id: 'apikey:anthropic:work', orgId: 'c57dea1d-dfac-4ad7-9dee-123456789abc',
+    })
+    expect(learned.rows[0]?.accountId).toBeUndefined()
+
+    const row = reply.result.credentials[0]!
+    for (const valid of ['AZaz09-_.:', 'a'.repeat(128)]) {
+      row.org_id = valid
+      expect((await client.listScoped()).rows[0]?.orgId).toBe(valid)
+    }
+    for (const malformed of [null, 7, '', 'a'.repeat(129), 'a/b', 'id\n', 'id\u200b']) {
+      row.org_id = malformed
+      expect(await rejectionOf(client.listScoped())).toMatchObject({ code: 'invalid_response' })
+    }
+  } finally {
+    client.close()
+  }
+})
+
 test('producer report_auth_failure receipt is accepted by both addressing methods', async () => {
   const client = await clientFor('credential.report_auth_failure')
   try {

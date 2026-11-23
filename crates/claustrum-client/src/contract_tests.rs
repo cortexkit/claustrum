@@ -561,6 +561,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    org_id: None,
                     plan_tier: None,
                     plan_tier_source: None,
                 },
@@ -606,6 +607,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    org_id: None,
                     plan_tier: None,
                     plan_tier_source: None,
                 },
@@ -631,6 +633,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    org_id: None,
                     plan_tier: Some("pro_200".into()),
                     plan_tier_source: Some("detected".into()),
                 },
@@ -662,6 +665,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    org_id: None,
                     plan_tier: None,
                     plan_tier_source: None,
                 },
@@ -687,6 +691,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: Some("00000000-0000-4000-8000-000000000000".into()),
                     email: Some("consumer@example.invalid".into()),
                     org_name: Some("Example Org".into()),
+                    org_id: None,
                     plan_tier: Some("max_20x".into()),
                     plan_tier_source: Some("operator".into()),
                 },
@@ -708,6 +713,64 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
             undecodable_grants: vec![],
         }
     );
+}
+
+#[test]
+fn org_id_listing_decodes_producer_sample_and_quarantines_malformed_rows() {
+    let mut reply = producer_vector_reply("list-scoped-v2.json", "learned_org");
+    let listing = decode_list_scoped_reply(reply.clone()).unwrap();
+    let learned = &listing.credentials[0];
+    assert_eq!(learned.id, "apikey:anthropic:work");
+    assert_eq!(
+        learned.org_id.as_deref(),
+        Some("c57dea1d-dfac-4ad7-9dee-123456789abc")
+    );
+    assert_eq!(learned.account_id, None);
+    assert!(listing.undecodable_credentials.is_empty());
+
+    let legacy = producer_vector_reply("list-scoped-v2.json", "catalog_and_lifecycle");
+    let healthy = decode_list_scoped_reply(legacy.clone())
+        .unwrap()
+        .credentials;
+    assert!(!healthy.is_empty());
+    assert!(healthy.iter().all(|row| row.org_id.is_none()));
+    reply["result"]["credentials"]
+        .as_array_mut()
+        .unwrap()
+        .extend(
+            legacy["result"]["credentials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned(),
+        );
+
+    for valid in ["Aaz09-_.:".to_string(), "a".repeat(128)] {
+        let mut valid_reply = reply.clone();
+        valid_reply["result"]["credentials"][0]["org_id"] = json!(valid);
+        let listing = decode_list_scoped_reply(valid_reply).unwrap();
+        assert_eq!(
+            listing.credentials[0].org_id.as_deref(),
+            Some(valid.as_str())
+        );
+        assert!(listing.undecodable_credentials.is_empty());
+    }
+    for malformed in [
+        Value::Null,
+        json!(7),
+        json!(""),
+        json!("a".repeat(129)),
+        json!("a/b"),
+        json!("id\n"),
+        json!("id\u{200b}"),
+    ] {
+        let mut broken = reply.clone();
+        broken["result"]["credentials"][0]["org_id"] = malformed;
+        let listing = decode_list_scoped_reply(broken).unwrap();
+        assert_eq!(listing.credentials, healthy);
+        assert_eq!(listing.undecodable_credentials.len(), 1);
+        assert!(listing.undecodable_credentials[0].starts_with("apikey:anthropic:work: org_id "));
+    }
 }
 
 #[test]
@@ -823,6 +886,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 account_id: Some("00000000-0000-4000-8000-000000000000".into()),
                 email: Some("consumer@example.invalid".into()),
                 org_name: Some("Example Org".into()),
+                org_id: None,
                 plan_tier: Some("max_5x".into()),
                 plan_tier_source: Some("detected".into()),
             }],

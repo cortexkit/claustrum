@@ -216,21 +216,18 @@ pub async fn validate_key(
             Ok(resp) => ValidationOutcome::Warning(format!("unexpected status {}", resp.status)),
             Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
         },
-        KeyValidation::GetEndpoint { url, extra_headers } => {
-            headers.extend_from_slice(extra_headers);
-            match transport.get(url, &headers).await {
-                Ok(resp) => {
-                    if resp.status == 401 || resp.status == 403 {
-                        ValidationOutcome::Invalid(format!("unauthorized (status {})", resp.status))
-                    } else if (200..=299).contains(&resp.status) {
-                        ValidationOutcome::Valid
-                    } else {
-                        ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
-                    }
+        KeyValidation::GetEndpoint { .. } => match row.probe_get(transport, key, None).await {
+            Ok(resp) => {
+                if resp.status == 401 || resp.status == 403 {
+                    ValidationOutcome::Invalid(format!("unauthorized (status {})", resp.status))
+                } else if (200..=299).contains(&resp.status) {
+                    ValidationOutcome::Valid
+                } else {
+                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
                 }
-                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
             }
-        }
+            Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+        },
         KeyValidation::CloudflareWorkersAiModels { api_base } => {
             let Some(account_id) = account_id else {
                 // The account is part of the URL, so there is nothing to probe without

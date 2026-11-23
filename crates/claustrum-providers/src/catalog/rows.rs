@@ -28,6 +28,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         // Qwen, GLM and MiniMax models. Its kiroConstants.js adds thinking/agentic
         // suffix variants of those models, not additional model vendors.
         serves: &[Anthropic, DeepSeek, Qwen, Zhipu, MiniMax],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -48,6 +49,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -68,6 +70,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -88,6 +91,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[DeepSeek],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -108,6 +112,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, OpenAI],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -137,6 +142,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -157,6 +163,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, OpenAI, Moonshot, Mistral],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -177,6 +184,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Mistral],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -197,6 +205,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -217,6 +226,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[Perplexity],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -237,6 +247,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Moonshot],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -257,6 +268,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot, Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -277,6 +289,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Nvidia, Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -297,6 +310,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[XAI],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -317,6 +331,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[OpenAI],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -337,6 +352,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[Google],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Anthropic's paid API, as opposed to the `oauth:anthropic` subscription login. A bare
@@ -363,6 +379,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic],
+        org_id_header: Some("anthropic-organization-id"),
         account_id_prompt: None,
     },
     // Inception Labs' API for its Mercury models: OpenAI-compatible, Bearer key, env var
@@ -391,6 +408,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Inception],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Cloudflare Workers AI, through Cloudflare's REST API. The token alone is not enough:
@@ -424,6 +442,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         // other text-generation authors (Cloudflare, IBM, swiss-ai and others) have no
         // `ModelVendor`.
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia],
+        org_id_header: None,
         account_id_prompt: Some(AccountIdPrompt {
             label: "Cloudflare account id (32 hex characters; shown on the dashboard's Account home and in the Workers AI 'Use REST API' panel)",
             format: AccountIdFormat::LowerHex32,
@@ -457,6 +476,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
@@ -478,6 +498,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, Google, DeepSeek, Moonshot, Zhipu, Qwen],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
@@ -499,6 +520,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Nvidia],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/charm-hyper.kdl.
@@ -524,6 +546,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google, Moonshot, Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
@@ -544,6 +567,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
@@ -564,6 +588,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/deepinfra.kdl; serves from its models.json rows.
@@ -587,6 +612,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/firepass.kdl; serves from its models.json rows.
@@ -610,6 +636,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Moonshot, Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
@@ -631,6 +658,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/meta.kdl; serves from its models.json rows.
@@ -652,6 +680,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
@@ -673,6 +702,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[MiniMax],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
@@ -694,6 +724,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[MiniMax],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/nanogpt.kdl.
@@ -716,6 +747,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/novita.kdl; serves from its models.json rows.
@@ -739,6 +771,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
@@ -759,6 +792,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Qwen, Nvidia, MiniMax],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
@@ -779,6 +813,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
@@ -799,6 +834,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/qianfan.kdl; serves from its models.json rows.
@@ -822,6 +858,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/qwen-portal.kdl.
@@ -845,6 +882,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Qwen],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/sakana.kdl.
@@ -867,6 +905,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/siliconflow.kdl.
@@ -890,6 +929,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/siliconflow-cn.kdl.
@@ -913,6 +953,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/singularityapi-dev.kdl.
@@ -936,6 +977,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/singularityapi-tech.kdl. The roster is per key (no models.json rows);
@@ -959,6 +1001,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
@@ -980,6 +1023,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[StepFun],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
@@ -1001,6 +1045,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Qwen, Nvidia],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/typesafe.kdl.
@@ -1022,6 +1067,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/umans.kdl; serves from its models.json rows.
@@ -1043,6 +1089,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu, Qwen, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/venice.kdl; serves from its models.json rows.
@@ -1064,6 +1111,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/vercel-ai-gateway.kdl.
@@ -1085,6 +1133,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
@@ -1106,6 +1155,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu, Qwen, MiniMax],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
@@ -1127,6 +1177,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
@@ -1148,6 +1199,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
@@ -1169,6 +1221,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
@@ -1190,6 +1243,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Qwen],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
@@ -1211,6 +1265,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi, StepFun],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
@@ -1232,6 +1287,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
@@ -1252,6 +1308,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[Moonshot],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1271,6 +1328,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
@@ -1291,6 +1349,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
@@ -1311,6 +1370,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
@@ -1331,6 +1391,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Brave documents this header and endpoint, but not a distinct bad-key response; keep
@@ -1354,6 +1415,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Firecrawl documents the exact invalid-token message on its read-only credit-usage route.
@@ -1377,6 +1439,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Jina documents bearer auth but no unique invalid-key response, so do not use a
@@ -1399,6 +1462,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // TinyFish's wallet read is authenticated with X-API-Key and documents
@@ -1422,6 +1486,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
@@ -1442,6 +1507,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1462,6 +1528,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Rows below were taken from each provider's own documentation, starting from the
@@ -1489,6 +1556,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Abacus.AI's self-serve RouteLLM host; Enterprise workspaces use a per-workspace
@@ -1511,6 +1579,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // above.dev's model list is public, so the check is a chat.
@@ -1532,6 +1601,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AgentRouter's own Claude app guide sends users to ps.air-outer.com to create tokens.
@@ -1552,6 +1622,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Agnes AI's model list does not need a key, so the check is a chat.
@@ -1573,6 +1644,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AI-ROUTER documents its API without a /v1 prefix.
@@ -1594,6 +1666,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AI21's model list answers any key, so the check lists the account's library files.
@@ -1615,6 +1688,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AIHubMix documents api.inferera.com as a fallback for aihubmix.com. Its model list
@@ -1637,6 +1711,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AI/ML API's model list is public, so the check reads the account balance.
@@ -1658,6 +1733,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // ainetcafe's K3 guides send keys to its API host, microquickjs.com.
@@ -1679,6 +1755,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1699,6 +1776,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1719,6 +1797,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Alibaba Cloud Model Studio, Singapore region. Keys belong to one region; keys from
@@ -1741,6 +1820,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Alibaba Cloud Model Studio, Beijing region; workspace-specific hosts are not covered.
@@ -1762,6 +1842,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Coding Plan keys are for interactive coding tools. The plan's model list answers
@@ -1784,6 +1865,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // The China Coding Plan; its model list answers any key, so the check is a chat.
@@ -1805,6 +1887,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1825,6 +1908,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1845,6 +1929,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Ambient's model list needs no key, so the check lists the account's assistants.
@@ -1866,6 +1951,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // AMD Radeon Cloud Token Factory, served from AMD's China developer site.
@@ -1887,6 +1973,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1907,6 +1994,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1927,6 +2015,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -1947,6 +2036,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Ant Group's Ling guide sends Bearer tokens to api.ant-ling.com. That host refused
@@ -1968,6 +2058,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Bee's model list does not need a key, so the check is a chat.
@@ -1989,6 +2080,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Berget.AI's model list does not need a key, so the check is a chat.
@@ -2010,6 +2102,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2030,6 +2123,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Bothub's API guide sets this base URL with the access token as the OpenAI SDK's
@@ -2052,6 +2146,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Boundless also accepts the key in `x-api-key`; the row uses the documented Bearer
@@ -2074,6 +2169,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Chutes serves inference on llm.chutes.ai and its platform API on api.chutes.ai,
@@ -2097,6 +2193,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Claudinio also accepts the key in `x-api-key`; the row uses the Bearer form.
@@ -2118,6 +2215,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2138,6 +2236,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Cohere's API reference uses api.cohere.com; its OpenAI compatibility API uses
@@ -2160,6 +2259,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // The check is the documented balance read, which works at a zero balance.
@@ -2181,6 +2281,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Cortecs' model list does not need a key, so the check is a chat.
@@ -2202,6 +2303,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // CrossModel serves its OpenAI and Anthropic surfaces from one host. The Anthropic
@@ -2224,6 +2326,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Crusoe's serverless inference guide sets this base URL with the key as the OpenAI
@@ -2246,6 +2349,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // DaoXE's quickstart host. Alternative routes that its route list may return are
@@ -2268,6 +2372,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // DigitalOcean's serverless inference accepts a model access key or a personal
@@ -2291,6 +2396,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // DInference's API page sets this base URL with the key as the OpenAI SDK's API
@@ -2313,6 +2419,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // D.Run's pay-per-token host. Dedicated instances use per-region hosts that this
@@ -2334,6 +2441,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Echo keys belong to a workspace, and every documented request path names the
@@ -2355,6 +2463,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Eden AI serves the same API on a global and an EU host, with one key. Its model list
@@ -2377,6 +2486,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // The check is the documented account usage read, which returns the key's balance.
@@ -2398,6 +2508,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Engy's model list does not need a key, so the check is a chat. Its separate
@@ -2420,6 +2531,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // evroc Think shared models; dedicated model instances are not covered.
@@ -2441,6 +2553,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // FastRouter's model list does not need a key, so the check is a chat.
@@ -2462,6 +2575,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // FreeModel's site configures the OpenAI SDK with this base URL and the key as its
@@ -2486,6 +2600,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Friendli's serverless model list does not need a key, so the check is a chat.
@@ -2507,6 +2622,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // FrogBot also accepts the key in `x-api-key`; the row uses the documented Bearer form.
@@ -2528,6 +2644,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Covers Vertex AI express-mode API keys only: Gemini models at the global endpoint,
@@ -2550,6 +2667,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2570,6 +2688,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Helicone's AI gateway. Its model list does not need a key, so the check is a chat.
@@ -2591,6 +2710,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // The check is the documented balance read, which is free and answers at zero balance.
@@ -2612,6 +2732,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2632,6 +2753,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Impossibl's model list does not need a key, so the check is the documented read of
@@ -2654,6 +2776,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Inceptron's model list does not need a key, so the check is a chat.
@@ -2675,6 +2798,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Inco documents its model list as public without a key, so the check is a chat.
@@ -2696,6 +2820,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Infer's docs give no direct key-page URL, so the row's key page is the API guide.
@@ -2717,6 +2842,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Inference.net serves a default and a US-only host with one key. Its model list does
@@ -2739,6 +2865,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // InferX's console gives each key a tenant- and endpoint-specific base URL on this
@@ -2760,6 +2887,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Infomaniak AI requests carry the account's AI Tools product id in the path, which
@@ -2782,6 +2910,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // IO Intelligence's model list does not need a key, so the check is a chat.
@@ -2803,6 +2932,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // IteraCompute's model catalog is public; its free Auto chat still checks the key.
@@ -2824,6 +2954,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2844,6 +2975,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2864,6 +2996,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2884,6 +3017,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2904,6 +3038,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2924,6 +3059,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2944,6 +3080,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2964,6 +3101,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -2984,6 +3122,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3004,6 +3143,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // DevPass and pay-as-you-go use the same gateway, but are separate published
@@ -3026,6 +3166,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3046,6 +3187,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3066,6 +3208,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3086,6 +3229,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3106,6 +3250,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3126,6 +3271,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // Model listing needs a separate scope, so check a chat key with a chat instead.
@@ -3147,6 +3293,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3167,6 +3314,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3187,6 +3335,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3207,6 +3356,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3227,6 +3377,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3247,6 +3398,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3267,6 +3419,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3287,6 +3440,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3307,6 +3461,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3327,6 +3482,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3347,6 +3503,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3367,6 +3524,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3387,6 +3545,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3407,6 +3566,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3427,6 +3587,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3447,6 +3608,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3467,6 +3629,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3487,6 +3650,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3507,6 +3671,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3527,6 +3692,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3547,6 +3713,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3567,6 +3734,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3588,6 +3756,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3608,6 +3777,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3628,6 +3798,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3648,6 +3819,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3668,6 +3840,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3688,6 +3861,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3708,6 +3882,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3728,6 +3903,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3748,6 +3924,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3768,6 +3945,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3788,6 +3966,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3808,6 +3987,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3828,6 +4008,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3848,6 +4029,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3868,6 +4050,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3888,6 +4071,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3908,6 +4092,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3928,6 +4113,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3948,6 +4134,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3968,6 +4155,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -3988,6 +4176,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4008,6 +4197,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4028,6 +4218,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4048,6 +4239,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4068,6 +4260,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4088,6 +4281,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4108,6 +4302,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4128,6 +4323,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4148,6 +4344,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4168,6 +4365,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4188,6 +4386,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4208,6 +4407,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4228,6 +4428,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4248,6 +4449,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4268,6 +4470,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4288,6 +4491,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4308,6 +4512,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4328,6 +4533,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4348,6 +4554,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4367,6 +4574,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4386,6 +4594,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4405,6 +4614,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4424,6 +4634,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_MEDIA,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4443,6 +4654,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4463,6 +4675,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4482,6 +4695,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4502,6 +4716,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     ApiKeyProvider {
@@ -4521,6 +4736,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
     // BytePlus documents this fixed ModelArk data-plane host, Bearer API keys and chat:
@@ -4544,6 +4760,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        org_id_header: None,
         account_id_prompt: None,
     },
 ];

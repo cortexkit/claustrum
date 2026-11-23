@@ -37,6 +37,7 @@ mod manifest_active_report;
 mod manifest_identity;
 mod manifest_propose;
 mod module_secret;
+mod org_learner;
 mod plan_warnings;
 mod policy_token;
 mod read_surface;
@@ -515,7 +516,7 @@ where
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
     // dangling refresh intents BEFORE accepting any request.
-    let (surface, admin, login_sharing) =
+    let (surface, admin, login_sharing, org_learner) =
         build_surface(&ack, &config.module_id, config_path.clone()).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
@@ -553,6 +554,7 @@ where
         (None, AbortOnDrop(tokio::spawn(login_sharing.run())))
     };
     let _login_sharing_guard = login_sharing_task;
+    let _org_learner_guard = AbortOnDrop(tokio::spawn(org_learner.run()));
     // The outbound client: this vault's own connection to subc for calls it makes as a
     // consumer (callosum's pairing and key lookups, a peer vault, insula). Built once,
     // with either a fresh self-connection claim from this registration, or the legacy
@@ -854,6 +856,7 @@ async fn build_surface(
         ReadSurface,
         admin_surface::AdminSurface,
         federation::login_sharing::ConfigPoll,
+        org_learner::Learner,
     ),
     ModuleError,
 > {
@@ -946,6 +949,7 @@ async fn build_surface(
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
+    let org_learner = org_learner::Learner::new(Arc::clone(&store), http.clone());
     let adapters = registered_refresh_adapters(kimi_device_id_file);
     // A remote record's home names its refresh adapter; this vault lists only one it
     // registers itself, so the remote read validates against exactly this set.
@@ -989,6 +993,7 @@ async fn build_surface(
             .with_refresh_adapter_names(adapter_names),
         admin,
         login_sharing,
+        org_learner,
     ))
 }
 
@@ -8468,7 +8473,7 @@ mod tests {
             ("invalid-config", false),
         ] {
             std::fs::write(&path, bytes).unwrap();
-            let (surface, admin, poll) =
+            let (surface, admin, poll, _) =
                 build_surface(&ack, credentials_core::MODULE_ID, path.clone())
                     .await
                     .unwrap();
@@ -8519,7 +8524,7 @@ mod tests {
         .unwrap();
         let mut first_envelope = None;
         for _ in 0..2 {
-            let (surface, admin, poll) = build_surface(
+            let (surface, admin, poll, _) = build_surface(
                 &ack,
                 credentials_core::MODULE_ID,
                 root.join("claustrum.jsonc"),
@@ -10687,6 +10692,7 @@ mod tests {
             plan_tier_source: Option<&'a str>,
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
+            org_id: None,
             provider: credentials_core::catalog::provider(stored.id).map(str::to_owned),
             github_app: (stored.id == "github_app:plex-alfonso").then(|| ListedGitHubApp {
                 app_id: "4617236".into(),
@@ -13686,7 +13692,7 @@ mod tests {
     /// An OAuth record with a far-future expiry, a refresh adapter and a full identity,
     /// so a scoped get serves it without an upstream exchange and a list row has every
     /// identity field to show or withhold.
-    fn roster_oauth_record() -> VaultRecord {
+    pub(super) fn roster_oauth_record() -> VaultRecord {
         let oauth = credentials_core::OAuthCredential {
             access_token: "sk-ant-oat01-roster".to_string().into(),
             refresh_token: "ref".to_string().into(),
@@ -20533,6 +20539,8 @@ mod tests {
     ///             provider plan, plus the fixed provider family; never token fields
     ///   warn!     login-sharing config: path and resolver-redacted location/reason,
     ///             or fixed apply-failure text; never config bytes or parser messages
+    ///   warn!     organization probe failure: bounded escaped credential id, optional
+    ///             status and a fixed reason; never any header, response body or error text
     ///   warn!     skipped declaration: module id and digest from the daemon's bind attestation, fixed reasons and indices; never entry values, grants_json or request fields
     ///   warn!     declaration persistence failure: module id and digest from the daemon's bind attestation and fixed text; never entry values, grants_json or request fields
     ///   warn!     incomplete declared inventory: fixed text only; no module id, digest, entry values, grants_json or request fields
@@ -20621,6 +20629,7 @@ mod tests {
             )),
             request_action,
             policy_token,
+            include_str!("org_learner.rs"),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -20637,7 +20646,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 30, 0),
+            (1, 2, 31, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

@@ -427,6 +427,7 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
     cases.push(list_vector_case("descriptor_presence", OP_LIST_SCOPED, listing));
     cases.push(github_app_identity_listing_vector().await);
     cases.push(github_app_attestation_listing_vector().await);
+    cases.push(learned_org_listing_vector().await);
     let emitted =
         serde_json::to_vec_pretty(&json!({"v":"ck-list-scoped-vectors/v2", "cases":cases}))
             .unwrap();
@@ -507,6 +508,60 @@ async fn list_scoped_v2_vectors_are_emitted_by_real_handlers_and_pinned() {
             "SHA256SUMS must list each file this test produces once, with these hashes"
         );
     }
+}
+
+async fn learned_org_listing_vector() -> serde_json::Value {
+    let mut rig = Rig::new();
+    let id = "apikey:anthropic:work";
+    let other = "apikey:openai";
+    for (index, id) in [id, other].into_iter().enumerate() {
+        rig.store.create(id, &VaultRecord::new_static(
+            CredentialKind::ApiKey, "vector", b"vector-test-key".to_vec(), None,
+        )).unwrap();
+        rig.store.force_credential_incarnation_for_test(id, &format!("{:032x}", index + 1));
+    }
+    rig.store.set_providers_audited(
+        id, SetProvidersMode::Set, &["anthropic-platform".into()], AuditCtx::admin(AuditOp::SetProviders),
+    ).unwrap();
+    rig.bind(1, reserved("org-reader"));
+    rig.bind(2, reserved("other-reader"));
+    grant_for(&rig.store, "org-reader", id, GrantOperation::List);
+    grant_for(&rig.store, "other-reader", other, GrantOperation::List);
+
+    rig.open(1, 1, json!({})).await;
+    let before = rig.notice(1, 1, 1).await;
+    rig.open(2, 2, json!({})).await;
+    let other_before = rig.notice(2, 2, 1).await;
+    let target = rig.store.org_probe_targets().unwrap().into_iter()
+        .find(|target| target.credential_id == id).unwrap();
+    let org_id = "c57dea1d-dfac-4ad7-9dee-123456789abc";
+    assert!(rig.store.learn_org(&target, org_id, 123).unwrap());
+    let notice = rig.notice(1, 1, 2).await;
+    assert_ne!(notice["view"], before["view"]);
+
+    rig.dispatch(1, 3, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let frame = rig.next().await;
+    assert_eq!(frame.header.ty, FrameType::Response);
+    let case = list_vector_case("learned_org", OP_LIST_SCOPED, frame);
+    let listing = &case["reply"]["result"];
+    assert_eq!(listing["view"], notice["view"]);
+    assert_eq!(listing["credentials"][0]["org_id"], org_id);
+    assert_eq!(listing["credentials"][0]["record_version"], target.record_version);
+    assert!(listing["credentials"][0].get("account_id").is_none());
+
+    rig.dispatch(2, 4, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+    let other_listing = rig.next().await;
+    assert_eq!(other_listing.header.ty, FrameType::Response);
+    let other_listing: serde_json::Value = serde_json::from_slice(&other_listing.body).unwrap();
+    assert_eq!(other_listing["result"]["view"], other_before["view"]);
+    // The next visible edit is exactly notice 2 for the other reader. Learning
+    // the hidden org did not publish an intervening notice on that channel.
+    rig.store.set_providers_audited(
+        other, SetProvidersMode::Set, &["openai".into()], AuditCtx::admin(AuditOp::SetProviders),
+    ).unwrap();
+    let other_after = rig.notice(2, 2, 2).await;
+    assert_ne!(other_after["view"], other_before["view"]);
+    case
 }
 
 async fn github_app_identity_listing_vector() -> serde_json::Value {

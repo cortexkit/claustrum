@@ -825,6 +825,19 @@ operation; record-level refusals such as `kind_not_signable` still apply after c
 `grants == grant_tuples.length`. `view` is the deterministic SHA-256 validator over the
 returned rows and tuples; changes outside the caller's visibility do not move it.
 
+`org_id` is an optional top-level string on local API-key rows with read or list
+coverage. It is omitted when unknown, not returned as null. It identifies the provider
+organization, not the credential's account, and does not change `account_id`.
+The daemon learns it for Anthropic API keys from `anthropic-organization-id` on a
+successful models probe. The value is 1 to 128 bytes and contains only ASCII
+letters, digits, `-`, `_`, `.`, and `:`. The observation applies only to that
+credential version and incarnation. It neither rewrites the sealed record nor
+changes the credential's state on a failed probe. If the caller can see the learned
+organization, `auth.watch_scoped` signals the new `view` and the caller can re-list.
+Rust client 0.16.0 exposes `org_id` and TypeScript client 0.23.0 exposes `orgId`.
+Both accept omission; a present invalid value (including null) makes the Rust row
+undecodable and the TypeScript listing invalid.
+
 ### Provider metadata, plan tier and authentication method
 
 Two provider-id fields answer different questions:
@@ -989,10 +1002,12 @@ in that order. An absent identity or attestation adds no bytes of its own.
 Next frame `fusiform_provider_id` as an optional string (byte 0 while unmapped), then `hosts`:
 byte 0 when absent, or byte 1, a u32 host count, and each host as a length-prefixed
 string in served order. The absent optional frame is used whenever the JSON key is
-omitted, never an empty string. Deployment leaves an empty inventory's view unchanged
-but changes every nonempty visible inventory's view
-once, even if all provider-id arrays are empty and all methods omitted. Subsequent edits
-move only views whose returned rows include that credential. A committed registry
+omitted, never an empty string. After `hosts`, append byte 7 and a length-prefixed
+`org_id` string only when `org_id` is present. Rows without `org_id` add no bytes
+and retain the same view framing. Adding the provider-id count and the auth-method
+presence byte changed every nonempty view once, even when provider ids and methods
+were unset. Empty views were unchanged. Subsequent edits move only views whose
+returned rows include that credential. A committed registry
 hosts change moves the affected view and wakes `auth.watch_scoped` through the store's
 committed-write notification path; a token-only refresh does not. Catalog host changes
 arrive with a new binary and appear in the watcher's initial snapshot.
@@ -1252,8 +1267,9 @@ established. Refresh never changes account identity and does not touch the asser
 Removing a credential removes its tier, even without foreign-key enforcement.
 
 `crates/credentials-module/tests/vectors/list-scoped-v2.json` pins real dispatched
-list replies for search and Kimi coding keys, present and absent `hosts`, lifecycle
-states and category-filtered visibility, plus the real watch opening, category-change
+list replies for search and Kimi coding keys, a learned organization id, present
+and absent `hosts`, lifecycle states and category-filtered visibility, plus the
+real watch opening, category-change
 and revoked-caller terminal frames. Its unknown-method case is the dispatcher's actual reply to an unsupported
 method, standing in for an older vault. Storage incarnations and detection times are
 fixed test values; only the process-local watch boot nonce is normalized to zero.

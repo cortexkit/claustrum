@@ -12,12 +12,12 @@ start when present, otherwise fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.15.0"
+cortexkit-claustrum-client = "0.16.0"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.15.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.16.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.
@@ -312,6 +312,7 @@ tagged Magic Context and Prefrontal samples in
 
 ## Changes
 
+- 0.16.0: optional `org_id` on scoped listings. See the [changelog](CHANGELOG.md).
 - 0.15.0: optional `condition` on scoped listing rows, and single-attempt
   `report_condition` and `clear_condition`. A vault without login conditions
   lists no condition and answers both calls `unknown_method`.

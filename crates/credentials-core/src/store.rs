@@ -96,6 +96,9 @@ mod audit_store;
 
 #[path = "store_metadata.rs"]
 mod metadata;
+#[path = "store_orgs.rs"]
+mod orgs;
+pub use orgs::OrgProbeTarget;
 
 #[cfg(test)]
 use audit_store::row_to_audit;
@@ -168,6 +171,7 @@ pub const AGENT_POLICY_SCHEMA_VERSION: u32 = 51;
 pub const POLICY_ROOT_SCHEMA_VERSION: u32 = 52;
 /// Broker action requests, their approvals, and ordered issuance progress.
 const BROKER_ACTION_SCHEMA_VERSION: u32 = 53;
+const CREDENTIAL_ORG_SCHEMA_VERSION: u32 = 54;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -643,6 +647,7 @@ pub struct ScopedListRow {
     pub record_version: u64,
     pub operations: Vec<GrantOperation>,
     pub identity: Option<crate::record::RecordIdentity>,
+    pub org_id: Option<String>,
     /// The record's OWN refresh adapter, read from the sealed record rather than parsed
     /// from the id.
     ///

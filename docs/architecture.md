@@ -63,6 +63,7 @@ Transitions: `logout` moves `active` or `needs_reauth` to `retired`; `login --re
 
 `record_version` increases on every write and every refresh of one row. It is the
 change cursor consumers join on, and it is bound into the encryption (section 4).
+Learned API-key organization ids are stored outside the sealed record, bound to its version and incarnation.
 
 ## 3. Data flow
 

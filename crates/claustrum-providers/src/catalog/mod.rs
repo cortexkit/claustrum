@@ -267,6 +267,8 @@ pub struct ApiKeyProvider {
     /// Observation from a deliberately bogus key, not a rule evaluated by the vault.
     pub invalid_key: Option<InvalidKeyEvidence>,
     pub validation: KeyValidation,
+    /// Response header that identifies the organization on a successful GET probe.
+    pub org_id_header: Option<&'static str>,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
     /// `Some` only for providers whose key is unusable without an account id (Cloudflare
@@ -975,6 +977,32 @@ pub fn api_key_provider_for_credential(id: &str) -> Option<&'static ApiKeyProvid
     match catalog_match(id)? {
         CatalogEntry::ApiKey(entry) => Some(entry),
         CatalogEntry::Login(_) => None,
+    }
+}
+
+impl ApiKeyProvider {
+    /// Send the catalog's status-only GET check, optionally capturing one response header.
+    pub async fn probe_get(
+        &self,
+        transport: &dyn crate::refresh_adapters::HttpTransport,
+        key: &str,
+        response_header: Option<&str>,
+    ) -> Result<crate::refresh_adapters::HttpProbeResponse, crate::refresh_adapters::RefreshError>
+    {
+        let (KeyValidation::GetEndpoint { url, extra_headers }, Some(auth)) =
+            (&self.validation, self.auth)
+        else {
+            return Err(crate::refresh_adapters::RefreshError::Transport(
+                "no authenticated GET probe for this provider".into(),
+            ));
+        };
+        let value = match auth.scheme {
+            AuthScheme::Bearer => std::borrow::Cow::Owned(format!("Bearer {key}")),
+            AuthScheme::Raw => std::borrow::Cow::Borrowed(key),
+        };
+        let mut headers = vec![(auth.header, value.as_ref())];
+        headers.extend_from_slice(extra_headers);
+        transport.probe_get(url, &headers, response_header).await
     }
 }
 

@@ -350,7 +350,7 @@ pub struct ScopedCredentialListing {
 
 /// One vault row as `credential.list_scoped` describes it. The vault fills in
 /// `account_id`, `refresh_adapter`, the plan tier and the condition only for rows
-/// the caller may list or read.
+/// the caller may list or read. Learned `org_id` has the same visibility.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListedCredential {
     /// Catalog service key, distinct from routing provider ids.
@@ -379,6 +379,8 @@ pub struct ListedCredential {
     pub account_id: Option<String>,
     pub email: Option<String>,
     pub org_name: Option<String>,
+    /// Provider organization of this API key; independent of `account_id`.
+    pub org_id: Option<String>,
     /// The subscription plan to price this account by (for example `max_20x` or
     /// `pro_200`). `None` means unknown: an API key, a provider that reports no plan,
     /// or a vault older than plan tiers.
@@ -2008,6 +2010,18 @@ fn decode_optional_github_app(row: &Value) -> Result<Option<ListedGitHubApp>, St
     }))
 }
 
+const MAX_LISTED_ORG_ID_BYTES: usize = 128;
+
+// Mirrors `claustrum_model::record::is_valid_org_id`; the published client cannot
+// depend on the vault's unpublished model crate.
+fn is_valid_listed_org_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LISTED_ORG_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
         plan_tier_since_ms: row
@@ -2046,6 +2060,16 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         account_id: decode_optional_string(row, "account_id")?,
         email: decode_optional_string(row, "email")?,
         org_name: decode_optional_string(row, "org_name")?,
+        org_id: row
+            .get("org_id")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| is_valid_listed_org_id(value))
+                    .map(str::to_owned)
+                    .ok_or_else(|| "org_id is not a valid organization id".to_string())
+            })
+            .transpose()?,
         plan_tier: decode_optional_string(row, "plan_tier")?,
         plan_tier_source: decode_optional_string(row, "plan_tier_source")?,
         condition: decode_optional_condition(row)?,

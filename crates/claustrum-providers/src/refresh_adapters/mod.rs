@@ -206,6 +206,30 @@ pub trait HttpTransport: Send + Sync {
             "HTTP GET is unsupported by this transport".into(),
         ))
     }
+
+    /// GET for a status check, with optional capture of one named response header.
+    async fn probe_get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        response_header: Option<&str>,
+    ) -> Result<HttpProbeResponse, RefreshError> {
+        if response_header.is_some() {
+            return Err(RefreshError::Transport(
+                "HTTP response header probes are unsupported by this transport".into(),
+            ));
+        }
+        Ok(HttpProbeResponse {
+            status: self.get(url, headers).await?.status,
+            header: None,
+        })
+    }
+}
+
+/// Status and, if requested and present, the raw value of one header. No response body.
+pub struct HttpProbeResponse {
+    pub status: u16,
+    pub header: Option<Vec<u8>>,
 }
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a

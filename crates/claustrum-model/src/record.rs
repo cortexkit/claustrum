@@ -209,6 +209,33 @@ fn validate_identity_value(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+const MAX_ORG_ID_BYTES: usize = 128;
+
+/// Whether a provider organization id can be stored and exposed as a listing key.
+pub fn is_valid_org_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ORG_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+#[cfg(test)]
+mod org_id_tests {
+    use super::*;
+
+    #[test]
+    fn org_id_accepts_128_bytes_and_refuses_129_empty_and_disallowed_bytes() {
+        assert!(is_valid_org_id("org-AZaz09_1.2:3"));
+        assert!(is_valid_org_id(&"a".repeat(128)));
+        assert!(!is_valid_org_id(&"a".repeat(129)));
+        assert!(!is_valid_org_id(""));
+        for invalid in ["a/b", " a", "a ", "a\t", "a\u{200b}", "aé"] {
+            assert!(!is_valid_org_id(invalid));
+        }
+    }
+}
+
 /// The vault's typed, at-rest view of one credential. Encrypted as one unit; only
 /// `payload` is ever returned to a consumer.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

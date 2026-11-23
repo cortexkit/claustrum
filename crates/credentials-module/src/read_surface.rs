@@ -332,6 +332,8 @@ pub struct ListScopedCredential {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
     /// The catalog provider ids the operator mapped to this credential, in ascending byte
     /// order. Present on EVERY row, including a sign-only row whose record stays sealed,
     /// because the ids live beside the record and reading them opens nothing. Empty when
@@ -2419,6 +2421,10 @@ pub(crate) fn list_scoped_view(
                 }
             }
         }
+        if let Some(org_id) = &credential.org_id {
+            digest_input.push(7);
+            push_string(&mut digest_input, org_id);
+        }
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -2513,6 +2519,7 @@ fn project_list_scoped_with_providers(
                 account_id,
                 email,
                 org_name,
+                org_id: row.org_id,
                 provider_ids: row.provider_ids,
                 plan_tier: row.plan_tier,
                 plan_tier_source: row.plan_tier_source,
@@ -5819,6 +5826,7 @@ mod list_scoped_tests {
     ) -> ScopedListRow {
         ScopedListRow {
             github_app: None,
+            org_id: None,
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -5897,6 +5905,7 @@ mod list_scoped_tests {
     fn scoped_row_with_adapter(id: &str, adapter: Option<&str>) -> ScopedListRow {
         ScopedListRow {
             github_app: None,
+            org_id: None,
             provider: credentials_core::catalog::provider(id).map(str::to_owned),
             incarnation: "0123456789abcdef0123456789abcdef".into(),
             plan_tier_observed_at_ms: None,
@@ -6212,6 +6221,7 @@ mod list_scoped_tests {
         }
         let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
             github_app: None,
+            org_id: None,
             fusiform_provider_id: None,
             hosts: None,
             provider: None,

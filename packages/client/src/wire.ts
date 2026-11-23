@@ -896,6 +896,8 @@ export interface ScopedInventoryRow {
   readonly accountId?: string
   readonly email?: string
   readonly orgName?: string
+  /** Provider organization learned for this API key, independent of accountId. */
+  readonly orgId?: string
 }
 
 /**
@@ -1057,6 +1059,12 @@ export function decodeScopedInventory(
     if (!isOptionalString(row.account_id) || !isOptionalString(row.email) || !isOptionalString(row.org_name)) {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
+    // The vault accepts 1–128 bytes from this ASCII alphabet only.
+    const orgId = row.org_id
+    if (orgId !== undefined &&
+      (typeof orgId !== 'string' || orgId.length === 0 || orgId.length > 128 || /[^A-Za-z0-9_.:-]/.test(orgId))) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     return {
       id: row.id,
       provider,
@@ -1086,6 +1094,7 @@ export function decodeScopedInventory(
       accountId: row.account_id,
       email: row.email,
       orgName: row.org_name,
+      ...(orgId === undefined ? {} : { orgId }),
     }
   })
   // ABSENT IS UNKNOWN, PRESENT MUST BE WELL-FORMED. A vault from before these fields

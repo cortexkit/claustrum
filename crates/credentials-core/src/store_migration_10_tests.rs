@@ -1002,13 +1002,14 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 53);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 54);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
     for table in [
         "agent_policies",
         "broker_action_requests",
         "credential_conditions",
+        "credential_orgs",
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",
@@ -1168,9 +1169,10 @@ fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy
         } else {
             EncryptedStore::migrate(&copy).unwrap();
         }
-        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 53);
+        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 54);
         let mut after = every_table_row(&copy);
         assert_eq!(after.remove("broker_action_requests"), Some(vec![]));
+        assert_eq!(after.remove("credential_orgs"), Some(vec![]));
         let settings = after.get_mut("settings").unwrap();
         let seeded = settings.iter().position(|row| row[0] == seed[0]);
         assert_eq!(
@@ -1289,6 +1291,41 @@ fn migration_53_broker_action_adds_only_its_table_to_a_step_52_copy() {
 }
 
 #[test]
+fn migration_54_preserves_the_step_53_vault_without_backfilling_orgs() {
+    let (_root, sqlite) = sqlite("credential-org-upgrade", 230);
+    migrate_through_for_test(&sqlite, 53).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([230; 32])).unwrap();
+    for id in ["apikey:anthropic", "apikey:openai"] {
+        store.create(id, &api_record()).unwrap();
+    }
+    let before = every_table_row(&store.store);
+    assert_eq!(before["credentials"].len(), 2);
+    EncryptedStore::migrate(&store.store).unwrap();
+    assert_eq!(schema_version_of(&store.store), 54);
+    let mut after = every_table_row(&store.store);
+    assert_eq!(after.remove("credential_orgs"), Some(vec![]));
+    assert_eq!(after, before);
+    let columns = store
+        .with_raw_conn(|conn| {
+            let mut stmt = conn.prepare("PRAGMA table_info(credential_orgs)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "credential_id",
+            "record_version",
+            "incarnation",
+            "org_id",
+            "observed_at_ms"
+        ]
+    );
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+#[test]
 fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
     let (_root, sqlite) = sqlite("local-program-upgrade", 228);
     migrate_through_for_test(&sqlite, 45).unwrap();
@@ -1305,6 +1342,7 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
         "agent_policies",
         "broker_action_requests",
         "credential_conditions",
+        "credential_orgs",
         "fleet_discards",
         "fleet_epochs",
         "fleet_removals",

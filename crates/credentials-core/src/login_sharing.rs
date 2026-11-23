@@ -56,10 +56,12 @@ fn enabled() -> bool {
 pub fn schema() -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Credential Vault",
         "type": "object", "unevaluatedProperties": false,
         "properties": {"login_sharing": {
             "type": "boolean", "default": true,
-            "description": "Set to false to stop sharing this computer's logins with paired computers and drop automatic copies of their logins.",
+            "title": "Share logins with paired computers",
+            "description": "Turn off to stop sharing this computer's logins with paired computers and to remove the copies of their logins this computer received automatically.",
             "x-ck-apply": "live", "x-ck-layers": ["user"]
         }}
     })

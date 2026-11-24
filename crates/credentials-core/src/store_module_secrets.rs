@@ -119,6 +119,14 @@ impl ModuleSecretState {
             Self::Corrupt => "corrupt",
         }
     }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        match row.get_ref("state")?.as_str() {
+            Ok("active") => Ok(Self::Active),
+            Ok("corrupt") => Ok(Self::Corrupt),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +155,20 @@ pub struct ModuleSecretSummary {
     pub updated_at_ms: i64,
 }
 
+impl ModuleSecretSummary {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let version: i64 = row.get("version")?;
+        Ok(Self {
+            module_id: row.get("module_id")?,
+            name: row.get("name")?,
+            version: u64::try_from(version).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            protected: row.get("protected")?,
+            state: ModuleSecretState::from_row(row)?,
+            updated_at_ms: row.get("updated_at_ms")?,
+        })
+    }
+}
+
 fn binding_id(module_id: &str, name: &str) -> String {
     format!("module-secret|{module_id}|{name}")
 }
@@ -165,26 +187,19 @@ struct StoredModuleSecret {
     state: ModuleSecretState,
     envelope: Vec<u8>,
     created_at_ms: i64,
-    updated_at_ms: i64,
 }
 
 impl StoredModuleSecret {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         let version: i64 = row.get("version")?;
-        let state: String = row.get("state")?;
         Ok(Self {
             module_id: row.get("module_id")?,
             name: row.get("name")?,
             version: u64::try_from(version).map_err(|_| rusqlite::Error::InvalidQuery)?,
             protected: row.get("protected")?,
-            state: match state.as_str() {
-                "active" => ModuleSecretState::Active,
-                "corrupt" => ModuleSecretState::Corrupt,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            },
+            state: ModuleSecretState::from_row(row)?,
             envelope: row.get("envelope")?,
             created_at_ms: row.get("created_at_ms")?,
-            updated_at_ms: row.get("updated_at_ms")?,
         })
     }
 
@@ -205,17 +220,6 @@ impl StoredModuleSecret {
             EnvelopeError::KeyMismatch { .. } => ModuleSecretError::VaultLocked,
             _ => ModuleSecretError::Corrupt,
         })
-    }
-
-    fn summary(self) -> ModuleSecretSummary {
-        ModuleSecretSummary {
-            module_id: self.module_id,
-            name: self.name,
-            version: self.version,
-            protected: self.protected,
-            state: self.state,
-            updated_at_ms: self.updated_at_ms,
-        }
     }
 }
 
@@ -369,27 +373,35 @@ impl EncryptedStore {
         &self,
         owner: &ModuleSecretOwner,
     ) -> Result<Vec<ModuleSecretSummary>, ModuleSecretError> {
-        self.list_module_secret_metadata(Some(owner))
+        self.list_module_secret_metadata(
+            "SELECT module_id, name, version, protected, state, updated_at_ms \
+             FROM module_secrets WHERE module_id = ?1 ORDER BY name",
+            [owner.as_str()],
+        )
     }
 
     pub fn list_all_module_secrets(&self) -> Result<Vec<ModuleSecretSummary>, ModuleSecretError> {
-        self.list_module_secret_metadata(None)
+        self.list_module_secret_metadata(
+            "SELECT module_id, name, version, protected, state, updated_at_ms \
+             FROM module_secrets ORDER BY module_id, name",
+            [],
+        )
     }
 
     fn list_module_secret_metadata(
         &self,
-        owner: Option<&ModuleSecretOwner>,
+        sql: &str,
+        params: impl rusqlite::Params,
     ) -> Result<Vec<ModuleSecretSummary>, ModuleSecretError> {
         self.store
             .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT * FROM module_secrets WHERE (?1 IS NULL OR module_id = ?1)
-                 ORDER BY module_id, name",
-                )?;
-                let rows = stmt.query_map([owner.map(ModuleSecretOwner::as_str)], |row| {
-                    StoredModuleSecret::from_row(row).map(StoredModuleSecret::summary)
-                })?;
-                rows.collect()
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map(params, ModuleSecretSummary::from_row)?;
+                let result = rows.collect();
+                #[cfg(test)]
+                METADATA_FULL_SCAN_STEPS
+                    .set(stmt.get_status(rusqlite::StatementStatus::FullscanStep));
+                result
             })
             .map_err(|_| ModuleSecretError::Store)
     }
@@ -526,6 +538,11 @@ impl EncryptedStore {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static METADATA_FULL_SCAN_STEPS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
 /// Called only from master-key rotation, inside the single write transaction that
 /// `fenced_write` opens for the whole rotation. That transaction is refused if a newer
 /// writer has taken the store's single-writer lease, and the re-sealed rows commit
@@ -534,15 +551,19 @@ pub(super) fn rotate_module_secrets_tx(
     tx: &rusqlite::Transaction<'_>,
     old_key: &MasterKey,
     new_key: &MasterKey,
-) -> rusqlite::Result<Vec<String>> {
+    report: &mut KeyRotationReport,
+) -> rusqlite::Result<()> {
     let rows = {
         let mut stmt = tx.prepare("SELECT * FROM module_secrets ORDER BY module_id, name")?;
         let mapped = stmt.query_map([], StoredModuleSecret::from_row)?;
         mapped.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let mut quarantined = Vec::new();
     for row in rows {
         let id = binding_id(&row.module_id, &row.name);
+        if row.state == ModuleSecretState::Corrupt {
+            report.already_corrupt.push(id);
+            continue;
+        }
         let value = match row.open(old_key) {
             Ok(value) => value,
             Err(_) => {
@@ -550,7 +571,7 @@ pub(super) fn rotate_module_secrets_tx(
                     "UPDATE module_secrets SET state = 'corrupt' WHERE module_id = ?1 AND name = ?2",
                     rusqlite::params![row.module_id, row.name],
                 )?;
-                quarantined.push(id);
+                report.newly_quarantined.push(id);
                 continue;
             }
         };
@@ -568,5 +589,5 @@ pub(super) fn rotate_module_secrets_tx(
             rusqlite::params![row.module_id, row.name, sealed, new_key.key_id().to_hex()],
         )?;
     }
-    Ok(quarantined)
+    Ok(())
 }

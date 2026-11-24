@@ -814,14 +814,21 @@ pub fn compute_entry_mac(audit_key: &[u8; 32], prev_mac: &str, fields: &MacField
 /// tip_mac)` off-box); that is out of scope for the in-DB chain. Callers relying on the
 /// audit log for non-repudiation must pair it with such an anchor.
 pub fn verify_chain(audit_key: &[u8; 32], entries: &[AuditEntry]) -> Option<i64> {
-    let mut expected_prev = GENESIS_MAC.to_string();
+    let mut expected_prev = GENESIS_MAC;
     for e in entries {
-        if e.prev_mac != expected_prev {
+        if !entry_verifies(audit_key, expected_prev, e) {
             return Some(e.seq);
         }
-        let recomputed = compute_entry_mac(
+        expected_prev = &e.entry_mac;
+    }
+    None
+}
+
+pub(crate) fn entry_verifies(audit_key: &[u8; 32], expected_prev: &str, e: &AuditEntry) -> bool {
+    e.prev_mac == expected_prev
+        && compute_entry_mac(
             audit_key,
-            &e.prev_mac,
+            expected_prev,
             &MacFields {
                 seq: e.seq,
                 ts_ms: e.ts_ms,
@@ -832,13 +839,7 @@ pub fn verify_chain(audit_key: &[u8; 32], entries: &[AuditEntry]) -> Option<i64>
                 alarm: e.alarm,
                 alarm_reason: e.alarm_reason.as_deref(),
             },
-        );
-        if recomputed != e.entry_mac {
-            return Some(e.seq);
-        }
-        expected_prev = e.entry_mac.clone();
-    }
-    None
+        ) == e.entry_mac
 }
 
 fn feed(mac: &mut HmacSha256, field: &[u8]) {

@@ -384,6 +384,28 @@ fn policy_root_exact_sign_grants_are_refused_without_writes_but_read_still_works
 }
 
 #[test]
+fn logout_refuses_to_retire_the_configured_signing_root() {
+    let (_root, store) = taxonomy_tests::rig("protected-root-logout", 227);
+    let (record, _) = root_key();
+    store
+        .put_legacy_manifest_root_for_tests(&record, AuditCtx::admin(AuditOp::Put))
+        .unwrap();
+    let before = store.read_audit(None).unwrap().len();
+    assert!(matches!(
+        store.retire_and_revoke_all_audited(
+            GH_MANIFEST_ROOT_KEY_ID,
+            AuditCtx::admin(AuditOp::Invalidate),
+        ),
+        Err(StoreOpError::PolicyRootProtected)
+    ));
+    assert_eq!(
+        store.meta(GH_MANIFEST_ROOT_KEY_ID).unwrap().state,
+        RecordState::Active
+    );
+    assert_eq!(store.read_audit(None).unwrap().len(), before);
+}
+
+#[test]
 fn policy_root_mutations_are_refused_before_duplicate_or_not_found_checks() {
     use crate::admin_ops::{apply, AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
     let (_root, store) = taxonomy_tests::rig("policy-root-mutations", 227);

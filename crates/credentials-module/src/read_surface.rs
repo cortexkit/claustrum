@@ -3474,10 +3474,8 @@ impl ReadSurface {
         {
             Ok(refreshed) => {
                 crate::plan_warnings::report(refreshed.unmapped_plan.as_ref());
-                // A refusal is sound only after THIS request minted once for its stated
-                // demand. The status excludes static reads and a single-flight follower
-                // that merely observed another writer's newer version, neither of which
-                // can prove a fresh token fails this caller's request.
+                // Only an exchange, including one shared with another reader, can
+                // prove a fresh token fails this caller's demand.
                 if refreshed.refreshed_for_min_ttl
                     && params
                         .min_ttl_ms
@@ -4919,30 +4917,9 @@ impl ReadSurface {
         *self.last_refresh.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
     }
 
-    /// The actual domain-health computation: a no-decrypt `list_meta` scan plus the
-    /// open-intent count and the fenced-out latch. A failed scan means the store is
-    /// unreadable (lost lease / gone db) — the vault's real serving-inability signal
-    /// and the only read-derived `Failing` trigger. Runs off the probe path only.
+    /// Recompute from lifecycle states and intent counts, off the probe path.
     fn compute_health(engine: &RefreshEngine) -> VaultHealth {
-        let store = engine.store();
-        let metas = match store.list_meta() {
-            Ok(metas) => metas,
-            Err(_) => return VaultHealth::unreadable(),
-        };
-        // Open intents are carried as an opaque metric only (a transient in-flight
-        // refresh holds one open), so a scan failure here must not flip serving
-        // health — default to 0 rather than masking a readable store as failing.
-        let open_intents = store.list_intents().map(|i| i.len()).unwrap_or(0);
-        let audit_tip = store.audit_tip().ok().flatten();
-        let mut health = VaultHealth::summarize(&metas, open_intents, store.is_fenced_out());
-        // The tip is optional because a failed tip query cannot provide a truthful
-        // observation. Never substitute zero or a previously cached value: either would
-        // turn an unreadable audit table into false witness data.
-        if let Some((seq, entry_mac)) = audit_tip {
-            health.audit_seq = Some(seq);
-            health.audit_tip_mac = Some(entry_mac);
-        }
-        health
+        engine.store().health_snapshot()
     }
 
     /// Run the per-connection limiter for one probe, keyed by `probe_key` (the

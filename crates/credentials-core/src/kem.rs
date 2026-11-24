@@ -96,23 +96,18 @@ pub fn open_base(
 }
 
 // HPKE accepts a rand_core 0.9 RNG; the workspace CSPRNG is getrandom 0.2.
-struct SystemRng;
-impl hpke::rand_core::RngCore for SystemRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut b = [0; 4];
-        self.fill_bytes(&mut b);
-        u32::from_le_bytes(b)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut b = [0; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::getrandom(dest).expect("OS randomness unavailable");
-    }
+#[cfg(test)]
+thread_local! {
+    static FAIL_ENTROPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
-impl hpke::rand_core::CryptoRng for SystemRng {}
+
+fn fill_entropy(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+    #[cfg(test)]
+    if FAIL_ENTROPY.get() {
+        return Err(getrandom::Error::UNSUPPORTED);
+    }
+    getrandom::getrandom(dest)
+}
 
 /// Seal one message to a public recipient with a fresh encapsulation.
 pub fn seal_base(
@@ -121,7 +116,9 @@ pub fn seal_base(
     info: &[u8],
     aad: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    seal_base_with_rng(public, pt, info, aad, &mut SystemRng)
+    let mut rng =
+        EphemeralRng::from_system().map_err(|_| "OS randomness unavailable".to_owned())?;
+    seal_base_with_rng(public, pt, info, aad, &mut rng)
 }
 
 fn seal_base_with_rng<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
@@ -169,8 +166,7 @@ pub enum SealError {
     /// The stored sender key is not a usable X25519 PKCS#8 key: vault-side damage, not
     /// a fault in the request.
     UnusableKey,
-    /// The AEAD refused to seal. A fresh context seals sequence zero, which cannot
-    /// overflow, so this is unreachable in practice and exists only to avoid a panic.
+    /// Entropy was unavailable or authenticated encryption could not seal the message.
     Failed,
 }
 
@@ -214,26 +210,26 @@ pub fn seal_auth(
     info: &[u8],
     aad: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), SealError> {
-    seal_auth_with_rng(
+    seal_auth_with_ephemeral_source(
         sender_pem,
         recipient_public_key,
         plaintext,
         info,
         aad,
-        &mut SystemRng,
+        EphemeralRng::from_system,
     )
 }
 
-fn seal_auth_with_rng<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
+fn seal_auth_with_ephemeral_source(
     sender_pem: &str,
     recipient_public_key: &[u8],
     plaintext: &[u8],
     info: &[u8],
     aad: &[u8],
-    rng: &mut R,
+    draw: impl FnOnce() -> Result<EphemeralRng, SealError>,
 ) -> Result<(Vec<u8>, Vec<u8>), SealError> {
     check_seal_inputs(recipient_public_key, plaintext, info, aad)?;
-    seal_auth_inner(sender_pem, recipient_public_key, plaintext, info, aad, rng)
+    seal_auth_inner(sender_pem, recipient_public_key, plaintext, info, aad, draw)
 }
 
 /// Fleet joins carry retained history, not a single credential payload. Only this
@@ -256,7 +252,7 @@ pub fn seal_fleet_auth(
         plaintext,
         info,
         b"",
-        &mut SystemRng,
+        EphemeralRng::from_system,
     )
 }
 
@@ -277,7 +273,7 @@ pub fn seal_hub_logins(
         plaintext,
         HUB_LOGINS_INFO,
         aad,
-        &mut SystemRng,
+        EphemeralRng::from_system,
     )
 }
 
@@ -287,28 +283,31 @@ pub fn valid_recipient_public_key(public_key: &[u8; 32]) -> bool {
     let Ok(public) = <<K as hpke::Kem>::PublicKey as Deserializable>::from_bytes(public_key) else {
         return false;
     };
+    // This context is never used to seal. A fixed ephemeral input is enough to
+    // detect a low-order recipient by the all-zero shared output.
     hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, K, _>(
         &OpModeS::Base,
         &public,
         b"",
-        &mut SystemRng,
+        &mut EphemeralRng::from_ikm([0; 32]),
     )
     .is_ok()
 }
 
-fn seal_auth_inner<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
+fn seal_auth_inner(
     sender_pem: &str,
     recipient_public_key: &[u8],
     plaintext: &[u8],
     info: &[u8],
     aad: &[u8],
-    rng: &mut R,
+    draw: impl FnOnce() -> Result<EphemeralRng, SealError>,
 ) -> Result<(Vec<u8>, Vec<u8>), SealError> {
     let recipient =
         <<K as hpke::Kem>::PublicKey as Deserializable>::from_bytes(recipient_public_key)
             .map_err(|_| SealError::InvalidRecipient)?;
     let sender_secret = parse_pkcs8_pem(sender_pem).map_err(|_| SealError::UnusableKey)?;
     let sender_public = K::sk_to_pk(&sender_secret);
+    let mut rng = draw()?;
     // The `hpke` crate refuses an all-zero Diffie-Hellman output during encapsulation
     // (its X25519 `dh` returns an error exactly then), and encapsulation can fail for no
     // other reason, so this error means the recipient is a low-order point.
@@ -317,7 +316,7 @@ fn seal_auth_inner<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
         &OpModeS::Auth((sender_secret, sender_public)),
         &recipient,
         info,
-        rng,
+        &mut rng,
     )
     .map_err(|_| SealError::InvalidRecipient)?;
     let ciphertext = context
@@ -326,17 +325,29 @@ fn seal_auth_inner<R: hpke::rand_core::CryptoRng + hpke::rand_core::RngCore>(
     Ok((enc.to_bytes().to_vec(), ciphertext))
 }
 
-/// Hands out exactly one fixed 32-byte draw, so a test can choose the ephemeral key.
-/// HPKE derives the ephemeral key pair from one Nsk-byte draw (`DeriveKeyPair(ikmE)`),
-/// which is how RFC 9180's published vectors fix it.
-#[cfg(any(test, feature = "test-support"))]
-struct FixedEphemeralRng {
-    ikm: [u8; 32],
+/// HPKE derives its X25519 ephemeral key from one 32-byte draw. Sample it
+/// before handing control to HPKE's infallible RNG interface.
+struct EphemeralRng {
+    ikm: Zeroizing<[u8; 32]>,
     used: bool,
 }
 
-#[cfg(any(test, feature = "test-support"))]
-impl hpke::rand_core::RngCore for FixedEphemeralRng {
+impl EphemeralRng {
+    fn from_system() -> Result<Self, SealError> {
+        let mut rng = Self::from_ikm([0; 32]);
+        fill_entropy(rng.ikm.as_mut_slice()).map_err(|_| SealError::Failed)?;
+        Ok(rng)
+    }
+
+    fn from_ikm(ikm: [u8; 32]) -> Self {
+        Self {
+            ikm: Zeroizing::new(ikm),
+            used: false,
+        }
+    }
+}
+
+impl hpke::rand_core::RngCore for EphemeralRng {
     fn next_u32(&mut self) -> u32 {
         unimplemented!("the fixed ephemeral source serves one 32-byte draw only")
     }
@@ -347,13 +358,12 @@ impl hpke::rand_core::RngCore for FixedEphemeralRng {
         // A second draw, or one of another size, means the library changed how it
         // derives the ephemeral key, and a vector comparison would then be meaningless.
         assert!(!self.used && dest.len() == 32, "unexpected ephemeral draw");
-        dest.copy_from_slice(&self.ikm);
+        dest.copy_from_slice(self.ikm.as_slice());
         self.used = true;
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-impl hpke::rand_core::CryptoRng for FixedEphemeralRng {}
+impl hpke::rand_core::CryptoRng for EphemeralRng {}
 
 /// Test-only base-mode sender with a reproducible ephemeral key, for pinned wire samples.
 #[cfg(any(test, feature = "test-support"))]
@@ -369,10 +379,7 @@ pub fn seal_base_with_ephemeral_ikm(
         plaintext,
         info,
         aad,
-        &mut FixedEphemeralRng {
-            ikm: ikm_e,
-            used: false,
-        },
+        &mut EphemeralRng::from_ikm(ikm_e),
     )
 }
 
@@ -388,16 +395,13 @@ pub fn seal_auth_with_ephemeral_ikm(
     aad: &[u8],
     ikm_e: [u8; 32],
 ) -> Result<(Vec<u8>, Vec<u8>), SealError> {
-    seal_auth_with_rng(
+    seal_auth_with_ephemeral_source(
         sender_pem,
         recipient_public_key,
         plaintext,
         info,
         aad,
-        &mut FixedEphemeralRng {
-            ikm: ikm_e,
-            used: false,
-        },
+        || Ok(EphemeralRng::from_ikm(ikm_e)),
     )
 }
 
@@ -478,6 +482,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hpke_seal_refuses_unavailable_entropy_without_panicking() {
+        let sender = pem_from_scalar(&[7; 32]);
+        let recipient = pem_from_scalar(&[8; 32]);
+        let (public, _) = public_half(&recipient).unwrap();
+        FAIL_ENTROPY.set(true);
+        assert_eq!(
+            seal_auth(&sender, &public, b"payload", b"", b""),
+            Err(SealError::Failed)
+        );
+        assert_eq!(
+            seal_fleet_auth(&sender, &public, b"payload", b""),
+            Err(SealError::Failed)
+        );
+        assert_eq!(
+            seal_hub_logins(&sender, &public, b"payload", b""),
+            Err(SealError::Failed)
+        );
+        assert!(seal_base(&public, b"payload", b"", b"").is_err());
+    }
+
+    #[test]
+    fn recipient_validation_does_not_need_os_entropy() {
+        let recipient = pem_from_scalar(&[8; 32]);
+        let (public, _) = public_half(&recipient).unwrap();
+        FAIL_ENTROPY.set(true);
+        assert!(valid_recipient_public_key(&public.try_into().unwrap()));
+        assert!(!valid_recipient_public_key(&[0; 32]));
+    }
+
+    #[test]
     fn hub_logins_auth_round_trips_at_184320_bytes_and_refuses_184321() {
         let sender = pem_from_scalar(&[7; 32]);
         let recipient = pem_from_scalar(&[8; 32]);
@@ -529,7 +563,7 @@ mod tests {
             &vec![4; 184_321],
             HUB_LOGINS_INFO,
             &aad,
-            &mut SystemRng,
+            EphemeralRng::from_system,
         )
         .unwrap();
         assert!(

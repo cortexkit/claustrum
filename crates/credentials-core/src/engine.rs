@@ -140,10 +140,9 @@ pub enum EngineError {
 
 /// A credential served by [`RefreshEngine::get_with_refresh_status`].
 ///
-/// `refreshed_for_min_ttl` is true only when THIS read completed one upstream exchange
-/// after its supplied minimum-TTL demand found the old token too short. A caller must not
-/// infer a fresh mint from a record version alone: another request or an admin write can
-/// move the version without this read proving why the replacement exists.
+/// `refreshed_for_min_ttl` lets the caller check its floor against a freshly
+/// exchanged token. A read can perform that exchange or join another reader's
+/// exchange. A higher record version alone does not establish that one occurred.
 #[derive(Debug)]
 pub struct GetWithRefreshStatus {
     /// Internal lifetime of the row read; never projected onto consumer replies.
@@ -230,7 +229,7 @@ pub struct RefreshEngine {
     // only to prune/look up/insert a lock handle (never across an await); the per-id
     // tokio mutex is the one held across the refresh await. Weak entries let unused
     // ids be reclaimed without evicting locks still owned by holders or waiters.
-    inflight: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    inflight: Mutex<HashMap<String, InflightEntry>>,
     // Test-only crash seam: fired AFTER the intent is durably committed and the new
     // tokens are staged, but BEFORE the commit transaction. The kill-9 conformance
     // helper sets this to a closure that signals readiness and parks forever, so a
@@ -241,6 +240,11 @@ pub struct RefreshEngine {
     pre_commit: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+struct InflightEntry {
+    lock: Weak<tokio::sync::Mutex<()>>,
+    last_refresh: Option<(String, u64)>,
 }
 
 impl RefreshEngine {
@@ -319,10 +323,9 @@ impl RefreshEngine {
             .map(|result| result.record)
     }
 
-    /// Read a credential and report whether this read itself completed an exchange for
-    /// its minimum-TTL demand. The status is deliberately narrower than "the version
-    /// changed": a concurrent refresh or admin write is not proof that this request
-    /// minted a token against its demand.
+    /// Read a credential and report whether its minimum-TTL demand was evaluated
+    /// against an exchange, including one shared with another reader. An admin
+    /// replacement is not an exchange.
     pub async fn get_with_refresh_status(
         &self,
         credential_id: &str,
@@ -352,6 +355,9 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
+        // Retain the entry before reading SQLite so a refresh that finishes
+        // before we can wait still leaves its committed version for us to check.
+        let lock = self.inflight_lock(credential_id);
         let initial = match expected_incarnation {
             Some(incarnation) => self.store.get_snapshot(credential_id, incarnation)?,
             None => self
@@ -381,7 +387,6 @@ impl RefreshEngine {
             });
         }
         let initial_version = initial.record.record_version;
-        let lock = self.inflight_lock(credential_id);
         let _guard = lock.lock().await;
         let initial = self.store.get_snapshot(credential_id, &incarnation)?;
         // An intent surviving the prior holder is unresolved just as it would be
@@ -389,13 +394,15 @@ impl RefreshEngine {
         if initial.has_refresh_intent {
             return Err(StoreOpError::NeedsReauth.into());
         }
-        // A prior holder already refreshed or an admin replaced the row. Preserve
-        // single-flight even for forced reads, without claiming our own TTL exchange.
-        if initial.record.record_version != initial_version {
+        // Only the exact record committed by a prior refresh can share its
+        // exchange. An admin replacement must be evaluated on its own merits.
+        if initial.record.record_version != initial_version
+            && self.is_last_refresh(credential_id, &incarnation, initial.record.record_version)
+        {
             return Ok(GetWithRefreshStatus {
                 incarnation,
                 record: initial.record,
-                refreshed_for_min_ttl: false,
+                refreshed_for_min_ttl: min_ttl_ms.is_some(),
                 unmapped_plan: None,
                 refresh_deferred_until_ms: None,
                 stored_digest_hex: initial.stored_digest_hex,
@@ -475,17 +482,18 @@ impl RefreshEngine {
             });
         }
 
-        self.do_refresh(credential_id, &incarnation, &served.record)
+        let (record, stored_digest_hex) = self
+            .do_refresh(credential_id, &incarnation, &served.record)
             .await?;
-        let refreshed = self.store.get_snapshot(credential_id, &incarnation)?;
-        let unmapped_plan = UnmappedPlanObservation::committed(credential_id, &refreshed.record);
+        self.stamp_refresh(credential_id, &incarnation, record.record_version);
+        let unmapped_plan = UnmappedPlanObservation::committed(credential_id, &record);
         Ok(GetWithRefreshStatus {
             incarnation,
-            record: refreshed.record,
+            record,
             refreshed_for_min_ttl: refresh_requested_by_min_ttl,
             unmapped_plan,
             refresh_deferred_until_ms: None,
-            stored_digest_hex: refreshed.stored_digest_hex,
+            stored_digest_hex,
         })
     }
 
@@ -546,7 +554,7 @@ impl RefreshEngine {
         credential_id: &str,
         incarnation: &str,
         record: &VaultRecord,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(VaultRecord, String), EngineError> {
         let oauth = record
             .oauth
             .as_ref()
@@ -615,14 +623,16 @@ impl RefreshEngine {
                     }
                 }
 
-                match self.store.commit_refresh(
+                match self.store.commit_refresh_with_previous(
                     credential_id,
                     record.record_version,
                     incarnation,
-                    &new_record,
+                    Some(record),
+                    new_record,
                     github_app.as_ref().filter(|_| is_github_app),
                 ) {
-                    Ok(record_version) => {
+                    Ok((new_record, digest)) => {
+                        let record_version = new_record.record_version;
                         if let ("anthropic", Some(new_oauth)) =
                             (adapter_name, new_record.oauth.as_ref())
                         {
@@ -660,7 +670,7 @@ impl RefreshEngine {
                                 permissions,
                             );
                         }
-                        Ok(())
+                        Ok((new_record, digest))
                     }
                     // Lease handover fenced our commit: the new lease owner will
                     // reconcile the still-dangling intent. Discard the staged tokens,
@@ -675,17 +685,14 @@ impl RefreshEngine {
                     Err(other) => Err(EngineError::Store(other)),
                 }
             }
-            // A dead refresh token or unserviceable subscription: mark needs_reauth
-            // and clear the intent (only a human can repair it). VERSION-GATED on the version this
-            // refresh actually observed: if an admin replaced the credential while
-            // the provider call was in flight (bumping the version), the invalid_grant
-            // verdict is about the OLD record's token, and invalidating the fresh
-            // replacement would kill a healthy credential the verdict never saw. The
-            // stale invalidation then no-ops silently; the replacement stands.
+            // The provider's verdict applies only to the version and incarnation it
+            // saw. The admin lock prevents route admin writes during an exchange;
+            // the store guard also protects replacements made without that lock.
             Err(e @ (RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired)) => {
-                self.store.invalidate_if_version_reported(
+                self.store.invalidate_in_incarnation(
                     credential_id,
                     record.record_version,
+                    incarnation,
                     AuditCtx::vault(AuditOp::Invalidate),
                     Some(AuthObservation {
                         kind: AuthEventKind::RefreshFailed.as_str(),
@@ -698,12 +705,11 @@ impl RefreshEngine {
                 Err(EngineError::RefreshFailed(e))
             }
             // A transient/ambiguous failure (transport, decode, unexpected status):
-            // no committable tokens were produced. Clear the intent and leave the
-            // record active — the engine is alive and handling this synchronously,
-            // so this is NOT the indeterminate crash window. If the provider DID
-            // rotate server-side and we missed the response, the stored refresh
-            // token is now dead and the NEXT refresh attempt fails with invalid_grant
-            // ⇒ needs_reauth then (self-healing), never a silent dead token.
+            // No usable tokens were received. Clear the intent so a later exchange
+            // can recover if the provider did not consume the stored token. If the
+            // provider rotated it and the reply was lost, the stored token is dead.
+            // Even if reuse revokes the whole token family, its only live member is
+            // the new refresh token the vault never received.
             Err(other) => {
                 self.store.clear_intent(credential_id)?;
                 // Record that the provider WAS called and refused, which nothing else
@@ -742,10 +748,10 @@ impl RefreshEngine {
     async fn reconcile_one(&self, intent: &RefreshIntent) -> Result<Reconciliation, EngineError> {
         let id = intent.credential_id.as_str();
 
-        // Read the stored record. Absent / already-needs_reauth / damaged =>
-        // there is nothing live to protect; clear the orphan intent.
-        let record = match self.store.get(id) {
-            Ok(r) => r,
+        // A pending intent on the same needs_reauth version means an earlier
+        // validity check did not complete. It remains eligible for reconciliation.
+        let (record, incarnation) = match self.store.get_for_reconciliation(intent) {
+            Ok(snapshot) => snapshot,
             Err(StoreOpError::NotFound)
             | Err(StoreOpError::NeedsReauth)
             | Err(StoreOpError::Quarantined)
@@ -806,10 +812,14 @@ impl RefreshEngine {
                     reason: ReauthReason::NoValidityCheck,
                 })
             }
-            // The check proved the stored refresh state still valid: clear the
-            // intent, leave the record active (no re-login).
+            // The check proved the stored grant still valid, including if an
+            // earlier check left it in needs_reauth.
             Some(Ok(ValidityOutcome::Valid)) => {
-                self.store.clear_intent(id)?;
+                self.store.confirm_refresh_intent_valid(
+                    intent,
+                    &incarnation,
+                    record.record_version,
+                )?;
                 Ok(Reconciliation::ClearedValid {
                     credential_id: id.to_string(),
                 })
@@ -869,13 +879,39 @@ impl RefreshEngine {
     /// Look up or create the single-flight lock for a credential.
     fn inflight_lock(&self, credential_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
-        map.retain(|_, lock| lock.strong_count() != 0);
-        if let Some(lock) = map.get(credential_id).and_then(Weak::upgrade) {
+        if let Some(lock) = map
+            .get(credential_id)
+            .and_then(|entry| entry.lock.upgrade())
+        {
             return lock;
         }
+        map.retain(|_, entry| entry.lock.strong_count() != 0);
         let lock = Arc::new(tokio::sync::Mutex::new(()));
-        map.insert(credential_id.to_string(), Arc::downgrade(&lock));
+        map.insert(
+            credential_id.to_string(),
+            InflightEntry {
+                lock: Arc::downgrade(&lock),
+                last_refresh: None,
+            },
+        );
         lock
+    }
+
+    fn is_last_refresh(&self, id: &str, incarnation: &str, version: u64) -> bool {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .and_then(|entry| entry.last_refresh.as_ref())
+            .is_some_and(|(committed_incarnation, committed_version)| {
+                committed_incarnation == incarnation && *committed_version == version
+            })
+    }
+
+    fn stamp_refresh(&self, id: &str, incarnation: &str, version: u64) {
+        let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = map.get_mut(id).expect("a held flight cannot be pruned");
+        entry.last_refresh = Some((incarnation.to_owned(), version));
     }
 }
 

@@ -1882,25 +1882,50 @@ impl EncryptedStore {
         f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
         after_commit: impl FnOnce(&T),
     ) -> Result<T, StoreError> {
-        let out = self.store.with_conn_fenced(f);
-        if let Ok(value) = &out {
-            after_commit(value);
-        }
+        let out = self.store.with_conn_fenced(|tx| {
+            // Count the operation's row changes, including triggers, but not the
+            // lease claim the store may have written before calling this closure.
+            let before = tx.total_changes();
+            let value = f(tx)?;
+            Ok((value, tx.total_changes() != before))
+        });
         if matches!(out, Err(StoreError::Fenced { .. })) {
             self.fenced_out.store(true, Ordering::Relaxed);
         }
-        self.signal_commit(&out);
-        out
+        out.map(|(value, changed)| {
+            after_commit(&value);
+            self.signal_commit(changed);
+            value
+        })
     }
 
-    // with_conn_fenced returns only after commit. Runtime mutations pass through
-    // fenced_write, except deliberately unfenced diagnostic observations. Permission
-    // observations also call this hook; held plans are not reader-visible until the
-    // next token commit. Migrations, audit-key bootstrap and the
-    // enrollment sweep precede serving. Failed transactions never wake readers;
-    // successful no-ops may wake them and are filtered by their projected digests.
-    fn signal_commit<T>(&self, result: &Result<T, StoreError>) {
-        if result.is_ok() {
+    /// Abort on a domain refusal as well as on a SQLite error. Use only when a
+    /// refusal must not persist anything; some other operations record a diagnostic
+    /// event and commit it before returning their refusal.
+    fn fenced_write_or_rollback<T, E>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<Result<T, E>>,
+    ) -> Result<Result<T, E>, StoreError> {
+        let mut refusal = None;
+        let result = self.fenced_write(|tx| match f(tx)? {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                // The store wraps SQLite errors. Keep the typed refusal separately
+                // while using a SQLite error to trigger rollback.
+                refusal = Some(error);
+                Err(rusqlite::Error::InvalidQuery)
+            }
+        });
+        match refusal {
+            Some(error) => Ok(Err(error)),
+            None => result.map(Ok),
+        }
+    }
+
+    // Call only after commit. The unfenced GitHub App permission update also
+    // wakes inventory readers so they see new permissions without another refresh.
+    fn signal_commit(&self, changed: bool) {
+        if changed {
             self.writes.send_replace(());
         }
     }

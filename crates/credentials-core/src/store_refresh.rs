@@ -375,6 +375,7 @@ impl EncryptedStore {
         };
         let result = self.store.with_conn(|c| {
             let tx = c.unchecked_transaction()?;
+            let before = tx.total_changes();
             let previous_json: Option<Option<String>> = tx
                 .query_row(
                     "SELECT last_github_app_permissions FROM credentials \
@@ -385,12 +386,13 @@ impl EncryptedStore {
                 .optional()?;
             let Some(previous_json) = previous_json else {
                 tx.commit()?;
-                return Ok(());
+                return Ok(false);
             };
 
             let updated = tx.execute(
                 "UPDATE credentials SET last_github_app_permissions = ?3 \
-                 WHERE credential_id = ?1 AND record_version = ?2",
+                 WHERE credential_id = ?1 AND record_version = ?2
+                   AND last_github_app_permissions IS NOT ?3",
                 rusqlite::params![credential_id, record_version as i64, current_json],
             )?;
             if updated > 0 {
@@ -415,9 +417,13 @@ impl EncryptedStore {
                     )?;
                 }
             }
-            tx.commit()
+            let changed = tx.total_changes() != before;
+            tx.commit()?;
+            Ok(changed)
         });
-        self.signal_commit(&result);
+        if let Ok(changed) = result {
+            self.signal_commit(changed);
+        }
     }
 
     /// Read the dangling intent for one credential, if any (reconciliation + the

@@ -191,7 +191,7 @@ impl EncryptedStore {
         // the row use `resolve_handle_with_incarnation`, which also pins the row identity.
         let h = handle_hash(raw_handle);
         self.store
-            .with_conn(|c| {
+            .with_read(|c| {
                 c.query_row(
                     "SELECT credential_id FROM handles \
                      WHERE handle_hash = ?1 AND revoked = 0",
@@ -219,7 +219,7 @@ impl EncryptedStore {
     ) -> Result<(String, String), StoreOpError> {
         let h = handle_hash(raw_handle);
         self.store
-            .with_conn(|c| {
+            .with_read(|c| {
                 c.query_row(
                     "SELECT h.credential_id, c.incarnation FROM handles h \
                      JOIN credentials c ON c.credential_id = h.credential_id \
@@ -244,7 +244,7 @@ impl EncryptedStore {
     /// This is not a credential address or an access capability.
     pub fn credential_incarnation(&self, credential_id: &str) -> Result<String, StoreOpError> {
         self.store
-            .with_conn(|c| {
+            .with_read(|c| {
                 c.query_row(
                     "SELECT incarnation FROM credentials WHERE credential_id = ?1",
                     [credential_id],

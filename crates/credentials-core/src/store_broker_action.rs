@@ -238,7 +238,7 @@ impl EncryptedStore {
         decode_stamp: impl FnOnce(Value) -> Result<(String, BrokerActionScope), Error>,
         clock: impl FnOnce() -> i64,
     ) -> Result<BrokerActionRequestReply, Error> {
-        self.fenced_write(|tx| {
+        self.fenced_write_or_rollback(|tx| {
             self.request_broker_action_tx(tx, module_id, body, decode_stamp, clock)
         })
         .map_err(|_| Error::StoreError)?

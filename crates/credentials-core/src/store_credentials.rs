@@ -1067,7 +1067,7 @@ impl EncryptedStore {
     ) -> Result<CredentialSnapshot, StoreOpError> {
         let row = self
             .store
-            .with_conn(|c| {
+            .with_read(|c| {
                 c.query_row(
                     "SELECT record_version, state, stale_pending, envelope, updated_at_ms, incarnation, \
                             EXISTS(SELECT 1 FROM refresh_intent WHERE credential_id = ?1) \

@@ -54,11 +54,10 @@ use credentials_core::federation::{
     RemoteRecordWrite, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
+use credentials_core::record::{CredentialKind, RecordIdentity};
 use credentials_core::store::{
-    AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
-    ReadGrant, ScopedListRow, SecretHomeRole, SelectorKind, StoreOpError,
-    SECRET_RELEASE_RECEIPT_LIFETIME_MS,
+    AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, SecretHomeRole,
+    StoreOpError, SECRET_RELEASE_RECEIPT_LIFETIME_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2054,95 +2053,6 @@ pub fn status_body(record: &RemoteRecord, fenced_out: bool) -> Value {
         body["last_fetch_outcome"] = json!(outcome);
     }
     body
-}
-
-fn record_state(state: RemoteHomeState) -> RecordState {
-    match state {
-        RemoteHomeState::Active => RecordState::Active,
-        RemoteHomeState::NeedsReauth => RecordState::NeedsReauth,
-        RemoteHomeState::Corrupt => RecordState::Corrupt,
-    }
-}
-
-impl RemoteReader {
-    /// The scoped-listing rows for every remote record `grants` reach, built from this
-    /// vault's storage alone, exactly as the local listing builds a row: operations
-    /// from the matching grants (deposit never lists), identity, adapter, auth method
-    /// and plan disclosed only to `read` or `list`, categories, provider ids and the
-    /// operator tier from this vault's own tables, `record_version` the last home
-    /// version and `state` the last authoritative home state.
-    pub fn scoped_rows(&self, grants: &[ReadGrant]) -> Result<Vec<ScopedListRow>, StoreOpError> {
-        let mut rows = Vec::new();
-        let providers = self.store.registered_providers()?;
-        for entry in self.store.remote_inventory()? {
-            let record = entry.record;
-            let operations: BTreeSet<GrantOperation> = grants
-                .iter()
-                .filter(|grant| grant.operation != GrantOperation::Deposit)
-                .filter(|grant| match grant.selector_kind {
-                    SelectorKind::Exact => grant.selector == record.credential_id,
-                    SelectorKind::Audience => false,
-                    SelectorKind::Category => entry.categories.contains(&grant.selector),
-                })
-                .map(|grant| grant.operation)
-                .collect();
-            if operations.is_empty() {
-                continue;
-            }
-            let disclose = operations.contains(&GrantOperation::Read)
-                || operations.contains(&GrantOperation::List);
-            let (identity, refresh_adapter, auth_method, detected_plan) = if disclose {
-                let auth_method = credentials_core::list_auth_method::list_auth_method(
-                    CredentialKind::Oauth,
-                    record.refresh_adapter.as_deref(),
-                );
-                (
-                    Some(record.identity.clone()),
-                    record.refresh_adapter.clone(),
-                    auth_method,
-                    record.detected_plan.clone(),
-                )
-            } else {
-                (None, None, None, None)
-            };
-            let (plan_tier, plan_tier_source) = credentials_core::plan_detection::effective_plan(
-                identity.as_ref().and(entry.plan_tier),
-                detected_plan.as_ref(),
-            );
-            rows.push(ScopedListRow {
-                github_app: None,
-                org_id: None,
-                plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") {
-                    entry.plan_tier_since_ms
-                } else {
-                    None
-                },
-                provider: credentials_core::store::RegisteredProvider::service_for_id(
-                    &providers,
-                    &record.credential_id,
-                )
-                .map(str::to_owned),
-                incarnation: record.incarnation.clone(),
-                plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
-                    Some("operator") => entry.plan_tier_observed_at_ms,
-                    Some("detected") => record.detected_plan_tier_observed_at_ms,
-                    _ => None,
-                },
-                id: record.credential_id.clone(),
-                categories: entry.categories,
-                state: record_state(record.last_home_state),
-                record_version: record.last_home_version,
-                operations: operations.into_iter().collect(),
-                identity,
-                refresh_adapter,
-                provider_ids: entry.provider_ids,
-                plan_tier,
-                plan_tier_source,
-                auth_method,
-            });
-        }
-        Ok(rows)
-    }
 }
 
 #[cfg(test)]

@@ -143,6 +143,25 @@ async fn usage_report_scoped_granted_enrollment_queues_vouched_row_and_records_f
 }
 
 #[tokio::test]
+async fn usage_report_scoped_requires_a_record_even_with_an_exact_grant() {
+    let (surface, admin, store) = deposit_cookie_rig(202);
+    usage_grant(&store, "reserved", "usage", SelectorKind::Exact, USAGE_ID, GrantOperation::Read);
+    let principal = Some(reserved("usage"));
+    let params = json!({"credential_id": USAGE_ID, "reading": {}});
+    let refused = usage_frame(&surface, &admin, principal.clone(), params.clone()).await;
+    let missing = deposit_cookie_frame(&surface, &admin, principal.clone(), "credential.get_scoped",
+        json!({"credential_id": USAGE_ID})).await;
+    assert_eq!(refused.header.ty, FrameType::Response);
+    assert_eq!(refused.body, missing.body);
+    assert!(surface.usage.pending().is_empty());
+
+    usage_seed(&store);
+    let accepted = usage_frame(&surface, &admin, principal, params).await;
+    assert_eq!(deposit_cookie_body(&accepted), json!({"result":{"accepted":true}}));
+    assert_eq!(surface.usage.pending().len(), 1);
+}
+
+#[tokio::test]
 async fn usage_report_scoped_category_grants_work_and_refusals_are_get_scoped_bytes() {
     let (surface, admin, store) = deposit_cookie_rig(202);
     usage_seed(&store);

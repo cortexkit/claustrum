@@ -5,6 +5,42 @@ use crate::record::RecordIdentity;
 use crate::store::taxonomy_tests::{api_record, rig};
 
 #[test]
+fn scoped_list_reads_gateway_settings_once_regardless_of_visible_row_count() {
+    use super::gateway::GATEWAY_SETTINGS_QUERIES;
+
+    let (_root, store) = rig("scoped-gateway-query-count", 89);
+    for count in [2, 6] {
+        for index in if count == 2 { 0..2 } else { 2..6 } {
+            let id = format!("apikey:gateway-query:{index}");
+            store
+                .create_audited(&id, &api_record(), AuditCtx::admin(AuditOp::Put))
+                .unwrap();
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "consumer",
+                    SelectorKind::Exact,
+                    &id,
+                    GrantOperation::List,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+
+        GATEWAY_SETTINGS_QUERIES.with(|queries| queries.set(0));
+        let snapshot = store
+            .list_scoped_snapshot("reserved", "consumer", &DeclaredGrantSet::empty())
+            .unwrap();
+        assert_eq!(snapshot.rows.len(), count);
+        assert_eq!(
+            GATEWAY_SETTINGS_QUERIES.with(std::cell::Cell::get),
+            1,
+            "visible rows: {count}"
+        );
+    }
+}
+
+#[test]
 fn list_scoped_copies_only_covered_envelopes() {
     use super::grants::SCOPED_ENVELOPE_COPIES;
 

@@ -251,10 +251,14 @@ impl ManifestWatchHub {
             .retain(|key, _| key.0 != channel);
     }
 
-    pub async fn finish_all(&self) -> Result<(), String> {
+    pub fn begin_drain(&self) {
         // Latch before waiting for publication: pending checks must observe draining
         // even when an older stream's writer is backpressured.
         self.registry.lock().expect("remote watches").draining = true;
+    }
+
+    pub async fn finish_all(&self) -> Result<(), String> {
+        self.begin_drain();
         let _publication = self.publication.lock().await;
         let live: Vec<_> = {
             let mut registry = self.registry.lock().expect("remote watches");

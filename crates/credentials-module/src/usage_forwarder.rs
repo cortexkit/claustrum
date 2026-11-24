@@ -85,7 +85,7 @@ fn older(incoming: &Value, pending: &Value) -> bool {
 }
 
 impl UsageForwarder {
-    pub(crate) fn enqueue(&self, row: Value) {
+    pub(crate) fn enqueue(&self, mut row: Value) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(index) = state
             .pending
@@ -93,10 +93,13 @@ impl UsageForwarder {
             .position(|pending| pending["credentialId"] == row["credentialId"])
         {
             state.dropped += 1;
-            if older(&row, &state.pending[index]) {
-                return;
+            if let Some(previous) = state
+                .pending
+                .remove(index)
+                .filter(|previous| older(&row, previous))
+            {
+                row = previous;
             }
-            state.pending.remove(index);
         } else if state.pending.len() == MAX_PENDING_USAGE {
             // Evict the least recently received credential so every admitted report
             // can be queued without waiting for a network operation or free capacity.
@@ -172,5 +175,28 @@ impl UsageForwarder {
     #[cfg(test)]
     pub(crate) fn pending(&self) -> Vec<Value> {
         self.state.lock().unwrap().pending.iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_usage_reading_refreshes_eviction_order_without_replacing_the_payload() {
+        let forwarder = UsageForwarder::default();
+        for id in 0..MAX_PENDING_USAGE {
+            forwarder.enqueue(json!({"credentialId": id, "observedAtMs": 10}));
+        }
+        forwarder.enqueue(json!({"credentialId": 0, "observedAtMs": 9}));
+        forwarder.enqueue(json!({"credentialId": MAX_PENDING_USAGE, "observedAtMs": 11}));
+
+        let pending = forwarder.pending();
+        assert_eq!(pending.len(), MAX_PENDING_USAGE);
+        assert_eq!(
+            pending[MAX_PENDING_USAGE - 2],
+            json!({"credentialId": 0, "observedAtMs": 10})
+        );
+        assert!(!pending.iter().any(|row| row["credentialId"] == 1));
     }
 }

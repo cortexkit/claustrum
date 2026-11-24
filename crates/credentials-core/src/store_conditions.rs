@@ -142,6 +142,52 @@ pub(super) fn local_condition_conn(
     condition_in_incarnation(conn, id, incarnation, Location::Local)
 }
 
+pub(super) fn scoped_inventory_conditions(
+    conn: &rusqlite::Connection,
+    schema_version: u32,
+    rows: &[ScopedListRow],
+) -> rusqlite::Result<BTreeMap<String, ScopedInventoryCondition>> {
+    let mut conditions = BTreeMap::new();
+    if schema_version < CONDITION_SCHEMA_VERSION || rows.is_empty() {
+        return Ok(conditions);
+    }
+    let visible: BTreeMap<_, _> = rows
+        .iter()
+        .filter(|row| {
+            row.operations
+                .iter()
+                .any(|op| matches!(op, GrantOperation::Read | GrantOperation::List))
+        })
+        .map(|row| (row.id.as_str(), row.incarnation.as_str()))
+        .collect();
+    if visible.is_empty() {
+        return Ok(conditions);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT credential_id, incarnation, reason, since_ms FROM credential_conditions \
+         UNION ALL SELECT credential_id, incarnation, reason, since_ms FROM remote_record_conditions",
+    )?;
+    let mut stored = stmt.query([])?;
+    while let Some(row) = stored.next()? {
+        let id: String = row.get(0)?;
+        let Some(expected) = visible.get(id.as_str()) else {
+            continue;
+        };
+        let incarnation: String = row.get(1)?;
+        if incarnation == *expected {
+            conditions.insert(
+                id,
+                ScopedInventoryCondition {
+                    incarnation,
+                    reason: row.get(2)?,
+                    since_ms: row.get(3)?,
+                },
+            );
+        }
+    }
+    Ok(conditions)
+}
+
 pub(super) fn write_remote_condition_tx(
     tx: &rusqlite::Transaction<'_>,
     id: &str,

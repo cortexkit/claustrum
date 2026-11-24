@@ -866,6 +866,63 @@ async fn account_token_non_json_success_is_transient_at_both_stages() {
 }
 
 #[tokio::test]
+async fn account_token_wrong_success_shape_is_transient_at_both_stages() {
+    for redemption in [false, true] {
+        let field = if redemption { "jwt" } else { "challenge" };
+        for body in [json!({}), json!(["invalid"]), json!({field: "invalid"})] {
+            let mut responses = Vec::new();
+            if redemption {
+                responses.push(reply(200, challenge()));
+            }
+            responses.push(reply(200, body));
+            let rig = Rig::new(responses);
+            let refusal = error(rig.call().await);
+            assert_eq!(
+                (refusal.code, refusal.class),
+                ("account_exchange_unavailable", ErrorClass::Transient),
+                "redemption={redemption}"
+            );
+            assert!(rig
+                .store
+                .recent_auth_events(64)
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.kind == "scoped_read_refusal"
+                        && event.provider_status == Some(200)
+                        && event.detail.as_deref() == Some("account_exchange_unavailable")
+                }));
+        }
+    }
+}
+
+#[tokio::test]
+async fn account_token_refused_audiences_record_refusals_not_first_use() {
+    for audience in ["cortexkit-hub", "legacy-audience"] {
+        let rig = Rig::new(vec![]);
+        rusqlite::Connection::open(rig.root.join("store.db")).unwrap().execute(
+            "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+             VALUES ('reserved', 'ck-motor', 'audience', ?1, 'account_token', 0)",
+            [audience],
+        ).unwrap();
+        let caller = crate::federation::ingress::ScopedCaller::hand_only(Some(principal()));
+        let p = AccountTokenParams {
+            audience: audience.into(),
+            ..params()
+        };
+        assert_eq!(
+            error(rig.surface.account_token(&caller, &p).await).code,
+            "not_found"
+        );
+        let events = rig.store.recent_auth_events(64).unwrap();
+        assert!(!events.iter().any(|event| event.kind == "scoped_first_use"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "scoped_read_refusal"));
+    }
+}
+
+#[tokio::test]
 async fn account_token_machine_json_cannot_select_a_bus_signing_key() {
     for id in credentials_core::signing::BUS_SIGNING_KEY_IDS {
         let rig = Rig::new(vec![]);

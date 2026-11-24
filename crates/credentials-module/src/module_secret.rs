@@ -47,6 +47,7 @@ pub fn reply(error: ModuleSecretError) -> Value {
 struct PutParams {
     name: String,
     value: Secret<String>,
+    #[serde(default, deserialize_with = "present_version")]
     expected_version: Option<u64>,
     protected: Option<bool>,
 }
@@ -61,12 +62,17 @@ struct NameParams {
 #[serde(deny_unknown_fields)]
 struct DeleteParams {
     name: String,
+    #[serde(default, deserialize_with = "present_version")]
     expected_version: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListParams {}
+
+fn present_version<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(decoder).map(Some)
+}
 
 fn decode<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, ModuleSecretError> {
     if !params.is_object() {

@@ -135,8 +135,8 @@ impl WatchHub {
         }
     }
 
-    pub(crate) async fn finish_all(&self) -> Result<(), ModuleError> {
-        let entries: Vec<_> = {
+    pub(crate) fn begin_finish(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let endings: Vec<_> = {
             let mut registry = self.entries.lock().expect("watches");
             // Process-lifetime latch: subc-protocol 0.31.0's
             // session::ModuleControlCommand::Draining documents that the daemon
@@ -149,16 +149,22 @@ impl WatchHub {
                 .drain()
                 .map(|(_, entry)| {
                     entry.stop.send_replace(Stop::Finished);
-                    entry
+                    entry.done
                 })
                 .collect()
         };
-        // Each task serializes its own data and terminal frames. Wait for its final
-        // send so no racing snapshot can publish after STREAM_END, and no held
-        // request consumes the supervisor's drain budget after dispatch returns.
-        for entry in entries {
-            let _ = entry.done.await;
+        // Each task orders its data and terminal frames. Graceful shutdown can wait
+        // for the final sends without making the drain command wait for route capacity.
+        async move {
+            for ending in endings {
+                let _ = ending.await;
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn finish_all(&self) -> Result<(), ModuleError> {
+        self.begin_finish().await;
         Ok(())
     }
 

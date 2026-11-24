@@ -570,6 +570,27 @@ async fn permissions_credential_grants_revoke_rolls_back_on_audit_failure() {
 }
 
 #[tokio::test]
+async fn permissions_category_reach_counts_remote_only_credentials() {
+    let (surface, admin, store) = cp_rig(156);
+    store.remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+        credential_id: "oauth:shared:remote".into(),
+        home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
+        refresh_adapter: None,
+        detected_plan: None,
+        identity: Default::default(),
+        home_version: 1,
+        categories: vec!["llm-provider".into()],
+    }).unwrap();
+    let id = cp_id("reserved", "broca", SelectorKind::Category, "llm-provider", GrantOperation::Read);
+    let result: serde_json::Value = serde_json::from_slice(
+        &cp_reply(&surface, &admin, "permissions.list", json!({})).await,
+    ).unwrap();
+    let rows = result["result"]["grants"].as_array().unwrap();
+    let row = rows.iter().find(|row| row["id"] == id).unwrap();
+    assert_eq!(row["scope_label"], "can read the secrets of 2 credentials in this group");
+}
+
+#[tokio::test]
 async fn permissions_credential_grants_reach_changes_without_changing_identity_or_subject() {
     let (surface, admin, store) = cp_rig(156);
     let before: serde_json::Value =

@@ -7,6 +7,203 @@ thread_local! {
     pub(super) static SCOPED_ENVELOPE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+fn enrolled_name(conn: &rusqlite::Connection, token: &str) -> rusqlite::Result<Option<String>> {
+    let Some(hash) = crate::enrollment::enrollment_secret_hash(token) else {
+        return Ok(None);
+    };
+    Ok(enrollment::find_live_enrollment_by_hash(conn, &hash)?.map(|(_, name, _)| name))
+}
+
+fn exact_only_key(id: &str) -> bool {
+    crate::federation::is_bus_key_id(id) || crate::federation::is_bus_seal_key_id(id)
+}
+
+fn record_state(state: crate::federation::RemoteHomeState) -> RecordState {
+    match state {
+        crate::federation::RemoteHomeState::Active => RecordState::Active,
+        crate::federation::RemoteHomeState::NeedsReauth => RecordState::NeedsReauth,
+        crate::federation::RemoteHomeState::Corrupt => RecordState::Corrupt,
+    }
+}
+
+/// The scoped-listing rows for every remote record `grants` reach, built from this
+/// vault's storage alone, exactly as the local listing builds a row: operations
+/// from the matching grants (deposit never lists), identity, adapter, auth method
+/// and plan disclosed only to `read` or `list`, categories, provider ids and the
+/// operator tier from this vault's own tables, `record_version` the last home
+/// version and `state` the last authoritative home state.
+fn scoped_remote_rows(
+    entries: Vec<crate::federation::RemoteInventoryRow>,
+    grants: &[ReadGrant],
+    providers: &[RegisteredProvider],
+) -> Vec<ScopedListRow> {
+    let mut rows = Vec::new();
+    for entry in entries {
+        let record = entry.record;
+        let operations: BTreeSet<GrantOperation> = grants
+            .iter()
+            .filter(|grant| grant.operation != GrantOperation::Deposit)
+            .filter(|grant| match grant.selector_kind {
+                SelectorKind::Exact => grant.selector == record.credential_id,
+                SelectorKind::Audience => false,
+                SelectorKind::Category => {
+                    !exact_only_key(&record.credential_id)
+                        && entry.categories.contains(&grant.selector)
+                }
+            })
+            .map(|grant| grant.operation)
+            .collect();
+        if operations.is_empty() {
+            continue;
+        }
+        let disclose = operations.contains(&GrantOperation::Read)
+            || operations.contains(&GrantOperation::List);
+        let (identity, refresh_adapter, auth_method, detected_plan) = if disclose {
+            let auth_method = crate::list_auth_method::list_auth_method(
+                CredentialKind::Oauth,
+                record.refresh_adapter.as_deref(),
+            );
+            (
+                Some(record.identity.clone()),
+                record.refresh_adapter.clone(),
+                auth_method,
+                record.detected_plan.clone(),
+            )
+        } else {
+            (None, None, None, None)
+        };
+        let (plan_tier, plan_tier_source) = crate::plan_detection::effective_plan(
+            identity.as_ref().and(entry.plan_tier),
+            detected_plan.as_ref(),
+        );
+        rows.push(ScopedListRow {
+            github_app: None,
+            org_id: None,
+            plan_tier_since_ms: if plan_tier_source.as_deref() == Some("operator") {
+                entry.plan_tier_since_ms
+            } else {
+                None
+            },
+            provider: crate::store::RegisteredProvider::service_for_id(
+                providers,
+                &record.credential_id,
+            )
+            .map(str::to_owned),
+            incarnation: record.incarnation.clone(),
+            plan_tier_observed_at_ms: match plan_tier_source.as_deref() {
+                Some("operator") => entry.plan_tier_observed_at_ms,
+                Some("detected") => record.detected_plan_tier_observed_at_ms,
+                _ => None,
+            },
+            id: record.credential_id.clone(),
+            categories: entry.categories,
+            state: record_state(record.last_home_state),
+            record_version: record.last_home_version,
+            operations: operations.into_iter().collect(),
+            identity,
+            refresh_adapter,
+            provider_ids: entry.provider_ids,
+            plan_tier,
+            plan_tier_source,
+            auth_method,
+        });
+    }
+    rows
+}
+
+fn scoped_coverage_conn(
+    conn: &rusqlite::Connection,
+    principal_kind: &str,
+    principal_id: &str,
+    credential_id: &str,
+    operation: GrantOperation,
+    declared: &DeclaredGrantSet,
+) -> rusqlite::Result<ScopedCoverage> {
+    let exact_only = exact_only_key(credential_id);
+    let mut grants = read_grants_from_conn(
+        conn,
+        Some(principal_kind),
+        Some(principal_id),
+        read_schema_version(conn)?,
+    )?;
+    declared.union_into(principal_kind, principal_id, &mut grants);
+    let grants: Vec<_> = grants
+        .into_iter()
+        .filter(|grant| grant.operation == operation)
+        .filter(|grant| !exact_only || grant.selector_kind == SelectorKind::Exact)
+        .map(|grant| (grant.selector_kind.as_str().to_owned(), grant.selector))
+        .collect();
+    let caller_active_grants = grants.len() as u32;
+    if operation == GrantOperation::AccountToken {
+        return Ok(ScopedCoverage {
+            covered: grants.iter().any(|(kind, selector)| {
+                kind == SelectorKind::Audience.as_str() && credential_id == selector
+            }),
+            caller_active_grants,
+            holds_category_selector: false,
+            id_exists: false,
+            id_category_count: None,
+        });
+    }
+    if operation == GrantOperation::Deposit {
+        let categories = crate::catalog::category_defaults(credential_id);
+        return Ok(ScopedCoverage {
+            covered: grants.iter().any(|(kind, selector)| {
+                kind == SelectorKind::Category.as_str() && categories.contains(selector)
+            }),
+            caller_active_grants,
+            holds_category_selector: grants
+                .iter()
+                .any(|(kind, _)| kind == SelectorKind::Category.as_str()),
+            // A fresh id has no stored categories: authorize the vault-assigned
+            // defaults instead, without looking up any existing credential.
+            id_exists: false,
+            id_category_count: Some(categories.len() as u32),
+        });
+    }
+    // The stored kind text is compared through the enum rather than against a
+    // literal spelled again here: this predicate reads raw columns, so a
+    // vocabulary change that misses it would silently cover nothing.
+    let holds_category_selector = grants
+        .iter()
+        .any(|(kind, _)| kind == SelectorKind::Category.as_str());
+    let mut covered = grants
+        .iter()
+        .any(|(kind, selector)| kind == SelectorKind::Exact.as_str() && credential_id == selector);
+    // A remote record exists here as fully as a local one: local exact and
+    // category grants reach it unchanged, with categories from this vault's
+    // own remote-record set.
+    let tables = metadata_tables_for(conn, credential_id)?;
+    let id_exists = tables.is_some();
+
+    let id_category_count = if !covered && holds_category_selector {
+        let mut categories_stmt = conn.prepare(&format!(
+            "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
+            tables.unwrap_or(MetadataTables::Local).categories()
+        ))?;
+        let categories = categories_stmt
+            .query_map(rusqlite::params![credential_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        covered = grants.iter().any(|(kind, selector)| {
+            kind == SelectorKind::Category.as_str()
+                && categories.iter().any(|category| selector == category)
+        });
+        Some(categories.len() as u32)
+    } else {
+        None
+    };
+
+    Ok(ScopedCoverage {
+        covered,
+        caller_active_grants,
+        holds_category_selector,
+        id_exists,
+        id_category_count,
+    })
+}
+
 pub(super) fn validate_read_grant(
     principal_kind: &str,
     principal_id: &str,
@@ -477,91 +674,52 @@ impl EncryptedStore {
         {
             return Err(StoreOpError::NotFound);
         }
-        let exact_only = bus_key || crate::federation::is_bus_seal_key_id(credential_id);
         self.store
             .with_conn(|conn| {
-                let mut grants = read_grants_from_conn(
-                    conn,
-                    Some(principal_kind),
-                    Some(principal_id),
-                    read_schema_version(conn)?,
+                let tx = conn.unchecked_transaction()?;
+                let coverage = scoped_coverage_conn(
+                    &tx,
+                    principal_kind,
+                    principal_id,
+                    credential_id,
+                    operation,
+                    declared,
                 )?;
-                declared.union_into(principal_kind, principal_id, &mut grants);
-                let grants: Vec<_> = grants
-                    .into_iter()
-                    .filter(|grant| grant.operation == operation)
-                    .filter(|grant| !exact_only || grant.selector_kind == SelectorKind::Exact)
-                    .map(|grant| (grant.selector_kind.as_str().to_owned(), grant.selector))
-                    .collect();
-                let caller_active_grants = grants.len() as u32;
-                if operation == GrantOperation::AccountToken {
-                    return Ok(ScopedCoverage {
-                        covered: grants.iter().any(|(kind, selector)| {
-                            kind == SelectorKind::Audience.as_str() && credential_id == selector
-                        }),
-                        caller_active_grants,
-                        holds_category_selector: false,
-                        id_exists: false,
-                        id_category_count: None,
-                    });
-                }
-                if operation == GrantOperation::Deposit {
-                    let categories = crate::catalog::category_defaults(credential_id);
-                    return Ok(ScopedCoverage {
-                        covered: grants.iter().any(|(kind, selector)| {
-                            kind == SelectorKind::Category.as_str() && categories.contains(selector)
-                        }),
-                        caller_active_grants,
-                        holds_category_selector: grants
-                            .iter()
-                            .any(|(kind, _)| kind == SelectorKind::Category.as_str()),
-                        // A fresh id has no stored categories: authorize the vault-assigned
-                        // defaults instead, without looking up any existing credential.
-                        id_exists: false,
-                        id_category_count: Some(categories.len() as u32),
-                    });
-                }
-                // The stored kind text is compared through the enum rather than against a
-                // literal spelled again here: this predicate reads raw columns, so a
-                // vocabulary change that misses it would silently cover nothing.
-                let holds_category_selector = grants
-                    .iter()
-                    .any(|(kind, _)| kind == SelectorKind::Category.as_str());
-                let mut covered = grants.iter().any(|(kind, selector)| {
-                    kind == SelectorKind::Exact.as_str() && credential_id == selector
-                });
-                // A remote record exists here as fully as a local one: local exact and
-                // category grants reach it unchanged, with categories from this vault's
-                // own remote-record set.
-                let tables = metadata_tables_for(conn, credential_id)?;
-                let id_exists = tables.is_some();
+                tx.commit()?;
+                Ok(coverage)
+            })
+            .map_err(StoreOpError::from)
+    }
 
-                let id_category_count = if !covered && holds_category_selector {
-                    let mut categories_stmt = conn.prepare(&format!(
-                        "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
-                        tables.unwrap_or(MetadataTables::Local).categories()
-                    ))?;
-                    let categories = categories_stmt
-                        .query_map(rusqlite::params![credential_id], |row| {
-                            row.get::<_, String>(0)
-                        })?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    covered = grants.iter().any(|(kind, selector)| {
-                        kind == SelectorKind::Category.as_str()
-                            && categories.iter().any(|category| selector == category)
-                    });
-                    Some(categories.len() as u32)
-                } else {
-                    None
+    /// Resolve a bearer and evaluate its grants in the same read transaction.
+    pub fn evaluate_enrolled_scoped_coverage(
+        &self,
+        token: &str,
+        credential_id: &str,
+        operation: GrantOperation,
+    ) -> Result<Option<(String, ScopedCoverage)>, StoreOpError> {
+        if crate::federation::is_bus_key_id(credential_id)
+            || crate::agent_secret::is_deposit_key(credential_id)
+            || is_github_app_companion_id(credential_id)
+        {
+            return Ok(None);
+        }
+        self.store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let Some(name) = enrolled_name(&tx, token)? else {
+                    return Ok(None);
                 };
-
-                Ok(ScopedCoverage {
-                    covered,
-                    caller_active_grants,
-                    holds_category_selector,
-                    id_exists,
-                    id_category_count,
-                })
+                let coverage = scoped_coverage_conn(
+                    &tx,
+                    "enrolled",
+                    &name,
+                    credential_id,
+                    operation,
+                    &DeclaredGrantSet::empty(),
+                )?;
+                tx.commit()?;
+                Ok(Some((name, coverage)))
             })
             .map_err(StoreOpError::from)
     }
@@ -598,8 +756,18 @@ impl EncryptedStore {
         principal_id: &str,
         declared: &DeclaredGrantSet,
     ) -> Result<ScopedListSnapshot, StoreOpError> {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, declared, false, || Ok(()))
-            .map(|(snapshot, _)| snapshot)
+        self.scoped_inventory_snapshot_inner(
+            ScopedInventoryCaller::Principal {
+                kind: principal_kind,
+                id: principal_id,
+            },
+            declared,
+            false,
+            false,
+            || Ok(()),
+        )?
+        .map(|snapshot| snapshot.list)
+        .ok_or(StoreOpError::NotFound)
     }
 
     /// The list projection and held-key generations from the same SQLite snapshot.
@@ -611,7 +779,29 @@ impl EncryptedStore {
         principal_id: &str,
         declared: &DeclaredGrantSet,
     ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError> {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, declared, true, || Ok(()))
+        self.scoped_inventory_snapshot_inner(
+            ScopedInventoryCaller::Principal {
+                kind: principal_kind,
+                id: principal_id,
+            },
+            declared,
+            true,
+            false,
+            || Ok(()),
+        )?
+        .map(|snapshot| (snapshot.list, snapshot.key_versions))
+        .ok_or(StoreOpError::NotFound)
+    }
+
+    /// Read the complete list/watch projection, including any enrolled authority, in
+    /// one transaction. A presented bearer never falls back to the route principal.
+    pub fn scoped_inventory_snapshot(
+        &self,
+        caller: ScopedInventoryCaller<'_>,
+        declared: &DeclaredGrantSet,
+        include_keys: bool,
+    ) -> Result<Option<ScopedInventorySnapshot>, StoreOpError> {
+        self.scoped_inventory_snapshot_inner(caller, declared, include_keys, true, || Ok(()))
     }
 
     #[cfg(test)]
@@ -624,39 +814,50 @@ impl EncryptedStore {
     where
         F: FnOnce() -> rusqlite::Result<()>,
     {
-        self.list_scoped_snapshot_inner(
-            principal_kind,
-            principal_id,
+        self.scoped_inventory_snapshot_inner(
+            ScopedInventoryCaller::Principal {
+                kind: principal_kind,
+                id: principal_id,
+            },
             &DeclaredGrantSet::empty(),
             false,
+            false,
             after_grants,
-        )
-        .map(|(snapshot, _)| snapshot)
+        )?
+        .map(|snapshot| snapshot.list)
+        .ok_or(StoreOpError::NotFound)
     }
 
-    fn list_scoped_snapshot_inner<F>(
+    fn scoped_inventory_snapshot_inner<F>(
         &self,
-        principal_kind: &str,
-        principal_id: &str,
+        caller: ScopedInventoryCaller<'_>,
         declared: &DeclaredGrantSet,
         include_keys: bool,
+        include_remote: bool,
         after_grants: F,
-    ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError>
+    ) -> Result<Option<ScopedInventorySnapshot>, StoreOpError>
     where
         F: FnOnce() -> rusqlite::Result<()>,
     {
         self.store
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
+                let (principal_kind, principal_id) = match caller {
+                    ScopedInventoryCaller::Principal { kind, id } => (kind, id.to_owned()),
+                    ScopedInventoryCaller::EnrollmentToken(token) => {
+                        let Some(id) = enrolled_name(&tx, token)? else { return Ok(None) };
+                        ("enrolled", id)
+                    }
+                };
                 let schema_version = read_schema_version(&tx)?;
                 let registered_providers = registered_providers::from_conn(&tx)?;
                 let mut grants = read_grants_from_conn(
                     &tx,
                     Some(principal_kind),
-                    Some(principal_id),
+                    Some(&principal_id),
                     schema_version,
                 )?;
-                declared.union_into(principal_kind, principal_id, &mut grants);
+                declared.union_into(principal_kind, &principal_id, &mut grants);
                 grants.retain(|grant| grant.selector_kind != SelectorKind::Exact
                     || (!crate::agent_secret::is_deposit_key(&grant.selector)
                         && !is_github_app_companion_id(&grant.selector)));
@@ -695,7 +896,8 @@ impl EncryptedStore {
                         if let Some(operations) = by_category.get(category.as_str()) {
                             let id: String = row.get(0)?;
                             if !crate::agent_secret::is_deposit_key(&id)
-                                && !is_github_app_companion_id(&id) {
+                                && !is_github_app_companion_id(&id)
+                                && !exact_only_key(&id) {
                                 covered
                                     .entry(id)
                                     .or_default()
@@ -704,13 +906,15 @@ impl EncryptedStore {
                         }
                     }
                 }
-                if covered.is_empty() {
-                    tx.commit()?;
-                    return Ok((
-                        ScopedListSnapshot { rows: Vec::new(), grants },
-                        Vec::new(),
-                    ));
-                }
+                let read_remote = include_remote && (!covered.is_empty() || !by_category.is_empty());
+                let mut rows = Vec::new();
+                let mut keys = Vec::new();
+                let gateways = if covered.is_empty() {
+                    Default::default()
+                } else {
+                let gateways = gateway::scoped_settings(&tx, schema_version, |id| {
+                    covered.get(id).is_some_and(|ops| ops.contains(&GrantOperation::Read) || ops.contains(&GrantOperation::List))
+                })?;
                 let mut stmt = tx.prepare(&format!(
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
@@ -729,8 +933,6 @@ impl EncryptedStore {
                     if schema_version >= CREDENTIAL_ORG_SCHEMA_VERSION { orgs::ORG_ID_COLUMN } else { "NULL" },
                 ))?;
 
-                let mut rows = Vec::new();
-                let mut keys = Vec::new();
                 for (id, operations) in covered {
                     let candidate = stmt.query_row([&id], |row| {
                         let envelope_bytes = row.get::<_, Vec<u8>>(3)?;
@@ -794,7 +996,14 @@ impl EncryptedStore {
                     } else {
                         None
                     };
-                    let is_gateway = disclose_identity && gateway::has_settings(&tx, &id)?;
+                    let is_gateway = if let Some(settings) = gateways.get(&id) {
+                        if settings.incarnation != incarnation {
+                            return Err(rusqlite::Error::InvalidQuery);
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     let decoded_record = if state != RecordState::Corrupt
                         && (include_keys || disclose_identity)
                     {
@@ -869,9 +1078,26 @@ impl EncryptedStore {
                         auth_method,
                     });
                 }
-                drop(stmt);
+                gateways
+                };
+                if read_remote {
+                    rows.extend(scoped_remote_rows(Self::remote_inventory_in_snapshot(&tx)?, &grants, &registered_providers));
+                    rows.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
+                }
+                let conditions = if include_remote {
+                    conditions::scoped_inventory_conditions(&tx, schema_version, &rows)?
+                } else {
+                    BTreeMap::new()
+                };
                 tx.commit()?;
-                Ok((ScopedListSnapshot { rows, grants }, keys))
+                Ok(Some(ScopedInventorySnapshot {
+                    principal_id,
+                    list: ScopedListSnapshot { rows, grants },
+                    key_versions: keys,
+                    providers: registered_providers,
+                    gateways,
+                    conditions,
+                }))
             })
             .map_err(StoreOpError::from)
     }

@@ -37,7 +37,8 @@ use credentials_core::federation::{
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::{
-    GrantOperation, ScopedListRow, SelectorKind, SetCategoryMode, SetProvidersMode,
+    GrantOperation, ScopedInventoryCaller, ScopedListRow, SelectorKind, SetCategoryMode,
+    SetProvidersMode,
 };
 use serde_json::{json, Value};
 
@@ -561,19 +562,20 @@ impl Rig {
 
     /// B's listing row for `id`, for a module holding an exact read grant on it.
     fn b_row(&self, id: &str) -> ScopedListRow {
-        let grants = self
-            .b
+        self.b
             .store
-            .list_scoped_snapshot(
-                "reserved",
-                "broca",
+            .scoped_inventory_snapshot(
+                ScopedInventoryCaller::Principal {
+                    kind: "reserved",
+                    id: "broca",
+                },
                 &credentials_core::store::DeclaredGrantSet::empty(),
+                false,
             )
             .unwrap()
-            .grants;
-        self.reader
-            .scoped_rows(&grants)
             .unwrap()
+            .list
+            .rows
             .into_iter()
             .find(|row| row.id == id)
             .expect("B lists the remote id")

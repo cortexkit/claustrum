@@ -44,6 +44,60 @@ fn assert_not_found(answer: read_surface::GetOutcome) {
 }
 
 #[tokio::test]
+async fn closed_route_cannot_grow_counters_when_its_requests_resume() {
+    let (surface, _admin, _store) = scoped_rig(188);
+    let connection = route_connection_id(7, 1);
+    let routes = Arc::new(RouteEpochs::default());
+    routes.install(7, 1);
+    surface.set_live_routes(routes.clone());
+    let fetch = read_surface::GetParams { handle: "missing".into(), min_ttl_ms: None, force_refresh: false };
+    let caller = federation::ingress::ScopedCaller::hand_only(Some(reserved("late")));
+    let open = read_surface::OpenParams {
+        credential_id: "kem:missing".into(), enc_b64: String::new(), ciphertext_b64: String::new(),
+        info_b64: String::new(), aad_b64: String::new(), enrollment_token: None,
+    };
+    let pending_fetch = surface.get(connection, &fetch);
+    let pending_open = surface.open(connection, &caller, &open);
+    routes.remove(7);
+    surface.drop_connection(connection).await;
+    assert_not_found(pending_fetch.await);
+    assert_eq!(pending_open.await.err(), Some(read_surface::ReadError::NotFound));
+    assert_eq!(surface.route_counter_presence(connection).await, (false, false));
+    routes.install(7, 2);
+    let new_connection = route_connection_id(7, 2);
+    assert_not_found(surface.get(new_connection, &fetch).await);
+    assert_eq!(surface.open(new_connection, &caller, &open).await.err(), Some(read_surface::ReadError::NotFound));
+    assert_eq!(surface.route_counter_presence(new_connection).await, (true, true));
+}
+
+#[tokio::test]
+async fn status_refuses_recreated_record_for_old_handle_and_category() {
+    const ID: &str = "apikey:status:lifetime";
+    for by_handle in [true, false] {
+        let (surface, _admin, store) = scoped_rig(188);
+        store.create(ID, &dummy_record()).unwrap();
+        store.set_categories_audited(ID, credentials_core::store::SetCategoryMode::Set,
+            &["status-lifetime".into()], AuditCtx::admin(AuditOp::SetCategory)).unwrap();
+        store.create_read_grant_audited("reserved", "status-reader", SelectorKind::Category,
+            "status-lifetime", GrantOperation::Read, AuditCtx::admin(AuditOp::GrantCreate)).unwrap();
+        let caller = federation::ingress::ScopedCaller::hand_only(Some(reserved("status-reader")));
+        let params = read_surface::StatusParams {
+            handle: by_handle.then(|| handle_for(&store, ID)),
+            credential_id: (!by_handle).then(|| ID.into()),
+            enrollment_token: None,
+        };
+        assert!(surface.status(77, &caller, &params).await.ready);
+        recreate_on(&surface, &store, "status-admitted", ID, dummy_record());
+        let status = surface.status(77, &caller, &params).await;
+        assert_eq!(status.last_error_code, Some(read_surface::ReadError::NotFound), "by_handle={by_handle}");
+        assert!(!status.ready);
+        assert_eq!(status.credential_id, None);
+        assert_eq!(status.record_version, None);
+        assert_eq!(status.stale_pending, None);
+    }
+}
+
+#[tokio::test]
 async fn incarnation_open_refuses_recreated_key_outside_authorized_category() {
     use base64::Engine as _;
     let (surface, _admin, store) = scoped_rig(188);

@@ -37,13 +37,24 @@ fn valid_org(org: &str) -> bool {
         && org.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+const CREATE_VALUE_FLAGS: &[&str] = &["--agent", "--org", "--name", "--approve-on", "--browser"];
+const CREATE_SWITCHES: &[&str] = &["--no-relay", "--no-browser"];
+
+pub(crate) fn flag_spec(verb: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match verb {
+        "create" => (CREATE_VALUE_FLAGS, CREATE_SWITCHES),
+        "relay-retry" | "rotate-webhook-secret" => (&["--slug"], &[]),
+        _ => (&[], &[]),
+    }
+}
+
 fn create_args(args: &[String]) -> Result<CreateArgs, CliError> {
     let mut values = BTreeMap::new();
     let mut switches = BTreeSet::new();
     let mut args = args.iter().map(String::as_str);
     while let Some(flag) = args.next() {
         match flag {
-            "--agent" | "--org" | "--name" | "--approve-on" | "--browser" => {
+            value if CREATE_VALUE_FLAGS.contains(&value) => {
                 let value = args
                     .next()
                     .ok_or_else(|| usage(format!("{flag} requires a value")))?;
@@ -51,7 +62,7 @@ fn create_args(args: &[String]) -> Result<CreateArgs, CliError> {
                     return Err(usage(format!("{flag} must not be repeated")));
                 }
             }
-            "--no-relay" | "--no-browser" => {
+            value if CREATE_SWITCHES.contains(&value) => {
                 if !switches.insert(flag) {
                     return Err(usage(format!("{flag} must not be repeated")));
                 }
@@ -121,20 +132,25 @@ pub(super) fn cmd(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         .ok_or_else(|| usage(help("github-app")))?;
     let verb = verb.as_str();
     match verb {
-        "create" => run_create(
-            create_args(args)?,
-            commit,
-            browser_login::pasted_lines,
-            |action, url| {
-                browser_login::present(
-                    action,
-                    url,
-                    |url| crate::open_in_browser(action, url),
-                    browser_login::copy_link,
-                )
-            },
-            |line| println!("{line}"),
-        ),
+        "create" => {
+            let args = create_args(args)?;
+            let _hidden = browser_login::HiddenPaste::begin()
+                .map_err(|error| CliError::Io(format!("hiding callback input: {error}")))?;
+            run_create(
+                args,
+                commit,
+                browser_login::pasted_lines,
+                |action, url| {
+                    browser_login::present(
+                        action,
+                        url,
+                        |url| crate::open_in_browser(action, url),
+                        browser_login::copy_link,
+                    )
+                },
+                |line| println!("{line}"),
+            )
+        }
         "relay-retry" | "rotate-webhook-secret" => {
             let [flag, slug] = args else {
                 return Err(usage("expected --slug <slug>"));

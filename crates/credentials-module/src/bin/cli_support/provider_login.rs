@@ -10,12 +10,22 @@ use credentials_core::record::VaultRecord;
 use credentials_core::refresh_adapters::{cursor, devin, digitalocean, snowflake};
 use credentials_core::ReqwestTransport;
 
-use super::login_listener;
+use super::{has_flag, login_id_is_valid, login_listener, optional, CliError};
 
 pub(crate) struct SpecialLogin {
     pub id: String,
     pub record: VaultRecord,
     pub replace: bool,
+}
+
+impl SpecialLogin {
+    pub fn receipt(&self) -> &'static str {
+        if self.replace {
+            "replaced"
+        } else {
+            "stored"
+        }
+    }
 }
 
 /// Run one of the provider-specific CLI flows. `None` means the ordinary login
@@ -25,8 +35,8 @@ pub(crate) fn run(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
-    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
-) -> Result<Option<SpecialLogin>, String> {
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), CliError>,
+) -> Result<Option<SpecialLogin>, CliError> {
     let result = match provider {
         "cursor" => Some(run_cursor(args, selected_id, selected_replace, preflight)?),
         "devin" => Some(run_devin(args, selected_id, selected_replace, preflight)?),
@@ -51,21 +61,21 @@ fn run_cursor(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
-    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
-) -> Result<SpecialLogin, String> {
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), CliError>,
+) -> Result<SpecialLogin, CliError> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
         .unwrap_or_else(|| cursor::DEFAULT_ID.to_string());
     if !login_id_is_valid(cursor::DEFAULT_ID, &id) {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "login --id must be '{}' or a labeled id",
             cursor::DEFAULT_ID
-        ));
+        )));
     }
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
-    let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
-    let start =
-        cursor::start_login(&pkce).map_err(|e| format!("building Cursor login URL: {e}"))?;
+    let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let start = cursor::start_login(&pkce)
+        .map_err(|e| CliError::Io(format!("building Cursor login URL: {e}")))?;
     println!("Open this URL in a browser signed into the Cursor account:");
     println!();
     println!("  {}", start.authorize_url);
@@ -74,17 +84,16 @@ fn run_cursor(
         args,
         super::browser_login::ApproveOn::This,
         &start.authorize_url,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     println!("Waiting for browser sign-in…");
     let poller = cursor::ReqwestCursorPollTransport::new()
-        .map_err(|e| format!("starting Cursor login poll: {e}"))?;
+        .map_err(|e| CliError::Io(format!("starting Cursor login poll: {e}")))?;
     let tokens = block_on(cursor::run_cursor_login(
         &poller,
         &start.uuid,
         &start.verifier,
     ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| CliError::Io(e.to_string()))?;
     let oauth = OAuthCredential {
         access_token: tokens.access_token.clone().into(),
         refresh_token: tokens.refresh_token.into(),
@@ -110,22 +119,22 @@ fn run_devin(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
-    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
-) -> Result<SpecialLogin, String> {
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), CliError>,
+) -> Result<SpecialLogin, CliError> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
         .unwrap_or_else(|| devin::DEFAULT_ID.to_string());
     if !login_id_is_valid(devin::DEFAULT_ID, &id) {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "login --id must be '{}' or a labeled id",
             devin::DEFAULT_ID
-        ));
+        )));
     }
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
-    let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
-    let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
+    let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let authorize_url = devin::authorize_url(devin::LOGIN_REDIRECT_URI, &state, &pkce.challenge)
-        .map_err(|e| format!("building Devin login URL: {e}"))?;
+        .map_err(|e| CliError::Io(format!("building Devin login URL: {e}")))?;
     let listener = if super::paste_only(args) {
         None
     } else {
@@ -137,11 +146,13 @@ fn run_devin(
         super::browser_login::ApproveOn::This,
         &authorize_url,
         listener,
+        devin::LOGIN_REDIRECT_URI,
+        &state,
         "After approving Devin, copy the full callback URL from the browser and paste it here:",
     )?;
-    let callback =
-        parse_callback(&callback).ok_or_else(|| "could not parse Devin callback".to_string())?;
-    let http = ReqwestTransport::new().map_err(|e| format!("http: {e}"))?;
+    let callback = parse_callback(&callback)
+        .ok_or_else(|| CliError::Io("could not parse Devin callback".into()))?;
+    let http = ReqwestTransport::new().map_err(|e| CliError::Io(format!("http: {e}")))?;
     let tokens = block_on(devin::exchange_authorization_code(
         &http,
         &callback,
@@ -149,7 +160,7 @@ fn run_devin(
         &pkce.verifier,
         chrono::Utc::now().timestamp_millis(),
     ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| CliError::Io(e.to_string()))?;
     let oauth = OAuthCredential {
         access_token: tokens.access_token.clone().into(),
         refresh_token: tokens.refresh_token.into(),
@@ -175,11 +186,14 @@ fn run_snowflake(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
-    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
-) -> Result<SpecialLogin, String> {
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), CliError>,
+) -> Result<SpecialLogin, CliError> {
     let selected_account = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
-        .and_then(|id| id.strip_prefix("oauth:snowflake:").map(str::to_string));
+        .and_then(|id| {
+            let suffix = id.strip_prefix("oauth:snowflake:")?;
+            suffix.split(':').next().map(str::to_owned)
+        });
     let account = match optional(args, "--account").or(selected_account) {
         Some(account) => account,
         None => {
@@ -187,31 +201,33 @@ fn run_snowflake(
             let mut account = String::new();
             std::io::stdin()
                 .read_line(&mut account)
-                .map_err(|e| format!("reading Snowflake account: {e}"))?;
+                .map_err(|e| CliError::Io(format!("reading Snowflake account: {e}")))?;
             account.trim().to_string()
         }
     };
-    snowflake::validate_account(&account)?;
-    let default_id = snowflake::default_id(&account)?;
+    snowflake::validate_account(&account).map_err(account_usage)?;
+    let default_id = snowflake::default_id(&account).map_err(account_usage)?;
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
         .unwrap_or_else(|| default_id.clone());
-    snowflake::validate_credential_id(&account, &id)?;
+    snowflake::validate_credential_id(&account, &id).map_err(account_usage)?;
 
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
 
     // Snowflake requires the actual callback port in the authorize URL. Reserve it
     // before opening the browser, then keep the listener alive through the redirect.
-    let reserved = login_listener::capture_dynamic_callback()
-        .ok_or_else(|| "could not bind a loopback callback port for Snowflake".to_string())?;
+    let reserved = login_listener::capture_dynamic_callback().ok_or_else(|| {
+        CliError::Io("could not bind a loopback callback port for Snowflake".into())
+    })?;
     let port = reserved
         .local_addr()
-        .map_err(|e| format!("reading Snowflake callback port: {e}"))?
+        .map_err(|e| CliError::Io(format!("reading Snowflake callback port: {e}")))?
         .port();
     let redirect_uri = format!("{}{port}/", snowflake::LOGIN_REDIRECT_PREFIX);
-    let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
-    let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
-    let authorize_url = snowflake::authorize_url(&account, &redirect_uri, &state, &pkce.challenge)?;
+    let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let authorize_url = snowflake::authorize_url(&account, &redirect_uri, &state, &pkce.challenge)
+        .map_err(CliError::Io)?;
     let listener = if super::paste_only(args) {
         // Keep the dynamically selected port in the URL, but intentionally release
         // the socket so this flag has the same paste-only behavior as other providers.
@@ -225,12 +241,14 @@ fn run_snowflake(
         super::browser_login::ApproveOn::This,
         &authorize_url,
         listener,
+        &redirect_uri,
+        &state,
         "After approving Snowflake, copy the full callback URL from the browser and paste it here:",
     )?;
     let callback = parse_callback(&callback)
-        .ok_or_else(|| "could not parse Snowflake callback".to_string())?;
-    let token_url = snowflake::token_url(&account)?;
-    let http = ReqwestTransport::new().map_err(|e| format!("http: {e}"))?;
+        .ok_or_else(|| CliError::Io("could not parse Snowflake callback".into()))?;
+    let token_url = snowflake::token_url(&account).map_err(CliError::Io)?;
+    let http = ReqwestTransport::new().map_err(|e| CliError::Io(format!("http: {e}")))?;
     let tokens = block_on(snowflake::exchange_authorization_code(
         &http,
         &token_url,
@@ -240,7 +258,7 @@ fn run_snowflake(
         &pkce.verifier,
         chrono::Utc::now().timestamp_millis(),
     ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| CliError::Io(e.to_string()))?;
     let oauth = OAuthCredential {
         access_token: tokens.access_token.clone().into(),
         refresh_token: tokens.refresh_token.into(),
@@ -266,20 +284,20 @@ fn run_digitalocean(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
-    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
-) -> Result<SpecialLogin, String> {
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), CliError>,
+) -> Result<SpecialLogin, CliError> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
         .unwrap_or_else(|| digitalocean::DEFAULT_ID.to_string());
     if !login_id_is_valid(digitalocean::DEFAULT_ID, &id) {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "login --id must be '{}' or a labeled id",
             digitalocean::DEFAULT_ID
-        ));
+        )));
     }
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
-    let approve_on = super::browser_login::approve_on(args).map_err(|e| e.to_string())?;
-    let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
+    let approve_on = super::browser_login::approve_on(args)?;
+    let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let authorize_url = digitalocean::authorize_url(&state);
     let listener = if approve_on == super::browser_login::ApproveOn::Other
         || has_flag(args, "--no-listener")
@@ -289,7 +307,11 @@ fn run_digitalocean(
         Some(
             login_listener::loopback_bind_addr(digitalocean::REDIRECT_URI)
                 .and_then(|addr| login_listener::capture_fragment_callback(&addr))
-                .ok_or_else(|| login_listener::port_in_use_message(digitalocean::REDIRECT_URI))?,
+                .ok_or_else(|| {
+                    CliError::Io(login_listener::port_in_use_message(
+                        digitalocean::REDIRECT_URI,
+                    ))
+                })?,
         )
     };
     let raw = open_and_capture(
@@ -297,10 +319,13 @@ fn run_digitalocean(
         approve_on,
         &authorize_url,
         listener,
+        digitalocean::REDIRECT_URI,
+        &state,
         "After approving DigitalOcean, copy the full callback URL (including the #fragment) and paste it here:",
     )?;
     let tokens =
-        digitalocean::parse_fragment_capture(&raw, &state, chrono::Utc::now().timestamp_millis())?;
+        digitalocean::parse_fragment_capture(&raw, &state, chrono::Utc::now().timestamp_millis())
+            .map_err(CliError::Io)?;
     let oauth = OAuthCredential {
         access_token: tokens.access_token.clone().into(),
         refresh_token: tokens.refresh_token.into(),
@@ -330,95 +355,31 @@ fn open_and_capture(
     approve_on: super::browser_login::ApproveOn,
     authorize_url: &str,
     listener: Option<login_listener::CallbackListener>,
+    redirect_uri: &str,
+    expected_state: &str,
     paste_prompt: &str,
-) -> Result<String, String> {
+) -> Result<String, CliError> {
     println!("Open this URL in a browser signed into the account to custody:");
     println!();
     println!("  {authorize_url}");
     println!();
-    super::browser_login::choose_and_present(args, approve_on, authorize_url)
-        .map_err(|e| e.to_string())?;
+    super::browser_login::choose_and_present(args, approve_on, authorize_url)?;
     let captured = match listener {
         Some(listener) => {
             println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");
-            listener.wait()
+            listener.wait(redirect_uri, expected_state)
         }
         None => None,
     };
     if let Some(captured) = captured {
         return Ok(captured);
     }
-    read_pasted_callback(paste_prompt).map_err(|e| format!("reading callback: {e}"))
+    super::browser_login::read_pasted_callback(paste_prompt)
+        .map_err(|e| CliError::Io(format!("reading callback: {e}")))
 }
 
-fn read_pasted_callback(prompt: &str) -> std::io::Result<String> {
-    use std::io::{IsTerminal, Write};
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return read_hidden_callback(&stdin, prompt);
-    }
-
-    writeln!(std::io::stdout(), "{prompt}")?;
-    let mut pasted = String::new();
-    stdin.read_line(&mut pasted)?;
-    Ok(pasted)
-}
-
-#[cfg(unix)]
-fn read_hidden_callback(stdin: &std::io::Stdin, prompt: &str) -> std::io::Result<String> {
-    use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions};
-    use std::io::Write;
-
-    let original = tcgetattr(stdin)?;
-    let mut hidden = original.clone();
-    hidden
-        .local_modes
-        .remove(LocalModes::ECHO | LocalModes::ECHONL);
-    tcsetattr(stdin, OptionalActions::Now, &hidden)?;
-    // The callback may contain a bearer. Disable echo before inviting the paste,
-    // and restore the terminal even if printing the prompt or reading fails.
-    let mut pasted = String::new();
-    let read = writeln!(std::io::stdout(), "{prompt}").and_then(|_| stdin.read_line(&mut pasted));
-    tcsetattr(stdin, OptionalActions::Now, &original)?;
-    read?;
-    writeln!(std::io::stdout())?;
-    Ok(pasted)
-}
-
-#[cfg(not(unix))]
-fn read_hidden_callback(_stdin: &std::io::Stdin, prompt: &str) -> std::io::Result<String> {
-    // The console reader uses non-echoing input events on Windows but requires a
-    // terminal output handle. Do not fall back to an echoed read if both are pipes.
-    let mut terminal = console::Term::stdout();
-    if !terminal.is_term() {
-        terminal = console::Term::stderr();
-    }
-    if !terminal.is_term() {
-        return Err(std::io::Error::other(
-            "hidden callback input needs a console output; run this command in a terminal window",
-        ));
-    }
-    terminal.write_line(prompt)?;
-    terminal.read_secure_line()
-}
-
-fn login_id_is_valid(default_id: &str, id: &str) -> bool {
-    id == default_id
-        || id
-            .strip_prefix(default_id)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .is_some_and(|label| !label.is_empty() && !label.contains(':'))
-}
-
-fn optional(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|arg| arg == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-}
-
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|arg| arg == flag)
+fn account_usage(error: String) -> CliError {
+    CliError::Usage(format!("{error}\n\n{}", crate::help_verb("login")))
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -434,16 +395,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn special_login_replacement_receipt_says_replaced() {
+        let login = SpecialLogin {
+            id: "oauth:snowflake:org-account".into(),
+            record: VaultRecord::new_static(
+                credentials_core::record::CredentialKind::Opaque,
+                "fixture",
+                b"fixture".to_vec(),
+                None,
+            ),
+            replace: true,
+        };
+        assert_eq!(login.receipt(), "replaced");
+    }
+
+    #[test]
     fn special_logins_preflight_before_starting_authorization() {
         for provider in ["cursor", "devin", "snowflake", "digitalocean"] {
             let args = vec!["--account".into(), "org-account".into()];
             let mut seen = Vec::new();
             let result = run(provider, &args, None, true, &mut |id, replace| {
                 seen.push((id.to_string(), replace));
-                Err("preflight stop".into())
+                Err(CliError::Io("preflight stop".into()))
             });
             assert!(
-                matches!(result, Err(ref error) if error == "preflight stop"),
+                matches!(result, Err(CliError::Io(ref error)) if error == "preflight stop"),
                 "{provider}"
             );
             assert_eq!(seen.len(), 1, "{provider}");
@@ -457,14 +433,14 @@ mod tests {
         let result = run(
             "snowflake",
             &[],
-            Some("oauth:snowflake:org-account"),
+            Some("oauth:snowflake:org-account:work"),
             true,
             &mut |id, _| {
                 seen = Some(id.to_string());
-                Err("preflight stop".into())
+                Err(CliError::Io("preflight stop".into()))
             },
         );
-        assert!(matches!(result, Err(ref error) if error == "preflight stop"));
-        assert_eq!(seen.as_deref(), Some("oauth:snowflake:org-account"));
+        assert!(matches!(result, Err(CliError::Io(ref error)) if error == "preflight stop"));
+        assert_eq!(seen.as_deref(), Some("oauth:snowflake:org-account:work"));
     }
 }

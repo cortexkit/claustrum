@@ -8,16 +8,20 @@ use credentials_core::store::module_secrets::validate_module_secret_name;
 
 use crate::{commit_admin, CliError, GlobalArgs};
 
+pub(crate) fn value_flags(verb: &str) -> Option<&'static [&'static str]> {
+    Some(match verb {
+        "list" => &["--module"],
+        "delete" => &["--module", "--name", "--confirm"],
+        "move" => &["--from", "--to"],
+        _ => return None,
+    })
+}
+
 fn parse(args: &[String]) -> Result<(AdminOpBody, Option<String>), CliError> {
     let Some((verb, rest)) = args.split_first() else {
         return Err(CliError::Usage(help_text(None)));
     };
-    let flags: &[&str] = match verb.as_str() {
-        "list" => &["--module"],
-        "delete" => &["--module", "--name", "--confirm"],
-        "move" => &["--from", "--to"],
-        _ => return Err(CliError::Usage(help_text(None))),
-    };
+    let flags = value_flags(verb).ok_or_else(|| CliError::Usage(help_text(None)))?;
     let mut values = BTreeMap::new();
     let mut iter = rest.iter();
     while let Some(flag) = iter.next() {

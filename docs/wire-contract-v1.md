@@ -134,9 +134,7 @@ bug in its own serialisation as a credential verdict.
 
 **What a consumer must do:** distinguish the two by FRAME TYPE before decoding. An
 `Error` frame is never a statement about a credential — do not map it into a credential
-state, do not mark anything `needs_reauth`, and do not delete client state on it. Treat
-an unrecognised `Error` code as retryable, because the alternative is letting a
-transport condition masquerade as a permanent verdict about a credential that is fine.
+state, do not mark anything `needs_reauth`, and do not delete client state on it.
 
 **Some `Error` codes are definitive: retrying or reconnecting cannot change them.** They
 say nothing about a credential, but the same request will be refused the same way on
@@ -156,19 +154,16 @@ the code:
 - `unknown_module` (sent by subc, not the vault): no module with this id is registered
   or supervised on the daemon at all. A vault that is starting, restarting or busy is
   reported as `module_warming`, `module_reloading`, `target_unavailable` or
-  `module_timeout` instead, and those stay retryable.
+  `module_timeout` instead. These codes can be retryable.
 
-`admin_refused` is also sent on this lane, but only by the admin operations, never by a
-credential read. Treat every other `Error` code as retryable, as above; connection loss
-and route churn (`route_closed`, `unknown_channel`, `stale_route_epoch`) are the common
-ones.
+Both clients use SUBC's route-open retry rule for coded terminal refusals. Unknown
+codes and `missing_identity` are terminal. A normally retryable code is terminal
+when `detail.expected_back` is `false`. This does not change how clients handle
+connection loss without an error reply. The TypeScript client reports a terminal
+refusal as `permanent`/`gone`; the Rust client reports it as unclassified and not
+retryable. Neither classification describes the credential's state.
 
-The TypeScript client (`@cortexkit/claustrum-client` 0.13.0 and later) reports the
-definitive codes, plus its own pre-send `missing_identity`, as
-`ClaustrumCredentialError(code, 'permanent', 'gone')` and never reconnects for them;
-every other transport failure stays `transient`/`retry`. The Rust client returns them
-unclassified and not retryable (`unknown_module` excepted, which it treats as a
-transport failure and redials).
+`admin_refused` is sent by admin operations, never by a credential read.
 
 **And do not decode an `Error` frame's body as a result.** A decoder reaching for
 `result.credentials` in an `Error` body gets a missing-field failure, which presents as
@@ -1732,8 +1727,13 @@ deadline converts silence into an event that arm can act on:
 per-call deadline expires  ->  classify as retryable
                            ->  clear the cached binding
                            ->  reconnect and re-bind
-                           ->  the restart heals in one call
+                           ->  later attempts can reach the restarted vault
 ```
+
+The Rust client uses one deadline per unary attempt. It includes the route queue,
+the route open, and the reply. A handle read retries transport failures, not a
+classified vault refusal. Neither client resends a usage report after losing its
+reply.
 
 The vault's diagnostics cannot tell you which happened. Every refusal on the scoped-read
 path writes to `auth_events`, so an empty table proves no scoped read reached a refusal

@@ -1012,6 +1012,87 @@ fn cli_review_minted_bearer_is_stdout_only() {
 }
 
 #[test]
+fn recognized_flags_are_not_swallowed_and_help_remains_a_payload_filename() {
+    let vault = GrantCliVault::new("flag-boundaries");
+    vault.bootstrap();
+    std::fs::write(vault.root.join("--help"), b"fixture-payload").unwrap();
+    let run = |args: &[&str]| cli().current_dir(&vault.root).args(args).output().unwrap();
+    for (args, flag) in [
+        (
+            vec!["remove", "--data-dir", "--subc", "--id", "apikey:fixture"],
+            "--data-dir",
+        ),
+        (vec!["--data-dir", "--subc", "bootstrap"], "--data-dir"),
+        (
+            vec!["login", "--provider", "openai", "--id", "--replace"],
+            "--id",
+        ),
+    ] {
+        let out = run(&args);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(&format!("{flag} requires a value")));
+    }
+    let status = cli()
+        .current_dir(&vault.root)
+        .args([
+            "put",
+            "--id",
+            "apikey:fixture",
+            "--payload-file",
+            "--help",
+            "--data-dir",
+        ])
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("created apikey:fixture"));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_payload_path_is_a_usage_refusal_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let out = cli()
+        .args(["put", "--id", "apikey:fixture", "--payload-file"])
+        .arg(std::ffi::OsStr::from_bytes(b"input-\xff"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("arguments must be valid UTF-8"));
+    assert!(!error.contains("panicked"));
+}
+
+#[test]
+fn snowflake_logout_without_matching_credentials_reports_no_change() {
+    let vault = GrantCliVault::new("logout-no-snowflake");
+    vault.bootstrap();
+    let out = vault.run(&["logout", "--provider", "snowflake"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing changed"));
+}
+
+#[test]
+fn invalid_snowflake_id_is_a_usage_error_before_login() {
+    let vault = GrantCliVault::new("invalid-snowflake-id");
+    vault.bootstrap();
+    let out = vault.run(&[
+        "login",
+        "--provider",
+        "snowflake",
+        "--id",
+        "oauth:snowflake:org/work",
+        "--no-browser",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing ran, nothing changed."));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("Open this URL"));
+}
+
+#[test]
 fn cli_review_payload_filename_is_not_a_replacement_flag() {
     let vault = GrantCliVault::new("flag-filename");
     vault.bootstrap();

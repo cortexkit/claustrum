@@ -70,6 +70,19 @@ const REVOKE_FLAGS: &[&str] = &["--grant-id"];
 /// The flags `secret delete` takes: the name, as an alternative to the positional operand.
 const DELETE_FLAGS: &[&str] = &["--name"];
 
+pub(crate) fn flag_spec(verb: &str) -> Option<(&'static [&'static str], bool)> {
+    Some(match verb {
+        "phone-gate" | "multi-host" | "basic-auth" | "local-programs" | "dev-desktop-approvals" => {
+            (&[], true)
+        }
+        "delete" => (DELETE_FLAGS, true),
+        "put" => (put_flags(), true),
+        "revoke" => (REVOKE_FLAGS, false),
+        "list" | "grants" => (&[], false),
+        _ => return None,
+    })
+}
+
 /// Refuse an unknown or misplaced flag on one `ck auth secret <verb>` invocation.
 ///
 /// The dispatcher's shared argument check sees only the verb name `secret`, and a flag's
@@ -81,22 +94,9 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
     let Some((verb, rest)) = args.split_first() else {
         return Ok(());
     };
-    let (value_flags, positional) = match verb.as_str() {
-        // Each setting takes one positional operand and no flags.
-        "phone-gate" | "multi-host" | "basic-auth" | "local-programs" | "dev-desktop-approvals" => {
-            (&[][..], true)
-        }
-        // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
-        "delete" => (DELETE_FLAGS, true),
-        // `put` names the secret first or with `--name`, then its flags.
-        "put" => (put_flags(), true),
-        "revoke" => (REVOKE_FLAGS, false),
-        "list" | "grants" => (&[][..], false),
-        // `home` takes an action and, for `set`, one member id or `self`, and no flags.
-        // `home` itself checks that exact shape, which a one-positional table cannot say.
-        "home" => return Ok(()),
-        // An unknown verb is diagnosed by `cmd_secret`, which names it.
-        _ => return Ok(()),
+    let Some((value_flags, positional)) = flag_spec(verb) else {
+        // `home` and unknown verbs are checked at dispatch.
+        return Ok(());
     };
     // A positional operand, when the verb takes one, is the first token unless that token is
     // a flag: `put --name ops-key ...` names the secret with the flag instead.

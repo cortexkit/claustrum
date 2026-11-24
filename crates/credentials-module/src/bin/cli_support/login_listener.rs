@@ -12,16 +12,16 @@
 //! - The redirect STRING sent to the provider is UNCHANGED — we bind the exact
 //!   host:port the registered redirect already uses, so the provider's exact-match
 //!   still holds. We do not invent a new redirect.
-//! - One-shot: it accepts exactly one request, then closes. Bound to loopback only.
+//! - It closes after accepting one valid callback or reaching its deadline.
 //! - Paste-back remains available while listening. A browser on another device
 //!   cannot reach this socket, so the listener is a convenience, not a requirement.
-//! - State is validated by the SAME downstream code that validates a pasted
-//!   callback (the exchange checks `state` before any network call); this listener
-//!   only transports the callback, it does not authorize anything.
+//! - State is checked before acknowledging receipt. The terminal reports the
+//!   outcome of the exchange and the deposit.
 
+use credentials_core::oauth_login::{parse_callback, states_equal, Callback};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long to keep the browser callback socket open. Pasting need not wait for it.
 pub const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -133,29 +133,53 @@ impl CallbackListener {
     /// Block for the browser callback, up to [`LISTEN_TIMEOUT`]. Code mode returns a
     /// `code=..&state=..` querystring; fragment mode returns the form posted by the
     /// bootstrap page.
-    pub fn wait(self) -> Option<String> {
-        self.listener.set_nonblocking(false).ok()?;
+    pub fn wait(self, redirect_uri: &str, expected_state: &str) -> Option<String> {
+        let deadline = Instant::now() + LISTEN_TIMEOUT;
+        let path = callback_path(redirect_uri);
         match self.mode {
             CaptureMode::Code => {
-                accept_with_timeout(&self.listener, LISTEN_TIMEOUT).and_then(|mut stream| {
-                    let query = read_callback_query(&mut stream);
+                while let Some(mut stream) = accept_until(&self.listener, deadline) {
+                    let Some((method, target, _)) = read_http_request(&mut stream, deadline) else {
+                        continue;
+                    };
+                    let query = callback_query(&method, &target, path, expected_state)
+                        .and_then(Result::ok)
+                        .map(|(query, _)| query.to_owned());
                     write_browser_response(&mut stream, query.is_some());
-                    query
-                })
+                    if query.is_some() {
+                        return query;
+                    }
+                }
+                None
             }
-            CaptureMode::Fragment => wait_for_fragment(&self.listener),
+            CaptureMode::Fragment => {
+                wait_for_fragment(&self.listener, deadline, path, expected_state)
+            }
         }
     }
 }
 
-/// Receive one code callback without blocking pasted input, even if an HTTP client
-/// connects and sends only part of a request. The caller validates code and state.
-pub async fn receive_code(listener: &tokio::net::TcpListener) -> Option<String> {
-    let (mut stream, _) = listener.accept().await.ok()?;
+/// Receive and validate one callback without blocking pasted input.
+pub async fn receive_code(
+    listener: &tokio::net::TcpListener,
+    path: &str,
+    expected_state: &str,
+) -> Result<Option<Callback>, &'static str> {
+    let Ok((mut stream, _)) = listener.accept().await else {
+        return Ok(None);
+    };
     let query = read_request_target(&mut stream)
         .await
-        .and_then(|(method, target)| callback_query(&method, &target));
-    write_response_async(&mut stream, &browser_response(query.is_some())).await;
+        .and_then(|(method, target)| {
+            callback_query(&method, &target, path, expected_state)
+                .map(|result| result.map(|(_, callback)| callback))
+        })
+        .transpose();
+    write_response_async(
+        &mut stream,
+        &browser_response(matches!(&query, Ok(Some(_)))),
+    )
+    .await;
     query
 }
 
@@ -321,29 +345,37 @@ fn manifest_http_response(status: &str, body: &str) -> String {
 
 /// Fragment mode needs two browser connections: the first GET receives a page that
 /// can read `location.hash`, and the second POST carries the fragment fields.
-fn wait_for_fragment(listener: &TcpListener) -> Option<String> {
-    let mut first = accept_with_timeout(listener, LISTEN_TIMEOUT)?;
-    let request = read_http_request(&mut first)?;
-    if request.0 == "GET" {
-        write_fragment_bootstrap(&mut first);
-        drop(first);
-        let mut post = accept_with_timeout(listener, LISTEN_TIMEOUT)?;
-        let request = read_http_request(&mut post)?;
-        if request.0 == "POST" && request.1 == "/auth/token" {
-            let body = String::from_utf8(request.2).ok()?;
-            write_token_response(&mut post, true);
-            return Some(body);
+fn wait_for_fragment(
+    listener: &TcpListener,
+    deadline: Instant,
+    path: &str,
+    expected_state: &str,
+) -> Option<String> {
+    while let Some(mut stream) = accept_until(listener, deadline) {
+        let Some((method, target, body)) = read_http_request(&mut stream, deadline) else {
+            continue;
+        };
+        if method == "GET" && target.split(['?', '#']).next() == Some(path) {
+            write_fragment_bootstrap(&mut stream);
+            continue;
         }
-        write_token_response(&mut post, false);
-        None
-    } else if request.0 == "POST" && request.1 == "/auth/token" {
-        let body = String::from_utf8(request.2).ok()?;
-        write_token_response(&mut first, true);
-        Some(body)
-    } else {
-        write_token_response(&mut first, false);
-        None
+        if method == "POST" && target == "/auth/token" {
+            if let Ok(form) = String::from_utf8(body) {
+                if credentials_core::refresh_adapters::digitalocean::parse_fragment_capture(
+                    &form,
+                    expected_state,
+                    0,
+                )
+                .is_ok()
+                {
+                    write_token_response(&mut stream, true);
+                    return Some(form);
+                }
+            }
+        }
+        write_token_response(&mut stream, false);
     }
+    None
 }
 
 /// Serve only local JavaScript: the browser owns the fragment and posts it back to
@@ -352,7 +384,7 @@ fn write_fragment_bootstrap(stream: &mut TcpStream) {
     let body = "<!doctype html><meta charset=\"utf-8\"><title>CortexKit · login</title><script>\
 const fields=new URLSearchParams(location.hash.slice(1));\
 fetch('/auth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fields.toString()})\
-.then(()=>document.body.textContent='Authentication successful. You can close this tab.')\
+ .then(r=>{if(!r.ok)throw Error();document.body.textContent='Callback received. Return to the terminal.';})\
 .catch(()=>document.body.textContent='Return to the terminal and paste the URL from the address bar.');</script>\
 <p>Completing authentication…</p>";
     let response = format!(
@@ -366,7 +398,7 @@ fetch('/auth/token',{method:'POST',headers:{'Content-Type':'application/x-www-fo
 
 fn write_token_response(stream: &mut TcpStream, ok: bool) {
     let (status, body) = if ok {
-        ("200 OK", "ok")
+        ("200 OK", "Callback received. Return to the terminal.")
     } else {
         ("400 Bad Request", "bad request")
     };
@@ -379,12 +411,21 @@ fn write_token_response(stream: &mut TcpStream, ok: bool) {
 }
 
 /// Read a bounded HTTP request, including a form body when Content-Length is present.
-fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+fn read_http_request(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> Option<(String, String, Vec<u8>)> {
+    let read = |stream: &mut TcpStream, chunk: &mut [u8]| {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        stream
+            .set_read_timeout(Some(remaining.min(Duration::from_secs(5))))
+            .ok()?;
+        stream.read(chunk).ok()
+    };
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let header_end = loop {
-        let n = stream.read(&mut chunk).ok()?;
+        let n = read(stream, &mut chunk)?;
         if n == 0 {
             return None;
         }
@@ -413,7 +454,7 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)
         return None;
     }
     while buf.len() - header_end < content_length {
-        let n = stream.read(&mut chunk).ok()?;
+        let n = read(stream, &mut chunk)?;
         if n == 0 {
             return None;
         }
@@ -428,44 +469,54 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)
 
 /// Accept one connection, honoring a wall-clock timeout by polling the listener's
 /// accept in short nonblocking windows (std has no accept-with-deadline).
-fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> Option<TcpStream> {
-    let deadline = std::time::Instant::now() + timeout;
+fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> {
     listener.set_nonblocking(true).ok()?;
-    loop {
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).ok()?;
+                stream
+                    .set_write_timeout(Some(remaining.min(Duration::from_secs(1))))
+                    .ok()?;
                 return Some(stream);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
             }
             Err(_) => return None,
         }
     }
+    None
 }
 
-/// Read through the headers before extracting the callback query, since a TCP read
-/// may end in the middle of the request line.
-fn read_callback_query(stream: &mut TcpStream) -> Option<String> {
-    let (method, target, _) = read_http_request(stream)?;
-    callback_query(&method, &target)
+pub fn callback_path(redirect_uri: &str) -> &str {
+    let authority_and_path = redirect_uri
+        .split_once("://")
+        .map_or(redirect_uri, |(_, tail)| tail);
+    authority_and_path
+        .find('/')
+        .map_or("/", |start| &authority_and_path[start..])
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("/")
 }
 
-fn callback_query(method: &str, target: &str) -> Option<String> {
-    if method != "GET" {
-        return None;
-    }
-    // Extract the query after the first '?'. The target is a path like
-    // `/auth/callback?code=..&state=..`.
-    let (_, query) = target.split_once('?')?;
-    if query.contains("code=") && query.contains("state=") {
-        Some(query.to_string())
-    } else {
-        None
+fn callback_query<'a>(
+    method: &str,
+    target: &'a str,
+    path: &str,
+    expected_state: &str,
+) -> Option<Result<(&'a str, Callback), &'static str>> {
+    let (request_path, query) = target.split_once('?').unwrap_or((target, ""));
+    (method == "GET" && request_path == path)
+        .then(|| validated_callback(query, expected_state).map(|callback| (query, callback)))
+}
+
+pub fn validated_callback(raw: &str, expected_state: &str) -> Result<Callback, &'static str> {
+    match parse_callback(raw) {
+        Some(callback) if !callback.code.is_empty() && states_equal(&callback.state, expected_state) => Ok(callback),
+        Some(callback) if !states_equal(&callback.state, expected_state) => Err("The callback state does not match this login. Paste the callback from the URL above."),
+        _ => Err("Could not parse the login callback. Paste the complete callback URL or code and state."),
     }
 }
 
@@ -478,10 +529,11 @@ fn write_browser_response(stream: &mut TcpStream, ok: bool) {
 }
 
 fn browser_response(ok: bool) -> String {
+    let status = if ok { "200 OK" } else { "400 Bad Request" };
     let (title, detail, mark) = if ok {
         (
-            "Authentication successful",
-            "You are logged in. You can close this tab and return to the terminal.",
+            "Callback received",
+            "Return to the terminal to see whether the login completed.",
             "\u{2713}",
         )
     } else {
@@ -503,7 +555,7 @@ fn browser_response(ok: bool) -> String {
          </body></html>"
     );
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
          Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{}",
         body.len(),
         body
@@ -561,28 +613,53 @@ mod tests {
             resp
         });
 
-        let query = listener.wait().expect("captured query");
+        let query = listener
+            .wait("http://localhost/auth/callback", "xyz789")
+            .expect("captured query");
         assert_eq!(query, "code=abc123&state=xyz789");
         let resp = client.join().unwrap();
         assert!(resp.contains("200 OK"), "browser got a page: {resp}");
-        assert!(resp.contains("Authentication successful"));
+        assert!(resp.contains("Callback received"));
     }
 
     #[test]
-    fn a_request_without_code_state_falls_back() {
+    fn unrelated_connection_does_not_end_callback_capture() {
         let listener = capture_callback("127.0.0.1:0").expect("bind ephemeral");
         let addr = listener.listener.local_addr().unwrap();
-        let client = std::thread::spawn(move || {
-            let mut s = TcpStream::connect(addr).expect("connect");
-            let _ = s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n");
-            let mut resp = String::new();
-            let _ = s.read_to_string(&mut resp);
-        });
-        assert!(
-            listener.wait().is_none(),
-            "a non-callback request yields None so the caller falls back to paste"
-        );
-        client.join().unwrap();
+        let mut unrelated = TcpStream::connect(addr).unwrap();
+        unrelated
+            .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut callback = TcpStream::connect(addr).unwrap();
+        callback
+            .write_all(
+                b"GET /auth/callback?code=fixture&state=valid HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .unwrap();
+        assert!(listener
+            .wait("http://localhost/auth/callback", "valid")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_callback_does_not_claim_sign_in_and_valid_callback_only_acknowledges_receipt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = capture_callback("127.0.0.1:0")
+            .unwrap()
+            .into_async()
+            .unwrap();
+        for (state, accepted) in [("stale", false), ("current", true)] {
+            let mut browser = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            browser.write_all(format!("GET /auth/callback?code=fixture&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+            let result = receive_code(&listener, "/auth/callback", "current").await;
+            let mut page = String::new();
+            browser.read_to_string(&mut page).await.unwrap();
+            assert!(!page.contains("Authentication successful"));
+            assert_eq!(matches!(result, Ok(Some(_))), accepted);
+            assert_eq!(page.contains("Callback received"), accepted);
+        }
     }
 
     #[test]
@@ -600,6 +677,10 @@ mod tests {
             assert!(page.contains("location.hash"));
             assert!(page.contains("/auth/token"));
 
+            let mut favicon = TcpStream::connect(addr).unwrap();
+            favicon
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let body = "access_token=secret&expires_in=3600&state=state";
             let mut post = TcpStream::connect(addr).expect("connect POST");
             write!(
@@ -613,7 +694,9 @@ mod tests {
             post.read_to_string(&mut response).unwrap();
             assert!(response.contains("200 OK"));
         });
-        let posted = listener.wait().expect("fragment POST captured");
+        let posted = listener
+            .wait("http://localhost/auth/callback", "state")
+            .expect("fragment POST captured");
         assert_eq!(posted, "access_token=secret&expires_in=3600&state=state");
         client.join().unwrap();
     }
@@ -648,7 +731,7 @@ mod streaming_tests {
             let mut response = String::new();
             let _ = stream.read_to_string(&mut response);
         });
-        let captured = listener.wait();
+        let captured = listener.wait("http://localhost/cb", "xyz");
         client.join().unwrap();
         assert_eq!(captured.as_deref(), Some("code=abc&state=xyz"));
     }

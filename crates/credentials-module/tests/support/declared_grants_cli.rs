@@ -51,6 +51,72 @@ fn seed_declared(vault: &GrantCliVault) {
     }
 }
 
+fn seed_settings(vault: &GrantCliVault) {
+    use sha2::{Digest, Sha256};
+    let refs = r#"["apikey:synthetic-picked"]"#;
+    let hash = format!("{:x}", Sha256::digest(refs));
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    conn.execute(
+        "INSERT INTO settings_ref_sets VALUES ('settings-module', '1', ?1, ?2, 1700000000000)",
+        rusqlite::params![refs, hash],
+    )
+    .unwrap();
+}
+
+#[test]
+fn settings_grants_are_opt_in_and_revoke_points_to_the_setting() {
+    let vault = migrated_vault("settings-cli-revoke");
+    let plain_before = vault.run(&["grants"]);
+    assert_ok(&plain_before);
+    seed_settings(&vault);
+    let plain_after = vault.run(&["grants"]);
+    assert_ok(&plain_after);
+    assert_eq!(plain_before.stdout, b"no grants\n");
+    assert_eq!(plain_after.stdout, plain_before.stdout);
+    assert_eq!(plain_after.stderr, plain_before.stderr);
+
+    let declared = vault.run(&["grants", "--declared"]);
+    assert_ok(&declared);
+    let displayed = String::from_utf8(declared.stdout).unwrap();
+    assert!(
+        displayed
+            .lines()
+            .any(|line| line.split_whitespace().take(5).eq([
+                "settings-module",
+                "exact",
+                "apikey:synthetic-picked",
+                "read",
+                "settings",
+            ])),
+        "{displayed}"
+    );
+
+    let args = |verb| {
+        [
+            verb,
+            "--principal",
+            "settings-module",
+            "--selector-kind",
+            "exact",
+            "--selector",
+            "apikey:synthetic-picked",
+            "--operation",
+            "read",
+        ]
+    };
+    let refused = vault.run(&args("revoke-grant"));
+    assert!(!refused.status.success());
+    let remedy = String::from_utf8(refused.stderr).unwrap();
+    assert!(remedy.contains("declared_grant/permanent"), "{remedy}");
+    assert!(
+        remedy.contains("settings-module's approved setting"),
+        "{remedy}"
+    );
+    assert_ok(&vault.run(&args("grant")));
+    assert_ok(&vault.run(&args("revoke-grant")));
+    assert!(!vault.run(&args("revoke-grant")).status.success());
+}
+
 fn assert_ok(output: &std::process::Output) {
     assert!(
         output.status.success(),

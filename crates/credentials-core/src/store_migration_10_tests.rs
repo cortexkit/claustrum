@@ -1002,9 +1002,10 @@ fn migration_45_adds_only_an_empty_declaration_inventory_and_preserves_every_row
         .unwrap();
     let before = every_table_row(&store.store);
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 54);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 55);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("declared_grant_sets"), Some(vec![]));
+    assert_eq!(after.remove("settings_ref_sets"), Some(vec![]));
     for table in [
         "agent_policies",
         "broker_action_requests",
@@ -1169,10 +1170,11 @@ fn migration_52_seeds_an_active_legacy_root_and_preserves_step_51_rows_on_a_copy
         } else {
             EncryptedStore::migrate(&copy).unwrap();
         }
-        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 54);
+        assert_eq!(copy.with_conn(read_schema_version).unwrap(), 55);
         let mut after = every_table_row(&copy);
         assert_eq!(after.remove("broker_action_requests"), Some(vec![]));
         assert_eq!(after.remove("credential_orgs"), Some(vec![]));
+        assert_eq!(after.remove("settings_ref_sets"), Some(vec![]));
         let settings = after.get_mut("settings").unwrap();
         let seeded = settings.iter().position(|row| row[0] == seed[0]);
         assert_eq!(
@@ -1300,7 +1302,7 @@ fn migration_54_preserves_the_step_53_vault_without_backfilling_orgs() {
     }
     let before = every_table_row(&store.store);
     assert_eq!(before["credentials"].len(), 2);
-    EncryptedStore::migrate(&store.store).unwrap();
+    migrate_through_for_test(&store.store, 54).unwrap();
     assert_eq!(schema_version_of(&store.store), 54);
     let mut after = every_table_row(&store.store);
     assert_eq!(after.remove("credential_orgs"), Some(vec![]));
@@ -1353,6 +1355,7 @@ fn migration_46_preserves_secret_rows_and_adds_only_nullable_local_use() {
         "hub_report_task",
         "module_secrets",
         "remote_record_conditions",
+        "settings_ref_sets",
     ] {
         assert_eq!(after.remove(table), Some(vec![]));
     }
@@ -2429,6 +2432,16 @@ fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares
                 column("grants_json", "TEXT", true, None, false),
                 column("skipped_count", "INTEGER", true, None, false),
                 column("first_seen_ms", "INTEGER", true, None, false),
+            ],
+        ),
+        (
+            "settings_ref_sets",
+            vec![
+                column("module_id", "TEXT", true, None, true),
+                column("generation", "TEXT", true, None, false),
+                column("refs_json", "TEXT", true, None, false),
+                column("refs_sha256", "TEXT", true, None, false),
+                column("seen_at_ms", "INTEGER", true, None, false),
             ],
         ),
         (

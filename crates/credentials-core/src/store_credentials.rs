@@ -1005,7 +1005,19 @@ impl EncryptedStore {
         credential_id: &str,
         incarnation: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, Some(incarnation))
+        self.read_snapshot(credential_id, Some(incarnation), None)
+    }
+
+    pub(crate) fn get_pinned_snapshot(
+        &self,
+        credential_id: &str,
+        pin: &SettingsReadPin,
+    ) -> Result<StoredRead, StoreOpError> {
+        self.read_snapshot(
+            credential_id,
+            Some(&pin.incarnation),
+            Some(pin.record_version),
+        )
     }
 
     /// The same read as [`Self::get_with_stale_pending`], plus the SHA-256 of the exact
@@ -1021,13 +1033,14 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, None)
+        self.read_snapshot(credential_id, None, None)
     }
 
     fn read_snapshot(
         &self,
         credential_id: &str,
         expected_incarnation: Option<&str>,
+        expected_version: Option<u64>,
     ) -> Result<StoredRead, StoreOpError> {
         let row = self
             .store
@@ -1066,7 +1079,9 @@ impl EncryptedStore {
 
         let (version, state, stale_pending, blob, updated_at_ms, incarnation, has_refresh_intent) =
             row.ok_or(StoreOpError::NotFound)?;
-        if expected_incarnation.is_some_and(|expected| expected != incarnation) {
+        if expected_incarnation.is_some_and(|expected| expected != incarnation)
+            || expected_version.is_some_and(|expected| expected != version as u64)
+        {
             return Err(StoreOpError::NotFound);
         }
         let (record, pending) = self.decode_record_row(

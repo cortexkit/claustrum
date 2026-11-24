@@ -646,7 +646,7 @@ the **last declaration each module presented**, not live authority: an uninstall
 module's row authorizes nothing, and a route bound earlier may have captured an older
 set than the inventory shows.
 
-#### Optional `admin.op` declaration fields
+#### Optional `admin.op` grant inventory fields
 
 The existing authenticated admin transcript is unchanged. These are additive reply
 fields; no existing Status field changes:
@@ -655,6 +655,8 @@ fields; no existing Status field changes:
 |---|---|
 | `admin.status` (`Status`) | Optional `declared_grants`: an array of `{module_id, selector_kind, selector, operation, first_seen_ms}`, sorted by module then canonical tuple order; omitted when empty. |
 | `admin.status` (`Status`) | Optional `declared_grants_incomplete: true` if the table cannot be read or any stored `grants_json` fails to parse. Unreadable rows are omitted with a WARN; a table failure omits `declared_grants`, without hiding existing status or hand grants. |
+| `admin.status` (`Status`) | Optional `settings_grants`: last-seen rows `{module_id, selector_kind:"exact", selector, operation:"read", first_seen_ms, source:"settings"}`, sorted by module and id; omitted when empty. `first_seen_ms` is the arrival time of the last changed snapshot. |
+| `admin.status` (`Status`) | Optional `settings_grants_incomplete: true` if the table cannot be read or a stored snapshot fails validation. Unreadable snapshots are omitted without hiding other status fields. |
 | `admin.grant_create_v2` (`GrantCreateV2`) | Optional `declared_covers: true` when the module's last-seen stored set already contains the tuple; the hand grant is still created normally. |
 | `admin.grant_revoke_v2` (`GrantRevokeV2`) | Optional success field `declared_still_listed: true` when a matching hand-made row was revoked but the stored declaration still lists the tuple. |
 
@@ -664,6 +666,10 @@ the daemon's configuration: change that approval, then let the module re-bind (r
 the module). The stored row is replaced at that bind; a vault-side revoke cannot
 override declared authority. An unreadable or unparseable stored row never counts as
 covering a create or revoke.
+
+`GrantRevokeV2` of an exact read tuple present only in the settings inventory also
+refuses with `declared_grant` / `permanent`. Its remedy says to remove the reference
+from the module's approved setting. A matching hand grant can still be revoked normally.
 
 A new CLI with an old daemon sees no declared inventory; an old CLI ignores the new
 fields. `ck auth list` (including `--json`) and `ck auth status` output are unchanged.
@@ -676,6 +682,37 @@ the same credential inventory as hand grants; audience reach is `token`. Zero
 well-formed rows produce no declared table. Malformed reply elements are dropped;
 incomplete inventory produces one stderr line without interrupting hand-grant output.
 Offline mode reads the table read-only; a step-44 store has no declared output or warning.
+When available, `--declared` also prints a separate settings inventory with `SOURCE`
+set to `settings`; it does not add rows to plain `ck auth grants`.
+
+#### Key references in approved settings
+
+On stamped installs, the supervisor includes `settings_credentials: {generation,
+refs}` in the `caller` attestation of `route.bind`. `generation` is the approved
+configuration revision (an unsigned 64-bit integer). `refs` contains the sorted,
+deduplicated credential ids from the calling module's approved user settings. An
+empty list replaces the last list with no keys. An absent member conveys no settings
+authority and leaves the last-seen inventory alone.
+
+The vault admits the member only for an `own` claim on the matching `reserved:<module>`
+principal route. `first_party` is not required. Relay claims, `fed-` routes, phones and
+enrolled consumers do not inherit this authority. A member with over 32 raw refs or
+any id that is not 1–256 printable ASCII bytes without spaces grants nothing and does
+not fail the bind. The vault warns once per module and generation and logs no ids.
+
+Each listed id supplements hand and declaration grants with exact `read` while its
+record is an API key (`apikey`, including gateways). Use is pinned to the checked
+incarnation and version. Other kinds answer the same `not_found` as an uncovered id.
+No other grant operation is implied, including `list`, `sign`, `open`, `seal`,
+`deposit`, `account_token` and `policy_token`. A settings grant adds no category grant.
+The daemon closes the module's routes when the approved references change, and a
+new bind replaces the earlier route's captured authority.
+
+Schema step 55 stores each module's last-seen generation, canonical refs, their
+SHA-256 and seen time. A changed generation or list writes one `settings_refs_seen`
+audit row in the same transaction before the bind succeeds. A repeated snapshot
+writes nothing. A store failure grants nothing for that member. The inventory is
+not consulted when authorizing a read.
 
 #### Approval wording
 
@@ -2778,6 +2815,7 @@ versions JSON numbers, and reasons refusal codes.
 | `federation_self_set` | none | admin | `{member}` |
 | `login_sharing_set` | none | config:&lt;path&gt; | applied boolean (`true` or `false`) |
 | `declaration_seen` | `declaration\|<digest>` or `declaration\|none` | `reserved:<module>` | canonical `grants_json` bytes (compact array, tuple text-byte order, deduplicated); `payload_hash` is their lowercase-hex SHA-256 |
+| `settings_refs_seen` | `settings_refs\|<generation>` | `reserved:<module>` | canonical `refs_json` bytes (compact array, bytewise sorted and deduplicated); `payload_hash` is their lowercase-hex SHA-256 |
 
 Issuance dedup and audit commit before token release, keyed by member/id/version/encrypted
 material digest, so retries/restarts add no row but a recreated id at version 1 is audited
@@ -4489,6 +4527,8 @@ and the vault's health counts.
 | `identity?` | Account email, otherwise organization name, as plain text; omitted above 254 UTF-8 bytes. |
 | `plan?` | `{tier, source}` from the existing effective plan, with `source` `operator` or `detected`; absent when unknown. |
 | `condition?` | `{reason, since_ms, action_url?}` from the stored login condition. Omitted when none is set. |
+
+Access a module has through a key picked in its approved settings is not listed here.
 
 Status maps `active` to `ok`, `needs_reauth` to `needs_sign_in` for accounts and
 `key_refused` for API keys, `retired` to `signed_out`, and `corrupt` to `damaged`.

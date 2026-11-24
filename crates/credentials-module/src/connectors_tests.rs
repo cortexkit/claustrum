@@ -2,6 +2,7 @@ mod connectors_contract {
     use super::*;
     use credentials_core::{federation::NewRemoteRecord, record::RecordIdentity};
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
 
     fn declaration(entries: serde_json::Value) -> serde_json::Value {
         use subc_protocol::peer::{CallerAttestation, CallerClaim, CallerOrigin};
@@ -98,6 +99,211 @@ mod connectors_contract {
             .iter()
             .filter(|row| row.op == "declaration_seen")
             .count()
+    }
+
+    fn settings_bind(admin: &admin_surface::AdminSurface, channel: u16, principal: subc_protocol::Principal, harness: &str, claim: subc_protocol::peer::CallerClaim, member: Option<(u64, Vec<String>)>) {
+        use subc_protocol::peer::{CallerAttestation, CallerOrigin};
+        let caller = CallerAttestation::new("settings-test", 1, 1, claim, false, CallerOrigin::Release, "approved").unwrap();
+        let member = member.map(|(generation, refs)| admin_surface::SettingsCredentials { generation, refs });
+        admin.record_connector_bind_with_settings(channel, 1, principal, harness, None, None, Some(&caller), None, member.as_ref());
+    }
+
+    fn settings_api() -> VaultRecord {
+        VaultRecord::new_static(CredentialKind::ApiKey, "test", vec![1], None)
+    }
+
+    fn settings_oauth(adapter: &str) -> VaultRecord {
+        VaultRecord::new_oauth("test", adapter, credentials_core::oauth::OAuthCredential {
+            access_token: "synthetic".to_owned().into(), refresh_token: "synthetic".to_owned().into(), expires_at_ms: None,
+            token_url: String::new(), client_id: None, client_secret: None, scopes: vec![],
+        }, vec![2])
+    }
+
+    #[tokio::test]
+    async fn settings_refs_admit_own_non_first_party_and_replace_authority_on_rebind() {
+        use subc_protocol::peer::CallerClaim;
+        let (surface, admin, store, _db, _root) = rig(225);
+        let id = "apikey:settings-test";
+        store.create(id, &settings_api()).unwrap();
+        let call = |channel| routed_json(&surface, &admin, channel, OP_GET_SCOPED, json!({"credential_id":id}));
+        let picked = || Some((1, vec![id.to_owned()]));
+        for (channel, principal, harness, claim, member) in [
+            (77, reserved("picked-test"), "self", CallerClaim::Own, picked()),
+            (78, reserved("picked-test"), "self", CallerClaim::Relay, picked()),
+            (79, reserved("picked-test"), "fed-test", CallerClaim::Own, picked()),
+            (80, subc_protocol::Principal::Direct, "self", CallerClaim::Own, picked()),
+            (81, reserved("picked-test"), "self", CallerClaim::Own, None),
+            (82, reserved("callosum"), "fed-phone:22222222222222222222222222222222", CallerClaim::Own, picked()),
+        ] {
+            settings_bind(&admin, channel, principal, harness, claim, member);
+        }
+        let granted = call(77).await;
+        assert!(granted["result"].get("payload").is_some());
+        let refused = call(81).await;
+        assert_eq!(refused["result"]["error"]["code"], "not_found");
+        for channel in 78..=80 {
+            assert_eq!(call(channel).await, refused);
+        }
+        assert_eq!(store.list_settings_ref_sets().unwrap().rows.len(), 1);
+        let secret = "ba".repeat(32);
+        let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+        let proposed = store.propose_enrollment("picked-test", &hash).unwrap();
+        store.approve_enrollment(&proposed.request_id, "picked-test", "operator").unwrap();
+        let credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } = store.poll_enrollment(&proposed.request_id, &secret).unwrap() else {
+            panic!("expected an approved enrollment");
+        };
+        assert_eq!(routed_json(&surface, &admin, 77, OP_GET_SCOPED, json!({"credential_id":id,"enrollment_token":token})).await, refused);
+        settings_bind(&admin, 77, reserved("picked-test"), "self", CallerClaim::Own, Some((2, vec![])));
+        assert_eq!(call(77).await, refused);
+        assert!(store.list_settings_ref_sets().unwrap().rows[0].set.refs().is_empty());
+    }
+
+    fn settings_params(op: &str, id: &str, version: u64) -> serde_json::Value {
+        match op {
+            OP_REPORT_AUTH_FAILURE => json!({"credential_id":id,"record_version":version,"provider_status":401}),
+            OP_REPORT_CONDITION => json!({"credential_id":id,"record_version":version,"provider_status":429,"reason":"quota"}),
+            OP_CLEAR_CONDITION => json!({"credential_id":id,"record_version":version}),
+            OP_USAGE_REPORT_SCOPED => json!({"credential_id":id,"reading":{"observedAtMs":12,"provider":"claude","headers":{}}}),
+            _ => json!({"credential_id":id}),
+        }
+    }
+
+    async fn exercise_settings_read_surface(op: &str) {
+        use subc_protocol::peer::CallerClaim;
+        let (surface, admin, store, _db, _root) = rig(226);
+        let ids = ["oauth:settings-test", "signing:settings-test", "github_app:settings-test", "apikey:settings-test"];
+        for (id, record) in ids.into_iter().zip([
+            settings_oauth("stub"),
+            VaultRecord::new_static(CredentialKind::SigningKey, "test", vec![3], None),
+            settings_oauth("github_app"),
+            settings_api(),
+        ]) {
+            store.create(id, &record).unwrap();
+        }
+        settings_bind(&admin, 77, reserved("settings-test"), "self", CallerClaim::Own, Some((1, ids.into_iter().map(str::to_owned).collect())));
+        let call = |id| routed_json(&surface, &admin, 77, op, settings_params(op, id, 1));
+        let refused = call("uncovered").await;
+        if op == OP_STATUS {
+            assert_eq!(refused["result"]["last_error_code"], "not_found");
+        } else {
+            assert_eq!(refused["result"]["error"]["code"], "not_found");
+        }
+        for id in &ids[..3] {
+            assert_eq!(call(id).await, refused, "{op} with {id}");
+        }
+        let allowed = call(ids[3]).await;
+        match op {
+            OP_GET_SCOPED => assert!(allowed["result"].get("payload").is_some()),
+            OP_STATUS => assert_eq!(allowed["result"]["ready"], true),
+            OP_REPORT_AUTH_FAILURE | OP_USAGE_REPORT_SCOPED => assert_eq!(allowed["result"]["accepted"], true),
+            OP_REPORT_CONDITION => assert_eq!(allowed["result"]["error"]["code"], "condition_not_admitted"),
+            OP_CLEAR_CONDITION => assert_eq!(allowed["result"], json!({"cleared":false})),
+            OP_PUBLIC_KEY => assert_eq!(allowed, refused),
+            _ => unreachable!(),
+        }
+    }
+
+    macro_rules! settings_read_surface_test {
+        ($name:ident, $op:expr) => {
+            #[tokio::test]
+            async fn $name() { exercise_settings_read_surface($op).await; }
+        };
+    }
+
+    settings_read_surface_test!(settings_refs_get_requires_api_key, OP_GET_SCOPED);
+    settings_read_surface_test!(settings_refs_status_requires_api_key, OP_STATUS);
+    settings_read_surface_test!(settings_refs_auth_failure_requires_api_key, OP_REPORT_AUTH_FAILURE);
+    settings_read_surface_test!(settings_refs_usage_requires_api_key, OP_USAGE_REPORT_SCOPED);
+    settings_read_surface_test!(settings_refs_report_condition_requires_api_key, OP_REPORT_CONDITION);
+    settings_read_surface_test!(settings_refs_clear_condition_requires_api_key, OP_CLEAR_CONDITION);
+    settings_read_surface_test!(settings_refs_public_key_refuses_all_kinds, OP_PUBLIC_KEY);
+
+    #[tokio::test]
+    async fn settings_refs_read_gateway_key_with_its_descriptor() {
+        use subc_protocol::peer::CallerClaim;
+        let (surface, admin, store, _db, _root) = rig(228);
+        let provider = "openai-gw-settings";
+        let id = format!("apikey:{provider}");
+        let base_url = format!("http://{}:8220/v1", std::net::Ipv4Addr::LOCALHOST);
+        store.gateway_create_audited(&id, &settings_api(), &credentials_core::GatewaySettings {
+            base_url: base_url.clone(),
+            auth: credentials_core::GatewayAuth { header: "authorization".into(), scheme: "bearer".into() },
+            headers: vec![],
+        }, &[provider.into()], AuditCtx::admin(AuditOp::Put)).unwrap();
+        settings_bind(&admin, 77, reserved("settings-test"), "self", CallerClaim::Own, Some((1, vec![id.clone()])));
+        let reply = routed_json(&surface, &admin, 77, OP_GET_SCOPED, json!({"credential_id":id})).await;
+        assert!(reply["result"].get("payload").is_some());
+        assert_eq!(reply["result"]["base_url"], base_url);
+    }
+
+    #[tokio::test]
+    async fn settings_refs_malformed_members_leave_the_bind_usable_and_warn_once() {
+        use subc_protocol::peer::CallerClaim;
+        struct Capture(Arc<Mutex<Vec<Vec<String>>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() != tracing::Level::WARN { return; }
+                struct Fields(Vec<String>);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                        self.0.push(format!("{}={value:?}", field.name()));
+                    }
+                }
+                let mut fields = Fields(Vec::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+        let (surface, admin, store, _db, _root) = rig(229);
+        let id = "apikey:settings-valid";
+        store.create(id, &settings_api()).unwrap();
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let invalid = [vec![id.to_owned(); 33], vec![id.into(), "invalid ref".into()], vec![id.into(), String::new()], vec![id.into(), "a".repeat(257)]];
+        tracing::subscriber::with_default(Capture(Arc::clone(&notes)), || {
+            for (offset, refs) in invalid.into_iter().enumerate() {
+                for _ in 0..2 {
+                    settings_bind(&admin, 77 + offset as u16, reserved("settings-warn-test"), "self", CallerClaim::Own, Some((1 + offset as u64, refs.clone())));
+                }
+            }
+        });
+        let notes = std::mem::take(&mut *notes.lock().unwrap());
+        assert_eq!(notes.len(), 4);
+        for (offset, fields) in notes.into_iter().enumerate() {
+            assert_eq!(fields.len(), 3);
+            assert!(fields.contains(&format!("generation={}", 1 + offset)));
+            assert!(fields.iter().any(|field| field == "module=\"settings-warn-test\""));
+            assert!(!fields.iter().any(|field| field.contains(id)));
+            let channel = 77 + offset as u16;
+            assert!(matches!(admin.route_caller(channel), federation::RouteCaller::Principal(_)));
+            let reply = routed_json(&surface, &admin, channel, OP_GET_SCOPED, json!({"credential_id":id})).await;
+            assert_eq!(reply["result"]["error"]["code"], "not_found");
+        }
+        assert!(store.list_settings_ref_sets().unwrap().rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn settings_refs_get_and_auth_failure_refuse_overwrite_after_kind_check() {
+        use subc_protocol::peer::CallerClaim;
+        for op in [OP_GET_SCOPED, OP_REPORT_AUTH_FAILURE] {
+            let (surface, admin, store, _db, _root) = rig(227);
+            let id = "picked-record";
+            store.create(id, &settings_api()).unwrap();
+            settings_bind(&admin, 77, reserved("settings-test"), "self", CallerClaim::Own, Some((1, vec![id.into()])));
+            let expected = routed_json(&surface, &admin, 77, op, settings_params(op, "uncovered", 1)).await;
+            let write = Arc::clone(&store);
+            surface.set_incarnation_hook("admitted", move || {
+                write.overwrite_unconditional_audited(id, &settings_oauth("stub"), AuditCtx::admin(AuditOp::Overwrite)).unwrap();
+            });
+            let actual = routed_json(&surface, &admin, 77, op, settings_params(op, id, 2)).await;
+            assert_eq!(actual, expected, "{op}");
+            assert!(store.get(id).is_ok(), "{op} changed the replacement");
+        }
     }
 
     #[tokio::test]

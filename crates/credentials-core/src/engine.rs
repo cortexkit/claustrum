@@ -329,7 +329,7 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        self.get_for_incarnation(credential_id, None, min_ttl_ms, force_refresh)
+        self.get_for_incarnation(credential_id, None, None, min_ttl_ms, force_refresh)
             .await
     }
 
@@ -341,20 +341,44 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        self.get_for_incarnation(credential_id, Some(incarnation), min_ttl_ms, force_refresh)
-            .await
+        self.get_for_incarnation(
+            credential_id,
+            Some(incarnation),
+            None,
+            min_ttl_ms,
+            force_refresh,
+        )
+        .await
+    }
+
+    pub async fn get_in_settings_record(
+        &self,
+        credential_id: &str,
+        pin: &crate::store::SettingsReadPin,
+        min_ttl_ms: Option<i64>,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
+        self.get_for_incarnation(
+            credential_id,
+            Some(&pin.incarnation),
+            Some(pin),
+            min_ttl_ms,
+            false,
+        )
+        .await
     }
 
     async fn get_for_incarnation(
         &self,
         credential_id: &str,
         expected_incarnation: Option<&str>,
+        settings_read: Option<&crate::store::SettingsReadPin>,
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        let initial = match expected_incarnation {
-            Some(incarnation) => self.store.get_snapshot(credential_id, incarnation)?,
-            None => self
+        let initial = match (settings_read, expected_incarnation) {
+            (Some(pin), _) => self.store.get_pinned_snapshot(credential_id, pin)?,
+            (None, Some(incarnation)) => self.store.get_snapshot(credential_id, incarnation)?,
+            (None, None) => self
                 .store
                 .get_with_stale_pending_and_digest(credential_id)?,
         };
@@ -383,7 +407,11 @@ impl RefreshEngine {
         let initial_version = initial.record.record_version;
         let lock = self.inflight_lock(credential_id);
         let _guard = lock.lock().await;
-        let initial = self.store.get_snapshot(credential_id, &incarnation)?;
+        let snapshot = || match settings_read {
+            Some(pin) => self.store.get_pinned_snapshot(credential_id, pin),
+            None => self.store.get_snapshot(credential_id, &incarnation),
+        };
+        let initial = snapshot()?;
         // An intent surviving the prior holder is unresolved just as it would be
         // at boot; a fresh access token cannot prove its refresh token survived.
         if initial.has_refresh_intent {
@@ -421,7 +449,7 @@ impl RefreshEngine {
             )?;
             // If a concurrent write moved the version, return the replacement rather
             // than incorrectly refusing the record this get did not inspect.
-            let replacement = self.store.get_snapshot(credential_id, &incarnation)?;
+            let replacement = snapshot()?;
             return Ok(GetWithRefreshStatus {
                 incarnation,
                 record: replacement.record,

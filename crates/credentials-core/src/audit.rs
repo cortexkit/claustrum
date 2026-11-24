@@ -162,6 +162,8 @@ pub enum AuditOp {
     GrantRevoke,
     /// A module's last-seen declaration changed; payload_hash is SHA-256 of grants_json.
     DeclarationSeen,
+    /// A module's last-seen settings refs changed; payload_hash is SHA-256 of refs_json.
+    SettingsRefsSeen,
     /// A credential's authorization categories changed.
     SetCategory,
     /// A credential's operator-assigned catalog provider ids changed.
@@ -325,6 +327,7 @@ impl AuditOp {
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::DeclarationSeen => "declaration_seen",
+            AuditOp::SettingsRefsSeen => "settings_refs_seen",
             AuditOp::SetCategory => "set_category",
             AuditOp::SetProviders => "set_providers",
             AuditOp::GatewayCreate => "gateway_create",
@@ -1100,6 +1103,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::DeclarationSeen => AuditOp::DeclarationSeen.as_str(),
+                AuditOp::SettingsRefsSeen => AuditOp::SettingsRefsSeen.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
                 AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
                 AuditOp::GatewayCreate => AuditOp::GatewayCreate.as_str(),
@@ -1168,6 +1172,7 @@ mod vocabulary_documentation_tests {
         assert_documented(section, "audit_log.op", value(AuditOp::GrantCreate));
         assert_documented(section, "audit_log.op", value(AuditOp::GrantRevoke));
         assert_documented(section, "audit_log.op", value(AuditOp::DeclarationSeen));
+        assert_documented(section, "audit_log.op", value(AuditOp::SettingsRefsSeen));
         assert!(
             WIRE_CONTRACT.contains(value(AuditOp::SetCategory)),
             "the new category audit op must be documented in the slice wire contract"

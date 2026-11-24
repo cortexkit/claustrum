@@ -593,8 +593,8 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
     let sqlite = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([211; 32])).unwrap();
     EncryptedStore::migrate(&store.store).unwrap();
-    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 54);
-    assert_eq!(newest_migration_version(), 54);
+    assert_eq!(store.with_raw_conn(read_schema_version).unwrap(), 55);
+    assert_eq!(newest_migration_version(), 55);
     let added: Vec<_> = table_names(&store)
         .into_iter()
         .filter(|name| !tables_before.contains(name))
@@ -617,7 +617,8 @@ fn store_at_descriptor_schema_upgrades_to_gateway_settings_and_conserves_every_r
             "hub_own_report",
             "hub_report_task",
             "module_secrets",
-            "remote_record_conditions"
+            "remote_record_conditions",
+            "settings_ref_sets"
         ]
     );
     assert!(rows(&store, "credential_gateway_settings").is_empty());

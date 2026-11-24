@@ -118,7 +118,8 @@ impl ReadSurface {
                     &audience,
                     GrantOperation::AccountToken,
                 )
-                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?;
+                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?
+                .principal;
             if !AUDIENCES.contains(&audience.as_str())
                 || (audience == "cortexkit-hub" && (kind != "reserved" || id != "ckbus"))
             {

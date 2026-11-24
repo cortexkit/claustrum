@@ -496,6 +496,7 @@ impl EncryptedStore {
                 let caller_active_grants = grants.len() as u32;
                 if operation == GrantOperation::AccountToken {
                     return Ok(ScopedCoverage {
+                        settings_read: None,
                         covered: grants.iter().any(|(kind, selector)| {
                             kind == SelectorKind::Audience.as_str() && credential_id == selector
                         }),
@@ -508,6 +509,7 @@ impl EncryptedStore {
                 if operation == GrantOperation::Deposit {
                     let categories = crate::catalog::category_defaults(credential_id);
                     return Ok(ScopedCoverage {
+                        settings_read: None,
                         covered: grants.iter().any(|(kind, selector)| {
                             kind == SelectorKind::Category.as_str() && categories.contains(selector)
                         }),
@@ -555,9 +557,25 @@ impl EncryptedStore {
                     None
                 };
 
+                let settings_read = if !covered
+                    && operation == GrantOperation::Read
+                    && principal_kind == "reserved"
+                    && tables == Some(MetadataTables::Local)
+                    && declared.settings_refs.as_ref().is_some_and(|set| {
+                        set.module_id() == principal_id
+                            && set
+                                .refs()
+                                .binary_search_by(|id| id.as_str().cmp(credential_id))
+                                .is_ok()
+                    }) {
+                    self.settings_read_pin(conn, credential_id)?
+                } else {
+                    None
+                };
                 Ok(ScopedCoverage {
-                    covered,
-                    caller_active_grants,
+                    covered: covered || settings_read.is_some(),
+                    caller_active_grants: caller_active_grants + u32::from(settings_read.is_some()),
+                    settings_read,
                     holds_category_selector,
                     id_exists,
                     id_category_count,

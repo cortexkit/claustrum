@@ -91,11 +91,17 @@ pub fn declared_grant_approval_sentence(grant: &DeclaredGrant) -> Option<String>
 pub struct DeclaredGrantSet {
     module_id: Option<String>,
     grants: Vec<DeclaredGrant>,
+    pub(super) settings_refs: Option<SettingsRefSet>,
 }
 
 impl DeclaredGrantSet {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn with_settings_refs(mut self, settings_refs: Option<SettingsRefSet>) -> Self {
+        self.settings_refs = settings_refs;
+        self
     }
 
     pub fn grants(&self) -> &[DeclaredGrant] {
@@ -136,6 +142,7 @@ impl DeclaredGrantSet {
         Self {
             module_id: Some(module_id.into()),
             grants,
+            settings_refs: None,
         }
     }
 

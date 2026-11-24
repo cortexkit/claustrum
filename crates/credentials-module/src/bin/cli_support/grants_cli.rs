@@ -857,6 +857,7 @@ pub(super) fn cmd_grants(global: &GlobalArgs, args: &[String]) -> Result<(), Cli
         for line in declared.lines {
             println!("{line}");
         }
+        print_settings_grants(&result);
     } else {
         print_grants(&result)?;
         if declared.count > 0 {
@@ -880,6 +881,72 @@ struct DeclaredGrantRow {
     selector: String,
     operation: GrantOperation,
     first_seen_ms: i64,
+    source: Option<String>,
+}
+
+fn print_settings_grants(result: &serde_json::Value) {
+    let mut incomplete = result
+        .get("settings_grants_incomplete")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let mut rows = Vec::new();
+    if let Some(raw) = result.get("settings_grants") {
+        if let Some(raw) = raw.as_array() {
+            for value in raw {
+                let row = serde_json::from_value::<DeclaredGrantRow>(value.clone())
+                    .ok()
+                    .filter(|row| {
+                        row.source.as_deref() == Some("settings")
+                            && row.selector_kind == SelectorKind::Exact
+                            && row.operation == GrantOperation::Read
+                            && credentials_core::store::SettingsRefSet::new(
+                                &row.module_id,
+                                0,
+                                std::slice::from_ref(&row.selector),
+                            )
+                            .is_some()
+                    });
+                if let Some(row) = row {
+                    rows.push(row);
+                } else {
+                    incomplete = true;
+                }
+            }
+        } else {
+            incomplete = true;
+        }
+    }
+    if !rows.is_empty() {
+        let wm = rows
+            .iter()
+            .map(|row| row.module_id.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(6);
+        let ws = rows
+            .iter()
+            .map(|row| row.selector.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(8);
+        println!("settings grants (last approved references each module presented):");
+        println!(
+            "{:<wm$}  SELECTOR KIND  {:<ws$}  OP    SOURCE    FIRST SEEN",
+            "MODULE", "SELECTOR"
+        );
+        for row in rows {
+            println!(
+                "{:<wm$}  {:<13}  {:<ws$}  read  settings  {}",
+                row.module_id,
+                "exact",
+                row.selector,
+                format_ts_ms(row.first_seen_ms)
+            );
+        }
+    }
+    if incomplete {
+        eprintln!("settings grants could not be read completely");
+    }
 }
 
 struct DeclaredGrantReport {

@@ -729,6 +729,66 @@ async fn fleet_batch_grammar_and_each_item_caps_refuse_whole_call_before_store_a
         }
     }
 }
+#[tokio::test]
+async fn fleet_positional_arrays_refuse_at_request_item_and_wrap_level_before_store_access() {
+    let root = temp_root("fleet-positional");
+    let callosum = SharedCallosumStandIn::start(root.path()).await;
+    let a = Vault::new(root.path(), 1, &callosum);
+    let b = Vault::new(root.path(), 2, &callosum);
+    shared_epoch(&a, &b, &callosum).await;
+    // The keyed forms of the same values are accepted.
+    let sealed = a
+        .ok("fleet.epoch_seal", json!({"aad":"","plaintext":""}))
+        .await;
+    let open = open_params(&sealed, "");
+    b.ok("fleet.epoch_open_batch", json!({"items":[open.clone()]}))
+        .await;
+    // Any store access on `c` would answer with a store error, not invalid_params.
+    let c = Vault::new(root.path(), 3, &callosum);
+    rusqlite::Connection::open(c.fixture.store_path())
+        .unwrap()
+        .execute("DROP TABLE fleet_epochs", [])
+        .unwrap();
+    let positional_open = json!([
+        open["epoch"],
+        open["nonce"],
+        open["ciphertext"],
+        open["aad"]
+    ]);
+    let wrap = json!({"ct":URL_SAFE_NO_PAD.encode([0; 16]),"enc":URL_SAFE_NO_PAD.encode([0; 32]),
+        "from":member(1),"to":member(3),"v":"1"});
+    let positional_wrap = json!([wrap["ct"], wrap["enc"], wrap["from"], wrap["to"], wrap["v"]]);
+    for (method, params) in [
+        ("fleet.epoch_seal", json!(["", ""])),
+        ("fleet.epoch_open", positional_open.clone()),
+        ("fleet.epoch_seal_batch", json!([[{"aad":"","plaintext":""}]])),
+        ("fleet.epoch_seal_batch", json!({"items":[["", ""]]})),
+        ("fleet.epoch_open_batch", json!({"items":[positional_open]})),
+        ("fleet.epoch_status", json!([])),
+        ("fleet.epoch_commit", json!([1, URL_SAFE_NO_PAD.encode([0; 16])])),
+        ("fleet.epoch_import", json!([wrap])),
+        ("fleet.epoch_import", json!({"wrap":positional_wrap})),
+        ("fleet.epoch_wrap_for", json!([member(2)])),
+    ] {
+        assert!(
+            matches!(
+                fleet_ops::serve(
+                    Arc::clone(&c.store),
+                    None,
+                    Some(&Principal::Reserved {
+                        module_id: "entorhinal".into()
+                    }),
+                    method,
+                    &params
+                )
+                .await,
+                Answer::InvalidParams
+            ),
+            "{method} {params}"
+        );
+    }
+}
+
 fn peers(callosum: &SharedCallosumStandIn, vaults: &[&Vault]) {
     callosum.answer(
         TARGET_MODULE,

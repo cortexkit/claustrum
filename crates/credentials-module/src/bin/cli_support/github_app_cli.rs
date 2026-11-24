@@ -37,21 +37,35 @@ fn valid_org(org: &str) -> bool {
         && org.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+const CREATE_VALUE_FLAGS: &[&str] = &["--agent", "--org", "--name", "--approve-on", "--browser"];
+const CREATE_SWITCHES: &[&str] = &["--no-relay", "--no-browser"];
+
+pub(crate) fn flag_spec(verb: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match verb {
+        "create" => (CREATE_VALUE_FLAGS, CREATE_SWITCHES),
+        "relay-retry" | "rotate-webhook-secret" => (&["--slug"], &[]),
+        _ => (&[], &[]),
+    }
+}
+
 fn create_args(args: &[String]) -> Result<CreateArgs, CliError> {
     let mut values = BTreeMap::new();
     let mut switches = BTreeSet::new();
     let mut args = args.iter().map(String::as_str);
     while let Some(flag) = args.next() {
         match flag {
-            "--agent" | "--org" | "--name" | "--approve-on" | "--browser" => {
+            flag if CREATE_VALUE_FLAGS.contains(&flag) => {
                 let value = args
                     .next()
+                    .filter(|value| {
+                        !CREATE_VALUE_FLAGS.contains(value) && !CREATE_SWITCHES.contains(value)
+                    })
                     .ok_or_else(|| usage(format!("{flag} requires a value")))?;
                 if values.insert(flag, value).is_some() {
                     return Err(usage(format!("{flag} must not be repeated")));
                 }
             }
-            "--no-relay" | "--no-browser" => {
+            flag if CREATE_SWITCHES.contains(&flag) => {
                 if !switches.insert(flag) {
                     return Err(usage(format!("{flag} must not be repeated")));
                 }
@@ -121,20 +135,25 @@ pub(super) fn cmd(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         .ok_or_else(|| usage(help("github-app")))?;
     let verb = verb.as_str();
     match verb {
-        "create" => run_create(
-            create_args(args)?,
-            commit,
-            browser_login::pasted_lines,
-            |action, url| {
-                browser_login::present(
-                    action,
-                    url,
-                    |url| crate::open_in_browser(action, url),
-                    browser_login::copy_link,
-                )
-            },
-            |line| println!("{line}"),
-        ),
+        "create" => {
+            let args = create_args(args)?;
+            let _hidden = browser_login::HiddenPaste::begin()
+                .map_err(|error| CliError::Io(format!("hiding callback input: {error}")))?;
+            run_create(
+                args,
+                commit,
+                browser_login::pasted_lines,
+                |action, url| {
+                    browser_login::present(
+                        action,
+                        url,
+                        |url| crate::open_in_browser(action, url),
+                        browser_login::copy_link,
+                    )
+                },
+                |line| println!("{line}"),
+            )
+        }
         "relay-retry" | "rotate-webhook-secret" => {
             let [flag, slug] = args else {
                 return Err(usage("expected --slug <slug>"));
@@ -267,24 +286,31 @@ fn run_create(
     if matches!(completion, RouteCommit::Indeterminate(_)) {
         let guidance = match commit(prepare()) {
             RouteCommit::Refused(message) if code(&message) == "github_app_agent_exists" => {
-                "The App may be saved. Check `ck auth list`; if listed, run `ck auth github-app relay-retry --slug <slug>`.".into()
+                format!("The vault could not confirm whether this request attempted a write. The App named {name:?} may be saved. Check GitHub and `ck auth list`; if listed, run `ck auth github-app relay-retry --slug <slug>`.")
             }
-            _ => format!("github_app_conversion_unknown: Check GitHub for the App named {name:?}; the vault could not confirm conversion."),
+            _ => format!("github_app_conversion_unknown: The vault could not confirm whether it attempted a write. Check GitHub for the App named {name:?} and check `ck auth list` before starting again."),
         };
         return Err(CliError::RouteIndeterminate(guidance));
     }
     if let RouteCommit::Refused(message) = &completion {
         let guidance = match code(message) {
-            "github_app_agent_exists" => Some(format!("github_app_agent_exists: The App was created on GitHub but not converted. Delete the App named {name:?}.")),
-            "github_app_code_invalid" => Some(format!("github_app_code_invalid: Delete the App named {name:?} if it exists, then rerun creation.")),
-            "github_app_conversion_unknown" => Some(format!("github_app_conversion_unknown: Check GitHub for the App named {name:?}, delete it if present, then rerun creation.")),
+            "github_app_agent_exists" => Some(format!("github_app_agent_exists: No vault write was attempted. Delete the unconverted GitHub App named {name:?}.")),
+            "github_app_code_invalid" => Some(format!("github_app_code_invalid: No vault write was attempted. Delete the App named {name:?} if it exists, then rerun creation.")),
+            "github_app_conversion_unknown" => Some(format!("github_app_conversion_unknown: No vault write was attempted. Check GitHub for the App named {name:?} before deleting it or starting again.")),
             _ => None,
         };
         if let Some(guidance) = guidance {
             return Err(CliError::RouteRefused(guidance));
         }
     }
-    report_creation(result(completion)?, &name, emit)
+    let no_write =
+        format!("No vault write was attempted. Check GitHub for the App named {name:?}.");
+    let reply = result(completion).map_err(|error| match error {
+        CliError::RouteRefused(reason) => CliError::RouteRefused(format!("{reason}. {no_write}")),
+        CliError::LocalFailure(reason) => CliError::LocalFailure(format!("{reason}. {no_write}")),
+        error => error,
+    })?;
+    report_creation(reply, &name, emit)
 }
 
 fn report_creation(reply: Value, name: &str, mut emit: impl FnMut(&str)) -> Result<(), CliError> {
@@ -296,29 +322,41 @@ fn report_creation(reply: Value, name: &str, mut emit: impl FnMut(&str)) -> Resu
     let outcome = reply["outcome"].as_str();
     if outcome == Some("github_app_unsaved") {
         let target = match slug {
-            Some(slug) => format!("with slug {slug}"),
+            Some(slug) => format!("named {name:?} with slug {slug}"),
             None => format!("named {name:?}"),
         };
+        let write = match reply["cause"].as_str() {
+            Some("reply_invalid" | "busy") => "No vault write was attempted.",
+            Some("github_app_exists" | "github_app_agent_exists" | "store_failed") => {
+                "The vault attempted to save the App but could not."
+            }
+            _ => "The vault did not report whether it attempted a write.",
+        };
         return Err(CliError::Io(format!(
-            "github_app_unsaved: Delete the GitHub App {target}; the vault could not save it."
+            "github_app_unsaved: {write} Delete the unsaved GitHub App {target}."
         )));
     }
+    let invalid_completion = || {
+        CliError::Io(format!(
+        "The daemon did not confirm whether it attempted a write. Check `ck auth list` and check GitHub for the App named {name:?} before starting again."
+    ))
+    };
     if !matches!(outcome, Some("created" | "relay_registration_failed")) {
-        return Err(bad_reply());
+        return Err(invalid_completion());
     }
     let (Some(slug), Some(app_id)) = (slug, app_id) else {
-        return Err(bad_reply());
+        return Err(invalid_completion());
     };
     let install_url = format!("{GITHUB_ORIGIN}/apps/{slug}/installations/new");
     if reply["install_url"].as_str() != Some(&install_url) {
-        return Err(bad_reply());
+        return Err(invalid_completion());
     }
     emit(&format!("Slug: {slug}"));
     emit(&format!("App id: {app_id}"));
     emit(&format!("Install: {install_url}"));
     emit("Choose \"Only select repositories\" when installing the App.");
     if outcome == Some("relay_registration_failed") {
-        let mut message = "relay_registration_failed: The App is saved, but webhook events will not arrive without relay registration.".to_owned();
+        let mut message = format!("relay_registration_failed: The App is saved (GitHub name {name:?}), but webhook events will not arrive without relay registration.");
         if reply["cause"].as_str() == Some("relay_unavailable") {
             message.push_str(&format!(
                 " Try `ck auth github-app relay-retry --slug {slug}`."
@@ -352,7 +390,7 @@ fn result(reply: RouteCommit) -> Result<Value, CliError> {
                 | "relay_request_refused" | "relay_reply_invalid" | "relay_slot_expired"
                 | "relay_app_mismatch" | "audit_write_failed") => known.into(),
             "github_app_rotation_pending" => "github_app_rotation_pending: Run `rotate-webhook-secret` for this App to resume rotation.".into(),
-            "github_app_hook_update_failed" => "github_app_hook_update_failed: Rerun `rotate-webhook-secret` to resume this rotation.".into(),
+            "github_app_hook_update_failed" => "github_app_hook_update_failed: If the relay accepted the new secret, deliveries using the old secret stop about 10 minutes after acceptance. Rerun `rotate-webhook-secret` now to resume this rotation.".into(),
             _ => "the GitHub App operation was not admitted".into(),
         })),
     }
@@ -598,6 +636,19 @@ mod tests {
     }
 
     #[test]
+    fn github_app_name_does_not_consume_a_relay_switch() {
+        let error = create_args(&strings(&["--agent", AGENT, "--name", "--no-relay"]))
+            .err()
+            .expect("missing name must be refused before any admin call");
+        assert!(error.to_string().contains("--name requires a value"));
+        assert!(
+            create_args(&strings(&["--agent", AGENT, "--name", NAME, "--no-relay"]))
+                .unwrap()
+                .no_relay
+        );
+    }
+
+    #[test]
     fn github_app_org_accepts_39_characters_and_refuses_40() {
         assert!(create_args(&strings(&[
             "--agent",
@@ -741,6 +792,40 @@ mod tests {
             assert!(!stdout.contains("Install:"));
             assert!(result.unwrap_err().to_string().contains(target));
         }
+    }
+
+    #[test]
+    fn github_app_cli_names_the_app_when_completion_could_not_attempt_a_write() {
+        for failure in [
+            RouteCommit::NoLiveModule(MARKERS.join(" ")),
+            RouteCommit::Refused(format!(
+                "relay_unavailable/transient: {}",
+                MARKERS.join(" ")
+            )),
+        ] {
+            let (calls, _, result) = exercise_create(false, false, vec![prepared(), failure]);
+            assert_eq!(
+                calls,
+                [
+                    "admin.github_app_manifest_prepare",
+                    "admin.github_app_create_complete"
+                ]
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(&format!("{NAME:?}")));
+            assert!(error.contains("No vault write was attempted"));
+        }
+    }
+
+    #[test]
+    fn github_app_cli_warns_of_delivery_cutoff_when_hook_update_fails() {
+        let error = result(RouteCommit::Refused(
+            "github_app_hook_update_failed/transient".into(),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("10 minutes"));
+        assert!(error.contains("now to resume"));
     }
 
     #[tokio::test]

@@ -808,3 +808,289 @@ async fn login_sharing_invalid_startup_edits_warn_once_and_poll_on_tokio_clock()
     task.abort();
     assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
 }
+
+/// Collects WARN events logged by one daemon module, as `name=value;` fields.
+struct WarnCapture {
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    module: &'static str,
+}
+
+impl tracing::Subscriber for WarnCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={value:?};", field.name()));
+            }
+        }
+        if *event.metadata().level() == tracing::Level::WARN
+            && event
+                .metadata()
+                .module_path()
+                .is_some_and(|path| path.ends_with(self.module))
+        {
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.logs.lock().unwrap().push(fields.0);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+type Published = Arc<std::sync::Mutex<Vec<Option<Vec<String>>>>>;
+
+fn record_published(rig: &Rig) -> (Published, tokio::task::JoinHandle<()>) {
+    let published = Published::default();
+    let task = tokio::spawn(claustrum_module_probe::record_pairing_snapshots_for_test(
+        Arc::clone(&rig.home.store),
+        rig.vault.outbound.clone(),
+        Arc::clone(&published),
+    ));
+    (published, task)
+}
+
+fn method_count(rig: &Rig, method: &str) -> usize {
+    rig.callosum
+        .methods("callosum")
+        .iter()
+        .filter(|seen| seen.as_str() == method)
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
+    use std::time::Duration;
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(WarnCapture {
+        logs: Arc::clone(&warnings),
+        module: "federation::sharing",
+    });
+    let rig = Rig::new("sharing-refused-watch", snapshot("all_classes")).await;
+    rig.callosum.answer(
+        TARGET_MODULE,
+        WATCH,
+        Reply::SubscriptionError {
+            channel_zero: false,
+            body: json!({"code": "fed_not_ready", "message": "watch refused"}),
+        },
+    );
+    let (published, task) = record_published(&rig);
+    // Each round publishes the read's roster, then withdraws it when the watch is
+    // refused, just before the loop sleeps.
+    let rounds = || {
+        published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.is_none())
+            .count()
+    };
+    wait_until(|| rounds() == 1).await;
+    let mut gaps = Vec::new();
+    for round in 2..=5 {
+        let mut seconds = 0;
+        loop {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            seconds += 1;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            // The next round starts with a read, which waits for its reply.
+            if rig
+                .vault
+                .outbound
+                .pending_waiter_count_for_test()
+                .await
+                .unwrap_or(0)
+                > 0
+            {
+                break;
+            }
+            assert!(seconds <= 64, "no reread after {seconds} s");
+        }
+        gaps.push(seconds);
+        wait_until(|| rounds() == round).await;
+    }
+    assert_eq!(gaps, [1, 2, 4, 8], "seconds between successive reads");
+    // One WARN per distinct failure, never one per round.
+    let warnings = warnings.lock().unwrap();
+    let distinct: std::collections::BTreeSet<_> = warnings.iter().collect();
+    assert_eq!(distinct.len(), warnings.len(), "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("fed_not_ready")),
+        "{warnings:?}"
+    );
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_first_notices_reopen_both_local_feeds_after_the_setup_budget() {
+    use claustrum_module_probe::federation::ADMIN_OP_BUDGET;
+    const PEER_KEYS_WATCH: &str = "callosum.peer_keys_watch";
+    let rig = Rig::new("sharing-first-notice", snapshot("all_classes")).await;
+    // Both watches are accepted and never send a notice.
+    rig.callosum
+        .answer(TARGET_MODULE, WATCH, Reply::SilentWatch);
+    rig.callosum
+        .answer(TARGET_MODULE, PEER_KEYS_WATCH, Reply::SilentWatch);
+    let (observed, _bindings) = tokio::sync::watch::channel(None);
+    let task = tokio::spawn(claustrum_module_probe::observe_hub_bindings_for_test(
+        Arc::clone(&rig.home.store),
+        rig.vault.outbound.clone(),
+        "00000000000000000000000000000001",
+        observed,
+    ));
+    wait_until(|| method_count(&rig, WATCH) == 1 && method_count(&rig, PEER_KEYS_WATCH) == 1).await;
+    tokio::time::advance(ADMIN_OP_BUDGET).await;
+    // Both accepted-but-silent watches are given up and cancelled.
+    wait_until(|| rig.callosum.cancelled_watches() == 2).await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    wait_until(|| method_count(&rig, WATCH) == 2 && method_count(&rig, PEER_KEYS_WATCH) == 2).await;
+    assert_eq!(method_count(&rig, READ), 2);
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_coalesced_off_on_rereads_the_roster_and_restores_the_switch_grants() {
+    let mut rig = Rig::new("sharing-off-on", snapshot("all_classes")).await;
+    rig.home
+        .store
+        .set_login_sharing_audited(true, "test")
+        .unwrap();
+    rig.start().await;
+    rig.grants(2).await;
+    assert_eq!(method_count(&rig, READ), 1);
+    // No await between the two changes, so the reconciler sees one coalesced write
+    // notice and the setting where it started. Callosum sends nothing unsolicited.
+    assert!(rig
+        .home
+        .store
+        .set_login_sharing_audited(false, "test")
+        .unwrap());
+    assert!(rig.home.store.list_member_grants().unwrap().is_empty());
+    assert!(rig
+        .home
+        .store
+        .set_login_sharing_audited(true, "test")
+        .unwrap());
+    rig.grants(2).await;
+    assert_eq!(method_count(&rig, READ), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_roster_reaches_hub_workers_only_after_it_validates_and_its_grants_commit() {
+    use std::time::Duration;
+    const OTHER: &str = "0123456789abcdef0123456789abcdef";
+    let rig = Rig::new("sharing-publish-order", snapshot("all_classes")).await;
+    let paired = &MEMBER["fed-computer:".len()..];
+    let (published, task) = record_published(&rig);
+    rig.grants(2).await;
+    let showed = |fingerprint: &str| {
+        published
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|devices| devices.iter().any(|seen| seen == fingerprint))
+    };
+    wait_until(|| showed(paired)).await;
+    let before = rig.home.store.list_member_grants().unwrap();
+    // The loop withdraws its roster just before it sleeps after a failure.
+    let withdrawn = || {
+        published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.is_none())
+            .count()
+    };
+
+    // A roster that omits the paired computer and names another one with a
+    // pairing id the store refuses is no roster at all.
+    let reread = Held::new();
+    rig.callosum
+        .answer(TARGET_MODULE, READ, Reply::Hold(reread.clone()));
+    let mut malformed = snapshot("empty");
+    malformed["devices"] = json!([{"class": "computer", "fingerprint": OTHER,
+        "pairing_id": "bad pairing", "shares": [{"share": "vault", "enabled": true}]}]);
+    rig.callosum.watch_snapshot(Some(malformed)).await;
+    wait_until(|| withdrawn() == 1).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    reread.arrived().await;
+    assert!(!showed(OTHER), "{:?}", published.lock().unwrap());
+    assert!(published
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .all(|devices| devices.iter().any(|seen| seen == paired)));
+    assert_eq!(rig.home.store.list_member_grants().unwrap(), before);
+
+    // A valid roster whose grants cannot commit is not published either.
+    let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_grant_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'member_grant_create' BEGIN SELECT RAISE(ABORT, 'grant audit failed'); END;").unwrap();
+    let mut fresh = snapshot("all_classes");
+    fresh["devices"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"class": "computer",
+        "fingerprint": OTHER, "pairing_id": "pair-other",
+        "shares": [{"share": "vault", "enabled": true}]}));
+    let retry = Held::new();
+    rig.callosum
+        .answer(TARGET_MODULE, READ, Reply::Hold(retry.clone()));
+    reread.release(Reply::Ok(fresh));
+    wait_until(|| withdrawn() == 2).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    retry.arrived().await;
+    assert!(!showed(OTHER), "{:?}", published.lock().unwrap());
+    assert_eq!(rig.home.store.list_member_grants().unwrap(), before);
+
+    // A later valid roster is still published, including one without the computer.
+    conn.execute_batch("DROP TRIGGER fail_grant_audit").unwrap();
+    retry.release(Reply::Ok(snapshot("empty")));
+    wait_until(|| published.lock().unwrap().contains(&Some(Vec::new()))).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn login_sharing_apply_failures_warn_once_per_error_and_recover() {
+    use claustrum_module_probe::federation::login_sharing::ConfigPoll;
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(WarnCapture {
+        logs: Arc::clone(&warnings),
+        module: "federation::login_sharing",
+    });
+    let rig = Rig::new("login-sharing-apply-failure", snapshot("empty")).await;
+    rig.home
+        .store
+        .set_login_sharing_audited(false, "test")
+        .unwrap();
+    let path = rig._root.join("claustrum.jsonc");
+    std::fs::write(&path, r#"{"login_sharing":true}"#).unwrap();
+    let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'store unavailable'); END;").unwrap();
+    let mut poll = ConfigPoll::new(path, Arc::clone(&rig.home.store));
+    for _ in 0..3 {
+        assert!(poll.poll_logged().await.is_err());
+    }
+    {
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+    conn.execute_batch("DROP TRIGGER fail_audit").unwrap();
+    poll.poll_logged().await.unwrap();
+    assert!(rig.home.store.login_sharing().unwrap());
+    assert_eq!(warnings.lock().unwrap().len(), 1);
+}

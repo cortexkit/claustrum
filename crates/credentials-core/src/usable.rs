@@ -103,6 +103,8 @@ pub enum Usability {
     /// Neither a usable access token nor refresh material: cannot serve, cannot
     /// recover on its own, and needs an operator login.
     Stranded,
+    /// The access token is unusable and the refresh material has no supported adapter.
+    UnsupportedRefreshConfiguration,
     /// The envelope did not open, or its plaintext did not decode.
     Unreadable { why: String },
 }
@@ -171,18 +173,23 @@ impl std::fmt::Display for ScanError {
 /// and an all-serviceable report is equally consistent with a function that has no
 /// stranded arm at all.
 pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
-    is_serviceable_at(oauth, None, chrono::Utc::now().timestamp_millis())
+    is_serviceable_at(oauth, true, chrono::Utc::now().timestamp_millis())
 }
 
-fn is_serviceable_at(oauth: Option<&OAuthCredential>, adapter: Option<&str>, now_ms: i64) -> bool {
+fn usable_access(oauth: &OAuthCredential, now_ms: i64) -> bool {
+    !oauth.access_token.expose().is_empty() && oauth.expires_at_ms.is_none_or(|exp| now_ms < exp)
+}
+
+fn is_serviceable_at(
+    oauth: Option<&OAuthCredential>,
+    refresh_supported: bool,
+    now_ms: i64,
+) -> bool {
     match oauth {
         None => true,
         Some(oauth) => {
-            let can_refresh = adapter != Some(crate::refresh_adapters::digitalocean::ADAPTER_NAME)
-                && !oauth.refresh_token.expose().is_empty();
-            let usable_access = !oauth.access_token.expose().is_empty()
-                && oauth.expires_at_ms.is_none_or(|exp| now_ms < exp);
-            can_refresh || usable_access
+            (refresh_supported && !oauth.refresh_token.expose().is_empty())
+                || usable_access(oauth, now_ms)
         }
     }
 }
@@ -249,11 +256,8 @@ pub fn read_db_key_id_read_only(conn: &Connection) -> Option<KeyId> {
 
 /// Open a vault's store read-only, taking no lease.
 pub fn open_store_read_only(store_path: &Path) -> Result<Connection, ScanError> {
-    Connection::open_with_flags(
-        store_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|e| ScanError::Open(e.to_string()))
+    Connection::open_with_flags(store_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| ScanError::Open(e.to_string()))
 }
 
 /// Decrypt every record and report what each one's contents imply.
@@ -285,6 +289,7 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
 
     let mut out = Vec::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let registry = crate::refresh_adapters::registered_refresh_adapters(Default::default());
     for row in rows {
         let (id, version, state, blob, written_at_ms) =
             row.map_err(|e| ScanError::Read(e.to_string()))?;
@@ -330,7 +335,17 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
         };
 
         let oauth = record.oauth.as_ref();
-        let usability = if !is_serviceable_at(oauth, record.refresh_adapter.as_deref(), now_ms) {
+        let refresh_supported = record.is_refreshable()
+            && registry.iter().any(|adapter| {
+                record.refresh_adapter.as_deref() == Some(adapter.name()) && adapter.can_refresh()
+            });
+        let unsupported_configuration = !refresh_supported
+            && oauth.is_some_and(|oauth| {
+                !usable_access(oauth, now_ms) && !oauth.refresh_token.expose().is_empty()
+            });
+        let usability = if unsupported_configuration {
+            Usability::UnsupportedRefreshConfiguration
+        } else if !is_serviceable_at(oauth, refresh_supported, now_ms) {
             Usability::Stranded
         } else {
             match oauth {
@@ -560,15 +575,11 @@ mod tests {
     fn expired_access_requires_a_working_refresh_path() {
         let mut expired = creds("access", "");
         expired.expires_at_ms = Some(100);
-        assert!(super::is_serviceable_at(Some(&expired), None, 99));
-        assert!(!super::is_serviceable_at(Some(&expired), None, 100));
+        assert!(super::is_serviceable_at(Some(&expired), true, 99));
+        assert!(!super::is_serviceable_at(Some(&expired), true, 100));
         expired.refresh_token = "refresh".to_string().into();
-        assert!(super::is_serviceable_at(Some(&expired), None, 100));
-        assert!(!super::is_serviceable_at(
-            Some(&expired),
-            Some("digitalocean"),
-            100
-        ));
+        assert!(super::is_serviceable_at(Some(&expired), true, 100));
+        assert!(!super::is_serviceable_at(Some(&expired), false, 100));
     }
 
     #[test]

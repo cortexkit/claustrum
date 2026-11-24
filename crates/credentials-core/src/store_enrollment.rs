@@ -2,6 +2,19 @@
 
 use super::*;
 
+pub(super) fn find_live_enrollment_by_hash(
+    conn: &rusqlite::Connection,
+    hash: &str,
+) -> rusqlite::Result<Option<(String, String, i64)>> {
+    conn.query_row(
+        "SELECT enrollment_id, name, token_generation FROM enrolled_consumers \
+         WHERE token_hash = ?1 AND revoked_at_ms IS NULL",
+        [hash],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+}
+
 fn append_enrollment_event_tx(
     tx: &rusqlite::Transaction,
     subject: &str,
@@ -568,9 +581,8 @@ impl EncryptedStore {
                     // minute by rows saying "still waiting". The ring is for diagnosis; an
                     // observation that nothing changed is not one.
                     //
-                    // It also makes a pending poll write nothing at all: the fence row is
-                    // only written when this writer claims the database, so the
-                    // transaction commits empty instead of adding a commit per poll.
+                    // The pending arm changes no rows, but its successful transaction
+                    // still wakes store write subscribers.
                     //
                     // Every other arm here is a transition or a refusal and still records.
                     "pending" => Ok(Ok(EnrollmentPoll::Pending)),
@@ -720,29 +732,9 @@ impl EncryptedStore {
         let audit_key = self.audit_key.clone();
         let outcome = self
             .fenced_write(|tx| {
-                let mut stmt = tx.prepare(
-                    "SELECT enrollment_id, name, token_hash, token_generation \
-                 FROM enrolled_consumers WHERE revoked_at_ms IS NULL AND token_hash IS NOT NULL",
-                )?;
-                let candidates = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, i64>(3)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                drop(stmt);
-
-                let mut matched = None;
-                for candidate in candidates {
-                    if constant_time_hash_eq(&presented_hash, &candidate.2) {
-                        matched = Some(candidate);
-                    }
-                }
-                let Some((enrollment_id, name, old_hash, generation)) = matched else {
+                let Some((enrollment_id, name, generation)) =
+                    find_live_enrollment_by_hash(tx, &presented_hash)?
+                else {
                     return Ok(Err(EnrollmentRefusal::NotFound));
                 };
                 if generation < 0 || generation as u64 != expected_token_generation {
@@ -763,7 +755,7 @@ impl EncryptedStore {
                         replacement_hash,
                         next_generation,
                         enrollment_id,
-                        old_hash,
+                        presented_hash,
                         generation
                     ],
                 )?;
@@ -1045,7 +1037,7 @@ impl EncryptedStore {
     ///
     /// CONSTANT-TIME IS NOT THE PROPERTY HERE AND CLAIMING IT WOULD BE WORSE THAN NOT
     /// HAVING IT. The lookup hashes the presented token and asks SQLite for a row, so
-    /// timing varies with index structure and page cache. What defends the token is its
+    /// timing varies with the query plan and page cache. What defends the token is its
     /// entropy: 256 CSPRNG bits, the same as a capability handle, so guessing is not a
     /// timing question. The hash is domain-separated, so a token is not interchangeable
     /// with any other secret this store holds.
@@ -1070,15 +1062,8 @@ impl EncryptedStore {
         };
         self.store
             .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT name, token_generation FROM enrolled_consumers \
-                     WHERE token_hash = ?1 AND revoked_at_ms IS NULL",
-                )?;
-                let mut rows = stmt.query(rusqlite::params![hash])?;
-                match rows.next()? {
-                    Some(row) => Ok(Some((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))),
-                    None => Ok(None),
-                }
+                Ok(find_live_enrollment_by_hash(conn, &hash)?
+                    .map(|(_, name, generation)| (name, generation)))
             })
             .map_err(StoreOpError::from)
     }

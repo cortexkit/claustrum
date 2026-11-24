@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
 };
 
 use credentials_core::{
@@ -29,6 +30,7 @@ use crate::{
 
 pub(crate) const OP_POLICY_TOKEN: &str = "credential.policy_token";
 const MIN_POLICY_TOKEN_CACHE_TTL_MS: i64 = 5 * 60 * 1_000 + 1;
+const POLICY_TOKEN_MINT_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(PartialEq, Eq, Hash)]
 struct Key {
@@ -134,6 +136,7 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct PolicyTokens {
     entries: Mutex<HashMap<Arc<Key>, Entry>>,
+    live_http: OnceLock<Result<ReqwestTransport, Refusal>>,
     #[cfg(test)]
     pub(crate) http: Mutex<Option<Arc<dyn HttpTransport>>>,
     #[cfg(test)]
@@ -189,7 +192,14 @@ impl PolicyTokens {
                 let keep_alive = Arc::clone(&flight);
                 let cache = Arc::clone(self);
                 tokio::spawn(async move {
-                    let minted = cache.mint(store, key, record).await;
+                    let deadline = tokio::time::Instant::now() + POLICY_TOKEN_MINT_TIME_LIMIT;
+                    let minted =
+                        tokio::time::timeout_at(deadline, cache.mint(store, key, record)).await;
+                    let minted = if tokio::time::Instant::now() >= deadline {
+                        Err(Refusal::GITHUB_UNAVAILABLE)
+                    } else {
+                        minted.unwrap_or(Err(Refusal::GITHUB_UNAVAILABLE))
+                    };
                     publish.send_replace(Some(minted));
                     drop(keep_alive);
                 });
@@ -224,13 +234,13 @@ impl PolicyTokens {
         let injected = available.as_deref();
         #[cfg(not(test))]
         let injected = None;
-        let live;
         let http: &dyn HttpTransport = match injected {
             Some(http) => http,
-            None => {
-                live = ReqwestTransport::new().map_err(|_| Refusal::GITHUB_UNAVAILABLE)?;
-                &live
-            }
+            None => self
+                .live_http
+                .get_or_init(|| ReqwestTransport::new().map_err(|_| Refusal::GITHUB_UNAVAILABLE))
+                .as_ref()
+                .map_err(|error| *error)?,
         };
         let token = mint_narrowed_installation_token(
             &key.identity,
@@ -268,9 +278,35 @@ impl PolicyTokens {
                 repositories: repositories.clone(),
                 permissions: permissions.clone(),
             });
-            let (token, flight) = self
+            let (token, flight) = match self
                 .candidate(Arc::clone(store), Arc::clone(&key), record)
-                .await?;
+                .await
+            {
+                Ok(candidate) => candidate,
+                Err(error) if !retry => {
+                    let store = Arc::clone(store);
+                    let module_id = Arc::clone(&module_id);
+                    let request = Arc::clone(&request);
+                    let cache = Arc::clone(self);
+                    // Reuse the read-only gates without advancing the approval or
+                    // following a replacement for a caller whose grant was revoked.
+                    let current = tokio::task::spawn_blocking(move || {
+                        store.prepare_policy_token(&module_id, Some(&request), || cache.now())
+                    })
+                    .await;
+                    match current {
+                        Ok(Ok(current))
+                            if current.record.key != key.record
+                                && current.approval_leg == approval_leg =>
+                        {
+                            record = current.record;
+                            continue;
+                        }
+                        _ => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let decision = {
                 let store = Arc::clone(store);
                 let module_id = Arc::clone(&module_id);

@@ -42,6 +42,32 @@ pub mod openai;
 pub mod snowflake;
 pub mod xai;
 
+/// The provider registry shared by the daemon and offline diagnostics.
+pub fn registered_refresh_adapters(
+    kimi_device_id_file: std::path::PathBuf,
+) -> Vec<std::sync::Arc<dyn RefreshAdapter>> {
+    use std::sync::Arc;
+
+    vec![
+        Arc::new(anthropic::AnthropicAdapter::new()),
+        Arc::new(cursor::CursorAdapter::new()),
+        Arc::new(devin::DevinAdapter::new()),
+        Arc::new(digitalocean::DigitalOceanAdapter::new()),
+        Arc::new(openai::OpenAiAdapter::new()),
+        // Google defaults to the public gemini-cli client and allows environment overrides.
+        Arc::new(google::GoogleAdapter::new()),
+        Arc::new(google::GoogleAdapter::gmail()),
+        Arc::new(snowflake::SnowflakeAdapter::new()),
+        Arc::new(xai::XaiAdapter::new()),
+        Arc::new(github_copilot::GithubCopilotAdapter::new()),
+        Arc::new(github_app::GithubAppAdapter::new()),
+        Arc::new(meta::MetaAdapter),
+        Arc::new(kimi::KimiAdapter::from_device_id_file(kimi_device_id_file)),
+        // Antigravity uses a different Google OAuth client from gemini-cli.
+        Arc::new(antigravity::AntigravityAdapter::new()),
+    ]
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 #[cfg(test)]
@@ -169,6 +195,20 @@ pub trait HttpTransport: Send + Sync {
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
 
+    /// POST once, preserving the status even if the response body is too large.
+    async fn post_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        self.post(url, headers, content_type, body)
+            .await
+            .map(|response| BoundedHttpResponse::from_response(response, max))
+    }
+
     /// PUT an encoded body. Transports that do not support PUT refuse it.
     async fn put(
         &self,
@@ -180,6 +220,20 @@ pub trait HttpTransport: Send + Sync {
         Err(RefreshError::Transport(
             "HTTP PUT is unsupported by this transport".into(),
         ))
+    }
+
+    /// PUT once, preserving the status even if the response body is too large.
+    async fn put_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        self.put(url, headers, content_type, body)
+            .await
+            .map(|response| BoundedHttpResponse::from_response(response, max))
     }
 
     /// PATCH an encoded body. Transports that do not support PATCH refuse it.
@@ -232,6 +286,24 @@ pub struct HttpProbeResponse {
     pub header: Option<Vec<u8>>,
 }
 
+pub struct BoundedHttpResponse {
+    pub status: u16,
+    /// Missing only when the body exceeded the caller's limit.
+    pub body: Option<Vec<u8>>,
+    /// A forbidden response carried a positive rate-limit signal.
+    pub forbidden_rate_limited: bool,
+}
+
+impl BoundedHttpResponse {
+    pub fn from_response(response: HttpResponse, max: usize) -> Self {
+        Self {
+            status: response.status,
+            body: (response.body.len() <= max).then_some(response.body),
+            forbidden_rate_limited: false,
+        }
+    }
+}
+
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a
 /// token endpoint's reply).
 ///
@@ -264,17 +336,10 @@ pub struct HttpResponse {
     /// `Secret` CAN REACH. *** A refresh response body IS the new access token and
     /// often a new refresh token, in the clear, in a `Vec<u8>` nothing zeroizes.
     ///
-    /// It is deliberately NOT wrapped, because wrapping it would be theatre while the
-    /// layer above stays bare. The chain on a single refresh is:
-    ///
-    ///   reqwest's internal buffer   NOT under our control at all
-    ///   `.bytes().to_vec()`         a second copy, made in http.rs
-    ///   this field                  a third
-    ///   the adapter's response struct   a fourth, per token field
-    ///
-    /// Wrapping the last two while the first two stay bare would let a reader conclude
-    /// the refresh path is scrubbed when the earliest and longest-lived copies are
-    /// untouched. Closing this properly means owning the HTTP buffer, which means not
+    /// The HTTP transport assembles reqwest's body chunks in a bounded `Vec` and
+    /// moves it here. The adapter then decodes token fields from that buffer.
+    /// Wrapping these later copies would not scrub reqwest's own buffers.
+    /// Closing this properly means owning the HTTP buffer, which means not
     /// using reqwest — a real change with its own tradeoffs, not a wrapper.
     ///
     /// WHAT IS SCRUBBED TODAY, so the boundary is legible: the credential at rest, and
@@ -319,6 +384,11 @@ pub(crate) fn form_urlencode(pairs: &[(&str, &str)]) -> String {
 pub trait RefreshAdapter: Send + Sync {
     /// The adapter's stable name (matches `VaultRecord::refresh_adapter`).
     fn name(&self) -> &str;
+
+    /// Whether this adapter can exchange refresh material for a fresh access token.
+    fn can_refresh(&self) -> bool {
+        true
+    }
 
     /// Exchange the credential's refresh token for new tokens. ROTATES — never
     /// called during crash recovery.
@@ -521,6 +591,51 @@ mod token_response_rules {
         }
     }
     #[tokio::test]
+    async fn empty_refresh_rotation_preserves_the_old_grant() {
+        for adapter in [
+            Box::new(anthropic::AnthropicAdapter::new()) as Box<dyn RefreshAdapter>,
+            Box::new(openai::OpenAiAdapter::new()),
+            Box::new(google::GoogleAdapter::with_client("c", "s")),
+        ] {
+            let cred = credential();
+            for body in [
+                r#"{"access_token":"new","expires_in":60,"refresh_token":""}"#,
+                r#"{"access_token":"new","expires_in":60}"#,
+            ] {
+                let result = adapter
+                    .refresh(&cred, &FixtureTransport::ok(200, body))
+                    .await
+                    .unwrap();
+                assert!(
+                    result.refresh_token == cred.refresh_token,
+                    "{}",
+                    adapter.name()
+                );
+                assert!(result.access_token.expose() == "new", "{}", adapter.name());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_unauthorized_and_invalid_grant_require_sign_in() {
+        for (status, body) in [
+            (401, r#"{"error":{"message":"unauthorized"}}"#),
+            (400, r#"{"error":"invalid_grant"}"#),
+            (400, r#"{"error":{"code":"invalid_grant"}}"#),
+        ] {
+            assert!(
+                matches!(
+                    openai::OpenAiAdapter::new()
+                        .refresh(&credential(), &FixtureTransport::ok(status, body))
+                        .await,
+                    Err(RefreshError::InvalidGrant(_))
+                ),
+                "status {status}, fixture {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn openai_dead_refresh_codes_accept_three_envelope_shapes() {
         for code in [
             "refresh_token_expired",
@@ -532,7 +647,7 @@ mod token_response_rules {
                 serde_json::json!({"error":code}),
                 serde_json::json!({"code":code}),
             ] {
-                let http = FixtureTransport::ok(401, serde_json::to_vec(&body).unwrap());
+                let http = FixtureTransport::ok(400, serde_json::to_vec(&body).unwrap());
                 assert!(matches!(
                     openai::OpenAiAdapter::new()
                         .refresh(&credential(), &http)

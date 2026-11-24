@@ -77,9 +77,9 @@ The daemon never bootstraps. Only `ck auth bootstrap` creates a key, so a vault 
 data directory moved finds no key for its new scope and refuses to serve rather than
 coming up empty.
 
-A binary refuses to open a store whose schema is newer than its own migration chain
-(`store::tests::a_store_ahead_of_this_binary_refuses_to_migrate`). The current chain
-ends at migration 18.
+A binary refuses to open a store whose schema is newer than its own migration chain.
+[`newest_migration_version()`](../crates/credentials-core/src/store_migrations.rs)
+derives the schema version from that chain.
 
 ### Reading a credential
 

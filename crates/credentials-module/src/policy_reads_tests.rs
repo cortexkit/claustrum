@@ -148,19 +148,22 @@ fn policy(rig: &Rig, key_id: &str, version: i64, manifest_version: i64) -> Value
 }
 
 fn report_version(rig: &Rig, member: &str, version: i64, digest: &str, verdict: GhManifestVerdict) {
-    rig.store
-        .report_gh_manifest_active(
-            &GhManifestActivationReport {
-                member_id: member,
-                version,
-                payload_sha256: digest,
-                verdict,
-                reason: (verdict == GhManifestVerdict::Invalid).then_some("fixture_invalid"),
-                reported_at_ms: 100,
-            },
-            AuditCtx::admin(AuditOp::GhManifestActivation),
-        )
-        .unwrap();
+    let report = GhManifestActivationReport {
+        member_id: member,
+        version,
+        payload_sha256: digest,
+        verdict,
+        reason: (verdict == GhManifestVerdict::Invalid).then_some("fixture_invalid"),
+        reported_at_ms: 100,
+    };
+    let ctx = AuditCtx::admin(AuditOp::GhManifestActivation);
+    if member == SELF {
+        rig.store.record_hub_own_report(&report, ctx).unwrap();
+    } else {
+        rig.store
+            .seed_gh_manifest_activation_for_tests(&report, ctx)
+            .unwrap();
+    }
 }
 
 fn ready(rig: &Rig, member: &str, version: i64, digest: &str) {
@@ -218,6 +221,37 @@ fn stall_snapshot(rig: &Rig) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<
         reply
     }));
     (reached, release)
+}
+
+#[tokio::test]
+async fn policy_watch_projects_ready_metadata_without_decoding_the_document() {
+    let mut rig = Rig::new();
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "plexus");
+    root(&rig);
+    rig.self_member();
+    let digest = manifest(&rig, 41);
+    let hash = "a".repeat(64);
+    rig.sql(&format!("INSERT INTO agent_policies VALUES (1, x'ff', '{hash}', '0123456789abcdef', zeroblob(64), 1, 'ceremony', 1, 41)"));
+    let mut completed = rig.surface.watches.completed.subscribe();
+    ingress.open(&rig, 1, 11).await;
+    policy_notice(&mut rig, 11, 1, ABSENT, &ABSENT).await;
+    ready(&rig, SELF, 41, &digest);
+    wait_count(&mut completed, 2).await;
+    let changed = rig
+        .rx
+        .try_recv()
+        .expect("the ready pair does not need policy text");
+    assert_eq!(body(&changed)["policy_sha256"], hash);
+    assert_eq!(
+        rig.call("plexus", OP_POLICY_ACTIVE, json!({})).await,
+        refusal("store_error", "transient")
+    );
+    rig.store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    wait_count(&mut completed, 3).await;
+    assert!(rig.rx.try_recv().is_err());
 }
 
 #[tokio::test]

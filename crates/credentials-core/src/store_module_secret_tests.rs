@@ -44,6 +44,40 @@ fn sql(store: &EncryptedStore, statements: &str) {
 }
 
 #[test]
+fn module_secret_metadata_lists_do_not_read_envelopes() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let (_root, store) = rig("module-list-metadata", 201);
+    put(&store, "first", "a");
+    put(&store, "second", "b");
+    store
+        .with_raw_conn(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "module_secrets",
+                    column_name: "envelope",
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.list_module_secrets(&owner("first")).unwrap().len(), 1);
+    assert_eq!(store.list_all_module_secrets().unwrap().len(), 2);
+}
+
+#[test]
+fn owner_module_secret_metadata_uses_an_index_seek() {
+    let (_root, store) = rig("module-list-owner-seek", 201);
+    put(&store, "first", "a");
+    put(&store, "second", "b");
+    put(&store, "third", "c");
+    let result = store.list_module_secrets(&owner("second")).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "b");
+    assert_eq!(METADATA_FULL_SCAN_STEPS.get(), 0);
+}
+
+#[test]
 fn module_secret_bounds_validate_before_store_access() {
     let (_root, store) = rig("module-bounds", 201);
     let max_name = "a".repeat(64);
@@ -679,6 +713,41 @@ fn module_secret_move_refusals_and_mid_move_failure_leave_every_row_unchanged() 
         assert_eq!(snapshot(&store), before, "{failure}");
         assert_eq!(store.verify_audit_chain().unwrap(), None);
     }
+}
+
+#[test]
+fn rotation_does_not_count_existing_corruption_as_new_quarantine() {
+    let (_root, mut store) = rig("rotation-earlier-corruption", 211);
+    for name in ["existing", "new"] {
+        store
+            .create(
+                &format!("apikey:{name}"),
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"material".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        put(&store, "sample", name);
+    }
+    sql(
+        &store,
+        "UPDATE credentials SET envelope = X'00';
+         UPDATE credentials SET state = 'corrupt' WHERE credential_id = 'apikey:existing';
+         UPDATE module_secrets SET envelope = X'00';
+         UPDATE module_secrets SET state = 'corrupt' WHERE name = 'existing';",
+    );
+    let quarantined = store
+        .rotate_master_key(MasterKey::from_bytes([212; 32]))
+        .unwrap();
+    assert_eq!(quarantined, ["apikey:new", "module-secret|sample|new"]);
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+    assert!(store
+        .rotate_master_key(MasterKey::from_bytes([213; 32]))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

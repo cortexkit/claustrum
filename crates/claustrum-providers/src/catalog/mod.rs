@@ -948,28 +948,74 @@ impl CatalogEntry {
     }
 }
 
-fn catalog_match(id: &str) -> Option<CatalogEntry> {
-    let mut segments = id.split(':');
-    let first = segments.next()?;
-    let second = segments.next();
-    let boundary_id = second.map(|second| format!("{first}:{second}"));
-    let matches = |default_id: &str| {
-        id == default_id
-            || boundary_id
-                .as_deref()
-                .is_some_and(|prefix| prefix == default_id)
-    };
+#[cfg(feature = "test-support")]
+thread_local! {
+    static CATALOG_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-    API_KEY_PROVIDERS
+/// Count catalog lookups on the current thread and reset the counter.
+#[cfg(feature = "test-support")]
+pub fn take_catalog_lookups() -> usize {
+    CATALOG_LOOKUPS.with(|lookups| lookups.replace(0))
+}
+
+fn catalog_match(id: &str) -> Option<CatalogEntry> {
+    catalog_lookup(id, None).0
+}
+
+fn catalog_lookup(
+    id: &str,
+    login_adapter: Option<&str>,
+) -> (Option<CatalogEntry>, Option<&'static [&'static str]>) {
+    #[cfg(feature = "test-support")]
+    CATALOG_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+    let boundary_id = id
+        .match_indices(':')
+        .nth(1)
+        .map_or(id, |(end, _)| &id[..end]);
+    let matches = |default_id: &str| id == default_id || boundary_id == default_id;
+
+    let mut entry = API_KEY_PROVIDERS
         .iter()
         .find(|entry| matches(entry.default_id))
-        .map(CatalogEntry::ApiKey)
-        .or_else(|| {
-            LOGIN_PROVIDERS
-                .iter()
-                .find(|entry| matches(entry.default_id))
-                .map(CatalogEntry::Login)
-        })
+        .map(CatalogEntry::ApiKey);
+    let mut login_hosts = None;
+    for login in LOGIN_PROVIDERS {
+        if entry.is_some() && (login_adapter.is_none() || login_hosts.is_some()) {
+            break;
+        }
+        if entry.is_none() && matches(login.default_id) {
+            entry = Some(CatalogEntry::Login(login));
+        }
+        if login_hosts.is_none()
+            && login_adapter == Some(login.adapter_name)
+            && !login.hosts.is_empty()
+        {
+            login_hosts = Some(login.hosts);
+        }
+    }
+    (entry, login_hosts)
+}
+
+/// Catalog data for an inventory row's provider card, receiving hosts, and vendors.
+pub struct InventoryProvider {
+    pub catalogued: bool,
+    pub api_key: Option<&'static ApiKeyProvider>,
+    pub login_hosts: Option<&'static [&'static str]>,
+    pub serves: &'static [ModelVendor],
+}
+
+pub fn inventory_provider(id: &str, login_adapter: Option<&str>) -> InventoryProvider {
+    let (entry, login_hosts) = catalog_lookup(id, login_adapter);
+    InventoryProvider {
+        catalogued: entry.is_some(),
+        api_key: match entry {
+            Some(CatalogEntry::ApiKey(key)) => Some(key),
+            _ => None,
+        },
+        login_hosts,
+        serves: entry.map(CatalogEntry::serves).unwrap_or_default(),
+    }
 }
 
 /// Resolve an API-key credential id, including labels, without matching login rows.
@@ -1112,26 +1158,15 @@ pub fn connector_metadata(id: &str) -> (Option<&'static str>, Option<&'static st
 }
 
 pub fn credential_type(credential_id: &str) -> &'static str {
+    use crate::credential_id::AuthMethod;
     let method = credential_id.split(':').next().unwrap_or_default();
-    if API_KEY_PROVIDERS
-        .iter()
-        .any(|entry| entry.default_id.split(':').next() == Some(method))
-    {
-        return "apikey";
-    }
-    if LOGIN_PROVIDERS
-        .iter()
-        .any(|entry| entry.default_id.split(':').next() == Some(method))
-    {
-        return "oauth";
-    }
-    match method {
-        "cookie" => "cookie",
-        "signing" => "signing",
-        "kem" => "kem",
-        "github_app" => "github_app",
-        "apple" => "apple",
-        _ => "unknown",
+    match AuthMethod::from_segment(method) {
+        Some(
+            AuthMethod::Oauth | AuthMethod::Antigravity | AuthMethod::Chatgpt | AuthMethod::Copilot,
+        ) => "oauth",
+        Some(method) => method.as_str(),
+        None if method == "apple" => "apple",
+        None => "unknown",
     }
 }
 

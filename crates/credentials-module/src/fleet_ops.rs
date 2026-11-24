@@ -89,8 +89,10 @@ struct Open {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Batch<T> {
-    items: Vec<T>,
+struct Batch {
+    // Each item is decoded with `parse`, so a positional array is refused at
+    // the item level as it is at the request level.
+    items: Vec<Value>,
 }
 
 struct SealItem {
@@ -157,7 +159,7 @@ struct Transition {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Import {
-    wrap: FleetWrap,
+    wrap: Value,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,8 +167,17 @@ struct WrapFor {
     member_id: String,
 }
 
+/// The wire contract names every field, so only a JSON object is accepted.
+/// Serde would otherwise decode a positional array into the same struct.
 fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, FleetError> {
-    serde_json::from_value(value.clone()).map_err(|_| FleetError::InvalidParams)
+    parse_owned(value.clone())
+}
+
+fn parse_owned<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, FleetError> {
+    if !value.is_object() {
+        return Err(FleetError::InvalidParams);
+    }
+    serde_json::from_value(value).map_err(|_| FleetError::InvalidParams)
 }
 
 fn decode(value: &str, max: usize) -> Result<Secret<Vec<u8>>, FleetError> {
@@ -267,14 +278,14 @@ fn command(method: &str, params: &Value) -> Result<Command, FleetError> {
         "fleet.epoch_seal" => Command::Seal(seal_item(parse(params)?)?),
         "fleet.epoch_open" => Command::Open(open_item(parse(params)?)?),
         "fleet.epoch_seal_batch" => {
-            let p: Batch<Seal> = parse(params)?;
+            let p: Batch = parse(params)?;
             if !(1..=MAX_BATCH_ITEMS).contains(&p.items.len()) {
                 return Err(FleetError::InvalidParams);
             }
             let items = p
                 .items
                 .into_iter()
-                .map(seal_item)
+                .map(|item| seal_item(parse_owned(item)?))
                 .collect::<Result<Vec<_>, _>>()?;
             validate_batch(
                 items.len(),
@@ -283,14 +294,14 @@ fn command(method: &str, params: &Value) -> Result<Command, FleetError> {
             Command::SealBatch(items)
         }
         "fleet.epoch_open_batch" => {
-            let p: Batch<Open> = parse(params)?;
+            let p: Batch = parse(params)?;
             if !(1..=MAX_BATCH_ITEMS).contains(&p.items.len()) {
                 return Err(FleetError::InvalidParams);
             }
             let items = p
                 .items
                 .into_iter()
-                .map(open_item)
+                .map(|item| open_item(parse_owned(item)?))
                 .collect::<Result<Vec<_>, _>>()?;
             validate_batch(
                 items.len(),
@@ -331,11 +342,12 @@ fn command(method: &str, params: &Value) -> Result<Command, FleetError> {
         }
         "fleet.epoch_import" => {
             let p: Import = parse(params)?;
-            if decode(&p.wrap.enc, 32)?.expose().len() != 32 {
+            let wrap: FleetWrap = parse_owned(p.wrap)?;
+            if decode(&wrap.enc, 32)?.expose().len() != 32 {
                 return Err(FleetError::InvalidParams);
             }
-            decode(&p.wrap.ct, MAX_BYTES + 16)?;
-            Command::Import(p.wrap)
+            decode(&wrap.ct, MAX_BYTES + 16)?;
+            Command::Import(wrap)
         }
         "fleet.epoch_wrap_for" => {
             let p: WrapFor = parse(params)?;

@@ -136,13 +136,17 @@ impl ReadSurface {
             Ok(None) => {}
             Err(error) => return condition_reply(field, Err(map_store_error(&error))),
         }
-        let incarnation = match &authorization.settings_read {
-            Some(pin) => pin.incarnation.clone(),
-            None => match incarnation {
-                Ok(incarnation) => incarnation,
-                Err(error) => return condition_reply(field, Err(map_store_error(&error))),
-            },
+        let incarnation = match incarnation {
+            Ok(incarnation) => incarnation,
+            Err(error) => return condition_reply(field, Err(map_store_error(&error))),
         };
+        if authorization
+            .settings_read
+            .as_ref()
+            .is_some_and(|pin| pin.incarnation != incarnation)
+        {
+            return condition_reply(field, Err(ReadError::NotFound));
+        }
         let (kind, name) = authorization.principal;
         let (actor, principal) = if kind == "enrolled" {
             (

@@ -35,8 +35,8 @@ pub fn cmd_verify(global: &GlobalArgs) -> Result<(), CliError> {
             "no vault (run 'ck auth bootstrap' first)".into(),
         ));
     }
-    // A read transaction pins the key slot and envelopes to the same snapshot even
-    // if the running daemon rotates the master key during the network checks.
+    // Keep the key slot and envelopes in the same snapshot across key rotation.
+    // Release the snapshot before waiting for GitHub so checkpoints can proceed.
     let mut conn = usable::open_store_read_only(&db).map_err(|e| CliError::Io(e.to_string()))?;
     let conn = conn
         .transaction()
@@ -71,11 +71,13 @@ pub fn cmd_verify(global: &GlobalArgs) -> Result<(), CliError> {
                 r.get::<_, Vec<u8>>(2)?,
             ))
         })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(|e| CliError::Io(e.to_string()))?;
+    drop(stmt);
+    conn.commit().map_err(|e| CliError::Io(e.to_string()))?;
     let http = http().ok();
     let mut all_ok = true;
-    for row in rows {
-        let (id, version, blob) = row.map_err(|e| CliError::Io(e.to_string()))?;
+    for (id, version, blob) in rows {
         let binding = RecordBinding {
             credential_id: &id,
             record_version: version as u64,

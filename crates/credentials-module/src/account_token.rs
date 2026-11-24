@@ -21,6 +21,11 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use subc_protocol::Principal;
 use tokio::sync::{watch, Mutex};
 
+pub(super) fn audience_admits(audience: &str, kind: &str, id: &str) -> bool {
+    AUDIENCES.contains(&audience)
+        && (audience != "cortexkit-hub" || (kind == "reserved" && id == "ckbus"))
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountTokenParams {
@@ -120,11 +125,6 @@ impl ReadSurface {
                 )
                 .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?
                 .principal;
-            if !AUDIENCES.contains(&audience.as_str())
-                || (audience == "cortexkit-hub" && (kind != "reserved" || id != "ckbus"))
-            {
-                return Err(AccountTokenError::new("not_found", ErrorClass::Permanent));
-            }
             let key = candidate(&surface.engine, &surface.account_tokens.path()?)
                 .map_err(|_| AccountTokenError::login())?;
             Ok((kind, id, key))

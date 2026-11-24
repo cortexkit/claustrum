@@ -136,6 +136,77 @@ fn propose(store: &EncryptedStore) -> String {
 }
 
 #[test]
+fn proposal_writer_rechecks_the_role_after_preparation() {
+    let (_dir, store, pair) = rig("proposal-home-changed");
+    run(&store, import(&pair, V28)).unwrap();
+    let prepared = prepare_proposal_for_writer_test(&store);
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+        "INSERT INTO settings (name,value,updated_at_ms) VALUES ('secrets.home_member',?1,0)",
+        [OTHER],
+    )
+        })
+        .unwrap();
+    let before = snapshot(&store);
+    assert_eq!(
+        store
+            .propose_gh_manifest_binding(&prepared, "test", || true, || 1_794_355_300_123)
+            .err(),
+        Some(super::super::GhManifestProposalError::NotFound)
+    );
+    assert_eq!(snapshot(&store), before);
+}
+
+fn prepare_proposal_for_writer_test(
+    store: &EncryptedStore,
+) -> super::super::PreparedGhManifestProposal {
+    store
+        .set_federation_self_member_audited(MEMBER, AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    store
+        .prepare_gh_manifest_proposal(GhManifestProposalInput {
+            agent_id: "agent_4444444444444444".into(),
+            app_id: 42,
+            app_slug: "repo-bot".into(),
+            repo: "Octo/New".into(),
+            installation_permissions: BTreeMap::from([("contents".into(), "read".into())]),
+        })
+        .unwrap()
+}
+
+#[test]
+fn proposal_writer_rechecks_ahead_reports_after_preparation() {
+    let (_dir, store, pair) = rig("proposal-ahead-report");
+    run(&store, import(&pair, V28)).unwrap();
+    let prepared = prepare_proposal_for_writer_test(&store);
+    store
+        .record_hub_own_report(
+            &super::super::GhManifestActivationReport {
+                member_id: MEMBER,
+                version: 29,
+                payload_sha256: &"a".repeat(64),
+                verdict: super::super::GhManifestVerdict::Valid,
+                reason: None,
+                reported_at_ms: 0,
+            },
+            AuditCtx::admin(AuditOp::GhManifestActivation),
+        )
+        .unwrap();
+    let before = snapshot(&store);
+    assert_eq!(
+        store
+            .propose_gh_manifest_binding(&prepared, "test", || true, || 1_794_355_300_123)
+            .err(),
+        Some(super::super::GhManifestProposalError::StaleBase)
+    );
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
 fn gh_manifest_admin_import_checks_key_id_and_signature_without_writes() {
     let (_dir, store, pair) = rig("manifest-admin-import-checks");
     let mut wrong_id = envelope(&pair, V28);
@@ -423,7 +494,7 @@ fn gh_manifest_admin_list_includes_expected_and_retired_computers_without_writes
     )).unwrap();
     run(&store, import(&pair, V28)).unwrap();
     store
-        .report_gh_manifest_active(
+        .seed_gh_manifest_activation_for_tests(
             &super::super::GhManifestActivationReport {
                 member_id: OTHER,
                 version: 28,
@@ -457,6 +528,23 @@ fn gh_manifest_admin_list_includes_expected_and_retired_computers_without_writes
         ])
     );
     assert_eq!(snapshot(&store), before);
+    store
+        .with_raw_conn(|conn| conn.execute("DELETE FROM member_grants WHERE member_id=?1", [OTHER]))
+        .unwrap();
+    let listed = store.list_gh_manifests_admin().unwrap();
+    let status = store.gh_manifest_active_status(28).unwrap().unwrap();
+    assert!(!status.ready);
+    let peer = serde_json::to_value(&status.computers[1]).unwrap();
+    assert_eq!(peer["member_id"], OTHER);
+    for field in [
+        "version",
+        "payload_sha256",
+        "verdict",
+        "reason",
+        "reported_at_ms",
+    ] {
+        assert_eq!(listed["computers"][1][field], peer[field], "{field}");
+    }
     let result = run(
         &store,
         AdminOpBody::ManifestRetireMachine {
@@ -780,7 +868,7 @@ fn policy_admin_ceremony_preserves_pairing_and_pins_audit_and_envelope() {
         .unwrap();
     let report = |version, manifest_text: &str| {
         store
-            .report_gh_manifest_active(
+            .seed_gh_manifest_activation_for_tests(
                 &super::super::GhManifestActivationReport {
                     member_id: MEMBER,
                     version,
@@ -924,7 +1012,11 @@ fn policy_admin_derive_normalizes_and_refuses_identity_and_pairing_changes() {
                     "github_app",
                     crate::oauth::OAuthCredential {
                         access_token: "sample".to_string().into(),
-                        refresh_token: "test-only".to_string().into(),
+                        refresh_token: include_str!(
+                            "../tests/fixtures/github_app/test_private_key_pkcs1.pem"
+                        )
+                        .to_owned()
+                        .into(),
                         expires_at_ms: None,
                         token_url: String::new(),
                         client_id: Some("sample-id".into()),

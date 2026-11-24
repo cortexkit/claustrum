@@ -209,6 +209,18 @@ pub fn check_member_id(value: &str) -> Result<(), StoreOpError> {
     }
 }
 
+/// The longest pairing id the store keeps.
+pub const MAX_PAIRING_ID_LEN: usize = 128;
+
+/// True for a pairing id the store accepts: 1 to [`MAX_PAIRING_ID_LEN`] printable
+/// ASCII characters. Readers of a Callosum roster apply the same rule, so a roster
+/// the store would refuse is never acted on in part.
+pub fn valid_pairing_id(pairing_id: &str) -> bool {
+    !pairing_id.is_empty()
+        && pairing_id.len() <= MAX_PAIRING_ID_LEN
+        && pairing_id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 /// True for exactly 32 lowercase hex characters: the encoding of a transfer id, an
 /// incarnation, a token nonce and a member fingerprint.
 pub fn is_lower_hex_16_bytes(value: &str) -> bool {

@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use claustrum_module_probe::{
-    federation::transfer::ensure_transfer_key,
+    federation::{transfer::ensure_transfer_key, OutboundClient},
     hub_test_support::{record_manifest_report, HubFixture, RunningVault},
 };
 use credentials_core::{
@@ -16,8 +16,8 @@ use credentials_core::{
 use serde_json::{json, Value};
 
 use super::support::{
-    poll_until_ready, temp_root, wait_until, HomeStore, Reply, SharedCallosumStandIn, VaultFixture,
-    TARGET_MODULE,
+    poll_until_ready, temp_root, wait_until, Held, HomeStore, Reply, SharedCallosumStandIn,
+    VaultFixture, TARGET_MODULE,
 };
 
 const HOME_FP: &str = "00000000000000000000000000000007";
@@ -36,6 +36,7 @@ const MANIFEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 struct Rig {
     home_tasks: RunningVault,
     member_tasks: RunningVault,
+    member_outbound: OutboundClient,
     hub: HubFixture,
     home: Arc<EncryptedStore>,
     member: Arc<EncryptedStore>,
@@ -74,11 +75,13 @@ impl Rig {
         answer(&member_callosum, &roster(&home, HOME_FP, HOME_BOX, PAIR));
         let hub = HubFixture::default();
         let home_tasks = hub.start_vault(Arc::clone(&home), home_fixture.outbound, HOME_BOX);
+        let member_outbound = member_fixture.outbound.clone();
         let member_tasks =
             hub.start_vault(Arc::clone(&member), member_fixture.outbound, MEMBER_BOX);
         Self {
             home_tasks,
             member_tasks,
+            member_outbound,
             hub,
             home,
             member,
@@ -360,4 +363,53 @@ async fn signed_member_manifest_report_becomes_readiness_on_the_home() {
         .find(|row| row.member_id == member_id(MEMBER_FP))
         .unwrap();
     assert_eq!(member.version, Some(28));
+}
+
+#[tokio::test]
+async fn a_confirmed_unpair_removes_automatic_copies_while_the_hub_is_unreachable() {
+    let mut rig = Rig::new("hub-entries-cold-unpair").await;
+    rig.wait_for_login("original", PAIR).await;
+    let manual = rig
+        .member
+        .remote_add_audited(&NewRemoteRecord {
+            credential_id: MANUAL.into(),
+            home_member: member_id(HOME_FP),
+            refresh_adapter: None,
+            detected_plan: None,
+            identity: RecordIdentity::default(),
+            home_version: 1,
+            categories: Vec::new(),
+        })
+        .unwrap();
+    // Restart the member's tasks with its hub connection still pending.
+    let first = Held::new();
+    rig.member_callosum
+        .answer(TARGET_MODULE, READ, Reply::Hold(first.clone()));
+    let (tasks, connect) = rig.hub.start_vault_pending(
+        Arc::clone(&rig.member),
+        rig.member_outbound.clone(),
+        MEMBER_BOX,
+    );
+    rig.member_tasks = tasks;
+    first.arrived().await;
+    let second = Held::new();
+    rig.member_callosum
+        .answer(TARGET_MODULE, READ, Reply::Hold(second.clone()));
+    first.release(Reply::RetrySafe("fed_target_unavailable".into()));
+    second.arrived().await;
+    // An unavailable feed proves nothing: both copies remain.
+    assert!(rig.remote().is_some());
+    assert_eq!(
+        rig.member.remote_record(MANUAL).unwrap(),
+        Some(manual.clone())
+    );
+    // Callosum then confirms that the home is no longer paired.
+    let unpaired = json!({"self": {"static_public_key_hex": "00".repeat(32)},
+        "devices": [], "peers": []});
+    answer(&rig.member_callosum, &unpaired);
+    second.release(Reply::Ok(unpaired));
+    wait_until(|| rig.remote().is_none()).await;
+    assert_eq!(rig.member.remote_record(MANUAL).unwrap(), Some(manual));
+    // The hub never connected.
+    drop(connect);
 }

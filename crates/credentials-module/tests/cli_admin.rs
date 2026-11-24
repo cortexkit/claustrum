@@ -650,6 +650,13 @@ struct GithubAppServer {
 #[cfg(all(debug_assertions, feature = "test-support"))]
 impl GithubAppServer {
     fn new(responses: Vec<(u16, serde_json::Value)>) -> Self {
+        Self::with_before_reply(responses, || {})
+    }
+
+    fn with_before_reply(
+        responses: Vec<(u16, serde_json::Value)>,
+        before_reply: impl Fn() + Send + 'static,
+    ) -> Self {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
@@ -679,6 +686,7 @@ impl GithubAppServer {
                         .starts_with("authorization: bearer ");
                 }
                 assert!(authenticated, "discovery must use an App JWT");
+                before_reply();
                 let body = serde_json::to_vec(&body).unwrap();
                 write!(
                     stream,
@@ -702,6 +710,57 @@ impl GithubAppServer {
             .recv_timeout(std::time::Duration::from_secs(120))
             .expect("installations requests completed");
     }
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+#[test]
+fn verify_github_apps_releases_the_wal_snapshot_before_contacting_github() {
+    if skips_staged_github_api(
+        "verify_github_apps_releases_the_wal_snapshot_before_contacting_github",
+    ) {
+        return;
+    }
+    let vault = GrantCliVault::new("github-app-verify-snapshot");
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let record = credentials_core::record::VaultRecord::new_oauth(
+        "operator",
+        "github_app",
+        github_app_oauth(),
+        Vec::new(),
+    );
+    store.create("github_app:plex-alfonso", &record).unwrap();
+    let (notify, entered) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let server =
+        GithubAppServer::with_before_reply(vec![(200, github_app_installations())], move || {
+            notify.send(()).unwrap();
+            resume.recv().unwrap();
+        });
+    let child = cli()
+        .env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
+        .arg("verify-github-apps")
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    store.create("github_app:other", &record).unwrap();
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let busy: i64 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+    server.finish();
+    assert_eq!(busy, 0, "GitHub requests must not pin the WAL checkpoint");
 }
 
 #[cfg(all(debug_assertions, feature = "test-support"))]
@@ -989,6 +1048,113 @@ impl Drop for GrantCliVault {
 }
 
 #[test]
+fn usable_reports_an_unsupported_refresh_adapter_separately() {
+    let vault = GrantCliVault::new("usable-unsupported-adapter");
+    vault.bootstrap();
+    let raw = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    })
+    .unwrap();
+    EncryptedStore::migrate(&raw).unwrap();
+    let key = credentials_core::resolver::resolve(
+        &credentials_core::resolver::ResolverConfig {
+            data_dir: vault.data_dir.clone(),
+            source: credentials_core::resolver::KeySource::OperatorPath {
+                path: vault.key_path.clone(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let store = EncryptedStore::open(raw, key).unwrap();
+    for (id, adapter) in [
+        ("oauth:unknown", "unknown-fixture"),
+        ("oauth:known", "anthropic"),
+        ("oauth:static-adapter", "digitalocean"),
+    ] {
+        let record = credentials_core::record::VaultRecord::new_oauth(
+            "test",
+            adapter,
+            credentials_core::oauth::OAuthCredential {
+                access_token: "expired".to_owned().into(),
+                refresh_token: "sample".to_owned().into(),
+                expires_at_ms: Some(0),
+                token_url: String::new(),
+                client_id: None,
+                client_secret: None,
+                scopes: Vec::new(),
+            },
+            b"test-material".to_vec(),
+        );
+        store.create(id, &record).unwrap();
+    }
+    drop(store);
+    let result = vault.run(&["usable"]);
+    assert!(result.status.success());
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let unknown = stdout
+        .lines()
+        .find(|line| line.contains("oauth:unknown"))
+        .unwrap();
+    assert!(unknown.contains("unsupported refresh configuration"));
+    assert!(!unknown.contains("refreshes on next get"));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("oauth:known") && line.contains("refreshes on next get")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("oauth:static-adapter")
+            && line.contains("unsupported refresh configuration")));
+    assert!(stdout.contains("serviceable: 1"));
+}
+
+#[test]
+fn rotation_labels_preexisting_corruption_separately() {
+    let vault = GrantCliVault::new("rotation-corruption-label");
+    vault.bootstrap();
+    for id in ["apikey:previous", "apikey:new"] {
+        assert!(vault
+            .run(&[
+                "put",
+                "--id",
+                id,
+                "--payload-file",
+                &payload_file("fixture")
+            ])
+            .status
+            .success());
+    }
+    {
+        let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+        conn.execute_batch(
+            "UPDATE credentials SET envelope = X'00' WHERE credential_id IN ('apikey:previous', 'apikey:new');
+             UPDATE credentials SET state = 'corrupt' WHERE credential_id = 'apikey:previous';"
+        ).unwrap();
+    }
+    let result = vault.run(&["rotate-master-key"]);
+    assert!(result.status.success());
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let new = stderr
+        .lines()
+        .find(|line| line.contains("quarantined as corrupt"))
+        .unwrap();
+    assert!(new.contains("apikey:new"));
+    assert!(!new.contains("apikey:previous"));
+    assert!(stderr
+        .lines()
+        .any(|line| line.contains("already corrupt") && line.contains("apikey:previous")));
+}
+
+#[test]
 fn cli_review_minted_bearer_is_stdout_only() {
     let vault = GrantCliVault::new("mint-streams");
     vault.bootstrap();
@@ -1009,6 +1175,87 @@ fn cli_review_minted_bearer_is_stdout_only() {
     assert!(raw.starts_with("ckh_"));
     assert_eq!(stdout, format!("{raw}\n"));
     assert!(!String::from_utf8_lossy(&minted.stderr).contains(raw));
+}
+
+#[test]
+fn recognized_flags_are_not_swallowed_and_help_remains_a_payload_filename() {
+    let vault = GrantCliVault::new("flag-boundaries");
+    vault.bootstrap();
+    std::fs::write(vault.root.join("--help"), b"fixture-payload").unwrap();
+    let run = |args: &[&str]| cli().current_dir(&vault.root).args(args).output().unwrap();
+    for (args, flag) in [
+        (
+            vec!["remove", "--data-dir", "--subc", "--id", "apikey:fixture"],
+            "--data-dir",
+        ),
+        (vec!["--data-dir", "--subc", "bootstrap"], "--data-dir"),
+        (
+            vec!["login", "--provider", "openai", "--id", "--replace"],
+            "--id",
+        ),
+    ] {
+        let out = run(&args);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(&format!("{flag} requires a value")));
+    }
+    let status = cli()
+        .current_dir(&vault.root)
+        .args([
+            "put",
+            "--id",
+            "apikey:fixture",
+            "--payload-file",
+            "--help",
+            "--data-dir",
+        ])
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("created apikey:fixture"));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_payload_path_is_a_usage_refusal_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let out = cli()
+        .args(["put", "--id", "apikey:fixture", "--payload-file"])
+        .arg(std::ffi::OsStr::from_bytes(b"input-\xff"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("arguments must be valid UTF-8"));
+    assert!(!error.contains("panicked"));
+}
+
+#[test]
+fn snowflake_logout_without_matching_credentials_reports_no_change() {
+    let vault = GrantCliVault::new("logout-no-snowflake");
+    vault.bootstrap();
+    let out = vault.run(&["logout", "--provider", "snowflake"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing changed"));
+}
+
+#[test]
+fn invalid_snowflake_id_is_a_usage_error_before_login() {
+    let vault = GrantCliVault::new("invalid-snowflake-id");
+    vault.bootstrap();
+    let out = vault.run(&[
+        "login",
+        "--provider",
+        "snowflake",
+        "--id",
+        "oauth:snowflake:org/work",
+        "--no-browser",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing ran, nothing changed."));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("Open this URL"));
 }
 
 #[test]
@@ -6046,10 +6293,10 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // which flags may precede the verb. Version exits before that parser runs.
     let src = include_str!("../src/bin/credentials_cli.rs");
     let hoisted = src
-        .split_once("const GLOBAL_WITH_VALUE:")
+        .split_once("const GLOBAL_FLAGS:")
         .expect("global hoist definition")
         .1
-        .split_once("= [")
+        .split_once("= &[")
         .expect("global hoist array")
         .1
         .split_once("];")
@@ -8028,7 +8275,7 @@ fn github_app_cli_reconciles_when_route_peer_commits_and_disconnects() {
     assert_eq!(output.status.code(), Some(5));
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = stdout.join().unwrap();
-    assert!(stderr.contains("Check `ck auth list`"));
+    assert!(stderr.contains("Check GitHub and `ck auth list`"));
     assert!(stderr.contains("relay-retry"));
     assert!(!stderr.to_ascii_lowercase().contains("delete"));
     assert!(!format!("{stdout}{stderr}{callback}").contains("manifest-fixture-canary"));

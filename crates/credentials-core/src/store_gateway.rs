@@ -4,6 +4,11 @@ use crate::gateway::{
     GatewaySettingsRule,
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static GATEWAY_SETTINGS_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Plaintext gateway metadata with the identity of the record it was written for.
 /// Readers must compare `incarnation` with the record they serve, not a later lookup
 /// of the same credential id: removal and recreation can change all settings.
@@ -17,6 +22,11 @@ pub struct StoredGatewaySettings {
     pub vendor: crate::catalog::ModelVendor,
 }
 
+const SETTINGS_COLUMNS: &str = "SELECT g.incarnation, g.base_url, g.auth_header, g.auth_scheme, g.headers_json, \
+    COALESCE((SELECT group_concat(provider_id, ',') FROM (\
+        SELECT provider_id FROM credential_provider_ids WHERE credential_id = g.credential_id ORDER BY provider_id\
+    )), ''), g.credential_id FROM credential_gateway_settings g";
+
 pub(super) fn from_conn(
     conn: &rusqlite::Connection,
     credential_id: &str,
@@ -25,43 +35,68 @@ pub(super) fn from_conn(
     if schema_version < GATEWAY_SETTINGS_SCHEMA_VERSION {
         return Ok(None);
     }
+    #[cfg(test)]
+    GATEWAY_SETTINGS_QUERIES.with(|count| count.set(count.get() + 1));
     conn.query_row(
-        "SELECT incarnation, base_url, auth_header, auth_scheme, headers_json, \
-         COALESCE((SELECT group_concat(provider_id, ',') FROM (\
-             SELECT provider_id FROM credential_provider_ids WHERE credential_id = ?1 ORDER BY provider_id\
-         )), '') FROM credential_gateway_settings WHERE credential_id = ?1",
+        &format!("{SETTINGS_COLUMNS} WHERE g.credential_id = ?1"),
         [credential_id],
-        |row| {
-            let invalid = || {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "invalid stored gateway settings",
-                    )),
-                )
-            };
-            let settings = GatewaySettings {
-                base_url: row.get(1)?,
-                auth: GatewayAuth {
-                    header: row.get(2)?,
-                    scheme: row.get(3)?,
-                },
-                headers: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|_| invalid())?,
-            };
-            let providers = split_provider_ids(row.get(5)?);
-            let validated = validate_gateway_settings(credential_id, &settings, &providers)
-                .map_err(|_| invalid())?;
-            Ok(StoredGatewaySettings {
-                incarnation: row.get(0)?,
-                settings,
-                host: validated.host,
-                vendor: validated.vendor,
-            })
-        },
+        |row| settings_from_row(row, credential_id),
     )
     .optional()
+}
+
+pub(super) fn scoped_settings(
+    conn: &rusqlite::Connection,
+    schema_version: u32,
+    disclose: impl Fn(&str) -> bool,
+) -> rusqlite::Result<std::collections::HashMap<String, StoredGatewaySettings>> {
+    let mut settings = std::collections::HashMap::new();
+    if schema_version >= GATEWAY_SETTINGS_SCHEMA_VERSION {
+        #[cfg(test)]
+        GATEWAY_SETTINGS_QUERIES.with(|count| count.set(count.get() + 1));
+        let mut stmt = conn.prepare(SETTINGS_COLUMNS)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(6)?;
+            if disclose(&id) {
+                settings.insert(id.clone(), settings_from_row(row, &id)?);
+            }
+        }
+    }
+    Ok(settings)
+}
+
+fn settings_from_row(
+    row: &rusqlite::Row<'_>,
+    credential_id: &str,
+) -> rusqlite::Result<StoredGatewaySettings> {
+    let invalid = || {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid stored gateway settings",
+            )),
+        )
+    };
+    let settings = GatewaySettings {
+        base_url: row.get(1)?,
+        auth: GatewayAuth {
+            header: row.get(2)?,
+            scheme: row.get(3)?,
+        },
+        headers: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|_| invalid())?,
+    };
+    let providers = split_provider_ids(row.get(5)?);
+    let validated =
+        validate_gateway_settings(credential_id, &settings, &providers).map_err(|_| invalid())?;
+    Ok(StoredGatewaySettings {
+        incarnation: row.get(0)?,
+        settings,
+        host: validated.host,
+        vendor: validated.vendor,
+    })
 }
 
 pub(super) fn has_settings(
@@ -71,6 +106,8 @@ pub(super) fn has_settings(
     if read_schema_version(conn)? < GATEWAY_SETTINGS_SCHEMA_VERSION {
         return Ok(false);
     }
+    #[cfg(test)]
+    GATEWAY_SETTINGS_QUERIES.with(|count| count.set(count.get() + 1));
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM credential_gateway_settings WHERE credential_id = ?1)",
         [credential_id],

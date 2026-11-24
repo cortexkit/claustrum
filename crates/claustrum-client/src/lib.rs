@@ -47,7 +47,7 @@ use subc_transport::{authenticate_client, connection_file, read_frame, write_fra
 #[cfg(feature = "transport")]
 use tokio::net::TcpStream;
 #[cfg(feature = "transport")]
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
+use tokio::sync::Mutex as AsyncMutex;
 #[cfg(feature = "transport")]
 use tokio::time::Instant;
 
@@ -850,6 +850,22 @@ impl ClaustrumCredentialResolver {
     }
 
     #[doc(hidden)]
+    async fn retry_call<T, F: Future<Output = Result<T, CredentialResolverError>>>(
+        &self,
+        should_retry: impl Fn(&CredentialResolverError) -> bool,
+        mut attempt: impl FnMut() -> F,
+    ) -> Result<T, CredentialResolverError> {
+        for _ in 0..self.transient_retries {
+            match attempt().await {
+                Err(error) if should_retry(&error) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+        attempt().await
+    }
+
     pub fn with_target(target: Arc<dyn CredentialGetTarget>, transient_retries: usize) -> Self {
         Self {
             target,
@@ -875,24 +891,15 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         min_ttl_ms: Option<u64>,
         force_refresh: bool,
     ) -> CredentialResolverFuture<'a, Result<ResolvedCredential, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut retries = 0;
-            loop {
-                match self
-                    .target
+        Box::pin(self.retry_call(
+            |error| error.class == CredentialErrorClass::Transport,
+            move || async move {
+                self.target
                     .credential_get(raw_handle, min_ttl_ms, force_refresh)
                     .await
                     .and_then(decode_credential_reply)
-                {
-                    Ok(credential) => return Ok(credential),
-                    Err(error) if error.retryable() && retries < self.transient_retries => {
-                        retries += 1;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })
+            },
+        ))
     }
 
     fn get_scoped<'a>(
@@ -995,48 +1002,28 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         credential_id: &'a str,
         payload: &'a [u8],
     ) -> CredentialResolverFuture<'a, Result<CredentialSignature, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut retries = 0;
-            loop {
-                match self
-                    .target
+        Box::pin(
+            self.retry_call(CredentialResolverError::retryable, || async {
+                self.target
                     .credential_sign(credential_id, payload)
                     .await
                     .and_then(decode_signature_reply)
-                {
-                    Ok(signature) => return Ok(signature),
-                    Err(error) if error.retryable() && retries < self.transient_retries => {
-                        retries += 1;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })
+            }),
+        )
     }
 
     fn public_key<'a>(
         &'a self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<CredentialPublicKey, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut retries = 0;
-            loop {
-                match self
-                    .target
+        Box::pin(
+            self.retry_call(CredentialResolverError::retryable, || async {
+                self.target
                     .credential_public_key(credential_id)
                     .await
                     .and_then(decode_public_key_reply)
-                {
-                    Ok(public_key) => return Ok(public_key),
-                    Err(error) if error.retryable() && retries < self.transient_retries => {
-                        retries += 1;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })
+            }),
+        )
     }
 
     fn seal<'a>(
@@ -1269,23 +1256,47 @@ impl LiveCredentialGetTarget {
         Ok(())
     }
 
-    async fn lock_scoped_read(
+    async fn unary_call<P, T>(
         &self,
-        deadline: Instant,
         operation: &str,
-    ) -> Result<
-        MutexGuard<'_, Option<Box<dyn CredentialConsumerConnection>>>,
-        CredentialResolverError,
-    > {
-        // A caller that times out in the queue has not used the held connection.
-        let consumer = tokio::time::timeout_at(deadline, self.consumer.lock())
+        params: P,
+        send: impl for<'a> FnOnce(
+            &'a mut dyn CredentialConsumerConnection,
+            &'a P,
+        )
+            -> CredentialResolverFuture<'a, Result<T, CredentialResolverError>>,
+    ) -> Result<T, CredentialResolverError> {
+        let deadline = Instant::now() + self.call_deadline;
+        let mut consumer = tokio::time::timeout_at(deadline, self.consumer.lock())
             .await
             .map_err(|_| Self::deadline_error(operation))?;
-        // Tokio can grant a ready lock on the same poll as an expired timer.
+        // Tokio can grant the lock on the same poll as an expired timer. No
+        // request used the held route, so leave it cached on a queue timeout.
         if Instant::now() >= deadline {
             return Err(Self::deadline_error(operation));
         }
-        Ok(consumer)
+        let result = tokio::time::timeout_at(deadline, async {
+            self.connect_if_needed(&mut consumer).await?;
+            if Instant::now() >= deadline {
+                return Err(Self::deadline_error(operation));
+            }
+            let result = send(
+                consumer
+                    .as_deref_mut()
+                    .expect("credential consumer initialized"),
+                &params,
+            )
+            .await;
+            if Instant::now() >= deadline {
+                Err(Self::deadline_error(operation))
+            } else {
+                result
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(Self::deadline_error(operation)));
+        Self::clear_failed_transport(&mut consumer, &result);
+        result
     }
 
     async fn get_scoped(
@@ -1293,22 +1304,12 @@ impl LiveCredentialGetTarget {
         credential_id: &str,
         min_ttl_ms: Option<u64>,
     ) -> Result<Value, CredentialResolverError> {
-        let deadline = Instant::now() + self.call_deadline;
-        let mut consumer = self
-            .lock_scoped_read(deadline, CREDENTIAL_GET_SCOPED_OP)
-            .await?;
-        let result = tokio::time::timeout_at(deadline, async {
-            self.connect_if_needed(&mut consumer).await?;
-            consumer
-                .as_mut()
-                .expect("credential consumer initialized")
-                .credential_get_scoped(credential_id, min_ttl_ms)
-                .await
-        })
+        self.unary_call(
+            CREDENTIAL_GET_SCOPED_OP,
+            (credential_id, min_ttl_ms),
+            |consumer, &(id, ttl)| consumer.credential_get_scoped(id, ttl),
+        )
         .await
-        .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
-        Self::clear_failed_transport(&mut consumer, &result);
-        result
     }
 
     async fn sensitive_request(
@@ -1316,19 +1317,10 @@ impl LiveCredentialGetTarget {
         request: Secret<Vec<u8>>,
         operation: &str,
     ) -> Result<Secret<Vec<u8>>, CredentialResolverError> {
-        let mut consumer = self.consumer.lock().await;
-        let result = tokio::time::timeout(self.call_deadline, async {
-            self.connect_if_needed(&mut consumer).await?;
-            consumer
-                .as_mut()
-                .expect("credential consumer initialized")
-                .sensitive_request(request)
-                .await
+        self.unary_call(operation, (), move |consumer, &()| {
+            consumer.sensitive_request(request)
         })
         .await
-        .unwrap_or_else(|_| Err(Self::deadline_error(operation)));
-        Self::clear_failed_transport(&mut consumer, &result);
-        result
     }
 
     async fn condition_request(
@@ -1336,19 +1328,10 @@ impl LiveCredentialGetTarget {
         operation: &str,
         params: Value,
     ) -> Result<Value, CredentialResolverError> {
-        let mut consumer = self.consumer.lock().await;
-        self.connect_if_needed(&mut consumer).await?;
-        let result = tokio::time::timeout(
-            self.call_deadline,
-            consumer
-                .as_mut()
-                .expect("credential consumer initialized")
-                .credential_request(json!({ "method": operation, "params": params }), operation),
-        )
+        self.unary_call(operation, operation, move |consumer, &op| {
+            consumer.credential_request(json!({ "method": op, "params": params }), op)
+        })
         .await
-        .unwrap_or_else(|_| Err(Self::deadline_error(operation)));
-        Self::clear_failed_transport(&mut consumer, &result);
-        result
     }
 
     fn deadline_error(operation: &str) -> CredentialResolverError {
@@ -1396,21 +1379,11 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         min_ttl_ms: Option<u64>,
         force_refresh: bool,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_get(raw_handle, min_ttl_ms, force_refresh),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(self.unary_call(
+            CREDENTIAL_GET_OP,
+            (raw_handle, min_ttl_ms, force_refresh),
+            |consumer, &(handle, ttl, force)| consumer.credential_get(handle, ttl, force),
+        ))
     }
 
     fn credential_get_scoped<'a>(
@@ -1434,21 +1407,13 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         record_version: u64,
         provider_status: u16,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_report_auth_failure(credential_id, record_version, provider_status),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_REPORT_AUTH_FAILURE_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(self.unary_call(
+            CREDENTIAL_REPORT_AUTH_FAILURE_OP,
+            (credential_id, record_version, provider_status),
+            |consumer, &(id, version, status)| {
+                consumer.credential_report_auth_failure(id, version, status)
+            },
+        ))
     }
 
     fn credential_report_condition<'a>(
@@ -1491,24 +1456,11 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         &'a self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let deadline = Instant::now() + self.call_deadline;
-            let mut consumer = self
-                .lock_scoped_read(deadline, CREDENTIAL_STATUS_OP)
-                .await?;
-            let result = tokio::time::timeout_at(deadline, async {
-                self.connect_if_needed(&mut consumer).await?;
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_status(credential_id)
-                    .await
-            })
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_STATUS_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(
+            self.unary_call(CREDENTIAL_STATUS_OP, credential_id, |consumer, &id| {
+                consumer.credential_status(id)
+            }),
+        )
     }
 
     fn credential_sign<'a>(
@@ -1516,86 +1468,43 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         credential_id: &'a str,
         payload: &'a [u8],
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_sign(credential_id, payload),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_SIGN_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(self.unary_call(
+            CREDENTIAL_SIGN_OP,
+            (credential_id, payload),
+            |consumer, &(id, payload)| consumer.credential_sign(id, payload),
+        ))
     }
 
     fn credential_public_key<'a>(
         &'a self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_public_key(credential_id),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_PUBLIC_KEY_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(
+            self.unary_call(CREDENTIAL_PUBLIC_KEY_OP, credential_id, |consumer, &id| {
+                consumer.credential_public_key(id)
+            }),
+        )
     }
 
     fn credential_seal<'a>(
         &'a self,
         request: SealRequest<'a>,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let mut consumer = self.consumer.lock().await;
-            self.connect_if_needed(&mut consumer).await?;
-            let result = tokio::time::timeout(
-                self.call_deadline,
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_seal(request),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_SEAL_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(
+            self.unary_call(CREDENTIAL_SEAL_OP, request, |consumer, &request| {
+                consumer.credential_seal(request)
+            }),
+        )
     }
 
     fn credential_list_scoped(
         &self,
     ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
-        Box::pin(async move {
-            let deadline = Instant::now() + self.call_deadline;
-            let mut consumer = self
-                .lock_scoped_read(deadline, CREDENTIAL_LIST_SCOPED_OP)
-                .await?;
-            let result = tokio::time::timeout_at(deadline, async {
-                self.connect_if_needed(&mut consumer).await?;
-                consumer
-                    .as_mut()
-                    .expect("credential consumer initialized")
-                    .credential_list_scoped()
-                    .await
-            })
-            .await
-            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_LIST_SCOPED_OP)));
-            Self::clear_failed_transport(&mut consumer, &result);
-            result
-        })
+        Box::pin(
+            self.unary_call(CREDENTIAL_LIST_SCOPED_OP, (), |consumer, &()| {
+                consumer.credential_list_scoped()
+            }),
+        )
     }
 }
 
@@ -1635,7 +1544,7 @@ impl ClaustrumConsumer {
                         "credential route connection failed: {error}"
                     ))
                 })?;
-        authenticate_client(&mut stream, &connection, CREDENTIAL_CONNECT_TIMEOUT)
+        authenticate_client(&mut stream, &connection, CREDENTIAL_READ_TIMEOUT)
             .await
             .map_err(|_| {
                 CredentialResolverError::new(
@@ -1668,9 +1577,13 @@ impl ClaustrumConsumer {
         // A missing launch nonce refuses here, before anything is written: the route
         // must never open unscoped.
         let body = route_open_body(consumer_module_id)?;
-        self.write_request(0, 0, correlation, Priority::Passive, body)
-            .await?;
-        let reply = self.read_reply(0, 0, correlation).await?;
+        let reply = tokio::time::timeout(CREDENTIAL_READ_TIMEOUT, async {
+            self.write_request(0, 0, correlation, Priority::Passive, body)
+                .await?;
+            self.read_reply(0, 0, correlation).await
+        })
+        .await
+        .map_err(|_| CredentialResolverError::transport("credential route open timed out"))??;
         if reply.header.ty == FrameType::Error {
             return Err(decode_wire_error(&reply.body));
         }
@@ -1759,13 +1672,8 @@ impl ClaustrumConsumer {
         correlation: u64,
     ) -> Result<Frame, CredentialResolverError> {
         loop {
-            let frame = tokio::time::timeout(CREDENTIAL_READ_TIMEOUT, read_frame(&mut self.stream))
+            let frame = read_frame(&mut self.stream)
                 .await
-                .map_err(|error| {
-                    CredentialResolverError::transport(format!(
-                        "credential route reply timed out: {error}"
-                    ))
-                })?
                 .map_err(|error| {
                     CredentialResolverError::transport(format!(
                         "credential route read failed: {error}"
@@ -1967,8 +1875,9 @@ fn decode_optional_condition(row: &Value) -> Result<Option<ListedCredentialCondi
 }
 
 fn decode_optional_github_app(row: &Value) -> Result<Option<ListedGitHubApp>, String> {
-    let Some(app) = row.get("github_app") else {
-        return Ok(None);
+    let app = match row.get("github_app") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(app) => app,
     };
     if !app.is_object() {
         return Err("github_app is not an object".into());
@@ -2026,6 +1935,7 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
     Ok(ListedCredential {
         plan_tier_since_ms: row
             .get("plan_tier_since_ms")
+            .filter(|value| !value.is_null())
             .map(|value| {
                 value
                     .as_u64()
@@ -2062,6 +1972,7 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         org_name: decode_optional_string(row, "org_name")?,
         org_id: row
             .get("org_id")
+            .filter(|value| !value.is_null())
             .map(|value| {
                 value
                     .as_str()
@@ -2249,30 +2160,25 @@ pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
             "credential service returned an invalid error frame",
         );
     };
-    let message = value
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("credential route refused the request");
-    // Error frames describe the route, never credential state. Only definitive
-    // request failures survive a fresh connection unchanged; new codes must redial.
-    // unknown_module remains retryable because the credential module was unreachable.
-    if matches!(
-        code,
-        "unknown_method"
-            | "invalid_params"
-            | "invalid_request"
-            | "flow_scopes_unsupported"
-            | "invalid_control_body"
-    ) {
-        CredentialResolverError::unclassified(code, message)
-    } else {
-        // Wire codes distinguish route refusals from local failures such as a
-        // dropped socket, even though both require a fresh connection.
+    let body = subc_protocol::ErrorBody {
+        code: code.to_owned(),
+        message: value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("credential route refused the request")
+            .to_owned(),
+        detail: value.get("detail").cloned(),
+    };
+    // Error frames describe the route, not credential state. Honor the daemon's
+    // recovery verdict instead of inferring it from the failure message.
+    if subc_protocol::error_codes::is_retryable_route_open_refusal(&body) {
         CredentialResolverError {
             class: CredentialErrorClass::Transport,
-            code: code.to_owned(),
-            safe_message: message.to_owned(),
+            code: body.code,
+            safe_message: body.message,
         }
+    } else {
+        CredentialResolverError::unclassified(body.code, body.message)
     }
 }
 
@@ -2906,6 +2812,39 @@ mod tests {
 
     #[cfg(feature = "transport")]
     #[tokio::test(start_paused = true)]
+    async fn handle_and_seal_deadlines_include_the_queue_without_dialing() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let deadline = Duration::from_secs(5);
+        let target = LiveCredentialGetTarget::new(
+            Arc::new(DeadlineConnector {
+                dials: dials.clone(),
+            }),
+            deadline,
+        );
+        let mut holder = target.consumer.lock().await;
+        *holder = Some(Box::new(DeadlineConsumer { hangs: false }));
+        let (get, seal) = tokio::time::timeout(deadline + Duration::from_millis(1), async {
+            tokio::join!(
+                target.credential_get("fixture-handle", None, false),
+                target.credential_seal(SealRequest {
+                    credential_id: "kem:fixture",
+                    recipient_public_key: &[1; 32],
+                    info: b"",
+                    aad: b"",
+                    plaintext: b"fixture",
+                }),
+            )
+        })
+        .await
+        .expect("handle and seal must time out while the route is held");
+        assert!(get.unwrap_err().is_transport());
+        assert!(seal.unwrap_err().is_transport());
+        assert!(holder.is_some());
+        assert_eq!(dials.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "transport")]
+    #[tokio::test(start_paused = true)]
     async fn scoped_read_deadlines_expire_in_the_queue_without_clearing_the_held_route() {
         let dials = Arc::new(AtomicUsize::new(0));
         let deadline = Duration::from_secs(5);
@@ -2987,7 +2926,7 @@ mod tests {
         let target = Arc::new(FakeCkcredTarget {
             script: Mutex::new(VecDeque::from([
                 Err(CredentialResolverError::new(
-                    CredentialErrorClass::Transient,
+                    CredentialErrorClass::Transport,
                     "credential service is temporarily unavailable",
                 )),
                 Ok(json!({
@@ -3018,35 +2957,26 @@ mod tests {
     }
 
     #[test]
-    fn relay_routing_codes_classify_transport_so_redial_arms_fire() {
-        // The live specimen from the 2026-08-26 speech outage: the relay's
-        // class-less unknown_channel refusal after a credential-module restart.
-        // Without transport classification this class-less routing refusal is
-        // treated as a custody refusal. Transport classification permits redial.
-        // `module_warming` is the daemon's spelling for the pre-HELLO respawn
-        // window since subc #53 (it was `target_unavailable`); a copied two-code
-        // list rendered it as a custody verdict again (GitHub #48).
-        for code in [
-            "unknown_channel",
-            "stale_route_epoch",
-            "unknown_module",
-            "module_warming",
-            "module_reloading",
-            "target_unavailable",
-            "module_timeout",
+    fn wire_refusals_follow_the_daemon_recovery_verdict() {
+        for (code, expected_back, retryable) in [
+            ("unknown_module", None, false),
+            ("missing_identity", None, false),
+            ("future_refusal", None, false),
+            ("module_warming", None, true),
+            ("module_reloading", None, true),
+            ("target_unavailable", Some(true), true),
+            ("target_unavailable", Some(false), false),
+            ("module_timeout", None, true),
         ] {
             let error = decode_wire_error(
                 &serde_json::to_vec(&json!({
                     "code": code,
                     "message": format!("{code} 1"),
+                    "detail": { "expected_back": expected_back },
                 }))
                 .unwrap(),
             );
-            assert!(
-                error.is_transport(),
-                "{code} must classify transport (got {:?})",
-                error.class
-            );
+            assert_eq!(error.retryable(), retryable, "{code} {expected_back:?}");
             assert!(error.to_string().contains(code), "verbatim code preserved");
         }
         // A Response refusal with an unknown code is not a transport verdict.
@@ -3634,6 +3564,9 @@ mod tests {
                         "org_name": null,
                         "plan_tier": null,
                         "plan_tier_source": null,
+                        "plan_tier_since_ms": null,
+                        "org_id": null,
+                        "github_app": null,
                     })),
                     row(json!({ "plan_tier": 20 })),
                 ],
@@ -3649,6 +3582,9 @@ mod tests {
         );
         let listed = &listing.credentials[0];
         assert!(listed.provider_ids.is_empty());
+        assert!(listed.plan_tier_since_ms.is_none());
+        assert!(listed.org_id.is_none());
+        assert!(listed.github_app.is_none());
         assert_eq!(
             (
                 &listed.auth_method,

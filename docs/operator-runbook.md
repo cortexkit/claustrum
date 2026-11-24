@@ -417,9 +417,8 @@ and name prompts and paste only the value (`--kind` still defaults to `api_key`,
 cookie ids).
 
 For scripts, keep `--id` and `--payload-file <path>` so the secret never appears in the
-process list or shell history. File input strips trailing whitespace for non-cookie
-records (including spaces and tabs, unlike shell command substitution), while cookie
-file bytes are kept exactly:
+process list or shell history. Key files lose surrounding whitespace. Cookie files
+and cookies entered in the hidden prompt keep their surrounding whitespace:
 
 ```sh
 ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key
@@ -461,8 +460,8 @@ the App is created without webhook delivery to this vault.
 If create loses its daemon reply and reports that the App may be saved, check
 `ck auth list`. Do not resubmit the manifest code. If the App is listed with
 a relay slot, use `ck auth github-app relay-retry --slug <slug>` to finish
-registration. Retry never opens another slot; it cannot repair an expired
-slot or an App mismatch.
+registration. Retry never opens another slot. If registration fails permanently
+(for example, the slot expired or belongs to another App), recreate the App.
 
 Use `ck auth github-app rotate-webhook-secret --slug <slug>` to change the
 webhook secret on the relay and then on GitHub. If interrupted, rerun rotation
@@ -1272,7 +1271,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `secret_grant_create` | Phone approves a grant; target `secret\|<name>`, payload hash is the SHA-256 of the exact accepted envelope bytes. |
 | `secret_delete` | Phone or operator deletes a secret; target `secret\|<name>`, payload hash is the phone envelope SHA-256, or framed incarnation and request id for the operator. |
 | `secret_grant_revoke` | Phone, Cingulate or operator removes a grant; target `secret\|<name>`, payload fields: grant id, incarnation. |
-| `secret_grant_expire` | Vault sweeps an expired grant after an admitted use or phone list; target `secret\|<name>`, payload fields: grant id, incarnation, expiry as u64 LE. |
+| `secret_grant_expire` | Vault sweeps an expired agent grant on an admitted agent use or a phone list, not on a flow release. Expired grants are never usable. Target `secret\|<name>`, payload fields: grant id, incarnation, expiry as u64 LE. |
 | `secret_first_release` | Sender module first exercises a grant; target `secret\|<name>`, payload fields: grant id, incarnation. The grant's `first_released` marker, not prunable diagnostics, deduplicates this transition. |
 | `secret_local_release` | Release a sudo password; target `secret\|<name>`, payload fields: grant id, incarnation, canonical JSON object containing `program`, `use` and `target`, and the asking member id when forwarded. |
 | `secret_ssh_sign` | Sign SSH userauth data with an enrolled key; target is the bare signing-key credential id. Payload fields: grant id, incarnation, canonical JSON object containing `program`, `use` and `target`, lowercase hex of the keyed payload fingerprint of the signed bytes, and the asking member id when forwarded. |

@@ -9,6 +9,7 @@ use std::{
 use credentials_core::{
     federation::{is_lower_hex_16_bytes, valid_member_id},
     fleet::RECORD_KEY_ID,
+    hub_counters::HubReportSeq,
     record::{CredentialKind, RecordState, VaultRecord},
     signing::public_key_ed25519,
     store::{EncryptedStore, HubOwnReport, HubReportTaskState, StoreOpError},
@@ -20,7 +21,7 @@ use tokio::{
 
 use super::{
     hub::{Backoff, Hub, HubEntry, HubError, HubEvent, HubOperation, MANIFEST_ACTIVE},
-    hub_manifest::{matches_report, seal},
+    hub_manifest::{matches_report, published_seq, seal},
 };
 
 pub(super) enum Delivery {
@@ -163,11 +164,12 @@ async fn sign(
     store: &Arc<EncryptedStore>,
     input: &Arc<Input>,
     box_id: &str,
+    floor: Option<HubReportSeq>,
 ) -> Result<Option<HubReportTaskState>, StoreOpError> {
     let (store, input, box_id) = (Arc::clone(store), Arc::clone(input), box_id.to_owned());
     store_work(move || {
         let mut state = None;
-        store.commit_hub_report_bytes(&input.own, |seq| {
+        store.commit_hub_report_bytes_above(&input.own, floor, |seq| {
             let signed_bytes = seal(&input.own, &box_id, &input.member, seq, pem(&input.key)?)?;
             state = Some(HubReportTaskState {
                 seq,
@@ -244,11 +246,20 @@ async fn publish(
     let mut refresh_at = Some(Instant::now());
     let mut force_sign = false;
     let mut repair = false;
+    // The highest sequence found on the hub that the local row had not reached.
+    let mut floor: Option<HubReportSeq> = None;
+    let mut records = store.hub_own_report_records();
     loop {
         tokio::select! {
             biased;
             change = writes.changed() => {
                 if change.is_err() { return; }
+                // An explicit local report, even an unchanged one, is signed afresh.
+                let recorded = store.hub_own_report_records();
+                if recorded != records {
+                    records = recorded;
+                    force_sign = true;
+                }
                 if !force_sign || refresh_at.is_none() {
                     refresh_at = Some(Instant::now());
                 }
@@ -275,7 +286,7 @@ async fn publish(
                             let next = Arc::new(next);
                             input = Some(Arc::clone(&next));
                             if !same_bytes || force_sign {
-                                match sign(&store, &next, hub.box_id()).await {
+                                match sign(&store, &next, hub.box_id(), floor).await {
                                     Ok(Some(new)) => {
                                         state = Some(new);
                                         force_sign = false;
@@ -334,6 +345,20 @@ async fn publish(
                 match done {
                     Finished::Read(Ok(Some(entry))) if holds_bytes(&entry, latest) => backoff.reset(),
                     Finished::Read(Ok(entry)) => {
+                        let published = entry
+                            .as_ref()
+                            .filter(|entry| entry.operation == HubOperation::Put)
+                            .and_then(|entry| published_seq(&entry.value, hub.box_id(), &input.member, &input.key_id))
+                            .filter(|published| *published > latest.seq);
+                        if let Some(published) = published {
+                            // Never replace a value above the local sequence (a
+                            // restored backup): sign again above it.
+                            tracing::warn!(target: "federation", published = published.get(), "hub holds a newer manifest report from this vault than the local store; signing above it");
+                            floor = floor.max(Some(published));
+                            force_sign = true;
+                            refresh_at = Some(Instant::now());
+                            continue;
+                        }
                         if latest.sent {
                             // The Home may already have consumed this sequence before the key changed.
                             force_sign = true;

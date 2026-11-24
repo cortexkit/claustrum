@@ -296,7 +296,7 @@ async fn reports(rig: &Rig, hash: &str, public: &[u8]) -> (Value, Value, Value) 
     );
     // Seed the readiness state that a verified hub report leaves in the store.
     rig.store
-        .report_gh_manifest_active(
+        .seed_gh_manifest_activation_for_tests(
             &credentials_core::store::GhManifestActivationReport {
                 member_id: OTHER,
                 version: 29,

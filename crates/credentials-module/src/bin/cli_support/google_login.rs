@@ -146,6 +146,7 @@ pub fn cmd_login(
     super::browser_login::choose_and_present(args, approve_on, &authorize_url)?;
     let callback = super::tokio_block_on(super::browser_login::read_callback(
         listener,
+        redirect_uri,
         "Copy the full callback URL from the browser's address bar and paste it here, then Enter:",
         &state,
     ))?;
@@ -251,11 +252,7 @@ pub fn cmd_login(
         preflighted_key,
         args,
     );
-    let already_exists = match &result {
-        Err(CliError::Store(credentials_core::store::StoreOpError::AlreadyExists)) => true,
-        Err(CliError::RouteRefused(message)) => message.contains("already exists"),
-        _ => false,
-    };
+    let already_exists = result.as_ref().is_err_and(CliError::is_already_exists);
     if already_exists {
         return Err(CliError::Usage(format!(
             "'{id}' already holds a credential. To replace it, pass --replace (keeps its handles)."

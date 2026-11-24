@@ -247,6 +247,7 @@ impl RefreshAdapter for GoogleAdapter {
             // Preserve a rotated token if supplied; otherwise retain the existing grant.
             refresh_token: parsed
                 .refresh_token
+                .filter(|token| !token.is_empty())
                 .map(Into::into)
                 .unwrap_or_else(|| cred.refresh_token.clone()),
             expires_at_ms,

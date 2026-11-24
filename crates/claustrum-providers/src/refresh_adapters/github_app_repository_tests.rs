@@ -316,6 +316,32 @@ async fn repository_absence_requires_complete_listing_including_zero_repositorie
 }
 
 #[tokio::test]
+async fn repository_repeated_page_boundary_does_not_prove_absence() {
+    let names: Vec<_> = (0..201).map(|i| format!("owner/repo-{i}")).collect();
+    let distinct: Vec<_> = names.iter().map(String::as_str).collect();
+    for repeated in [false, true] {
+        let mut names = distinct.clone();
+        if repeated {
+            names[100] = "OWNER/REPO-99";
+        }
+        let http = transport(
+            names
+                .chunks(100)
+                .map(|chunk| response(200, page(201, chunk)))
+                .collect(),
+        );
+        assert_eq!(
+            check(&http).await,
+            if repeated {
+                GithubRepositoryCheck::GithubUnavailable
+            } else {
+                GithubRepositoryCheck::NotInstalled
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn repository_requests_never_classify_http_error_text() {
     for status in [401, 403, 404, 429, 422, 500, 503] {
         for stage in 0..3 {
@@ -389,7 +415,7 @@ async fn repository_changed_total_and_overfull_pages_are_unavailable_even_with_a
 async fn repository_paging_accepts_page_10_but_never_requests_page_11() {
     for last_name in ["CortexKit/claustrum", "owner/last"] {
         let mut pages = (1..10)
-            .map(|_| response(200, page(10, &["owner/other"])))
+            .map(|i| response(200, page(10, &[&format!("owner/other-{i}")])))
             .collect::<Vec<_>>();
         pages.push(response(200, page(10, &[last_name])));
         let http = transport(pages);

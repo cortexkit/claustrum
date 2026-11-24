@@ -10,7 +10,7 @@ impl EncryptedStore {
         call: &SecretFlowApproval,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
-        self.secret_request_flow_approval_from(call, LOCAL_ASKING_MEMBER, clock)
+        self.secret_request_flow_approval_inner(call, LOCAL_ASKING_MEMBER, None, clock)
     }
 
     /// [`Self::secret_request_flow_approval`] for a request that `asking_member`
@@ -21,10 +21,32 @@ impl EncryptedStore {
         &self,
         call: &SecretFlowApproval,
         asking_member: &str,
+        pairing_id: &str,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        self.secret_request_flow_approval_inner(
+            call,
+            asking_member,
+            (!asking_member.is_empty()).then_some(pairing_id),
+            clock,
+        )
+    }
+
+    fn secret_request_flow_approval_inner(
+        &self,
+        call: &SecretFlowApproval,
+        asking_member: &str,
+        pairing_id: Option<&str>,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
         agent_secret::validate_name(&call.name)?;
         call.flow.validate()?;
+        if agent_secret::flow_id_is_v1_statement_tag(&call.flow.flow_id)
+            || (pairing_id.is_some()
+                && agent_secret::flow_id_is_v2_statement_tag(&call.flow.flow_id))
+        {
+            return Err(SecretError::InvalidParams);
+        }
         call.target.validate()?;
         let methods = agent_secret::validate_flow_methods(&call.target, call.methods.as_deref())?;
         let methods = methods
@@ -33,6 +55,24 @@ impl EncryptedStore {
             .map_err(|_| SecretError::StoreError)?;
         let answer = self
             .fenced_write(|tx| {
+                if let Some(pairing_id) = pairing_id {
+                    if !super::member_grant_is_live(tx, asking_member, pairing_id)? {
+                        return Ok(Ok(Err(SecretError::NotFound)));
+                    }
+                }
+                if agent_secret::flow_id_is_v3_statement_tag(&call.flow.flow_id) {
+                    let extended = tx
+                        .query_row(
+                            "SELECT scope_json IS NOT NULL FROM agent_secrets WHERE name=?1",
+                            [&call.name],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if extended {
+                        return Ok(Ok(Err(SecretError::InvalidParams)));
+                    }
+                }
                 let record = match self.check_secret_target(
                     tx,
                     &call.name,
@@ -281,7 +321,7 @@ impl EncryptedStore {
         install_id: &str,
         version: Option<u64>,
     ) -> Result<usize, SecretError> {
-        self.revoke_flow_grants_from(install_id, version, LOCAL_ASKING_MEMBER)
+        self.revoke_flow_grants_inner(install_id, version, LOCAL_ASKING_MEMBER, None)
     }
 
     /// [`Self::revoke_flow_grants`] for a revoke that `asking_member` forwarded to this
@@ -294,6 +334,22 @@ impl EncryptedStore {
         install_id: &str,
         version: Option<u64>,
         asking_member: &str,
+        pairing_id: &str,
+    ) -> Result<usize, SecretError> {
+        self.revoke_flow_grants_inner(
+            install_id,
+            version,
+            asking_member,
+            (!asking_member.is_empty()).then_some(pairing_id),
+        )
+    }
+
+    fn revoke_flow_grants_inner(
+        &self,
+        install_id: &str,
+        version: Option<u64>,
+        asking_member: &str,
+        pairing_id: Option<&str>,
     ) -> Result<usize, SecretError> {
         if !(1..=256).contains(&install_id.len())
             || !install_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
@@ -302,6 +358,11 @@ impl EncryptedStore {
             return Err(SecretError::InvalidParams);
         }
         self.fenced_write(|tx| {
+            if let Some(pairing_id) = pairing_id {
+                if !super::member_grant_is_live(tx, asking_member, pairing_id)? {
+                    return Ok(Err(SecretError::NotFound));
+                }
+            }
             let mut stmt = tx.prepare("SELECT grant_id,secret_name,incarnation,flow_id,flow_version FROM secret_flow_grants WHERE flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2) AND asking_member_id=?3 ORDER BY grant_id")?;
             let grants = stmt.query_map(rusqlite::params![install_id, version, asking_member], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,u64>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             for (id, name, incarnation, flow_id, flow_version) in &grants {
@@ -312,8 +373,8 @@ impl EncryptedStore {
             tx.execute("DELETE FROM secret_pending_requests WHERE consumed=0 AND flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2) AND asking_member_id=?3", rusqlite::params![install_id, version, asking_member])?;
             phone::audit(tx, &self.audit_key, AuditOp::SecretGrantRevoke, Some(format!("secret-flow|{install_id}")), SecretSender::Basal.actor(),
                 &[install_id.as_bytes(), version.map(|v| v.to_string()).unwrap_or_default().as_bytes(), grants.len().to_string().as_bytes()])?;
-            Ok(grants.len())
-        }).map_err(|_| SecretError::StoreError)
+            Ok(Ok(grants.len()))
+        }).map_err(|_| SecretError::StoreError)?
     }
 }
 
@@ -348,14 +409,6 @@ fn flow_pending(
     let id =
         agent_secret::request_id(now).map_err(|_| rusqlite_err("request id generation failed"))?;
     let expiry = now + FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS;
-    // Refuse reserved tags before encoding so a collision is invalid_params,
-    // not a statement-encoding store_error. Local requests still accept v2 tags.
-    if (record.scope.is_extended() && agent_secret::flow_id_is_v3_statement_tag(&call.flow.flow_id))
-        || (!asking_member.is_empty()
-            && agent_secret::flow_id_is_v2_statement_tag(&call.flow.flow_id))
-    {
-        return Ok(Err(SecretError::InvalidParams));
-    }
     // The builder selects v1/v2 for legacy scopes and v3 for extended scopes.
     let statement = agent_secret::flow_approval_statement_for_asker(
         &id,
@@ -433,6 +486,7 @@ mod v2_flow_tests {
 
     const V2_MEMBER: &str = "fed-computer:22222222222222222222222222222222";
     const V2_ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    const V2_PAIRING: &str = "pair-M";
     const V2_NOW: i64 = 1_700_000_000_000;
 
     fn v2_scope() -> agent_secret::SecretScope {
@@ -474,6 +528,12 @@ mod v2_flow_tests {
                 crate::audit::AuditCtx::admin(crate::audit::AuditOp::FederationSelfSet),
             )
             .unwrap();
+        store.fenced_write(|tx| {
+            tx.execute(
+                "INSERT INTO member_grants (member_id,operation,selector_kind,selector,pairing_id,created_at_ms,source) VALUES (?1,'secret_use','none','',?2,?3,'operator')",
+                rusqlite::params![V2_ASKER, V2_PAIRING, V2_NOW],
+            ).map(|_| ())
+        }).unwrap();
         let incarnation = format!(
             "{:032x}",
             b"key".iter().copied().map(u64::from).sum::<u64>()
@@ -514,7 +574,7 @@ mod v2_flow_tests {
     fn forwarded_flow_pending_carries_v2_statement_with_asker() {
         let (_root, store) = v2_setup("v2-flow-forwarded");
         let outcome = store
-            .secret_request_flow_approval_from(&v2_approval_call(), V2_ASKER, || V2_NOW)
+            .secret_request_flow_approval_from(&v2_approval_call(), V2_ASKER, V2_PAIRING, || V2_NOW)
             .unwrap();
         assert_eq!(outcome.reply["status"], "approval_required");
         let request_id = outcome.reply["request_id"].as_str().unwrap().to_owned();
@@ -572,7 +632,7 @@ mod v2_flow_tests {
             assert_eq!(local.reply["status"], "approval_required");
             // Forwarded refuses it with invalid_params.
             assert!(matches!(
-                store.secret_request_flow_approval_from(&call, V2_ASKER, || V2_NOW),
+                store.secret_request_flow_approval_from(&call, V2_ASKER, V2_PAIRING, || V2_NOW),
                 Err(agent_secret::SecretError::InvalidParams)
             ));
         }

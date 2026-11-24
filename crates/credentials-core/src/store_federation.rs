@@ -31,7 +31,7 @@ const MAX_FETCH_OUTCOME_LEN: usize = 64;
 
 /// The longest pairing id stored. Callosum's pairing id is opaque and compared for
 /// equality only, so this bounds a column, not a format.
-const MAX_PAIRING_ID_LEN: usize = 128;
+use crate::federation::{valid_pairing_id, MAX_PAIRING_ID_LEN};
 
 pub(super) fn read_setting(
     conn: &rusqlite::Connection,
@@ -229,10 +229,7 @@ fn unchanged_or_stale(
 }
 
 pub(super) fn check_pairing_id(pairing_id: &str) -> Result<(), StoreOpError> {
-    if pairing_id.is_empty()
-        || pairing_id.len() > MAX_PAIRING_ID_LEN
-        || !pairing_id.bytes().all(|byte| byte.is_ascii_graphic())
-    {
+    if !valid_pairing_id(pairing_id) {
         return Err(StoreOpError::Encode(format!(
             "pairing_id must be 1 to {MAX_PAIRING_ID_LEN} printable ASCII characters"
         )));
@@ -299,6 +296,7 @@ impl RemoteWatchDiff<'_> {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn is_empty(&self) -> bool {
         self.inserts.is_empty() && self.updates.is_empty() && self.removals.is_empty()
     }
@@ -532,6 +530,13 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// How many times this process has turned login sharing on. A change that
+    /// ends at on raises it even when two coalesced write notices hide the off.
+    pub fn login_sharing_enables(&self) -> u64 {
+        self.login_sharing_enables
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Commit the setting and all automatic-state removals together. In-flight
     /// reconcilers recheck this setting in their own transaction before inserting.
     pub fn set_login_sharing_audited(
@@ -553,7 +558,13 @@ impl EncryptedStore {
                 return Ok(false);
             }
             write_setting_tx(tx, LOGIN_SHARING_SETTING, wanted)?;
-            if !enabled {
+            if enabled {
+                // Counted before the commit wakes write subscribers, so a woken
+                // watcher already sees it. A rolled-back commit only costs a
+                // spurious re-read.
+                self.login_sharing_enables
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            } else {
                 if read_schema_version(tx)? >= HUB_ENTRIES_SCHEMA_VERSION {
                     tx.execute("UPDATE hub_login_homes SET reapply = 1", [])?;
                 }
@@ -934,6 +945,10 @@ impl EncryptedStore {
     ///
     /// A read-only preflight avoids a fenced commit (and its write signal) for an
     /// empty diff. A non-empty diff is recomputed inside one fenced transaction.
+    ///
+    /// Test fixtures only: production writes home-watch rows through the hub path
+    /// (`apply_hub_login_audited` and `remove_hub_login_home_audited`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn remote_watch_apply_audited(
         &self,
         home_member: &str,
@@ -1127,6 +1142,8 @@ impl EncryptedStore {
 
     /// Remove a home's home-watch rows except those under `keep_pairing`, or all
     /// of them for `None`. Empty removals do not open a transaction or signal a write.
+    /// Test fixtures only, like [`Self::remote_watch_apply_audited`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn remote_watch_remove_audited(
         &self,
         home_member: &str,

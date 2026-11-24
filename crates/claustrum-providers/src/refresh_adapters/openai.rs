@@ -7,15 +7,15 @@
 //!
 //! Two provider-specific shapes the wire-format research pinned down (verified
 //! against the official `openai/codex` CLI source, not invented):
-//! - A dead/revoked refresh token is reported as a NESTED error code
-//!   (`{"error":{"code":"refresh_token_expired" | "refresh_token_reused" |
-//!   "refresh_token_invalidated"}}`) on a 400 OR 401 — NOT a flat `invalid_grant`.
+//! - A 401 means the refresh grant is unusable. A 400 is terminal only when its
+//!   flat or nested error code is `invalid_grant`, `refresh_token_expired`,
+//!   `refresh_token_reused`, or `refresh_token_invalidated`.
 //! - The official refresh path does not consume `expires_in` (the CLI reads the
 //!   access token's own JWT expiry), so it is parsed optionally here and absence
 //!   falls back to the access token's JWT expiry (unknown for opaque tokens).
 //!
-//! The refresh token rotates (single-use), so a response that omits `refresh_token`
-//! reuses the existing one. OpenAI exposes a revocation endpoint but no
+//! The refresh token rotates (single-use), so an absent or empty `refresh_token`
+//! leaves the existing one in place. OpenAI exposes a revocation endpoint but no
 //! non-mutating introspection, so [`RefreshAdapter::non_mutating_check`] stays
 //! `None`.
 
@@ -108,24 +108,21 @@ impl OpenAiAdapter {
         }
     }
 
-    /// Whether a body carries one of OpenAI's dead-refresh-token error codes.
-    fn is_dead_refresh_token(body: &[u8]) -> bool {
-        serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .and_then(|e| {
+    fn is_dead_refresh_error(body: &[u8]) -> bool {
+        serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|e| {
+            matches!(
                 e["error"]["code"]
                     .as_str()
                     .or_else(|| e["error"].as_str())
-                    .or_else(|| e["code"].as_str())
-                    .map(str::to_owned)
-            })
-            .map(|code| {
-                matches!(
-                    code.as_str(),
-                    "refresh_token_expired" | "refresh_token_reused" | "refresh_token_invalidated"
+                    .or_else(|| e["code"].as_str()),
+                Some(
+                    "invalid_grant"
+                        | "refresh_token_expired"
+                        | "refresh_token_reused"
+                        | "refresh_token_invalidated"
                 )
-            })
-            .unwrap_or(false)
+            )
+        })
     }
 }
 
@@ -145,13 +142,10 @@ impl RefreshAdapter for OpenAiAdapter {
             .post(Self::endpoint(cred), &[], "application/json", body)
             .await?;
 
-        // Recognize terminal refresh errors in nested, flat-error and top-level-code forms.
-        if resp.status == 400 || resp.status == 401 {
-            let text = String::from_utf8_lossy(&resp.body);
-            if Self::is_dead_refresh_token(&resp.body) {
-                return Err(RefreshError::InvalidGrant(text.into_owned()));
-            }
-            return Err(RefreshError::Status(resp.status, text.into_owned()));
+        if resp.status == 401 || (resp.status == 400 && Self::is_dead_refresh_error(&resp.body)) {
+            return Err(RefreshError::InvalidGrant(
+                "OpenAI refresh token was rejected".into(),
+            ));
         }
         if resp.status != 200 {
             return Err(RefreshError::Status(
@@ -174,6 +168,7 @@ impl RefreshAdapter for OpenAiAdapter {
             });
         let refresh_token = parsed
             .refresh_token
+            .filter(|token| !token.is_empty())
             .unwrap_or_else(|| cred.refresh_token.expose().to_string());
         Ok(RefreshedTokens {
             access_token: parsed.access_token.into(),

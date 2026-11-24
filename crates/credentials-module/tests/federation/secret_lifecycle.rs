@@ -379,6 +379,186 @@ async fn a_permanent_receipt_ends_when_the_phone_revokes_or_the_secret_is_recrea
 }
 
 #[tokio::test]
+async fn a_local_program_target_is_invalid_for_flow_approval_on_either_route() {
+    let rig = Rig::new("secret-flow-local-target").await;
+    let principal = Principal::Reserved {
+        module_id: "basal".into(),
+    };
+    let mut params = golden("request_flow_approval.request.api_key");
+    params["target"] = golden("use.request.local_program")["target"].clone();
+    let call = claustrum_module_probe::secret_use::sender_call(
+        "secret.request_flow_approval",
+        Some(&principal),
+        &params,
+    )
+    .unwrap();
+    assert!(matches!(
+        rig.reader.route_secret_call(call).await,
+        SecretRoute::Answer(SecretForwardAnswer::InvalidParams)
+    ));
+    assert!(matches!(
+        claustrum_module_probe::secret_use::serve_flow_approval(
+            &rig.a.store,
+            Some(&principal),
+            &params,
+            || rig.vaults.a.clock.wall_ms()
+        ),
+        claustrum_module_probe::secret_use::UseAnswer::InvalidParams
+    ));
+    assert_eq!(
+        count(&rig, "SELECT COUNT(*) FROM secret_pending_requests"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn reserved_flow_ids_are_grammar_errors_even_at_the_pending_cap() {
+    use credentials_core::agent_secret::{
+        FLOW_STATEMENT_V2, FLOW_STATEMENT_V3, MAX_FLOW_SECRET_PENDING_TOTAL,
+    };
+    let rig = Rig::new("secret-flow-reserved-tag").await;
+    let principal = Principal::Reserved {
+        module_id: "basal".into(),
+    };
+    let now = rig.vaults.a.clock.wall_ms();
+    let mut put = api_key_put();
+    put.name = "extended".into();
+    put.rules = Some(
+        serde_json::from_value(
+            json!([{"host":"x.test","path_prefix":"/repos/a"},{"host":"y.test"}]),
+        )
+        .unwrap(),
+    );
+    put.host = None;
+    put.path_prefix = None;
+    rig.a
+        .store
+        .set_secret_multi_host_audited(true, AuditCtx::admin(AuditOp::SecretMultiHostSet))
+        .unwrap();
+    put_secret(&rig.a.store, put);
+
+    let mut params = golden("request_flow_approval.request.api_key");
+    let local = |params: &Value| {
+        claustrum_module_probe::secret_use::serve_flow_approval(
+            &rig.a.store,
+            Some(&principal),
+            params,
+            || now,
+        )
+    };
+    params["flow"]["flow_id"] = json!(FLOW_STATEMENT_V2);
+    assert!(
+        matches!(local(&params), claustrum_module_probe::secret_use::UseAnswer::Reply(reply) if reply["status"] == "approval_required")
+    );
+    params["flow"]["flow_id"] = json!(FLOW_STATEMENT_V3);
+    assert!(
+        matches!(local(&params), claustrum_module_probe::secret_use::UseAnswer::Reply(reply) if reply["status"] == "approval_required")
+    );
+    let legacy_v3 = claustrum_module_probe::secret_use::sender_call(
+        "secret.request_flow_approval",
+        Some(&principal),
+        &params,
+    )
+    .unwrap();
+    assert!(matches!(
+        rig.reader.route_secret_call(legacy_v3).await,
+        SecretRoute::Answer(SecretForwardAnswer::Reply(reply)) if reply["status"] == "approval_required"
+    ));
+    params["name"] = json!("extended");
+    params["target"]["host"] = json!("z.test");
+    assert!(matches!(
+        local(&params),
+        claustrum_module_probe::secret_use::UseAnswer::InvalidParams
+    ));
+    params["target"]["host"] = json!("x.test");
+
+    let mut observations = Vec::new();
+    for full in [false, true] {
+        if full {
+            let conn = rusqlite::Connection::open(rig.vaults.a.store_path()).unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i+1<?1)
+                 INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms,flow_id,flow_install_id)
+                 SELECT printf('test-%d',i),'approve','key','fixture','fixture',X'','fixture',?2,'fixture','other-install' FROM n",
+                rusqlite::params![MAX_FLOW_SECRET_PENDING_TOTAL, now + 1],
+            ).unwrap();
+        }
+        for (name, tag, is_remote) in [
+            ("extended", FLOW_STATEMENT_V3, false),
+            ("extended", FLOW_STATEMENT_V3, true),
+            ("missing", "ck-secret-use-statement/v1", true),
+            ("missing", "ck-secret-flow-statement/v1", true),
+            ("missing", FLOW_STATEMENT_V2, true),
+        ] {
+            params["name"] = json!(name);
+            params["flow"]["flow_id"] = json!(tag);
+            let invalid = if is_remote {
+                let call = claustrum_module_probe::secret_use::sender_call(
+                    "secret.request_flow_approval",
+                    Some(&principal),
+                    &params,
+                )
+                .unwrap();
+                matches!(
+                    rig.reader.route_secret_call(call).await,
+                    SecretRoute::Answer(SecretForwardAnswer::InvalidParams)
+                )
+            } else {
+                matches!(
+                    local(&params),
+                    claustrum_module_probe::secret_use::UseAnswer::InvalidParams
+                )
+            };
+            observations.push((full, name, tag, is_remote, invalid));
+        }
+    }
+    assert!(observations.iter().all(|row| row.4), "{observations:?}");
+}
+
+#[tokio::test]
+async fn a_revoked_member_grant_fences_admitted_flow_writes() {
+    use claustrum_module_probe::secret_use::{
+        serve_flow_approval_forwarded, serve_revoke_flow_grants_forwarded, UseAnswer,
+    };
+    let rig = Rig::new("secret-flow-member-fence").await;
+    let mut params = golden("request_flow_approval.request.api_key");
+    let ask = rig
+        .on_b("basal", "secret.request_flow_approval", &params)
+        .await;
+    rig.grant(&ask, "version");
+    let member = rig.requester();
+    let now = rig.vaults.a.clock.wall_ms();
+    let revoke = json!({"flow_install_id":params["flow"]["install_id"]});
+
+    // Ingress has already admitted this member under the exact pairing used above.
+    // Commit revocation before entering either queued route's write transaction.
+    rig.a
+        .store
+        .revoke_member_grant_audited(
+            &member,
+            MemberGrantOperation::SecretUse,
+            &MemberGrantSelector::None,
+        )
+        .unwrap();
+    let snapshot = || {
+        (
+            count(&rig, "SELECT COUNT(*) FROM secret_pending_requests"),
+            count(&rig, "SELECT COUNT(*) FROM secret_flow_grants"),
+            count(&rig, "SELECT COUNT(*) FROM audit_log"),
+        )
+    };
+    let before = snapshot();
+    assert_eq!(before.1, 1);
+    params["flow"]["version"] = json!(8);
+    let approval = serve_flow_approval_forwarded(&rig.a.store, &member, PAIRING_B, &params, || now);
+    let revoke = serve_revoke_flow_grants_forwarded(&rig.a.store, &member, PAIRING_B, &revoke);
+    assert_eq!(snapshot(), before);
+    for answer in [approval, revoke] {
+        assert!(matches!(answer, UseAnswer::Reply(reply) if reply == not_found()));
+    }
+}
+
+#[tokio::test]
 async fn local_and_forwarded_flow_approvals_enforce_the_flow_id_grammar() {
     let rig = Rig::new("secret-flow-id-grammar").await;
     let principal = Principal::Reserved {

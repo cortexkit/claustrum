@@ -1,6 +1,9 @@
 //! Local authorization and release checks for policy-narrowed GitHub App tokens.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Deserializer};
@@ -10,19 +13,38 @@ use crate::{
     agent_policy::{AgentPolicy, Approval, Class, Identity},
     audit::{AuditOp, AuditRecord},
     broker_action::{valid_ulid, BrokerActionLeg},
-    envelope::{self, EnvelopeError, RecordBinding},
+    envelope::EnvelopeError,
     federation::is_lower_hex_sha256,
     oauth::OAuthCredential,
-    record::{CredentialKind, RecordState, VaultRecord},
+    record::RecordState,
 };
 
 use super::{
-    agent_policy::active_agent_policy_version_conn, append_audit_tx,
-    audit_store::record_scoped_first_use_tx, sha256_hex_of_bytes,
-    store_agent_secrets::secret_home_role_conn, EncryptedStore, GrantOperation, SecretHomeRole,
+    agent_policy::{active_agent_policy_summary_conn, AgentPolicySummary},
+    append_audit_tx,
+    audit_store::record_scoped_first_use_tx,
+    sha256_hex_of_bytes,
+    store_agent_secrets::secret_home_role_conn,
+    EncryptedStore, GrantOperation, SecretHomeRole, StoreOpError,
 };
 
 const MAX_POLICY_TOKEN_REPOSITORIES: usize = 500;
+
+// Only one policy is active in a snapshot. Keep its parsed document, not any
+// caller's binding, grants or approval result.
+#[derive(Default)]
+pub(super) struct ParsedPolicyMemo(Mutex<Option<ParsedPolicy>>);
+
+struct ParsedPolicy {
+    version: i64,
+    sha256: String,
+    policy: Arc<AgentPolicy>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static POLICY_TOKEN_POLICY_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,7 +143,7 @@ impl EncryptedStore {
         self.store
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                let result = prepare(&tx, module_id, request, clock)?;
+                let result = prepare(&tx, &self.policy_token_memo, module_id, request, clock)?;
                 tx.commit()?;
                 Ok(result)
             })
@@ -135,28 +157,14 @@ impl EncryptedStore {
         identity: &str,
         record: PolicyTokenRecord,
     ) -> Result<OAuthCredential, PolicyTokenError> {
-        let plaintext = envelope::open(
-            &self.key,
-            &record.envelope,
-            &RecordBinding {
-                credential_id: identity,
-                record_version: record.key.record_version,
-            },
-        )
-        .map_err(|error| match error {
-            EnvelopeError::KeyMismatch { .. } => PolicyTokenError::VaultLocked,
-            _ => PolicyTokenError::Corrupt,
-        })?;
-        let record = VaultRecord::decode(&plaintext).map_err(|_| PolicyTokenError::Corrupt)?;
-        if record.payload.expose().is_empty() {
-            return Err(PolicyTokenError::Corrupt);
-        }
-        if record.kind != CredentialKind::Oauth
-            || record.refresh_adapter.as_deref() != Some("github_app")
-        {
-            return Err(PolicyTokenError::InstallationUnusable);
-        }
-        record.oauth.ok_or(PolicyTokenError::InstallationUnusable)
+        self.open_github_app_material(identity, record.key.record_version, &record.envelope)
+            .map_err(|error| match error {
+                StoreOpError::Decrypt(EnvelopeError::KeyMismatch { .. }) => {
+                    PolicyTokenError::VaultLocked
+                }
+                _ => PolicyTokenError::Corrupt,
+            })?
+            .ok_or(PolicyTokenError::InstallationUnusable)
     }
 
     /// Authorize release and commit first use together. No provider request is made
@@ -187,18 +195,8 @@ impl EncryptedStore {
         clock: impl Fn() -> i64,
         after_grant: impl FnOnce(),
     ) -> Result<PolicyTokenHandoff, PolicyTokenError> {
-        self.fenced_write(|tx| {
-            handoff(
-                tx,
-                &self.audit_key,
-                module_id,
-                request,
-                candidate,
-                clock,
-                after_grant,
-            )
-        })
-        .map_err(|_| PolicyTokenError::StoreError)?
+        self.fenced_write(|tx| handoff(tx, self, module_id, request, candidate, clock, after_grant))
+            .map_err(|_| PolicyTokenError::StoreError)?
     }
 }
 
@@ -251,6 +249,7 @@ pub(super) fn has_exact_grant(
 
 fn prepare(
     conn: &Connection,
+    memo: &ParsedPolicyMemo,
     module_id: &str,
     request: Option<&PolicyTokenRequest>,
     clock: impl FnOnce() -> i64,
@@ -269,15 +268,17 @@ fn prepare(
         Ok(proof) => proof,
         Err(error) => return Ok(Err(error)),
     };
-    let active_version = active_agent_policy_version_conn(conn)?;
-    let policy = if active_version == Some(request.policy_version) {
-        let Some(policy) = read_policy(conn, request.policy_version)? else {
-            return Ok(Err(Error::StoreError));
+    let active = active_agent_policy_summary_conn(conn)?;
+    let active_version = active.as_ref().map(|policy| policy.version);
+    let policy =
+        if let Some(summary) = active.filter(|policy| policy.version == request.policy_version) {
+            let Some(policy) = read_policy(conn, memo, summary)? else {
+                return Ok(Err(Error::StoreError));
+            };
+            Some(policy)
+        } else {
+            None
         };
-        Some(policy)
-    } else {
-        None
-    };
     let kind = policy.as_ref().and_then(|policy| {
         policy
             .rule_sets
@@ -339,13 +340,41 @@ fn prepare(
     }))
 }
 
-fn read_policy(conn: &Connection, version: i64) -> rusqlite::Result<Option<AgentPolicy>> {
+fn read_policy(
+    conn: &Connection,
+    memo: &ParsedPolicyMemo,
+    summary: AgentPolicySummary,
+) -> rusqlite::Result<Option<Arc<AgentPolicy>>> {
+    let AgentPolicySummary {
+        version,
+        policy_sha256: sha256,
+    } = summary;
+    if let Some(cached) = memo
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|cached| cached.version == version && cached.sha256 == sha256)
+    {
+        return Ok(Some(Arc::clone(&cached.policy)));
+    }
     let bytes: Vec<u8> = conn.query_row(
         "SELECT policy_bytes FROM agent_policies WHERE version = ?1",
         [version],
         |row| row.get(0),
     )?;
-    Ok(AgentPolicy::parse_canonical(&bytes).ok())
+    #[cfg(test)]
+    POLICY_TOKEN_POLICY_PARSES.with(|count| count.set(count.get() + 1));
+    let Ok(policy) = AgentPolicy::parse_canonical(&bytes) else {
+        return Ok(None);
+    };
+    let policy = Arc::new(policy);
+    *memo.0.lock().unwrap() = Some(ParsedPolicy {
+        version,
+        sha256,
+        policy: Arc::clone(&policy),
+    });
+    Ok(Some(policy))
 }
 
 fn select_repositories(
@@ -447,7 +476,7 @@ fn check_approval(
 
 fn handoff(
     tx: &rusqlite::Transaction<'_>,
-    audit_key: &[u8; 32],
+    store: &EncryptedStore,
     module_id: &str,
     request: &PolicyTokenRequest,
     (key, expires_at_ms, prepared_leg): (&PolicyTokenRecordKey, i64, Option<i64>),
@@ -462,7 +491,8 @@ fn handoff(
         return Ok(Err(Error::NotFound));
     }
     after_grant();
-    let active_version = active_agent_policy_version_conn(tx)?;
+    let active = active_agent_policy_summary_conn(tx)?;
+    let active_version = active.as_ref().map(|policy| policy.version);
     let proof = match request.approval_proof() {
         Ok(proof) => proof,
         Err(error) => return Ok(Err(error)),
@@ -475,9 +505,9 @@ fn handoff(
             Err(error) => return Ok(Err(error)),
         }
     }
-    if active_version != Some(request.policy_version) {
+    let Some(active) = active.filter(|policy| policy.version == request.policy_version) else {
         return Ok(Err(Error::VersionNotActive));
-    }
+    };
     let record = match read_record(tx, &request.identity)? {
         Ok(record) => record,
         Err(error) => return Ok(Err(error)),
@@ -489,7 +519,7 @@ fn handoff(
     if let Some(agent) = &record.attested_agent {
         // A changed record is a candidate for a second mint. Never pass it back
         // to the route without checking that it still belongs to this binding.
-        let Some(policy) = read_policy(tx, request.policy_version)? else {
+        let Some(policy) = read_policy(tx, &store.policy_token_memo, active)? else {
             return Ok(Err(Error::StoreError));
         };
         if !policy.bindings.iter().any(|binding| {
@@ -514,7 +544,7 @@ fn handoff(
         }
         append_audit_tx(
             tx,
-            audit_key,
+            &store.audit_key,
             &AuditRecord {
                 op: AuditOp::BrokerActionIssue,
                 credential_id: Some(request.identity.clone()),

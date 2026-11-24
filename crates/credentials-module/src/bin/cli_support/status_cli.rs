@@ -923,6 +923,7 @@ pub(super) fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
         .unwrap_or(0);
     let (mut serviceable, mut stranded, mut unreadable, mut bad_identity) = (0, 0, 0, 0);
     let mut declared_expired = 0;
+    let mut unsupported_refresh = 0;
     for row in &rows {
         let id = &row.credential_id;
         if row.unservable_identity {
@@ -944,6 +945,13 @@ pub(super) fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                     row.account_id.as_deref().unwrap_or("none")
                 );
                 stranded += 1;
+            }
+            Usability::UnsupportedRefreshConfiguration => {
+                println!(
+                    "  {id:34} oauth   {}  unsupported refresh configuration",
+                    row.state
+                );
+                unsupported_refresh += 1;
             }
             Usability::Static {
                 expires_at_ms,
@@ -1043,7 +1051,7 @@ pub(super) fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
     println!(
         "  serviceable: {serviceable}   declared expired: {declared_expired}   \
          stranded: {stranded}   unreadable: {unreadable}   \
-         unservable identity: {bad_identity}"
+         unservable identity: {bad_identity}   unsupported refresh configuration: {unsupported_refresh}"
     );
     println!();
     println!("  Serviceable means the record decrypts under the current master key and");

@@ -2,6 +2,77 @@
 
 use super::*;
 
+impl EncryptedStore {
+    /// Count lifecycle states and refresh intents without opening any envelope.
+    pub fn health_snapshot(&self) -> crate::health::VaultHealth {
+        self.health_snapshot_at(now_ms())
+    }
+
+    pub(super) fn health_snapshot_at(&self, now: i64) -> crate::health::VaultHealth {
+        use crate::health::{
+            HealthAccumulator, VaultHealth, MAX_LISTED_ID_BYTES, MAX_REFRESH_INTENT_AGE_MS,
+        };
+        let cutoff = now.saturating_sub(MAX_REFRESH_INTENT_AGE_MS);
+        let snapshot = self.store.with_conn(|conn| {
+            let mut summary = HealthAccumulator::new();
+            // Intent diagnostics are optional. Keep state counts even if the intent
+            // table cannot be read, as the credential table may still be serviceable.
+            if let Ok((open, overdue)) = conn.query_row(
+                "SELECT COUNT(*), COUNT(CASE WHEN started_at_ms < ?1 THEN 1 END) FROM refresh_intent",
+                [cutoff], |row| Ok((row.get(0)?, row.get(1)?)),
+            ) {
+                summary.health.open_intents = open;
+                summary.health.overdue_intents = overdue;
+                if overdue > 0 {
+                    let _ = sample_overdue_intents(conn, cutoff, &mut summary);
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT CASE WHEN state <> 'active' AND length(CAST(credential_id AS BLOB)) <= ?1 \
+                  THEN credential_id END, state FROM credentials ORDER BY credential_id",
+            )?;
+            let mut rows = stmt.query([MAX_LISTED_ID_BYTES])?;
+            while let Some(row) = rows.next()? {
+                let id: Option<String> = row.get(0)?;
+                let state: String = row.get(1)?;
+                summary.add_record(id.as_deref(), RecordState::from_str(&state));
+            }
+            Ok(summary.finish(self.is_fenced_out()))
+        });
+        let Ok(mut health) = snapshot else {
+            return VaultHealth::unreadable();
+        };
+        // An unreadable audit tip must not be replaced with a stale witness value.
+        if let Ok(Some((seq, entry_mac))) = self.audit_tip() {
+            health.audit_seq = Some(seq);
+            health.audit_tip_mac = Some(entry_mac);
+        }
+        health
+    }
+}
+
+fn sample_overdue_intents(
+    conn: &rusqlite::Connection,
+    cutoff: i64,
+    summary: &mut crate::health::HealthAccumulator,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT credential_id FROM refresh_intent WHERE started_at_ms < ?1 \
+          AND length(CAST(credential_id AS BLOB)) <= ?2 ORDER BY credential_id",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![
+        cutoff,
+        crate::health::MAX_LISTED_ID_BYTES
+    ])?;
+    while summary.wants_overdue_sample() {
+        let Some(row) = rows.next()? else {
+            break;
+        };
+        summary.sample_overdue_intent(&row.get::<_, String>(0)?);
+    }
+    Ok(())
+}
+
 pub(super) fn split_categories(categories: String) -> Vec<String> {
     if categories.is_empty() {
         Vec::new()

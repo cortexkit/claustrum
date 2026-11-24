@@ -12,8 +12,8 @@ fn error_frames_never_infer_credential_state_from_a_class() {
             }))
             .unwrap(),
         );
-        assert_eq!(error.class, CredentialErrorClass::Transport);
-        assert!(error.retryable());
+        assert_eq!(error.class, CredentialErrorClass::Unclassified);
+        assert!(!error.retryable());
         let response = decode_credential_reply(json!({"result": {"error": {
             "code": code, "class": class
         }}}))
@@ -242,8 +242,17 @@ mod retry {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn response_refusals_retry_after_backoff_for_handle_sign_and_public_key() {
-        for operation in [Operation::Get, Operation::Sign, Operation::PublicKey] {
+    async fn handle_read_returns_classified_transient_refusal_without_replay() {
+        let (target, resolver) = scripted(vec![transient(), success(Operation::Get)]);
+        let error = invoke(&resolver, Operation::Get).await.unwrap_err();
+        assert_eq!(error.class, CredentialErrorClass::Transient);
+        assert!(error.to_string().contains("vault_locked"));
+        assert_eq!(target.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_refusals_retry_after_backoff_for_sign_and_public_key() {
+        for operation in [Operation::Sign, Operation::PublicKey] {
             let (target, resolver) = scripted(vec![transient(), success(operation)]);
             let mut call = Box::pin(invoke(&resolver, operation));
             let first = std::future::poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
@@ -260,7 +269,7 @@ mod retry {
 
     #[tokio::test(start_paused = true)]
     async fn response_retry_budget_and_single_attempt_operations_are_preserved() {
-        for operation in [Operation::Get, Operation::Sign, Operation::PublicKey] {
+        for operation in [Operation::Sign, Operation::PublicKey] {
             let (target, resolver) = scripted(vec![transient(); 3]);
             let error = invoke(&resolver, operation).await.unwrap_err();
             assert_eq!(error.class, CredentialErrorClass::Transient);
@@ -278,7 +287,7 @@ mod retry {
                 assert_eq!(target.calls.lock().unwrap().len(), 1);
             }
         }
-        for operation in [Operation::Scoped, Operation::Seal] {
+        for operation in [Operation::Get, Operation::Scoped, Operation::Seal] {
             let (target, resolver) = scripted(vec![transient()]);
             let error = invoke(&resolver, operation).await.unwrap_err();
             assert_eq!(error.class, CredentialErrorClass::Transient);
@@ -357,9 +366,31 @@ mod retry {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unknown_unary_error_codes_retry_and_redial_the_cached_connection() {
+    async fn terminal_route_open_refusal_does_not_redial() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        for code in ["route_closed", "future_transport_code", "unknown_module"] {
+        for code in ["unknown_module", "missing_identity", "future_refusal"] {
+            let dials = Arc::new(AtomicUsize::new(0));
+            let target = Arc::new(LiveCredentialGetTarget::new(
+                Arc::new(ErrorConnector {
+                    code,
+                    dials: dials.clone(),
+                    failing_dials: 1,
+                }),
+                Duration::from_secs(1),
+            ));
+            let resolver = ClaustrumCredentialResolver::with_target(target, 2);
+            let result = resolver.resolve("handle", None, false).await;
+            assert_eq!(dials.load(Ordering::SeqCst), 1, "must not redial {code}");
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), code);
+            assert!(!error.retryable());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_unary_error_codes_retry_and_redial_the_cached_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for code in ["module_reloading", "target_unavailable", "module_timeout"] {
             let dials = Arc::new(AtomicUsize::new(0));
             let target = Arc::new(LiveCredentialGetTarget::new(
                 Arc::new(ErrorConnector {
@@ -373,16 +404,16 @@ mod retry {
             let credential = resolver
                 .resolve("handle", None, false)
                 .await
-                .expect("unknown Error codes must retry on a fresh connection");
+                .expect("recoverable Error codes must retry on a fresh connection");
             assert_eq!(credential.expose(), b"A");
             assert_eq!(dials.load(Ordering::SeqCst), 2, "{code}");
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unknown_unary_error_codes_preserve_the_surfaced_code_after_retry_exhaustion() {
+    async fn recoverable_unary_error_codes_preserve_the_surfaced_code_after_retry_exhaustion() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        for code in ["route_closed", "future_transport_code", "unknown_module"] {
+        for code in ["module_reloading", "target_unavailable", "module_timeout"] {
             let dials = Arc::new(AtomicUsize::new(0));
             let target = Arc::new(LiveCredentialGetTarget::new(
                 Arc::new(ErrorConnector {

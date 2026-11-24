@@ -400,8 +400,9 @@ async fn reporter_recovers_local_commit_and_repairs_delete_reset_and_record_key_
         &signed(&pem, PEER_BOX, PEER, 5, GhManifestVerdict::Valid),
     );
     wait(|| rig.seq(PEER_BOX) == Some(5)).await;
-    // Use a high-water that does not belong to this pairing; the member's fresh
-    // local counter starts at one, and the Home can admit it after a re-pair.
+    // Use a high-water that does not belong to this pairing. The member finds that
+    // value under its own key and signs above it, and the Home admits it after a
+    // re-pair.
     rig.grant(REPAIR);
     rig.views(Some(REPAIR), Some((REPAIR, PEER_BOX, &pem)));
     rig.peer.record(PEER, 28, Some("a local-only diagnostic"));
@@ -424,7 +425,7 @@ async fn reporter_recovers_local_commit_and_repairs_delete_reset_and_record_key_
     rig.hub.lose_next_ack(MANIFEST_ACTIVE, PEER_BOX);
     rig.peer_client.replace_connection();
     rig.home_client.replace_connection();
-    let first = rig.published(1).await;
+    let first = rig.published(6).await;
     assert!(!std::str::from_utf8(&first.value)
         .unwrap()
         .contains("a local-only diagnostic"));
@@ -451,13 +452,13 @@ async fn reporter_recovers_local_commit_and_repairs_delete_reset_and_record_key_
         .tamper(MANIFEST_ACTIVE, PEER_BOX, &first.value)
         .unwrap();
     rig.hub.delete(MANIFEST_ACTIVE, PEER_BOX).unwrap();
-    let second = rig.published(2).await;
-    wait(|| rig.seq(PEER_BOX) == Some(2)).await;
+    let second = rig.published(7).await;
+    wait(|| rig.seq(PEER_BOX) == Some(7)).await;
     assert!(second.revision > first.revision);
     rig.hub
         .reset_bucket(MANIFEST_ACTIVE, &[(PEER_BOX, &second.value)]);
-    rig.published(3).await;
-    wait(|| rig.seq(PEER_BOX) == Some(3)).await;
+    rig.published(8).await;
+    wait(|| rig.seq(PEER_BOX) == Some(8)).await;
     assert!(rig.home.store.hub_own_report().unwrap().is_some());
 
     rig.peer
@@ -466,11 +467,11 @@ async fn reporter_recovers_local_commit_and_repairs_delete_reset_and_record_key_
         .unwrap();
     rig.peer.store.ensure_fleet_keys(1).unwrap();
     let new_pem = rig.peer.pem();
-    let fourth = rig.published(4).await;
+    let fourth = rig.published(9).await;
     assert!(verify(&fourth.value, &binding(PEER_BOX, &pem)).is_none());
     assert!(verify(&fourth.value, &binding(PEER_BOX, &new_pem)).is_some());
     rig.views(Some(REPAIR), Some((REPAIR, PEER_BOX, &new_pem)));
-    wait(|| rig.seq(PEER_BOX) == Some(4)).await;
+    wait(|| rig.seq(PEER_BOX) == Some(9)).await;
     stop(reporter).await;
     stop(home).await;
 }
@@ -749,4 +750,63 @@ async fn collector_start_clears_only_local_admission_losses_while_hub_and_callos
     assert_eq!(raw_version(HOME), Some(28));
     assert_eq!(rig.seq(PEER_BOX), Some(1));
     stop(task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeating_the_local_report_after_a_regrant_restores_readiness_with_a_new_sequence() {
+    let rig = Rig::new();
+    rig.grant(PAIR);
+    let collector = rig.collect();
+    let reporter = rig.publish();
+    rig.peer.record(PEER, 28, None);
+    rig.published(1).await;
+    wait(|| rig.ready()).await;
+    // Revoking the last grant clears readiness but keeps the sequence high-water,
+    // so the unchanged report on the hub cannot restore it by itself.
+    rig.revoke();
+    assert!(!rig.ready());
+    rig.grant(PAIR);
+    let activations = |store: &EncryptedStore| {
+        store
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|row| row.op == "gh_manifest_activation")
+            .count()
+    };
+    let local_before = activations(&rig.peer.store);
+    // The computer repeats the identical report explicitly.
+    rig.peer.record(PEER, 28, None);
+    rig.published(2).await;
+    wait(|| rig.ready()).await;
+    assert_eq!(rig.seq(PEER_BOX), Some(2));
+    assert_eq!(activations(&rig.peer.store), local_before);
+    stop(reporter).await;
+    stop(collector).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rewound_report_sequence_signs_above_the_one_on_the_hub() {
+    let rig = Rig::new();
+    rig.grant(PAIR);
+    let collector = rig.collect();
+    let reporter = rig.publish();
+    for (seq, reason) in [(1, None), (2, Some("reported_invalid")), (3, None)] {
+        rig.peer.record(PEER, 28, reason);
+        rig.published(seq).await;
+    }
+    wait(|| rig.seq(PEER_BOX) == Some(3)).await;
+    stop(reporter).await;
+    // A store restored from an older backup: the hub still holds sequence 3.
+    rig.peer.sql("UPDATE hub_report_task SET seq = 1");
+    let reporter = rig.publish();
+    rig.peer.record(PEER, 28, Some("reported_invalid"));
+    rig.published(4).await;
+    wait(|| rig.seq(PEER_BOX) == Some(4)).await;
+    assert_eq!(
+        rig.stored_peer().map(|(verdict, _, _)| verdict),
+        Some(GhManifestVerdict::Invalid)
+    );
+    stop(reporter).await;
+    stop(collector).await;
 }

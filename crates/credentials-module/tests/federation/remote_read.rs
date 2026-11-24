@@ -37,7 +37,8 @@ use credentials_core::federation::{
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::{
-    GrantOperation, ScopedListRow, SelectorKind, SetCategoryMode, SetProvidersMode,
+    GrantOperation, ScopedInventoryCaller, ScopedListRow, SelectorKind, SetCategoryMode,
+    SetProvidersMode,
 };
 use serde_json::{json, Value};
 
@@ -561,19 +562,20 @@ impl Rig {
 
     /// B's listing row for `id`, for a module holding an exact read grant on it.
     fn b_row(&self, id: &str) -> ScopedListRow {
-        let grants = self
-            .b
+        self.b
             .store
-            .list_scoped_snapshot(
-                "reserved",
-                "broca",
+            .scoped_inventory_snapshot(
+                ScopedInventoryCaller::Principal {
+                    kind: "reserved",
+                    id: "broca",
+                },
                 &credentials_core::store::DeclaredGrantSet::empty(),
+                false,
             )
             .unwrap()
-            .grants;
-        self.reader
-            .scoped_rows(&grants)
             .unwrap()
+            .list
+            .rows
             .into_iter()
             .find(|row| row.id == id)
             .expect("B lists the remote id")
@@ -1382,6 +1384,31 @@ async fn a_delayed_reply_after_mapping_removal_refuses_its_waiter() {
     };
     assert_eq!(code(&refusal), ("not_found", "permanent", None));
     assert!(rig.reader.remote_record(TOKEN_ID).unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_removed_mappings_state_is_dropped_once_its_late_reply_is_refused() {
+    let rig = Rig::new("remote-remove-prune").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let held = rig.hold(Step::Forward);
+    let old = rig.record(TOKEN_ID);
+    let pending = {
+        let reader = Arc::clone(&rig.reader);
+        tokio::spawn(async move { wait_for_signal(reader.get(&old, None)).await })
+    };
+    held.arrived().await;
+    assert_eq!(rig.reader.tracked_ids_for_test(), 1);
+    rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
+    held.release();
+    let RemoteAnswer::Refused(refusal) = pending.await.unwrap() else {
+        panic!("a reply for the removed mapping reached its waiter");
+    };
+    assert_eq!(code(&refusal), ("not_found", "permanent", None));
+    // Nothing is kept for an id with no cache, flight or waiter left.
+    assert_eq!(rig.reader.tracked_ids_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]

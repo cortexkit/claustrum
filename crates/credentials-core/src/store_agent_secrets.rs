@@ -148,10 +148,11 @@ pub(super) fn rotate_agent_secrets_tx(
     tx: &rusqlite::Transaction<'_>,
     old_key: &MasterKey,
     new_key: &MasterKey,
-) -> rusqlite::Result<Vec<String>> {
+    report: &mut KeyRotationReport,
+) -> rusqlite::Result<()> {
     let rows = {
         let mut stmt = tx.prepare(
-            "SELECT name, kind, incarnation, record_version, envelope FROM agent_secrets",
+            "SELECT name, kind, incarnation, record_version, envelope, state FROM agent_secrets",
         )?;
         let mapped = stmt.query_map([], |r| {
             Ok((
@@ -160,12 +161,16 @@ pub(super) fn rotate_agent_secrets_tx(
                 r.get::<_, String>(2)?,
                 r.get::<_, u64>(3)?,
                 r.get::<_, Vec<u8>>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
         mapped.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let mut quarantined = Vec::new();
-    for (name, kind, incarnation, version, blob) in rows {
+    for (name, kind, incarnation, version, blob, state) in rows {
+        let already_corrupt = state == "corrupt";
+        if already_corrupt {
+            report.already_corrupt.push(format!("secret|{name}"));
+        }
         let id = agent_secret::record_binding(&kind, &incarnation, &name);
         let plaintext = id.as_ref().ok().and_then(|id| {
             envelope::open(
@@ -195,16 +200,17 @@ pub(super) fn rotate_agent_secrets_tx(
                     rusqlite::params![name, new_blob, new_key.key_id().to_hex()],
                 )?;
             }
-            None => {
+            None if !already_corrupt => {
                 tx.execute(
                     "UPDATE agent_secrets SET state = 'corrupt' WHERE name = ?1",
                     [&name],
                 )?;
-                quarantined.push(format!("secret|{name}"));
+                report.newly_quarantined.push(format!("secret|{name}"));
             }
+            None => {}
         }
     }
-    Ok(quarantined)
+    Ok(())
 }
 
 pub(super) fn deposit_key_write_protected(

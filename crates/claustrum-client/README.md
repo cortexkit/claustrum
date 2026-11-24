@@ -101,35 +101,26 @@ seals one message in HPKE Auth mode (RFC 9180 mode 2) under a vault-held KEM key
 for a recipient that opens it with that key's public half. It needs an exact `seal`
 grant. Seal makes exactly one attempt and hands a retryable error back: every seal is
 a fresh ciphertext with its own audit row, so the caller decides whether to retry.
-`list_scoped` lists the credentials the caller's grants cover. Handle reads, signing
-and public-key reads retry transient and transport failures a bounded number of
-times, with a 100 ms backoff between attempts, including refusals in Response frames;
-scoped reads return the first error and leave the redial to the caller. `auth_required`
-and permanent refusals always return at once. Listing
-failures are row-local: callers should check `undecodable_credentials` and
+`list_scoped` lists the credentials the caller's grants cover. Handle reads retry
+transport failures, not classified vault refusals. Signing and public-key reads
+also retry transient vault refusals. Retries are bounded, with a 100 ms backoff
+between attempts. Scoped reads return the first error. Each unary attempt has one
+deadline for waiting in the queue, opening the route, and receiving the reply.
+Listing failures are row-local: callers should check `undecodable_credentials` and
 `undecodable_grants`, because the library does not log them. A grant tuple with
 a missing, empty or non-string field is skipped and reported there, never turned
 into an empty-string grant.
 A missing `grant_tuples` field is accepted for older vaults; a present non-array
 rejects the whole listing as `InvalidResponse`, not an empty grant inventory.
 
-A transport `Error` frame (`{code, message}`, no class) whose code a retry cannot
-change, such as `unknown_method`, `invalid_params`, `invalid_request`,
-`flow_scopes_unsupported` or `invalid_control_body`, comes back as
-`CredentialErrorClass::Unclassified` with the vault's code in `code()`. It is not
-`retryable()`, so it returns at once and is never retried. One that answers a call on
-an established route keeps that connection rather than redialing; one that refuses the
-route itself (`flow_scopes_unsupported`, `invalid_control_body`) fails the connect, so
-the next call dials again. `unknown_method` from a vault means the vault
-predates the operation: update the vault. A scoped watch is the exception: there
-`unknown_method` ends the watch as `Unsupported`, the signal to poll instead. `unknown_module` and the other daemon
-routing refusals are the exception: they are `Transport`, so the next call redials and
-the reads that retry transport failures retry them, because they say the credential
-module was not reachable rather than anything about the request.
-Unrecognized `Error` codes, including `route_closed`, also return `Transport` and
-clear the cached connection so a retry or the next call opens a fresh route.
-Their exact wire code remains available through `code()`, distinguishing a route
-refusal from a local transport failure without an Error frame.
+The client uses `subc_protocol::error_codes::is_retryable_route_open_refusal` for
+`Error` frames. A retryable refusal
+is `Transport` and clears the cached route. `unknown_module`, `missing_identity`,
+unknown codes, and refusals with `detail.expected_back: false` are terminal. They
+return `CredentialErrorClass::Unclassified` and do not trigger a retry. Both cases
+preserve the wire code in `code()`. They do not describe a credential's state.
+For a scoped watch, `unknown_method` ends the watch as `Unsupported`, the signal to
+poll instead.
 
 ## Watching for changes
 

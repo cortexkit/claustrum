@@ -41,7 +41,7 @@ test('served material refuses invalid UTF-8 as invalid_response', () => {
       throw new Error('accepted invalid UTF-8')
     } catch (error) {
       expect(error).toBeInstanceOf(ClaustrumCredentialError)
-      expect(error).toMatchObject({ code: 'invalid_response' })
+      expect(error).toMatchObject({ code: 'invalid_response', class: 'permanent', action: 'gone' })
     }
   }
   expect(decodeCredential({ result: { payload: [0xc3, 0xa9], record_version: 1 } }, () => {}).material).toBe('é')

@@ -14,6 +14,7 @@ async fn setup(status: u16, body: &str) -> (TestTempDir, RefreshEngine, Arc<Fixt
         DeviceTokens {
             access_token: "meta-identity-token".into(),
             refresh_token: Some("meta-refresh-token".into()),
+            id_token: None,
             expires_at_ms: None,
             expiry_field_present: false,
         },

@@ -168,9 +168,10 @@ mod tests {
         let source = cmd_login_source();
         assert_eq!(
             source.matches("plan.redirect_uri").count(),
-            2,
-            "both exchange arms (AnthropicJson and RfcForm) must pass plan.redirect_uri; \
-             a re-derived redirect there is an invalid_grant after browser approval"
+            3,
+            "the callback check and both exchange arms (AnthropicJson and RfcForm) must \
+             pass plan.redirect_uri; a re-derived redirect there is an invalid_grant \
+             after browser approval"
         );
         assert_eq!(
             source.matches("wire.redirect_uri").count(),

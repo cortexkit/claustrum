@@ -76,6 +76,8 @@ enum Step {
     Blocked(Arc<Barrier>, HttpResponse),
     TransportError,
     Pending,
+    LoopbackPost(String),
+    LoopbackPut(String),
 }
 
 #[derive(Default)]
@@ -89,6 +91,23 @@ struct RecordedHttp {
 }
 
 impl RecordedHttp {
+    fn take_loopback(&self, post: bool) -> Option<String> {
+        let mut steps = self.steps.lock().unwrap();
+        match steps.front()? {
+            Step::LoopbackPost(url) if post => {
+                let url = url.clone();
+                steps.pop_front();
+                Some(url)
+            }
+            Step::LoopbackPut(url) if !post => {
+                let url = url.clone();
+                steps.pop_front();
+                Some(url)
+            }
+            _ => None,
+        }
+    }
+
     async fn next(&self) -> Result<HttpResponse, RefreshError> {
         let step = self
             .steps
@@ -116,12 +135,51 @@ impl RecordedHttp {
                 self.pending.notify_one();
                 std::future::pending().await
             }
+            Step::LoopbackPost(_) | Step::LoopbackPut(_) => panic!("expected bounded request"),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl HttpTransport for RecordedHttp {
+    async fn post_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        if let Some(loopback) = self.take_loopback(true) {
+            self.requests.lock().unwrap().push(url.to_owned());
+            return ReqwestTransport::new()?
+                .post_bounded(&loopback, &[], content_type, Vec::new(), max)
+                .await;
+        }
+        self.post(url, headers, content_type, body)
+            .await
+            .map(|reply| BoundedHttpResponse::from_response(reply, max))
+    }
+
+    async fn put_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        if let Some(loopback) = self.take_loopback(false) {
+            self.requests.lock().unwrap().push(format!("PUT {url}"));
+            return ReqwestTransport::new()?
+                .put_bounded(&loopback, &[], content_type, Vec::new(), max)
+                .await;
+        }
+        self.put(url, headers, content_type, body)
+            .await
+            .map(|reply| BoundedHttpResponse::from_response(reply, max))
+    }
+
     async fn post(
         &self,
         url: &str,
@@ -930,6 +988,69 @@ async fn github_app_create_complete_validates_reply_and_flattens_failures() {
 }
 
 #[tokio::test]
+async fn github_app_oversized_successes_keep_the_endpoint_invalid_reply_outcome() {
+    for len in [1024 * 1024 - 1, 1024 * 1024 + 1] {
+        let (url, server) = loopback_reply(201, "", len);
+        let rig = Rig::new(vec![Step::LoopbackPost(url)], true);
+        let before = rig.counts();
+        let response = rig.call(&create_body(CODE, AGENT, Some(SLOT))).await;
+        server.join().unwrap();
+        assert_result(
+            response,
+            json!({"outcome":"github_app_unsaved","cause":"reply_invalid"}),
+        );
+        assert_eq!(rig.counts(), before);
+        assert_eq!(rig.http.requests.lock().unwrap().len(), 1);
+
+        let (url, server) = loopback_reply(200, "", len);
+        let mut steps = vec![reply(201, conversion("oversized-relay"))];
+        steps.extend(exchange());
+        steps.push(Step::LoopbackPut(url));
+        let rig = Rig::new(steps, true);
+        let response = rig.call(&create_body(CODE, AGENT, Some(SLOT))).await;
+        server.join().unwrap();
+        let mut expected = created("oversized-relay");
+        expected["outcome"] = json!("relay_registration_failed");
+        expected["cause"] = json!("relay_reply_invalid");
+        assert_result(response, expected);
+        assert_eq!(rig.http.requests.lock().unwrap().len(), 4);
+    }
+}
+
+fn loopback_reply(
+    status: u16,
+    headers: &'static str,
+    len: usize,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/reply", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut stream);
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        write!(stream, "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {len}\r\nConnection: close\r\n\r\n").unwrap();
+        let _ = stream.write_all(&vec![b' '; len]);
+    });
+    (url, server)
+}
+
+#[test]
+fn github_app_admin_shares_one_production_transport() {
+    let admin = GitHubAppAdmin::default();
+    assert!(Arc::ptr_eq(&admin.http().unwrap(), &admin.http().unwrap()));
+}
+
+#[tokio::test]
 async fn github_app_create_complete_conversion_status_table_never_retries() {
     let capture = Capture::default();
     let _capture = tracing::subscriber::set_default(capture.clone());
@@ -937,6 +1058,10 @@ async fn github_app_create_complete_conversion_status_table_never_retries() {
         (
             reply(422, conversion("echo")),
             "github_app_code_invalid/permanent",
+        ),
+        (
+            reply(429, conversion("echo")),
+            "github_app_conversion_unknown/permanent",
         ),
         (
             reply(307, conversion("echo")),
@@ -960,6 +1085,31 @@ async fn github_app_create_complete_conversion_status_table_never_retries() {
         assert_eq!(rig.counts(), before);
         let expected = format!("{GITHUB_MANIFEST_BASE}/{CODE}/conversions");
         assert!(rig.http.requests.lock().unwrap().as_slice() == [expected]);
+    }
+    for (headers, prefix) in [
+        (
+            "Retry-After: 30\r\n",
+            "github_app_conversion_unknown/permanent",
+        ),
+        (
+            "X-RateLimit-Remaining: 0\r\n",
+            "github_app_conversion_unknown/permanent",
+        ),
+        (
+            "X-RateLimit-Remaining: 1\r\n",
+            "github_app_code_invalid/permanent",
+        ),
+    ] {
+        let (url, server) = loopback_reply(403, headers, 0);
+        let rig = Rig::new(vec![Step::LoopbackPost(url)], true);
+        let before = rig.counts();
+        assert_refused(
+            rig.call(&create_body(CODE, AGENT, Some(SLOT))).await,
+            prefix,
+        );
+        server.join().unwrap();
+        assert_eq!(rig.counts(), before);
+        assert_eq!(rig.http.requests.lock().unwrap().len(), 1);
     }
     assert_redacted(&capture.0.lock().unwrap());
 }
@@ -1076,17 +1226,23 @@ async fn github_app_create_complete_put_failure_table_keeps_app_and_companion() 
 #[test]
 fn github_app_relay_put_reply_accepts_8_kib_and_refuses_one_byte_more() {
     assert_eq!(
-        confirmed_put(HttpResponse {
-            status: 200,
-            body: vec![b' '; 8192]
-        }),
+        confirmed_put(BoundedHttpResponse::from_response(
+            HttpResponse {
+                status: 200,
+                body: vec![b' '; 8192]
+            },
+            MAX_RELAY_REPLY_BYTES
+        )),
         Ok(())
     );
     assert_eq!(
-        confirmed_put(HttpResponse {
-            status: 200,
-            body: vec![b' '; 8193]
-        }),
+        confirmed_put(BoundedHttpResponse::from_response(
+            HttpResponse {
+                status: 200,
+                body: vec![b' '; 8193]
+            },
+            MAX_RELAY_REPLY_BYTES
+        )),
         Err(RelayFailure::ReplyInvalid)
     );
 }
@@ -1223,6 +1379,31 @@ fn spawn_route(rig: &Rig, body: String) -> tokio::task::JoinHandle<(FrameType, V
         )
         .await
     })
+}
+
+#[tokio::test(start_paused = true)]
+async fn github_app_confirmed_conversion_is_saved_even_when_the_budget_just_elapsed() {
+    let rig = Rig::new(vec![], false);
+    let app = read_conversion(
+        &serde_json::to_vec(&conversion("confirmed-app")).unwrap(),
+        false,
+    )
+    .ok()
+    .unwrap();
+    let outcome = rig
+        .admin
+        .github_apps
+        .commit_conversion(
+            &rig.engine,
+            rig.http.as_ref(),
+            Instant::now(),
+            AGENT,
+            None,
+            app,
+        )
+        .await;
+    assert!(matches!(outcome, AdminOutcome::Ok(reply) if reply == created("confirmed-app")));
+    assert!(rig.store.get("github_app:confirmed-app").is_ok());
 }
 
 #[tokio::test(start_paused = true)]

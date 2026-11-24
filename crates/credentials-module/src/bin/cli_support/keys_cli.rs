@@ -267,20 +267,26 @@ pub(super) fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError>
     #[cfg(all(windows, debug_assertions, feature = "windows-runtime-test-seam"))]
     credentials_core::test_support::windows_runtime_pause("rotation-staged")
         .map_err(|e| CliError::Io(e.to_string()))?;
-    let quarantined = store.rotate_master_key(new_key).map_err(CliError::Store)?;
+    let report = store
+        .rotate_master_key_with_report(new_key)
+        .map_err(CliError::Store)?;
     // Promote copies `next` to `current` and clears `next` within the key store, so
     // it needs no key handle (the new key was consumed by the rewrap above).
     resolver::promote_next(&config).map_err(CliError::MasterKey)?;
     println!("rotated master key to key_id {}", new_key_id.to_hex());
-    if !quarantined.is_empty() {
-        // Records that could not decrypt under the OLD key were already corrupt; the
-        // rotation quarantined them (state = corrupt) rather than leaving stale-key rows.
-        // Surface them so the operator re-imports/re-logs them in.
+    if !report.newly_quarantined.is_empty() {
         eprintln!(
             "warning: {} record(s) could not be re-wrapped and were quarantined as corrupt \
              (re-import or re-login these): {}",
-            quarantined.len(),
-            quarantined.join(", ")
+            report.newly_quarantined.len(),
+            report.newly_quarantined.join(", ")
+        );
+    }
+    if !report.already_corrupt.is_empty() {
+        eprintln!(
+            "warning: {} record(s) were already corrupt before rotation: {}",
+            report.already_corrupt.len(),
+            report.already_corrupt.join(", ")
         );
     }
     Ok(())

@@ -5,7 +5,7 @@ use credentials_core::store::GhManifestHandoffEnvelope;
 use serde_json::Value;
 use std::{io::Write as _, path::Path};
 
-fn value_flags(verb: &str) -> &'static [&'static str] {
+pub(crate) fn value_flags(verb: &str) -> &'static [&'static str] {
     match verb {
         "import" => &["--envelope"],
         "sign" => &["--file", "--approver"],

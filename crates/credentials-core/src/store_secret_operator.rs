@@ -232,9 +232,16 @@ impl EncryptedStore {
                     tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 };
                 let agent_secrets = count("agent_secrets")?;
-                let grants = count("secret_grants")?;
+                let now = now_ms();
+                let grants: u64 = tx.query_row(
+                    "SELECT COUNT(*) FROM secret_grants WHERE duration='permanent' OR expires_at_ms>?1",
+                    [now], |r| r.get(0),
+                )?;
                 let flow_grants = count("secret_flow_grants")?;
-                let pending_requests = count("secret_pending_requests")?;
+                let pending_requests: u64 = tx.query_row(
+                    "SELECT COUNT(*) FROM secret_pending_requests WHERE consumed=0 AND request_expires_at_ms>?1",
+                    [now], |r| r.get(0),
+                )?;
                 if agent_secrets + grants + flow_grants + pending_requests > 0 {
                     return Ok(Err(StoreOpError::SecretHomeNotEmpty {
                         agent_secrets,
@@ -404,23 +411,7 @@ impl EncryptedStore {
             let Some((kind, incarnation)) = row else {
                 return Ok(Err(SecretError::NotFound));
             };
-            for table in [
-                "secret_grants",
-                "secret_flow_grants",
-                "secret_pending_requests",
-            ] {
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE incarnation=?1"),
-                    [&incarnation],
-                )?;
-            }
-            tx.execute(
-                "DELETE FROM agent_secrets WHERE incarnation=?1",
-                [&incarnation],
-            )?;
-            // Diagnostics belong to the secret's own subject; nothing else is touched
-            // (a credential of the same name keeps its rows).
-            tx.execute("DELETE FROM auth_events WHERE credential_id=?1", [&target])?;
+            super::approval::delete_secret_rows_tx(tx, name, &incarnation)?;
             let request_id = agent_secret::request_id(now_ms())
                 .map_err(|_| rusqlite_err("request id generation failed"))?;
             super::phone::audit(

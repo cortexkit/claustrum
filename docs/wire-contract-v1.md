@@ -59,7 +59,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_recipient_key` | permanent | a `credential.seal` recipient key is not 32 bytes, or is a low-order X25519 point |
 | `seal_rate_limited` | transient | this connection has reached the scoped refusal threshold `credential.open` and `credential.seal` share |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
-| `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
+| `refresh_unsupported` | permanent | an operation that requires a refresh cannot run for this record |
 | `needs_reauth` | auth_required | the provider refused the stored login for good (for example `invalid_grant`, or a GitHub App that is no longer installed) and it stays refused until a new login, the credential was deliberately retired, or it has an unresolved refresh intent |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
@@ -134,9 +134,7 @@ bug in its own serialisation as a credential verdict.
 
 **What a consumer must do:** distinguish the two by FRAME TYPE before decoding. An
 `Error` frame is never a statement about a credential — do not map it into a credential
-state, do not mark anything `needs_reauth`, and do not delete client state on it. Treat
-an unrecognised `Error` code as retryable, because the alternative is letting a
-transport condition masquerade as a permanent verdict about a credential that is fine.
+state, do not mark anything `needs_reauth`, and do not delete client state on it.
 
 **Some `Error` codes are definitive: retrying or reconnecting cannot change them.** They
 say nothing about a credential, but the same request will be refused the same way on
@@ -156,19 +154,16 @@ the code:
 - `unknown_module` (sent by subc, not the vault): no module with this id is registered
   or supervised on the daemon at all. A vault that is starting, restarting or busy is
   reported as `module_warming`, `module_reloading`, `target_unavailable` or
-  `module_timeout` instead, and those stay retryable.
+  `module_timeout` instead. These codes can be retryable.
 
-`admin_refused` is also sent on this lane, but only by the admin operations, never by a
-credential read. Treat every other `Error` code as retryable, as above; connection loss
-and route churn (`route_closed`, `unknown_channel`, `stale_route_epoch`) are the common
-ones.
+Both clients use SUBC's route-open retry rule for coded terminal refusals. Unknown
+codes and `missing_identity` are terminal. A normally retryable code is terminal
+when `detail.expected_back` is `false`. This does not change how clients handle
+connection loss without an error reply. The TypeScript client reports a terminal
+refusal as `permanent`/`gone`; the Rust client reports it as unclassified and not
+retryable. Neither classification describes the credential's state.
 
-The TypeScript client (`@cortexkit/claustrum-client` 0.13.0 and later) reports the
-definitive codes, plus its own pre-send `missing_identity`, as
-`ClaustrumCredentialError(code, 'permanent', 'gone')` and never reconnects for them;
-every other transport failure stays `transient`/`retry`. The Rust client returns them
-unclassified and not retryable (`unknown_module` excepted, which it treats as a
-transport failure and redials).
+`admin_refused` is sent by admin operations, never by a credential read.
 
 **And do not decode an `Error` frame's body as a result.** A decoder reaching for
 `result.credentials` in an `Error` body gets a missing-field failure, which presents as
@@ -828,7 +823,8 @@ someone withdrew it, never that the credential behind it was fixed.
 
 Two optional levers, and they are the same lever pointed differently:
 
-- `force_refresh: true` — exchange before serving, unconditionally.
+- `force_refresh: true` — exchange before serving if the record has a refresh adapter.
+  A record with no refresh adapter still serves its stored secret.
 - `min_ttl_ms: <n>` — exchange if the token has less than `n` remaining.
 
 `min_ttl_ms` is evaluated **only when you supply it**. There is no implicit floor, and
@@ -957,8 +953,10 @@ Local current-value detection times are sealed beside the existing detection
 metadata. No old time is backfilled: existing records stay unknown until their
 tier next changes. Reasserting an unchanged operator value is still a no-op.
 Both clients decode these three fields as optional; omission by an older vault and
-explicit `null` both mean absent. The TypeScript names are `provider`, `incarnation`
-and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
+explicit `null` both mean absent. The TypeScript names for them are `provider`,
+`incarnation` and `planTierObservedAtMs`; Rust uses the wire spellings on
+`ListedCredential`. The Rust client applies the same null-is-absent rule to
+`plan_tier_since_ms`, `org_id` and `github_app`.
 `ck auth list --json` includes the same fields (and nulls), including
 `plan_tier_since_ms`, in each ordinary row.
 Gateway rows additionally carry `base_url` and `headers`.
@@ -1769,8 +1767,13 @@ deadline converts silence into an event that arm can act on:
 per-call deadline expires  ->  classify as retryable
                            ->  clear the cached binding
                            ->  reconnect and re-bind
-                           ->  the restart heals in one call
+                           ->  later attempts can reach the restarted vault
 ```
+
+The Rust client uses one deadline per unary attempt. It includes the route queue,
+the route open, and the reply. A handle read retries transport failures, not a
+classified vault refusal. Neither client resends a usage report after losing its
+reply.
 
 The vault's diagnostics cannot tell you which happened. Every refusal on the scoped-read
 path writes to `auth_events`, so an empty table proves no scoped read reached a refusal
@@ -3285,8 +3288,9 @@ malformed `card_ref`, 65 bytes included, is `invalid_params`.
 ```
 
 Reply `{results: [{request_id, outcome: "granted"} | {request_id, outcome: "refused",
-code}]}`, one entry per envelope item in envelope order. `code` is always
-`approval_invalid` and never says which check failed.
+code}]}`, one entry per envelope item in envelope order. A local-program item is refused
+with `secret_local_programs_disabled` when `secret.local_programs` is off or unreadable.
+Other item refusals use `approval_invalid` and do not identify the failed check.
 
 <!-- golden:approve.result -->
 ```json
@@ -3313,8 +3317,9 @@ case. The signed delete commit follows the same rule.
 
 Request `{}`. Reply `{secrets: [{name, kind, incarnation, state, host?, path_prefix?,
 location?, origin?, grants: [{grant_id, scope: {owner, kind, ref}, coverage, duration,
-agent_id, expires_at_ms?, last_use_ms?}], flow_grants: [{grant_id, flow: {flow_id,
-version, install_id}, duration, methods?, last_use_ms?}]}]}`. An API key carries `host`,
+agent_id, expires_at_ms?, last_use_ms?, local_use?}], flow_grants: [{grant_id, flow: {flow_id,
+version, install_id}, duration, methods?, last_use_ms?}]}],
+ssh_keys?: [{credential_id, incarnation, fingerprint, grants}]}`. An API key carries `host`,
 `location` and `path_prefix` (omitted when it covers every path); a login carries `origin`.
 `state` is `active` or `corrupt`. An agent grant always names its `agent_id`, `null` when
 the statement named no agent, and omits `expires_at_ms` when its duration is `permanent`.
@@ -3322,6 +3327,10 @@ A flow grant appears in `flow_grants` with `flow` and duration `version` in plac
 asking scope and coverage, and carries `methods` only for an API key. A grant of either
 kind omits `last_use_ms` until it has served a call. Material, its digests and requested
 paths never appear.
+
+A local-program grant includes `local_use: {program, use, target}`. `ssh_keys` lists
+keys with live SSH signing grants and is omitted when none exist. Each key's `grants`
+use the same shape as the agent grants in `secrets`, including `local_use`.
 
 <!-- golden:list.request -->
 ```json
@@ -3957,9 +3966,9 @@ the message is fixed text and never echoes the request.
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
 | `secret_basic_auth_disabled` | `permanent` | result error | creating a Basic sign-in secret while `secret.basic_auth` is off or unreadable |
-| `secret_local_programs_disabled` | `permanent` | result error | creating or depositing a local-program secret while `secret.local_programs` is off or unreadable |
+| `secret_local_programs_disabled` | `permanent` | result error or refused `secret.approve` item | creating or depositing a local-program secret, or approving a local-program item, while `secret.local_programs` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
-| `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active `signing:gh-manifest-root:1`, a stored manifest version or its own federation member id |
+| `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active configured policy root, a stored manifest version or its own federation member id |
 | `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
 | `expired` | `permanent` | result error | `manifest.approve` only (§17): the proposal, or the envelope's `issued_at_ms`, reached `expires_at_ms` |
 | `policy_too_large` | `permanent` | result error | `manifest.approve` only (§17): the successor policy exceeds the signing input limit or the policy document limit |
@@ -4417,8 +4426,8 @@ when the scope names an agent, or `null` otherwise. Sudo statements carry
 `secret: {name, kind: "local_program", incarnation}`; SSH statements instead carry
 `key: {credential_id, incarnation, fingerprint}`. These identities are supplied by
 the vault, not the asking program. SSH statements and stored local-use members
-omit `purpose`; sudo statement bytes are unchanged. The statement tag remains
-`ck-secret-local-use-statement/v1`.
+omit `purpose`. Forwarded local-use statements add `asking_member_id` and keep the
+`ck-secret-local-use-statement/v1` tag.
 
 Card text (`command`, `workdir`, and sudo-only `purpose` and `expects`)
 must be nonempty and contain no Cc, Cf, Zl or Zp characters. UTF-8 byte caps are
@@ -4641,9 +4650,10 @@ one audit row and repeating the current value writes none.
 - `repo`: `owner/name`, each part 1–100 characters from `[A-Za-z0-9._-]`, neither
   `.` nor `..`.
 
-Grammar is checked before any outbound call. The home needs an active
-`signing:gh-manifest-root:1`, a stored manifest version and its own federation
-member id; otherwise propose or approve refuses
+Grammar is checked before any outbound call. The home needs an active configured
+policy root (`policy_root_credential`; legacy `signing:gh-manifest-root:1` on
+migrated installs), a stored manifest version and its own federation member id.
+Otherwise propose or approve refuses
 `manifest_setup_incomplete`/`permanent`.
 
 A proposal has a 60 s deadline. Exhaustion during the identity check gives
@@ -4660,7 +4670,8 @@ names ASCII-case-insensitively:
    `user_token`, mismatched fields, or Entorhinal's `unknown_agent`, `gone` or
    `invalid_request` gives `identity_mismatch`; an unreachable Entorhinal gives
    `identity_unavailable`. The identity reply's per-process `incarnation` is
-   decoded, never refused.
+   decoded, never refused. The vault also refuses `identity_mismatch` if the App
+   record is attested to a different agent.
 2. **Installation.** Read the active `github_app:<app_slug>` record, mint an
    installation token and read that installation's GitHub `permissions` map from
    the same `/app/installations` record. The token stays in memory; this check
@@ -4671,8 +4682,10 @@ names ASCII-case-insensitively:
    `total_count`. Only a complete listing establishes absence (`not_installed`),
    as does the adapter's `NotInstalled` outcome. Several installations, a
    mismatched installation or a suspended installation gives
+   `installation_unusable`. A present but unusable local App record also gives
    `installation_unusable`. An empty page before completion, a changed
-   `total_count`, more entries than that count, or ten pages without either a
+   `total_count`, more entries than that count, repeated repository names that
+   prevent proving completeness, or ten pages without either a
    match or completion gives `github_unavailable`. So does any other request,
    transport, timeout or decoding failure, including 401, 403, 404, 429 and 5xx.
    The matched repository's GitHub `full_name` casing is the binding key from
@@ -4688,11 +4701,12 @@ names ASCII-case-insensitively:
 Build N+1 from the newest stored version N by incrementing `manifest_version`,
 setting `issued_at_unix_secs` to now and appending `"<full_name>": "<agent_id>"`
 as the last key in `bindings`, using the same serialization. No other manifest
-content changes. In one serializing write transaction, re-read the newest version:
-if it is no longer N, refuse `stale_base` without writing. Return an unexpired
-pending proposal for the same `(agent_id, repo)` unchanged, so concurrent proposes
-return the same proposal. If that pending proposal has reached its expiry, mark
-it expired and insert a replacement in the same transaction. Storing any new
+content changes. The write transaction rechecks that this vault is still the home.
+It refuses `stale_base` without writing if N is no longer newest or an activation
+is ahead of N. Return an unexpired pending proposal for the same `(agent_id, repo)`
+if the App id, slug and installation permissions are unchanged. If those inputs
+changed, supersede the pending proposal and insert a new one. If it reached its
+expiry, mark it expired and insert a replacement in the same transaction. Storing any new
 manifest version supersedes all pending proposals whose base is older, including
 after import or operator signing.
 
@@ -4740,14 +4754,17 @@ The phone route must carry the recorded `peer_build: "production"` mark. Otherwi
 audit changes, even for a valid signature from a registered phone.
 
 Domain separation runs both ways. `manifest.approve` refuses a non-manifest `v`
-with `approval_invalid` **before signature verification**, writing no rows.
+with `approval_invalid` **before signature verification**.
 `secret.approve` refuses a manifest envelope at its strict parse, before its
 signature check, using its ordinary parse-failure refusal. Neither operation
 accepts the other's envelope even when a signature would otherwise verify.
 
 Approval runs inside the phone pipeline's single serializing write transaction.
 Pairing admission, the home-role refusal and the phone-registration check come
-first, then `manifest_setup_incomplete`, then these checks in order:
+first. Once the phone pipeline records when it last saw this phone, it keeps that
+record even for an exact replay or a refusal. A replay or refusal does not write proposals,
+manifests, policies or audit rows. Next comes `manifest_setup_incomplete`, then
+these checks in order:
 
 1. Strictly parse the envelope (including its `v`); require canonical bytes equal
    to the received bytes, `device_fingerprint` equal to the route's fingerprint,
@@ -4767,7 +4784,7 @@ first, then `manifest_setup_incomplete`, then these checks in order:
    failure gives `approval_invalid`, before superseded/expired checks.
 3. For an already-approved proposal, only the stored envelope SHA-256 and device
    fingerprint pair is an exact resend. With `now <= issued_at_ms + 120,000`,
-   return the first reply without writing, including after a restart. Any other
+   return the first reply, including after a restart. Any other
    envelope, or a resend after the window, gives `approval_invalid`.
 4. A superseded proposal, or a base version that is no longer newest, gives
    `superseded`.
@@ -4777,10 +4794,9 @@ first, then `manifest_setup_incomplete`, then these checks in order:
    exceeds the signing input limit or the policy document limit, return
    `policy_too_large`. Otherwise, a conflicting GitHub App identity, an invalid
    successor policy or a mismatch with the proposed manifest's bindings gives
-   `policy_binding_conflict`. Both refusals leave the proposal pending and write
-   nothing.
+   `policy_binding_conflict`. Both refusals leave the proposal pending.
 
-On success, the transaction signs the manifest with `signing:gh-manifest-root:1`,
+On success, the transaction signs the manifest with the configured policy root,
 writes the approval, signing and storage audit rows, stores the version with
 source `one_tap` and signed time now, marks the proposal approved with the envelope
 hash/fingerprint pair, and supersedes older-base pending proposals. The result
@@ -4936,9 +4952,9 @@ integers use decimal text.
 |---|---|---|
 | `gh_manifest_propose` | Proposal insertion; `gh-manifest-proposal\|<proposal_id>` | Framed `agent_id, repo, base_version, manifest_sha256, statement_sha256` |
 | `gh_manifest_proposal_state` | A proposal leaving pending; same proposal subject | Framed `from, to` |
-| `gh_manifest_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain manifest SHA-256, without field framing |
+| `gh_manifest_sign` | One root-key signature; the configured policy root id | Plain manifest SHA-256, without field framing |
 | `gh_manifest_store` | Stored version; `gh-manifest\|<version>` | Framed `source, manifest_sha256` |
-| `agent_policy_sign` | One root-key signature; `signing:gh-manifest-root:1` | Plain policy SHA-256, without field framing |
+| `agent_policy_sign` | One root-key signature; the configured policy root id | Plain policy SHA-256, without field framing |
 | `agent_policy_store` | Stored policy version; `gh-manifest\|<manifest_version>` | Framed `version, manifest_version, source, policy_sha256` |
 | `gh_manifest_activation` | First audited report of a stored `(version, verdict)` per member; `gh-manifest-activation\|<member_id>` | Framed `version, verdict` |
 | `gh_manifest_retire` | Operator retirement; same activation subject | Framed `retired_at_ms` |
@@ -5744,6 +5760,8 @@ incarnation (a random value the vault assigns each time a credential is created,
 deleted and re-created credential with the same id is a different one), record
 version, sealed-record digest, repository set and permissions can share one mint
 and can reuse the result until five minutes before expiry.
+The shared mint has 30 seconds for installation discovery and token exchange
+together. It returns `github_unavailable` if the deadline passes.
 Before handing out any token, the vault rechecks its role, the accepted caller's
 exact grant, any approval for the prepared leg, the active policy version, the
 credential row and token expiry. In that same transaction it records the
@@ -6214,8 +6232,8 @@ The following failures return `admin_refused`:
 | `invalid_params` | permanent | Malformed code or relay slot; reported inside the `admin_refused` transport Error |
 | `github_app_agent_exists` | permanent | An App already holds the agent before conversion |
 | `relay_unavailable` | transient | The precheck could not finish; no conversion was attempted |
-| `github_app_code_invalid` | permanent | GitHub returned a client error |
-| `github_app_conversion_unknown` | permanent | GitHub conversion was not confirmed; do not reuse the code |
+| `github_app_code_invalid` | permanent | GitHub returned a client error other than a rate limit |
+| `github_app_conversion_unknown` | permanent | GitHub conversion was not confirmed, including `429` and `403` with `Retry-After` or `X-RateLimit-Remaining: 0`. Check GitHub before deleting the App. Do not reuse the code. |
 
 After a success HTTP status from GitHub, a failure returns a normal response
 frame so the caller can distinguish whether the App was saved:
@@ -6225,7 +6243,8 @@ frame so the caller can distinguish whether the App was saved:
 | `github_app_unsaved` | `cause`, optional validated `slug` and `app_id` | `reply_invalid`, `busy` (App lock deadline), `github_app_exists` (App or companion id already exists locally or remotely), `github_app_agent_exists` (agent already claimed at commit), or `store_failed` |
 | `relay_registration_failed` | `slug`, `app_id`, `install_url`, `cause` | `relay_unavailable` (mint, deadline, transport, redirect, `429` or server failure), `relay_unavailable_for_account` (missing machine key, `401` or `403`), `relay_slot_expired` (`404`), `relay_app_mismatch` (`409`), `relay_request_refused` (other client error), or `relay_reply_invalid` (unexpected or oversized success reply) |
 
-With a slot, the daemon keeps the App lock from the store commit through the
+Once GitHub returns the key, a daemon that acquires the App lock finishes the
+store write even if the App lock's deadline passes. With a slot, it keeps the lock through the
 initial relay `PUT`. Only a `200` reply within the 8 KiB reply limit confirms
 registration. A failed `PUT` does not roll back the App. Only the cause
 `relay_unavailable` offers a same-slot retry.

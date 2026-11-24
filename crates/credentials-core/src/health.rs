@@ -5,11 +5,8 @@
 //! call, an envelope decrypt, an audit-chain HMAC recompute, or a lease write.
 //!
 //! The vault keeps no decrypted state in memory (the daemon never caches
-//! payloads — every serve reads SQLite), so the honest cheap source of truth is
-//! a single no-decrypt metadata scan (`list_meta`): the same read every `get`
-//! does before decryption. That read IS the vault's real serving dependency
-//! (SQLite reachable under the resolved master key), so probing it proves the
-//! path consumers use without paying to decrypt every record.
+//! payloads — every serve reads SQLite), so health reads only lifecycle states,
+//! intent counts and a bounded sample of affected ids from SQLite.
 //!
 //! Fail-closed status ladder (deliberately never restart-flaps a serving vault):
 //! - `Failing` — the daemon cannot correctly serve. Two triggers: the store is
@@ -35,21 +32,27 @@
 //!   alongside `handles` and `refresh_intent`), and if you are reading this detail on
 //!   a store that was just restored, the answer is the epoch rather than a rival.
 //! - `Degraded` — the store serves, but ≥1 credential needs operator action because
-//!   it is `needs_reauth` or `corrupt`. `retired` is intentionally excluded: it records
+//!   it is `needs_reauth`, `corrupt`, or has an overdue refresh intent.
+//!   `retired` is intentionally excluded: it records
 //!   an operator decision, not an alarm. An expired token is a degraded DETAIL, never
 //!   `failing`: we must not let one credential needing re-auth trigger a daemon restart
 //!   of an otherwise-healthy vault.
-//! - `Ok` — the store is readable, not fenced out, and every record is Active or
-//!   intentionally Retired.
+//! - `Ok` — the store is readable, not fenced out, and has no degraded records
+//!   or overdue refresh intents.
 
 use crate::store::{RecordMeta, RecordState};
 
 /// Cap on how many affected credential ids the snapshot carries per bucket. The
 /// counts (`needs_reauth`/`retired`/`corrupt`) remain the true totals; the id lists are a
-/// bounded sample so the health metrics stay well under the prober's 16 KiB cap
-/// even on a pathologically large vault. For a real credential vault (dozens of
-/// records) this always lists every affected id.
+/// bounded sample so the health metrics stay within their size cap.
 const MAX_LISTED_IDS: usize = 32;
+/// Total allowance for JSON-encoded identifiers across all samples, including
+/// a separator per id. Leave room for other metrics and the health detail.
+pub(crate) const MAX_LISTED_ID_BYTES: usize = 1024;
+
+/// Allow a provider call to use its HTTP timeout and leave time for its commit.
+pub(crate) const MAX_REFRESH_INTENT_AGE_MS: i64 =
+    2 * crate::http::REQUEST_TIMEOUT.as_millis() as i64;
 
 /// The wire-agnostic domain health status. The module maps this onto the subc
 /// protocol `HealthStatus`; core never depends on the protocol crate.
@@ -104,11 +107,11 @@ pub struct VaultHealth {
     pub retired_ids: Vec<String>,
     /// The ids of `corrupt` (quarantined) credentials, same cap and rationale.
     pub corrupt_ids: Vec<String>,
-    /// Open refresh-intent rows at snapshot time. Carried as an opaque metric
-    /// only — a nonzero count is NOT a status input because a legitimately
-    /// in-flight refresh holds an intent open transiently (txn1 opens it, txn2
-    /// clears it), so it would false-positive a degraded state on every serve.
+    /// Open refresh intents, including exchanges that are still in flight.
     pub open_intents: usize,
+    /// Intents that outlived the refresh budget and may need operator attention.
+    pub overdue_intents: usize,
+    pub overdue_intent_ids: Vec<String>,
     /// The sequence number of the newest audit entry, when the chain is non-empty.
     /// This is informational and never contributes to the health status.
     pub audit_seq: Option<i64>,
@@ -137,6 +140,8 @@ impl VaultHealth {
             retired_ids: Vec::new(),
             corrupt_ids: Vec::new(),
             open_intents: 0,
+            overdue_intents: 0,
+            overdue_intent_ids: Vec::new(),
             audit_seq: None,
             audit_tip_mac: None,
         }
@@ -162,64 +167,91 @@ impl VaultHealth {
         open_intents: usize,
         fenced_out: bool,
     ) -> Self {
-        let mut active = 0;
-        let mut needs_reauth = 0;
-        let mut retired = 0;
-        let mut corrupt = 0;
-        let mut needs_reauth_ids = Vec::new();
-        let mut retired_ids = Vec::new();
-        let mut corrupt_ids = Vec::new();
+        let mut accumulator = HealthAccumulator::new();
         for (id, meta) in metas {
-            match meta.state {
-                RecordState::Active => active += 1,
-                RecordState::NeedsReauth => {
-                    needs_reauth += 1;
-                    if needs_reauth_ids.len() < MAX_LISTED_IDS {
-                        needs_reauth_ids.push(id.clone());
-                    }
-                }
-                RecordState::Retired => {
-                    retired += 1;
-                    if retired_ids.len() < MAX_LISTED_IDS {
-                        retired_ids.push(id.clone());
-                    }
-                }
-                RecordState::Corrupt => {
-                    corrupt += 1;
-                    if corrupt_ids.len() < MAX_LISTED_IDS {
-                        corrupt_ids.push(id.clone());
-                    }
-                }
+            accumulator.add_record(Some(id), meta.state);
+        }
+        accumulator.health.open_intents = open_intents;
+        accumulator.finish(fenced_out)
+    }
+}
+
+pub(crate) struct HealthAccumulator {
+    pub(crate) health: VaultHealth,
+    remaining_id_bytes: usize,
+}
+
+impl HealthAccumulator {
+    pub(crate) fn new() -> Self {
+        Self {
+            health: VaultHealth::unreadable(),
+            remaining_id_bytes: MAX_LISTED_ID_BYTES,
+        }
+    }
+
+    pub(crate) fn add_record(&mut self, id: Option<&str>, state: RecordState) {
+        self.health.credentials_total += 1;
+        let bucket = match state {
+            RecordState::Active => {
+                self.health.active += 1;
+                return;
+            }
+            RecordState::NeedsReauth => {
+                self.health.needs_reauth += 1;
+                &mut self.health.needs_reauth_ids
+            }
+            RecordState::Retired => {
+                self.health.retired += 1;
+                &mut self.health.retired_ids
+            }
+            RecordState::Corrupt => {
+                self.health.corrupt += 1;
+                &mut self.health.corrupt_ids
+            }
+        };
+        if let Some(id) = id {
+            Self::sample(&mut self.remaining_id_bytes, bucket, id);
+        }
+    }
+
+    pub(crate) fn sample_overdue_intent(&mut self, id: &str) {
+        Self::sample(
+            &mut self.remaining_id_bytes,
+            &mut self.health.overdue_intent_ids,
+            id,
+        );
+    }
+
+    pub(crate) fn wants_overdue_sample(&self) -> bool {
+        self.remaining_id_bytes >= 3 && self.health.overdue_intent_ids.len() < MAX_LISTED_IDS
+    }
+
+    fn sample(remaining: &mut usize, bucket: &mut Vec<String>, id: &str) {
+        // The raw length check avoids allocating for an arbitrarily large id.
+        if bucket.len() < MAX_LISTED_IDS && id.len() < *remaining {
+            let encoded_bytes = serde_json::to_string(id)
+                .expect("a string serializes to JSON")
+                .len()
+                + 1;
+            if encoded_bytes <= *remaining {
+                bucket.push(id.to_owned());
+                *remaining -= encoded_bytes;
             }
         }
-        // Fenced out outranks everything: this daemon lost write authority, so it
-        // is Failing even though its stale reads still succeed. Otherwise degraded
-        // on any credential needing operator action; else ok (the store is
-        // readable and this writer still holds the lease).
-        let status = if fenced_out {
+    }
+
+    pub(crate) fn finish(mut self, fenced_out: bool) -> VaultHealth {
+        let health = &mut self.health;
+        health.store_readable = true;
+        health.fenced_out = fenced_out;
+        health.status = if fenced_out {
             VaultHealthStatus::Failing
-        } else if needs_reauth > 0 || corrupt > 0 {
+        } else if health.needs_reauth > 0 || health.corrupt > 0 || health.overdue_intents > 0 {
             VaultHealthStatus::Degraded
         } else {
             VaultHealthStatus::Ok
         };
-        VaultHealth {
-            status,
-            store_readable: true,
-            fenced_out,
-            refresher_stalled: false,
-            credentials_total: metas.len(),
-            active,
-            needs_reauth,
-            retired,
-            corrupt,
-            needs_reauth_ids,
-            retired_ids,
-            corrupt_ids,
-            open_intents,
-            audit_seq: None,
-            audit_tip_mac: None,
-        }
+        self.health
     }
 }
 
@@ -372,6 +404,35 @@ mod tests {
                 "{state:?}: the id one past the cap is dropped from the list"
             );
         }
+    }
+
+    #[test]
+    fn health_id_samples_respect_encoded_bytes_without_losing_counts() {
+        let huge = "é".repeat(9_000);
+        let escaped = "\"".repeat(9_000);
+        let metas = [
+            meta_id(&huge, RecordState::NeedsReauth),
+            meta_id(&escaped, RecordState::Corrupt),
+            meta_id("oauth:actionable", RecordState::NeedsReauth),
+        ];
+        let health = VaultHealth::summarize(&metas, 0, false);
+        assert_eq!(health.needs_reauth, 2);
+        assert_eq!(health.corrupt, 1);
+        assert_eq!(health.needs_reauth_ids, ["oauth:actionable"]);
+        assert!(health.corrupt_ids.is_empty());
+    }
+
+    #[test]
+    fn health_accepts_an_id_at_the_encoded_byte_budget_but_not_one_byte_more() {
+        // Quotes are encoded as two bytes each, plus two outer quotes and a comma.
+        let mut id = "\"".repeat((MAX_LISTED_ID_BYTES - 3) / 2);
+        id.push('a');
+        let accepted = VaultHealth::summarize(&[meta_id(&id, RecordState::Corrupt)], 0, false);
+        assert_eq!(accepted.corrupt_ids, [id.clone()]);
+        id.push('b');
+        let refused = VaultHealth::summarize(&[meta_id(&id, RecordState::Corrupt)], 0, false);
+        assert_eq!(refused.corrupt, 1);
+        assert!(refused.corrupt_ids.is_empty());
     }
 
     #[test]

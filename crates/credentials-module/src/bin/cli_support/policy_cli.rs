@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::manifest_cli::{positive_version, publish_envelope, value, write_private_file};
 
-fn value_flags(verb: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn value_flags(verb: &str) -> Option<&'static [&'static str]> {
     Some(match verb {
         "sign" => &["--file", "--manifest-version", "--approver"],
         "list" => &[],

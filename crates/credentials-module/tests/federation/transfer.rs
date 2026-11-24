@@ -92,6 +92,7 @@ struct Vault {
     home: Arc<HomeVault>,
     transfers: Transfers,
     clock_offset: Arc<AtomicI64>,
+    store_path: std::path::PathBuf,
 }
 
 impl Vault {
@@ -147,6 +148,7 @@ impl Vault {
             home: Arc::new(home),
             transfers,
             clock_offset,
+            store_path: fixture.store_path(),
         }
     }
 
@@ -302,9 +304,9 @@ fn deliver_responder(home: Arc<HomeVault>, sender: String, script: Script) -> Re
 // The rig
 // ---------------------------------------------------------------------------------
 
-/// A budget long enough for a healthy send, short enough that a lost reply ends the
-/// call quickly.
-const SEND_BUDGET: Duration = Duration::from_secs(3);
+// These tests exercise transfer outcomes over real sockets on another runtime.
+// Leave ample time for scheduling and SQLite; deadline tests choose their own budget.
+const RIG_TRANSFER_BUDGET: Duration = Duration::from_secs(10 * 60);
 
 struct Rig {
     root: credentials_core::test_support::TestTempDir,
@@ -318,8 +320,8 @@ impl Rig {
     async fn new(tag: &str) -> Self {
         let root = crate::support::temp_root(tag);
         let vaults = TwoVaults::new(&root).await;
-        let a = Vault::open(&vaults.a, true, SEND_BUDGET);
-        let b = Vault::open(&vaults.b, true, SEND_BUDGET);
+        let a = Vault::open(&vaults.a, true, RIG_TRANSFER_BUDGET);
+        let b = Vault::open(&vaults.b, true, RIG_TRANSFER_BUDGET);
         vaults
             .callosum
             .announce_peer_key(&a.member, &hex(&a.public));
@@ -345,6 +347,12 @@ impl Rig {
         };
         rig.route_deliveries();
         rig
+    }
+
+    fn sender_with_budget(&self, budget: Duration) -> Transfers {
+        let sender = Transfers::new(Arc::clone(&self.a.home_store.store)).with_budget(budget);
+        assert!(sender.attach_outbound(self.vaults.a.outbound.clone()));
+        sender
     }
 
     /// Point the stand-in's `federation.transfer_deliver` at B's home, as member A.
@@ -437,7 +445,7 @@ impl Rig {
             script,
         } = self;
         drop(a);
-        let a = Vault::open(&vaults.a, false, SEND_BUDGET);
+        let a = Vault::open(&vaults.a, false, RIG_TRANSFER_BUDGET);
         Rig {
             root,
             vaults,
@@ -452,7 +460,7 @@ impl Rig {
     fn vault_c(&self) -> (VaultFixture, Vault) {
         let fixture =
             VaultFixture::new(&self.root, "vault-c", C_FINGERPRINT, &self.vaults.callosum);
-        let c = Vault::open(&fixture, true, SEND_BUDGET);
+        let c = Vault::open(&fixture, true, RIG_TRANSFER_BUDGET);
         self.vaults
             .callosum
             .announce_peer_key(&c.member, &hex(&c.public));
@@ -553,6 +561,43 @@ async fn an_api_key_sent_a_to_b_exists_on_b_only_after_accept() {
     assert!(rig.b.store().verify_audit_chain().is_ok());
 }
 
+/// A terminal reply whose row the sender cannot delete is reported as still kept:
+/// the row is there, and resume can deliver it again.
+#[tokio::test]
+async fn a_failed_cleanup_after_a_terminal_reply_reports_the_row_as_kept() {
+    let rig = Rig::new("transfer-cleanup-failure").await;
+    rig.api_key_on_a(API_ID, b"sk-transfer-secret");
+    let sent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+    rig.b
+        .transfers
+        .accept(&sent.transfer_id, &rig.a.member, false)
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(&rig.a.store_path).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_cleanup BEFORE DELETE ON outgoing_transfers BEGIN SELECT RAISE(ABORT, 'cleanup failed'); END;").unwrap();
+    let resumed = rig.a.transfers.resume(&sent.transfer_id).await.unwrap();
+    assert_eq!(
+        resumed.reply,
+        DeliveryReply::State(IncomingTransferState::Accepted)
+    );
+    assert!(resumed.row_kept, "the row could not be deleted");
+    assert!(rig
+        .a
+        .store()
+        .outgoing_transfer(&sent.transfer_id)
+        .unwrap()
+        .is_some());
+    conn.execute_batch("DROP TRIGGER fail_cleanup").unwrap();
+    let resumed = rig.a.transfers.resume(&sent.transfer_id).await.unwrap();
+    assert!(!resumed.row_kept);
+    assert!(rig
+        .a
+        .store()
+        .outgoing_transfer(&sent.transfer_id)
+        .unwrap()
+        .is_none());
+}
+
 /// Dedup runs before open: an accepted envelope delivered again as a new delivery is
 /// answered from the dedup on (sender, body hash) before anything is opened:
 /// `accepted`, with no pending row, no record change and no second `transfer_in`.
@@ -646,10 +691,9 @@ async fn a_same_hash_resend_after_the_grant_is_revoked_answers_not_found() {
 async fn a_fault_between_the_outgoing_insert_and_transfer_out_sends_nothing() {
     let rig = Rig::new("transfer-commit-fault").await;
     rig.api_key_on_a(API_ID, b"sk-fault");
-    let faulty = Transfers::new(Arc::clone(&rig.a.home_store.store))
-        .with_budget(SEND_BUDGET)
+    let faulty = rig
+        .sender_with_budget(RIG_TRANSFER_BUDGET)
         .with_commit_fault(Arc::new(|| true));
-    assert!(faulty.attach_outbound(rig.vaults.a.outbound.clone()));
     let refused = faulty.send(API_ID, &rig.b.member).await.unwrap_err();
     assert_eq!(refused.code, "store_error");
     assert!(rig.a.store().list_outgoing_transfers().unwrap().is_empty());
@@ -715,13 +759,13 @@ async fn a_lost_acknowledgement_resolves_stepwise_through_resume_and_accept() {
     // Deliver with the reply dropped: one pending row, one transfer_out, no transfer_in.
     let lost_ack = Held::new();
     rig.then(Step::ForwardThenDrop(lost_ack.clone()));
-    let sender = Transfers::new(Arc::clone(&rig.a.home_store.store)).with_budget(SEND_BUDGET);
-    assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
+    let budget = Duration::from_secs(3);
+    let sender = rig.sender_with_budget(budget);
     let to = rig.b.member.clone();
     tokio::time::pause();
     let mut send = tokio::spawn(async move { sender.send(API_ID, &to).await });
     lost_ack.arrived_before(&mut send).await;
-    let sent = resolved_after_advance(send, SEND_BUDGET + Duration::from_millis(1))
+    let sent = resolved_after_advance(send, budget + Duration::from_millis(1))
         .await
         .unwrap();
     tokio::time::resume();
@@ -1583,6 +1627,41 @@ async fn channel_zero_transfer_refusals_follow_sender_row_policy_on_send_and_res
         }
     }
     assert!(rig.b.incoming().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delayed_channel_zero_refusal_discards_the_committed_row() {
+    let rig = Rig::new("transfer-delayed-control-refusal").await;
+    rig.api_key_on_a(API_ID, b"sk-delayed-refusal");
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        OP_TRANSFER_DELIVER,
+        Reply::Permanent("fed_unknown_module".into()),
+    );
+
+    let sender = &rig.a.transfers;
+    let plan = wait_for_signal(sender.send_prepare(API_ID, &rig.b.member))
+        .await
+        .unwrap();
+    let row = sender.send_commit(&plan).unwrap();
+    // Spend just over 3 s between commit and delivery so a short fixture budget
+    // fails at delivery, without racing timer expiry against the socket reply.
+    tokio::time::advance(Duration::from_millis(3_001)).await;
+    let report = wait_for_signal(sender.send_deliver(&row, &plan)).await;
+    assert_eq!(
+        report.reply,
+        DeliveryReply::Refused {
+            code: "federation_setup_invalid".into(),
+            class: "permanent".into(),
+        }
+    );
+    assert!(!report.row_kept);
+    assert!(rig
+        .a
+        .store()
+        .outgoing_transfer(&row.transfer_id)
+        .unwrap()
+        .is_none());
 }
 
 /// A failed pairing lookup at delivery is transient: no row on B, and A keeps its row

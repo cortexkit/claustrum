@@ -971,6 +971,66 @@ async fn empty_access_token_refreshes_on_first_get_not_served_empty() {
 }
 
 #[tokio::test]
+async fn a_refresh_reuses_the_open_record_and_returns_the_written_envelope_digest() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 14);
+    let id = "oauth:stub";
+    store.create(id, &stale_oauth_record()).unwrap();
+    let (engine, _) = engine(store, StubAdapter::new("stub"));
+    crate::store::CREDENTIAL_OPEN_COUNT.set(0);
+    let served = engine
+        .get_with_refresh_status(id, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::store::CREDENTIAL_OPEN_COUNT.get(),
+        2,
+        "only the initial and locked reads open the record"
+    );
+    let stored = engine
+        .store()
+        .get_snapshot(id, &served.incarnation)
+        .unwrap();
+    assert_eq!(served.record.record_version, 2);
+    assert_eq!(stored.stored_digest_hex, served.stored_digest_hex);
+}
+
+#[tokio::test]
+async fn a_waiter_rechecks_a_short_admin_replacement_instead_of_treating_it_as_a_refresh() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 14);
+    let id = "oauth:stub";
+    let record = stale_oauth_record();
+    store.create(id, &record).unwrap();
+    let (engine, calls) = engine(store, StubAdapter::new("stub"));
+    let admin = engine.acquire_admin_lock(id).await;
+
+    let waiter = engine.get_with_refresh_status(id, Some(600_000), false);
+    tokio::pin!(waiter);
+    poll_fn(|cx| {
+        assert!(waiter.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let mut replacement = record;
+    replacement.oauth.as_mut().unwrap().expires_at_ms = Some(now_ms() + 300_000);
+    engine
+        .store()
+        .overwrite_unconditional_audited(id, &replacement, AuditCtx::admin(AuditOp::Put))
+        .unwrap();
+    drop(admin);
+
+    let served = waiter.await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(served.record.record_version, 3);
+    assert!(served.refreshed_for_min_ttl);
+}
+
+#[tokio::test]
 async fn concurrent_gets_single_flight_one_upstream_call() {
     let (root, d) = tmp_descriptor();
     let store = open_store(&d, 2);
@@ -1469,6 +1529,45 @@ async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
 }
 
 #[tokio::test]
+async fn invalid_grant_cannot_invalidate_a_recreated_credential_at_the_same_version() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 3);
+    let id = "oauth:stub";
+    let record = stale_oauth_record();
+    store.create(id, &record).unwrap();
+    let incarnation = store.credential_incarnation(id).unwrap();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("invalid_grant");
+    let (engine, calls) = engine(store, adapter);
+
+    let refresh = engine.get(id, None, true);
+    tokio::pin!(refresh);
+    poll_fn(|cx| {
+        assert!(refresh.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Route admin operations hold the engine lock; this direct store caller does not.
+    let store = engine.store();
+    store
+        .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    store.create(id, &record).unwrap();
+    assert_ne!(store.credential_incarnation(id).unwrap(), incarnation);
+    assert_eq!(store.meta(id).unwrap().record_version, 1);
+    assert!(refresh.await.is_err());
+    assert_eq!(
+        store.meta(id).unwrap().state,
+        crate::record::RecordState::Active
+    );
+}
+
+#[tokio::test]
 async fn reactivating_a_genuinely_dead_credential_returns_it_to_needs_reauth() {
     // THE SAFETY ARGUMENT FOR EXPOSING `reactivate` AT ALL, and until now it was prose.
     //
@@ -1581,6 +1680,44 @@ async fn reconcile_with_valid_check_clears_intent_and_keeps_active() {
     );
     assert!(eng.store().read_intent("id").unwrap().is_none());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn reconcile_retries_a_retained_intent_and_restores_a_proven_valid_record() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = Arc::new(open_store(&descriptor, 28));
+    let id = "oauth:stub";
+    let record = stale_oauth_record();
+    store.create(id, &record).unwrap();
+    let hash =
+        crate::store::refresh_token_hash(record.oauth.as_ref().unwrap().refresh_token.expose());
+    store.open_intent(id, 1, &hash).unwrap();
+
+    let mut adapter = StubAdapter::new("stub");
+    adapter.check = Some(Err(()));
+    let first = RefreshEngine::new(store.clone(), vec![Arc::new(adapter)], Arc::new(NoHttp));
+    assert!(matches!(
+        first.reconcile().await.unwrap().as_slice(),
+        [Reconciliation::Retained { .. }]
+    ));
+    assert!(matches!(store.get(id), Err(StoreOpError::NeedsReauth)));
+    assert!(store.read_intent(id).unwrap().is_some());
+
+    let mut adapter = StubAdapter::new("stub");
+    adapter.check = Some(Ok(ValidityOutcome::Valid));
+    let calls = adapter.calls.clone();
+    let second = RefreshEngine::new(store.clone(), vec![Arc::new(adapter)], Arc::new(NoHttp));
+    assert!(matches!(
+        second.reconcile().await.unwrap().as_slice(),
+        [Reconciliation::ClearedValid { .. }]
+    ));
+    assert!(store.read_intent(id).unwrap().is_none());
+    assert_eq!(store.get(id).unwrap().record_version, 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "reconciliation never exchanges tokens"
+    );
 }
 
 #[tokio::test]

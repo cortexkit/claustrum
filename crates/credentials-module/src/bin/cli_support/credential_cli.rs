@@ -148,18 +148,15 @@ pub(super) fn cmd_put(
         ));
     }
     // Keep secret bytes out of argv: read a file or use the hidden terminal prompt.
-    // Ordinary key files drop their terminal line ending, but a cookie header is sent
+    // Ordinary key files lose surrounding whitespace, but a cookie header is sent
     // verbatim upstream, so its file bytes cannot be trimmed or normalized.
+    let is_cookie = matches!(parsed.method, Some(AuthMethod::Cookie));
     let payload = match options.optional("--payload-file") {
-        Some(path) if matches!(parsed.method, Some(AuthMethod::Cookie)) => {
+        Some(path) if is_cookie => {
             std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))?
         }
-        Some(path) => {
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
-            raw.trim_end().as_bytes().to_vec()
-        }
-        None if put_prompt::is_terminal() => put_prompt::payload()?,
+        Some(path) => read_key_file(&path)?.into_bytes(),
+        None if put_prompt::is_terminal() => put_prompt::payload(is_cookie)?,
         None => {
             return Err(CliError::Usage(
                 "--payload-file <path> is required without a terminal for the hidden interactive prompt".to_string(),
@@ -196,7 +193,7 @@ pub(super) fn cmd_put(
         _ => {}
     }
 
-    let kind = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
+    let kind = if is_cookie {
         if options.optional("--kind").is_some() {
             return Err(CliError::Usage(
                 "cookie:<domain> determines the cookie kind; do not pass --kind".to_string(),
@@ -215,7 +212,7 @@ pub(super) fn cmd_put(
             }
         }
     };
-    let expires_at_ms = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
+    let expires_at_ms = if is_cookie {
         if options.optional("--expires-ms").is_some() {
             return Err(CliError::Usage(
                 "cookie credentials do not carry an expiry; omit --expires-ms".to_string(),
@@ -769,4 +766,10 @@ pub(super) fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), Cli
         println!("  one to a consumer, drop it from that consumer's config now.");
     }
     Ok(())
+}
+
+pub(super) fn read_key_file(path: &str) -> Result<String, CliError> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| CliError::Io(format!("reading {path}: {error}")))?;
+    Ok(raw.trim().to_owned())
 }

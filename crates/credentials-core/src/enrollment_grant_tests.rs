@@ -335,6 +335,24 @@ fn enrollment_approval_requires_explicit_consent_for_retained_or_preprovisioned_
 }
 
 #[test]
+fn rotating_a_token_does_not_decode_unrelated_live_token_rows() {
+    let (_root, store) = super::taxonomy_tests::rig("enrollment-rotation-isolated", 165);
+    let token = enroll(&store);
+    store.with_raw_conn(|conn| conn.execute(
+        "INSERT INTO enrolled_consumers (enrollment_id, name, token_hash, approved_at_ms, approved_by) \
+         VALUES ('unrelated', 'unrelated', X'00', 0, 'test')", [],
+    )).unwrap();
+    let rotated = store
+        .rotate_enrollment(&token, 1)
+        .expect("the matching token row can rotate");
+    assert_eq!(store.resolve_enrollment_token(&token).unwrap(), None);
+    assert_eq!(
+        store.resolve_enrollment_token(&rotated.token).unwrap(),
+        Some(("consumer".into(), 2))
+    );
+}
+
+#[test]
 fn enrollment_rotation_preserves_grants_and_generation() {
     let (_root, store) = super::taxonomy_tests::rig("enrollment-rotation-grants", 165);
     let token = enroll(&store);

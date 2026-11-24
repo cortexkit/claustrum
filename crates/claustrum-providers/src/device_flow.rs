@@ -72,6 +72,8 @@ pub struct DeviceAuthorization {
 pub struct DeviceTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
+    /// The OIDC token is used to read display identity, not stored in the vault.
+    pub id_token: Option<String>,
     pub expires_at_ms: Option<i64>,
     /// Whether the token response supplied a non-null expiry field, not a JWT fallback.
     pub expiry_field_present: bool,
@@ -98,6 +100,8 @@ struct DeviceTokenResponse {
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
+    id_token: Option<String>,
+    #[serde(default)]
     expires_in: Option<i64>,
     #[serde(default)]
     error: Option<String>,
@@ -106,12 +110,12 @@ struct DeviceTokenResponse {
 }
 
 /// Poll-loop decisions shared by the standard and OpenAI's pinned device wires.
-enum PollDecision {
+enum PollDecision<T = DeviceTokens> {
     Pending {
         slow_down: bool,
         returned_interval: Option<u64>,
     },
-    Success(DeviceTokens),
+    Success(T),
     Terminal(LoginError),
     Failure(Option<u16>),
 }
@@ -154,6 +158,7 @@ where
         .post(&cfg.device_code_url, &headers, content_type, body)
         .await
         .map_err(device_transport_error)?;
+    let authorized_at = Instant::now();
     if !(200..300).contains(&response.status) {
         return Err(LoginError::Status(
             response.status,
@@ -173,11 +178,11 @@ where
         expires_in: auth.expires_in,
         interval: auth.interval,
     };
+    let deadline = polling_deadline(authorized_at, auth.expires_in.unwrap_or(900))?;
     sink(&auth);
 
     let initial_interval = auth.interval.unwrap_or(5);
     let mut interval = max_duration(Duration::from_secs(initial_interval), cfg.poll_floor);
-    let deadline = polling_deadline(auth.expires_in.unwrap_or(900))?;
     let poll_headers = header_refs(&cfg.extra_headers);
     let device_code = auth.device_code;
     let mut request = || async {
@@ -245,6 +250,7 @@ where
         )
         .await
         .map_err(device_transport_error)?;
+    let authorized_at = Instant::now();
     if !(200..300).contains(&response.status) {
         return Err(LoginError::Status(
             response.status,
@@ -263,10 +269,10 @@ where
         expires_in: auth.expires_in,
         interval: auth.interval,
     };
+    let deadline = polling_deadline(authorized_at, auth.expires_in.unwrap_or(900))?;
     sink(&auth_for_sink);
 
     let mut interval = Duration::from_secs(auth.interval.unwrap_or(5).max(5));
-    let deadline = polling_deadline(auth.expires_in.unwrap_or(900))?;
     let device_auth_id = auth.device_auth_id;
     let user_code = auth.user_code;
     let mut request = || async {
@@ -291,50 +297,107 @@ where
                 body: br#"{"error":"authorization_pending"}"#.to_vec(),
             });
         }
-        if !(200..300).contains(&poll.status) {
-            return Ok(poll);
-        }
-        let parsed: OpenAiDevicePollResponse = match serde_json::from_slice(&poll.body) {
-            Ok(parsed) => parsed,
-            Err(_) => return Ok(poll),
-        };
-        if parsed.access_token.is_some() {
-            return Ok(poll);
-        }
-        let Some(authorization_code) = parsed.authorization_code else {
-            return Ok(poll);
-        };
-        let Some(code_verifier) = parsed.code_verifier else {
-            return Ok(poll);
-        };
-        let fields = [
-            ("grant_type", "authorization_code"),
-            ("code", authorization_code.as_str()),
-            (
-                "redirect_uri",
-                "https://auth.openai.com/deviceauth/callback",
-            ),
-            ("client_id", client_id),
-            ("code_verifier", code_verifier.as_str()),
-        ];
-        let token_response = http
-            .post(
-                "https://auth.openai.com/oauth/token",
-                &[],
-                "application/x-www-form-urlencoded",
-                form_urlencode(&fields).into_bytes(),
-            )
-            .await?;
-        Ok(token_response)
+        Ok(poll)
     };
-    run_poll_loop_typed(
+    match run_poll_loop_typed(
         &mut request,
         &mut interval,
         deadline,
         &mut sleep,
-        parse_token_response,
+        parse_openai_poll_response,
+    )
+    .await?
+    {
+        OpenAiPollSuccess::Tokens(tokens) => Ok(tokens),
+        OpenAiPollSuccess::Approved {
+            authorization_code,
+            code_verifier,
+        } => {
+            exchange_openai_device_code(http, client_id, &authorization_code, &code_verifier).await
+        }
+    }
+}
+
+enum OpenAiPollSuccess {
+    Tokens(DeviceTokens),
+    Approved {
+        authorization_code: String,
+        code_verifier: String,
+    },
+}
+
+fn parse_openai_poll_response(poll: HttpResponse) -> PollDecision<OpenAiPollSuccess> {
+    let approval = (200..300)
+        .contains(&poll.status)
+        .then(|| serde_json::from_slice(&poll.body).ok())
+        .flatten();
+    if let Some(OpenAiDevicePollResponse {
+        access_token: None,
+        authorization_code: Some(authorization_code),
+        code_verifier: Some(code_verifier),
+    }) = approval
+    {
+        return PollDecision::Success(OpenAiPollSuccess::Approved {
+            authorization_code,
+            code_verifier,
+        });
+    }
+    match parse_token_response(poll) {
+        PollDecision::Success(tokens) => PollDecision::Success(OpenAiPollSuccess::Tokens(tokens)),
+        PollDecision::Pending {
+            slow_down,
+            returned_interval,
+        } => PollDecision::Pending {
+            slow_down,
+            returned_interval,
+        },
+        PollDecision::Failure(status) => PollDecision::Failure(status),
+        PollDecision::Terminal(error) => PollDecision::Terminal(error),
+    }
+}
+
+async fn exchange_openai_device_code(
+    http: &dyn HttpTransport,
+    client_id: &str,
+    authorization_code: &str,
+    code_verifier: &str,
+) -> Result<DeviceTokens, LoginError> {
+    let fields = [
+        ("grant_type", "authorization_code"),
+        ("code", authorization_code),
+        (
+            "redirect_uri",
+            "https://auth.openai.com/deviceauth/callback",
+        ),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+    // Approval was received before expiry. Redeeming its one-time code has the
+    // same independent request budget as the browser OAuth token exchange.
+    let response = tokio::time::timeout(
+        crate::http::REQUEST_TIMEOUT,
+        http.post(
+            "https://auth.openai.com/oauth/token",
+            &[],
+            "application/x-www-form-urlencoded",
+            form_urlencode(&fields).into_bytes(),
+        ),
     )
     .await
+    .map_err(|_| LoginError::Transport("device code exchange timed out".into()))?
+    .map_err(device_transport_error)?;
+    let status = response.status;
+    match parse_token_response(response) {
+        PollDecision::Success(tokens) => Ok(tokens),
+        PollDecision::Terminal(error) => Err(error),
+        _ if !(200..300).contains(&status) => Err(LoginError::Status(
+            status,
+            "device code exchange was rejected".into(),
+        )),
+        _ => Err(LoginError::Decode(
+            "device code exchange did not return tokens".into(),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,32 +440,40 @@ where
     }
 }
 
-async fn run_poll_loop_typed<S, SleepFut, R, RequestFut>(
+async fn run_poll_loop_typed<S, SleepFut, R, RequestFut, T>(
     request: &mut R,
     interval: &mut Duration,
     deadline: Instant,
     sleep: &mut S,
-    mut parse: impl FnMut(HttpResponse) -> PollDecision,
-) -> Result<DeviceTokens, LoginError>
+    mut parse: impl FnMut(HttpResponse) -> PollDecision<T>,
+) -> Result<T, LoginError>
 where
     R: FnMut() -> RequestFut,
     RequestFut: Future<Output = Result<HttpResponse, RefreshError>>,
     S: FnMut(Duration) -> SleepFut,
     SleepFut: Future<Output = ()>,
 {
+    let expired = || LoginError::Device("device authorization expired".into());
     let mut consecutive_failures = 0u8;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(LoginError::Device("device authorization expired".into()));
+            return Err(expired());
         }
         sleep((*interval).min(remaining)).await;
         if Instant::now() >= deadline {
-            return Err(LoginError::Device("device authorization expired".into()));
+            return Err(expired());
         }
-        let response = match request().await {
+        let result = tokio::time::timeout_at(deadline, request())
+            .await
+            .map_err(|_| expired())?;
+        // A future that becomes ready on the deadline can win over the timer.
+        if Instant::now() >= deadline {
+            return Err(expired());
+        }
+        let response = match result {
             Ok(response) => response,
-            Err(_error) => {
+            Err(_) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 if consecutive_failures >= 3 {
                     return Err(LoginError::Transport(
@@ -446,14 +517,17 @@ where
     }
 }
 
-fn polling_deadline(seconds: u64) -> Result<Instant, LoginError> {
-    Instant::now()
+fn polling_deadline(authorized_at: Instant, seconds: u64) -> Result<Instant, LoginError> {
+    authorized_at
         .checked_add(Duration::from_secs(seconds.max(1)))
         .ok_or_else(|| LoginError::Device("device authorization lifetime is out of range".into()))
 }
 
 fn parse_token_response(response: HttpResponse) -> PollDecision {
     let status = response.status;
+    if status == 429 || (500..600).contains(&status) {
+        return PollDecision::Failure(Some(status));
+    }
     let parsed = match serde_json::from_slice::<DeviceTokenResponse>(&response.body) {
         Ok(parsed) => parsed,
         Err(_) => return PollDecision::Failure(Some(status)),
@@ -493,6 +567,7 @@ fn parse_token_response(response: HttpResponse) -> PollDecision {
     PollDecision::Success(DeviceTokens {
         access_token,
         refresh_token: parsed.refresh_token,
+        id_token: parsed.id_token,
         expires_at_ms,
         expiry_field_present: parsed.expires_in.is_some(),
     })
@@ -911,6 +986,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_throttle_and_unavailable_responses_keep_polling() {
+        for status in [429, 503] {
+            let http = FixtureTransport::new(vec![
+                Ok(HttpResponse {
+                    status: 200,
+                    body: br#"{"user_code":"CODE","device_code":"DEVICE","expires_in":120}"#
+                        .to_vec(),
+                }),
+                Ok(HttpResponse {
+                    status,
+                    body: br#"{"error":"temporarily_unavailable"}"#.to_vec(),
+                }),
+                Ok(HttpResponse {
+                    status: 200,
+                    body: br#"{"access_token":"new"}"#.to_vec(),
+                }),
+            ]);
+            let tokens = run_device_flow_with_sleeper(&http, &config(), &|_| {}, |_| async {})
+                .await
+                .unwrap();
+            assert!(tokens.access_token == "new");
+            assert_eq!(http.requests().len(), 3);
+        }
+        let http = FixtureTransport::new(vec![
+            Ok(HttpResponse {
+                status: 200,
+                body: br#"{"user_code":"CODE","device_code":"DEVICE","expires_in":120}"#.to_vec(),
+            }),
+            Ok(HttpResponse {
+                status: 400,
+                body: br#"{"error":"access_denied"}"#.to_vec(),
+            }),
+        ]);
+        let result = run_device_flow_with_sleeper(&http, &config(), &|_| {}, |_| async {}).await;
+        assert!(matches!(result, Err(LoginError::Device(message)) if message == "access_denied"));
+        assert_eq!(http.requests().len(), 2);
+    }
+
+    #[tokio::test]
     async fn three_invalid_poll_responses_are_terminal() {
         let http = FixtureTransport::new(vec![
             Ok(HttpResponse {
@@ -928,11 +1042,95 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, LoginError::Status(500, _)));
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn openai_redeems_timely_approval_with_a_separate_bounded_exchange() {
+        struct DelayedExchange(FixtureTransport, Duration);
+        #[async_trait::async_trait]
+        impl HttpTransport for DelayedExchange {
+            async fn post(
+                &self,
+                url: &str,
+                headers: &[(&str, &str)],
+                content_type: &str,
+                body: Vec<u8>,
+            ) -> Result<HttpResponse, RefreshError> {
+                if url == crate::refresh_adapters::openai::TOKEN_URL {
+                    tokio::time::sleep(self.1).await;
+                }
+                self.0.post(url, headers, content_type, body).await
+            }
+        }
+        for (delay, accepted) in [(3, true), (31, false)] {
+            let response = |body: &[u8]| {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: body.to_vec(),
+                })
+            };
+            let http = DelayedExchange(FixtureTransport::new(vec![
+                response(br#"{"device_auth_id":"auth-id","user_code":"ABCD","expires_in":7}"#),
+                response(br#"{"authorization_code":"fixture-code","code_verifier":"fixture-verifier"}"#),
+                response(br#"{"access_token":"fixture-token"}"#),
+            ]), Duration::from_secs(delay));
+            let result = run_openai_device_flow(&http, "fixture-client", |_| {}).await;
+            if accepted {
+                assert!(result.is_ok(), "approval before expiry may finish after it");
+            } else {
+                assert!(
+                    matches!(result, Err(LoginError::Transport(message)) if message == "device code exchange timed out")
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod expiry_rules {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn device_authorization_deadline_cancels_an_in_flight_poll() {
+        let mut polls = 0;
+        let mut request = || {
+            polls += 1;
+            async {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                Ok(HttpResponse {
+                    status: 200,
+                    body: br#"{"access_token":"late"}"#.to_vec(),
+                })
+            }
+        };
+        let lifetime = Duration::from_secs(7);
+        let result = tokio::time::timeout(
+            lifetime + Duration::from_millis(1),
+            run_poll_loop_typed(
+                &mut request,
+                &mut Duration::from_secs(5),
+                Instant::now() + lifetime,
+                &mut tokio::time::sleep,
+                parse_token_response,
+            ),
+        )
+        .await
+        .expect("an in-flight poll must not postpone expiry");
+        assert!(
+            matches!(result, Err(LoginError::Device(message)) if message == "device authorization expired")
+        );
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn token_poll_keeps_the_account_identity_token() {
+        let body = br#"{"access_token":"new","id_token":"identity-jwt"}"#.to_vec();
+        match parse_token_response(HttpResponse { status: 200, body }) {
+            PollDecision::Success(tokens) => {
+                assert!(tokens.id_token.as_deref() == Some("identity-jwt"))
+            }
+            _ => panic!("expected device tokens"),
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn device_poll_wait_is_clamped_after_slow_down() {
@@ -979,7 +1177,7 @@ mod expiry_rules {
     }
     #[test]
     fn unrepresentable_device_deadline_is_an_error_not_a_panic() {
-        assert!(polling_deadline(u64::MAX).is_err());
-        assert!(polling_deadline(900).is_ok());
+        assert!(polling_deadline(Instant::now(), u64::MAX).is_err());
+        assert!(polling_deadline(Instant::now(), 900).is_ok());
     }
 }

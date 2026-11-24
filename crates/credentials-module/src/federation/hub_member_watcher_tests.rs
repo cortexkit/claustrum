@@ -17,6 +17,11 @@ use credentials_core::{
     record::RecordIdentity,
     test_support::TestTempDir,
 };
+use credentials_core::{
+    federation::VAULT_TRANSFER_ID,
+    kem,
+    record::{CredentialKind, VaultRecord},
+};
 use serde_json::{json, Value};
 use std::{
     future::Future,
@@ -159,6 +164,8 @@ struct Rig {
     bindings: watch::Sender<Option<HubBindings>>,
     pairs: watch::Sender<Option<Arc<VaultSharingSnapshot>>>,
     handled: mpsc::UnboundedReceiver<HubEvent>,
+    reconciled: mpsc::UnboundedReceiver<Vec<String>>,
+    refreshed: mpsc::UnboundedReceiver<(usize, usize)>,
     attempted: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -185,6 +192,8 @@ impl Rig {
             bindings: watch::channel(view).0,
             pairs: watch::channel(pair).0,
             handled: mpsc::unbounded_channel().1,
+            reconciled: mpsc::unbounded_channel().1,
+            refreshed: mpsc::unbounded_channel().1,
             attempted: Arc::new(Notify::new()),
             task: None,
         }
@@ -204,6 +213,10 @@ impl Rig {
         assert!(self.task.is_none());
         let (handled, rx) = mpsc::unbounded_channel();
         self.handled = rx;
+        let (reconciled, rx) = mpsc::unbounded_channel();
+        self.reconciled = rx;
+        let (refreshed, rx) = mpsc::unbounded_channel();
+        self.refreshed = rx;
         self.attempted = Arc::new(Notify::new());
         self.task = Some(tokio::spawn(run_inner(
             Arc::clone(&self.store),
@@ -214,6 +227,8 @@ impl Rig {
                 before_apply: gate,
                 apply_attempted: Some(Arc::clone(&self.attempted)),
                 handled: Some(handled),
+                reconciled: Some(reconciled),
+                refreshed: Some(refreshed),
             },
         )));
     }
@@ -730,6 +745,71 @@ async fn applying_waits_for_current_binding_and_serializes_with_pairing_removal(
             assert!(rig.row(OTHER).is_some());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_transfer_key_is_decrypted_once_across_unrelated_writes() {
+    let mut rig = Rig::new(true);
+    rig.start();
+    rig.opened(1).await;
+    assert_eq!(
+        wait(rig.refreshed.recv())
+            .await
+            .map(|(decrypts, _)| decrypts),
+        Some(1)
+    );
+    for n in 0..5 {
+        // Each write wakes a refresh of every local input.
+        rig.add_handmade(&format!("oauth:unrelated-{n}"));
+        assert_eq!(
+            wait(rig.refreshed.recv())
+                .await
+                .map(|(decrypts, _)| decrypts),
+            Some(1)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unbound_home_holds_no_pending_value_and_a_rebind_reads_it_again() {
+    let mut rig = Rig::new(true);
+    rig.sharing(false);
+    rig.start();
+    rig.opened(1).await;
+    // With sharing off the authenticated value is held, not applied.
+    rig.put_seen(&login(1, vec![row(ID, 1)])).await;
+    assert!(rig.row(ID).is_none());
+    while rig.refreshed.try_recv().is_ok() {}
+    // The home's peer key lapses: it is no longer bound, though still paired.
+    rig.views(Some(PAIR), None);
+    let (_, held) = wait(rig.refreshed.recv()).await.unwrap();
+    assert_eq!(held, 0, "no state is held for an unbound home");
+    rig.views(Some(PAIR), Some((PAIR, HOME_BOX, SENDER)));
+    rig.sharing(true);
+    until(|| rig.row(ID).is_some()).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unrecognised_home_class_is_unmapped_and_removes_no_copy() {
+    let mut rig = Rig::new(true);
+    rig.start();
+    rig.opened(1).await;
+    rig.put_seen(&login(1, vec![row(ID, 1)])).await;
+    assert!(rig.row(ID).is_some());
+    while rig.reconciled.try_recv().is_ok() {}
+    // A newer Callosum names the home's class with a value this build does not know.
+    let unknown = decode_snapshot(&json!({
+        "self": {"static_public_key_hex": "00".repeat(32)},
+        "devices": [{"fingerprint": HOME_FP, "pairing_id": PAIR, "class": "tablet", "shares": []}],
+    }))
+    .unwrap();
+    rig.pairs.send_replace(Some(Arc::new(unknown)));
+    let queued = wait(rig.reconciled.recv()).await.unwrap();
+    assert!(queued.is_empty(), "removal queued for {queued:?}");
+    assert!(rig.row(ID).is_some());
+    // A roster that drops the home is still a definite loss.
+    rig.views(None, None);
+    until(|| rig.row(ID).is_none()).await;
 }
 
 #[tokio::test(start_paused = true)]

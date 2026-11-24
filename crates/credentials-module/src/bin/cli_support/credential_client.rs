@@ -96,9 +96,10 @@ async fn get_online_async(
     write_frame(&mut route.stream, &frame)
         .await
         .map_err(|e| CredentialReadError::Transport(format!("write credential.get: {e}")))?;
-    let response = route_client::read_route_response(&mut route.stream, 10)
-        .await
-        .map_err(|e| CredentialReadError::Transport(format!("read credential.get: {e}")))?;
+    let response =
+        route_client::read_route_response(&mut route.stream, route.channel, route.epoch, 10)
+            .await
+            .map_err(|e| CredentialReadError::Transport(format!("read credential.get: {e}")))?;
     if response.header.ty == FrameType::Error {
         return Err(CredentialReadError::Refused);
     }

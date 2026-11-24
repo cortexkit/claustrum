@@ -16,8 +16,14 @@ fn plan_since_decodes_optional_non_negative_integer_and_rejects_present_wrong_ty
             Some(since)
         );
     }
+    // An explicit null means absent, as for the other optional listing fields.
+    let mut null_since = reply.clone();
+    null_since["result"]["credentials"][0]["plan_tier_since_ms"] = Value::Null;
+    let listing = decode_list_scoped_reply(null_since).unwrap();
+    assert_eq!(listing.credentials.len(), 4);
+    assert!(listing.undecodable_credentials.is_empty());
+    assert_eq!(listing.credentials[0].plan_tier_since_ms, None);
     for malformed in [
-        json!(null),
         json!("1"),
         json!(true),
         json!([]),
@@ -755,8 +761,13 @@ fn org_id_listing_decodes_producer_sample_and_quarantines_malformed_rows() {
         );
         assert!(listing.undecodable_credentials.is_empty());
     }
+    // An explicit null means absent, as for the other optional listing fields.
+    let mut null_org = reply.clone();
+    null_org["result"]["credentials"][0]["org_id"] = Value::Null;
+    let listing = decode_list_scoped_reply(null_org).unwrap();
+    assert!(listing.undecodable_credentials.is_empty());
+    assert_eq!(listing.credentials[0].org_id, None);
     for malformed in [
-        Value::Null,
         json!(7),
         json!(""),
         json!("a".repeat(129)),
@@ -803,7 +814,6 @@ fn github_app_listing_preserves_string_id_and_quarantines_malformed_rows() {
             "github_app.app_id",
         ),
         (json!({ "app_id": "9007199254740993" }), "github_app.slug"),
-        (Value::Null, "github_app"),
     ] {
         let mut broken = reply.clone();
         broken["result"]["credentials"][0]["github_app"] = malformed;
@@ -814,6 +824,13 @@ fn github_app_listing_preserves_string_id_and_quarantines_malformed_rows() {
         assert!(listing.undecodable_credentials[0]
             .starts_with(&format!("github_app:listing-vector: {field} ")));
     }
+    // An explicit null means absent, as for the other optional listing fields.
+    let mut null_app = reply.clone();
+    null_app["result"]["credentials"][0]["github_app"] = Value::Null;
+    let listing = decode_list_scoped_reply(null_app).unwrap();
+    assert_eq!(listing.credentials.len(), 2);
+    assert!(listing.undecodable_credentials.is_empty());
+    assert_eq!(listing.credentials[0].github_app, None);
 }
 
 #[test]

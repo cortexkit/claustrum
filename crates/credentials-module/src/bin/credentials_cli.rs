@@ -256,6 +256,14 @@ enum CliError {
 }
 
 impl CliError {
+    fn is_already_exists(&self) -> bool {
+        match self {
+            Self::Store(StoreOpError::AlreadyExists) => true,
+            Self::RouteRefused(message) => *message == StoreOpError::AlreadyExists.to_string(),
+            _ => false,
+        }
+    }
+
     fn exit_code(&self) -> ExitCode {
         match self {
             CliError::DaemonRunning { .. } => ExitCode::from(3),
@@ -338,10 +346,17 @@ struct GlobalArgs {
 }
 
 fn run() -> Result<(), CliError> {
-    run_args(std::env::args().skip(1).collect())
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|_| CliError::Usage("arguments must be valid UTF-8".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    run_args(args)
 }
 
-fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
+fn run_args(args: Vec<String>) -> Result<(), CliError> {
     // Bare `ck auth` prints the short verb table to stdout and exits 0 — showing
     // usage is not an error (no `error:` prefix, no stderr).
     if args.is_empty() {
@@ -377,25 +392,14 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         );
         return Ok(());
     }
-    // The verb is positional and is taken FIRST, so a global flag written before it
-    // would be read as the verb itself. Rather than let that surface as "unexpected
-    // argument '<path>' for '--data-dir'" -- which names the flag as a verb and tells
-    // the reader nothing about what to do -- accept the leading-flag form by moving
-    // any leading global flags (and their values) after the verb.
-    //
-    // Both orders are documented as working and an operator has no way to know the
-    // parser is positional, so refusing one of them would be a rule with no reason a
-    // caller could see.
-    hoist_leading_global_flags(&mut args);
-    let command = args.remove(0);
+    let Invocation {
+        command,
+        args,
+        globals,
+        options,
+        help,
+    } = parse_invocation(args)?;
 
-    // A `--help`/`-h` ANYWHERE prints help and exits WITHOUT running the command.
-    // This is load-bearing safety, not a convenience: the arg parser pulls the flags
-    // it knows and silently ignores the rest, so without this `bootstrap --help` would
-    // ignore `--help` and RUN bootstrap — provisioning stray key material on a typo.
-    // Intercepting here, before parse_global / any open-for-admin, makes help a no-op.
-    // `ck auth help [<verb>]` and `ck auth <verb> --help` both land here: with a verb
-    // we print that verb's detail page, otherwise the short table.
     if command == "help" || command == "--help" || command == "-h" {
         // `help <verb>` → the verb's page; bare `help` → the short table.
         match args.first() {
@@ -419,7 +423,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         }
         return Ok(());
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if help {
         if command == "federation" && args.first().is_some_and(|a| a == "sharing") {
             println!("{}", help_verb("federation sharing status"));
             return Ok(());
@@ -441,25 +445,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // Pull the global flags (--data-dir, and the key source) out of the arg list.
-    let global = parse_global(&mut args)?;
-
-    // Every remaining arg must be an accepted flag for this command (or its value);
-    // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
-    // before dispatch, so a bad invocation never reaches the keychain or the lease.
-    let options = reject_unknown_args(&command, &args)?;
-    // A secret verb's flags belong to ONE sub-verb each and a flag's value may be any
-    // word, so `secret_cli::guard_args` is the only check that can judge the invocation:
-    // it knows the verb being run and lists the flags that verb takes.
-    if command == "secret" {
-        // `guard_args` reads the same `secret <verb> ...` shape the base check does, so the
-        // verb name goes back in front of its operands. It is the ONLY argument check for
-        // this verb: the generic one cannot judge a flag whose value may be any word.
-        let mut secret_args = Vec::with_capacity(args.len() + 1);
-        secret_args.push(command.clone());
-        secret_args.extend(args.iter().cloned());
-        cli_support::secret_cli::guard_args(&secret_args)?;
-    }
+    let global = resolve_globals(&globals)?;
 
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
@@ -523,24 +509,6 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
 /// verb -- so flags written after the verb are untouched, and a bare `--data-dir` with
 /// no value is left in place to be reported by the normal flag parser rather than
 /// silently swallowed here.
-fn hoist_leading_global_flags(args: &mut Vec<String>) {
-    const GLOBAL_WITH_VALUE: [&str; 3] = ["--data-dir", "--subc", "--key-path"];
-    let mut hoisted: Vec<String> = Vec::new();
-    while args
-        .first()
-        .is_some_and(|a| GLOBAL_WITH_VALUE.contains(&a.as_str()))
-    {
-        // Only move the pair when a value is actually present; a trailing flag with
-        // no value is left for the parser to refuse with its own message.
-        if args.len() < 2 {
-            break;
-        }
-        hoisted.push(args.remove(0));
-        hoisted.push(args.remove(0));
-    }
-    args.extend(hoisted);
-}
-
 #[derive(Debug, Default)]
 struct ParsedOptions {
     values: std::collections::BTreeMap<String, String>,
@@ -562,40 +530,34 @@ impl ParsedOptions {
     }
 }
 
-/// Reject any leftover arg that is not an accepted flag (or a flag's value) for the
-/// command, AFTER the global flags have been pulled. The arg parser consumes the
-/// flags it knows and ignores the rest, so without this a misspelled or stray flag is
-/// silently dropped. For a command that takes no required flag (such as `bootstrap`),
-/// that silent drop means a typo'd invocation runs the real mutation. This makes a
-/// bad flag a hard usage error before any keychain or lease access.
-fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
-    if command == "github-app" {
-        return Ok(ParsedOptions::default()); // Subcommand flags are checked by github_app_cli.
+type FlagSpec = (&'static [&'static str], &'static [&'static str]);
+
+fn verb_flags(command: &str, subcommand: &str) -> FlagSpec {
+    match command {
+        "github-app" => return github_app_cli::flag_spec(subcommand),
+        "module-secret" => {
+            return (
+                module_secret_cli::value_flags(subcommand).unwrap_or(&[]),
+                &[],
+            )
+        }
+        "manifest" => return (cli_support::manifest_cli::value_flags(subcommand), &[]),
+        "policy" => {
+            return (
+                cli_support::policy_cli::value_flags(subcommand).unwrap_or(&[]),
+                &[],
+            )
+        }
+        "secret" => {
+            return (
+                cli_support::secret_cli::flag_spec(subcommand)
+                    .map_or(&[][..], |(values, _)| values),
+                &[],
+            )
+        }
+        "ssh-key" if subcommand == "allow" => return (&["--target"], &[]),
+        _ => (),
     }
-    if command == "module-secret" {
-        return module_secret_cli::guard_args(args).map(|()| ParsedOptions::default());
-    }
-    if command == "ssh-key" {
-        parse_ssh_key_op(args)?;
-        return Ok(ParsedOptions::default());
-    }
-    if command == "manifest" {
-        return cli_support::manifest_cli::guard_args(args).map(|()| ParsedOptions::default());
-    }
-    if command == "policy" {
-        return cli_support::policy_cli::guard_args(args).map(|()| ParsedOptions::default());
-    }
-    if command == "policy-root" {
-        return keys_cli::guard_policy_root_args(args).map(|()| ParsedOptions::default());
-    }
-    // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
-    // the generic scan below cannot judge it. `secret_cli` does, against the table for the
-    // verb actually named, and that is the only argument check that runs for this verb.
-    if command == "secret" {
-        return cli_support::secret_cli::guard_args(args).map(|()| ParsedOptions::default());
-    }
-    // The per-command flags that TAKE a value. `--data-dir` / `--key-path` are global
-    // and already removed by parse_global before this runs.
     let value_flags: &[&str] = match command {
         "put" => &[
             "--id",
@@ -698,95 +660,177 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, 
         ],
         _ => &[],
     };
-    let mut options = ParsedOptions::default();
-    let mut i = if matches!(command, "set-identity" | "set-category")
-        && args.first().is_some_and(|arg| !arg.starts_with("--"))
-    {
-        1
-    } else {
-        0
+    (value_flags, bool_flags)
+}
+
+const GLOBAL_FLAGS: &[&str] = &["--data-dir", "--subc", "--key-path"];
+const HELP_FLAGS: &[&str] = &["--help", "-h"];
+
+#[derive(Debug)]
+struct Invocation {
+    command: String,
+    args: Vec<String>,
+    globals: ParsedOptions,
+    options: ParsedOptions,
+    help: bool,
+}
+
+fn parse_invocation(args: Vec<String>) -> Result<Invocation, CliError> {
+    let mut args = args.into_iter();
+    let mut globals = ParsedOptions::default();
+    let command = loop {
+        let arg = args
+            .next()
+            .ok_or_else(|| CliError::Usage("a command is required".into()))?;
+        if !GLOBAL_FLAGS.contains(&arg.as_str()) {
+            break arg;
+        }
+        let value = flag_value(&arg, &mut args, |next| {
+            next.starts_with("--") || HELP_FLAGS.contains(&next)
+        })?;
+        insert_global(&mut globals, arg, value)?;
     };
-    while i < args.len() {
-        let arg = &args[i];
-        // VERBS WITH POSITIONAL SUBCOMMANDS must name them here, or this check eats the
-        // subcommand before dispatch and the verb is unusable.
-        //
-        // Help and flag tests drive FLAGS, so a verb missing from this table still
-        // passes them and fails only when someone runs a subcommand such as
-        // `ck auth enroll list` against a live daemon. Keep subcommands in one table so a new
-        // verb can declare its positional actions alongside the existing ones.
-        let subcommands: &[&str] = match command {
-            "enroll" => &["list", "approve", "label", "deny", "revoke", "reissue"],
-            "transfer" => &["init", "send", "receive", "accept", "reject"],
-            "remote" => &["add", "remove", "list"],
-            "member" => &["grant", "revoke", "list"],
-            "provider" => &["list", "set", "remove"],
-            "federation" => &["self", "mapping", "sharing", "status"],
-            // Every secret verb name and its one positional action, so none is eaten
-            // here. `secret`'s FLAGS are checked by `secret_cli::guard_args` instead: this
-            // table is keyed on the command name alone and could not say which sub-verb a
-            // flag belongs to.
-            "secret" => &[
-                "put",
-                "list",
-                "grants",
-                "delete",
-                "revoke",
-                "phone-gate",
-                "multi-host",
-                "basic-auth",
-                "local-programs",
-                "dev-desktop-approvals",
-                "on",
-                "off",
-                "status",
-            ],
-            _ => &[],
-        };
-        // `transfer accept|reject <transfer-id>` and `federation self <member>` take one
-        // positional value, which the verb itself checks.
-        // `secret` is handed entirely to its own guard below: a name may be positional, a
-        // flag's value may be any word, and which flags a verb takes is known there alone.
-        // Judging any token here would only guess at that.
-        if command == "secret" {
-            i += 1;
+    scan_verb_args(command, args, globals, true)
+}
+
+fn flag_value(
+    flag: &str,
+    args: &mut impl Iterator<Item = String>,
+    is_flag: impl FnOnce(&str) -> bool,
+) -> Result<String, CliError> {
+    args.next()
+        .filter(|value| !is_flag(value))
+        .ok_or_else(|| CliError::Usage(format!("{flag} requires a value")))
+}
+
+fn insert_global(globals: &mut ParsedOptions, flag: String, value: String) -> Result<(), CliError> {
+    if globals.values.contains_key(&flag) {
+        return Err(CliError::Usage(format!(
+            "unexpected repeated argument '{flag}'"
+        )));
+    }
+    globals.values.insert(flag, value);
+    Ok(())
+}
+
+fn scan_verb_args(
+    command: String,
+    mut input: impl Iterator<Item = String>,
+    mut globals: ParsedOptions,
+    allow_help: bool,
+) -> Result<Invocation, CliError> {
+    let mut options = ParsedOptions::default();
+    let mut args = Vec::<String>::new();
+    let help_command = matches!(command.as_str(), "help" | "--help" | "-h");
+    let delegated = matches!(
+        command.as_str(),
+        "github-app"
+            | "module-secret"
+            | "ssh-key"
+            | "manifest"
+            | "policy"
+            | "policy-root"
+            | "secret"
+    );
+    let subcommands: &[&str] = match command.as_str() {
+        "enroll" => &["list", "approve", "label", "deny", "revoke", "reissue"],
+        "transfer" => &["init", "send", "receive", "accept", "reject"],
+        "remote" => &["add", "remove", "list"],
+        "member" => &["grant", "revoke", "list"],
+        "provider" => &["list", "set", "remove"],
+        "federation" => &["self", "mapping", "sharing", "status"],
+        _ => &[],
+    };
+    let mut help = false;
+    let mut unexpected = None;
+    while let Some(arg) = input.next() {
+        let subcommand = args.first().map(String::as_str).unwrap_or_default();
+        let (value_flags, bool_flags) = verb_flags(&command, subcommand);
+        if GLOBAL_FLAGS.contains(&arg.as_str()) {
+            let value = flag_value(&arg, &mut input, |next| {
+                next.starts_with("--") || HELP_FLAGS.contains(&next)
+            })?;
+            insert_global(&mut globals, arg, value)?;
             continue;
         }
-        if subcommands.contains(&arg.as_str())
-            || (matches!(command, "set-providers" | "transfer" | "federation")
-                && !arg.starts_with("--"))
-        {
-            i += 1;
-            continue;
-        }
-        if command == "put" && (arg == "--payload" || arg.starts_with("--payload=")) {
-            return Err(CliError::Usage(
-                "--payload is no longer accepted: use --payload-file <path> or omit it for the hidden interactive prompt".into(),
-            ));
-        }
-        if bool_flags.contains(&arg.as_str()) {
-            options.bools.insert(arg.clone());
-            i += 1;
+        if allow_help && HELP_FLAGS.contains(&arg.as_str()) {
+            help = true;
             continue;
         }
         if value_flags.contains(&arg.as_str()) {
-            // Skip the flag AND its value (the value may look like anything).
-            let value = args
-                .get(i + 1)
-                .ok_or_else(|| CliError::Usage(format!("{arg} requires a value")))?;
+            // A put payload path is documented to accept a literal flag-shaped filename.
+            let literal_path = command == "put" && arg == "--payload-file";
+            let value = flag_value(&arg, &mut input, |next| {
+                !literal_path
+                    && (GLOBAL_FLAGS.contains(&next)
+                        || HELP_FLAGS.contains(&next)
+                        || value_flags.contains(&next)
+                        || bool_flags.contains(&next))
+            })?;
             options
                 .values
                 .entry(arg.clone())
                 .or_insert_with(|| value.clone());
-            i += 2;
+            args.extend([arg, value]);
             continue;
         }
-        return Err(CliError::Usage(format!(
-            "unexpected argument '{arg}' for '{command}'\n\n{}",
-            help_verb(command)
-        )));
+        if bool_flags.contains(&arg.as_str()) {
+            options.bools.insert(arg.clone());
+        } else if !delegated
+            && !help_command
+            && !subcommands.contains(&arg.as_str())
+            && !(matches!(
+                command.as_str(),
+                "set-providers" | "transfer" | "federation"
+            ) && !arg.starts_with("--"))
+            && !(matches!(command.as_str(), "set-identity" | "set-category")
+                && args.is_empty()
+                && !arg.starts_with("--"))
+        {
+            unexpected.get_or_insert_with(|| {
+                if command == "put" && (arg == "--payload" || arg.starts_with("--payload=")) {
+                    CliError::Usage("--payload is no longer accepted: use --payload-file <path> or omit it for the hidden interactive prompt".into())
+                } else {
+                    CliError::Usage(format!("unexpected argument '{arg}' for '{command}'\n\n{}", help_verb(&command)))
+                }
+            });
+        }
+        args.push(arg);
     }
-    Ok(options)
+    if !help && !help_command {
+        if let Some(error) = unexpected {
+            return Err(error);
+        }
+        match command.as_str() {
+            "module-secret" => module_secret_cli::guard_args(&args)?,
+            "ssh-key" => {
+                parse_ssh_key_op(&args)?;
+            }
+            "manifest" => cli_support::manifest_cli::guard_args(&args)?,
+            "policy" => cli_support::policy_cli::guard_args(&args)?,
+            "policy-root" => keys_cli::guard_policy_root_args(&args)?,
+            "secret" => cli_support::secret_cli::guard_args(&args)?,
+            _ => (),
+        }
+    }
+    Ok(Invocation {
+        command,
+        args,
+        globals,
+        options,
+        help,
+    })
+}
+
+#[cfg(test)]
+fn reject_unknown_args(command: &str, args: &[String]) -> Result<ParsedOptions, CliError> {
+    scan_verb_args(
+        command.to_owned(),
+        args.iter().cloned(),
+        ParsedOptions::default(),
+        false,
+    )
+    .map(|invocation| invocation.options)
 }
 
 /// The short verb table shown for bare `ck auth`, `ck auth help`, and an unknown
@@ -834,7 +878,7 @@ fn usage_short() -> String {
        reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
        events              why credentials failed to authenticate\n\
-       usable              which credentials can still serve or refresh\n\
+       usable              check which credentials can serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
        verify-github-apps  check GitHub App record ids against GitHub's slugs\n\
        github-app          create Apps or manage their webhook relay\n\
@@ -844,7 +888,7 @@ fn usage_short() -> String {
          federation          member setup and config-file sharing status\n\
            secret              agent secrets; phone, multi-host, basic-auth gates\n\
            module-secret       list, delete or move module-owned secrets\n\
-       rotate-master-key   rotate the vault master key (offline)\n\
+       rotate-master-key   rotate the master key and report corrupt rows (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
      GLOBAL FLAGS\n\
@@ -1692,10 +1736,10 @@ fn help_verb(verb: &str) -> String {
              The only command that decrypts. 'status' and 'list' read plaintext metadata, so\n\
              neither can see a record that decrypts to nothing usable.\n\
              \n\
-             Scores STRANDED: a record holding neither a usable access token nor any refresh\n\
-             material, so it can never serve again without an operator login. Expiry is\n\
-             printed but never scored -- an expired access token beside live refresh material\n\
-             is the routine state of a healthy credential, and it refreshes on the next read.\n\
+             STRANDED means neither a usable access token nor refresh material remains.\n\
+             Expiry alone is normal for an active record that can refresh on the next read.\n\
+             If a record needs a refresh but its adapter cannot use the stored material,\n\
+             the report says 'unsupported refresh configuration'.\n\
              \n\
              Safe while the daemon runs: read-only, takes no lease, writes nothing.\n\
              \n\
@@ -1732,8 +1776,9 @@ fn help_verb(verb: &str) -> String {
             "ck auth rotate-master-key\n\
              \n\
              NOTES\n\
-             Crash-safe two-slot rotation of the vault master key (ALWAYS offline; stop the\n\
-             daemon first). Re-seals every record under the new key."
+             Rotate the vault master key using two crash-safe slots. Stop the daemon first.\n\
+             Re-seal readable rows under the new key. Rows newly marked corrupt are listed\n\
+             separately from rows already marked corrupt before rotation."
         }
         "bootstrap" => {
             "ck auth bootstrap\n\
@@ -2370,12 +2415,12 @@ fn created_id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
 
 // ---- arg parsing helpers -------------------------------------------------
 
-fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
+fn resolve_globals(options: &ParsedOptions) -> Result<GlobalArgs, CliError> {
     // ZERO-FLAG default: on a standard install every flag below is derivable, so a
     // top-level command (`ck auth login --provider xai --replace`, `ck auth status`)
     // works with no path arguments at all. Flags are OVERRIDES for non-standard
     // installs, never requirements.
-    let (data_dir, data_dir_explicit) = match take_flag(args, "--data-dir") {
+    let (data_dir, data_dir_explicit) = match options.optional("--data-dir") {
         Some(dir) => (PathBuf::from(dir), true),
         // The daemon's storage path is fixed by convention to
         // <data_home>/cortexkit/<module_id> (subc daemon_config); module_id is a
@@ -2383,7 +2428,7 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
         // uses. So the default IS the directory the supervised vault serves.
         None => (default_data_home().join("cortexkit").join(MODULE_ID), false),
     };
-    let key_path = take_flag(args, "--key-path").map(PathBuf::from);
+    let key_path = options.optional("--key-path").map(PathBuf::from);
     let key_source =
         resolver::key_source(&data_dir, key_path.as_deref()).map_err(CliError::MasterKey)?;
     // --subc resolution:
@@ -2396,7 +2441,7 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
     //   DIFFERENT vault, so silently routing there would be wrong. Use the offline
     //   lease path (or the operator adds --subc to route deliberately). This keeps
     //   auto-routing scoped to exactly the vault the default derivation targets.
-    let subc_conn = match take_flag(args, "--subc") {
+    let subc_conn = match options.optional("--subc") {
         Some(path) => Some(PathBuf::from(path)),
         None if data_dir_explicit => None,
         None => discover_subc_connection_file(),
@@ -2887,18 +2932,6 @@ fn non_empty_env(key: &str) -> Option<std::ffi::OsString> {
     }
 }
 
-/// Remove `--flag <value>` from the arg list and return the value (a global flag
-/// may appear anywhere).
-fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
-    let pos = args.iter().position(|a| a == flag)?;
-    if pos + 1 >= args.len() {
-        return None;
-    }
-    let value = args.remove(pos + 1);
-    args.remove(pos);
-    Some(value)
-}
-
 fn required(args: &[String], flag: &str) -> Result<String, CliError> {
     optional(args, flag).ok_or_else(|| CliError::Usage(format!("{flag} is required")))
 }
@@ -3192,48 +3225,40 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn deposit_already_exists_requires_the_exact_store_error() {
+        assert!(CliError::Store(StoreOpError::AlreadyExists).is_already_exists());
+        let message = StoreOpError::AlreadyExists.to_string();
+        assert!(CliError::RouteRefused(message.clone()).is_already_exists());
+        assert!(!CliError::RouteRefused(format!("invalid label: {message}")).is_already_exists());
+    }
+
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
     fn a_global_flag_before_the_verb_lands_where_one_after_it_would() {
-        // The verb is positional and read before the flags, so a leading global flag
-        // would otherwise BE the verb. Both orders are documented and a caller cannot
-        // see that the parser is positional.
-        let mut leading: Vec<String> = ["--data-dir", "/tmp/v", "list"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        hoist_leading_global_flags(&mut leading);
-        assert_eq!(leading, vec!["list", "--data-dir", "/tmp/v"]);
-
-        // Two of them, and each flag must stay next to its own value.
-        let mut two: Vec<String> = ["--data-dir", "/tmp/v", "--key-path", "/tmp/k", "status"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        hoist_leading_global_flags(&mut two);
-        assert_eq!(
-            two,
-            vec!["status", "--data-dir", "/tmp/v", "--key-path", "/tmp/k"]
+        for args in [
+            ["--data-dir", "/tmp/v", "--key-path", "/tmp/k", "status"],
+            ["status", "--data-dir", "/tmp/v", "--key-path", "/tmp/k"],
+            ["--data-dir", "/tmp/v", "status", "--key-path", "/tmp/k"],
+        ] {
+            let parsed = parse_invocation(v(&args)).unwrap();
+            assert_eq!(parsed.command, "status");
+            assert!(parsed.args.is_empty());
+            assert_eq!(
+                parsed.globals.optional("--data-dir").as_deref(),
+                Some("/tmp/v")
+            );
+            assert_eq!(
+                parsed.globals.optional("--key-path").as_deref(),
+                Some("/tmp/k")
+            );
+        }
+        assert!(
+            matches!(parse_invocation(v(&["--data-dir"])), Err(CliError::Usage(message)) if message == "--data-dir requires a value")
         );
-
-        // A flag already after the verb is untouched: the hoist must not reorder an
-        // invocation that already worked.
-        let mut trailing: Vec<String> = ["list", "--data-dir", "/tmp/v"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let before = trailing.clone();
-        hoist_leading_global_flags(&mut trailing);
-        assert_eq!(trailing, before);
-
-        // A flag with no value is left in place so the normal parser reports it,
-        // rather than this function consuming the arg and producing a stranger error.
-        let mut valueless: Vec<String> = vec!["--data-dir".to_string()];
-        hoist_leading_global_flags(&mut valueless);
-        assert_eq!(valueless, vec!["--data-dir"]);
     }
 
     #[test]
@@ -3485,7 +3510,13 @@ mod deposit_cli_tests {
                     "github_app",
                     OAuthCredential {
                         access_token: "sample".to_string().into(),
-                        refresh_token: "sample".to_string().into(),
+                        // Policy signing opens the App's real signing material, so the
+                        // identity needs a key that parses, not a placeholder string.
+                        refresh_token: include_str!(
+                            "../../../credentials-core/tests/fixtures/github_app/test_private_key_pkcs1.pem"
+                        )
+                        .to_string()
+                        .into(),
                         expires_at_ms: None,
                         token_url: String::new(),
                         client_id: Some("sample".into()),

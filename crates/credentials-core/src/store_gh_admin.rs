@@ -226,30 +226,25 @@ impl EncryptedStore {
                 "manifest_sha256": row.get::<_, String>(2)?,
                 "signed_at_ms": row.get::<_, i64>(3)?,
             })))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            // As in gh_manifest_active_status, self, secret-use grant holders and
-            // report senders are expected unless retired. Keep retired rows visible
-            // to the operator.
-            let computers = tx.prepare(
-                "SELECT population.member_id, a.version, a.payload_sha256, a.verdict, a.reason, \
-                 a.reported_at_ms, a.retired_at_ms \
-                 FROM (SELECT value AS member_id FROM settings WHERE name = ?1 AND value != '' \
-                       UNION SELECT member_id FROM member_grants WHERE operation = 'secret_use' \
-                       UNION SELECT member_id FROM gh_manifest_activations) AS population \
-                 LEFT JOIN gh_manifest_activations AS a ON a.member_id = population.member_id \
-                 ORDER BY population.member_id COLLATE BINARY",
-            )?.query_map([crate::federation::SELF_MEMBER_SETTING], |row| {
-                let retired = row.get::<_, Option<i64>>(6)?;
-                Ok(json!({
-                    "member_id": row.get::<_, String>(0)?,
-                    "version": row.get::<_, Option<i64>>(1)?,
-                    "payload_sha256": row.get::<_, Option<String>>(2)?,
-                    "verdict": row.get::<_, Option<String>>(3)?,
-                    "reason": row.get::<_, Option<String>>(4)?,
-                    "reported_at_ms": row.get::<_, Option<i64>>(5)?,
-                    "retired_at_ms": retired,
-                    "expected": retired.is_none(),
-                }))
-            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut computers = std::collections::BTreeMap::new();
+            for computer in super::gh_activations::gh_manifest_expected_computers_conn(&tx)? {
+                let mut item = json!(computer);
+                item["expected"] = json!(true);
+                item["retired_at_ms"] = Value::Null;
+                computers.insert(computer.member_id, item);
+            }
+            // Retired computers do not count for readiness but remain visible to operators.
+            let retired = tx.prepare(
+                "SELECT member_id, retired_at_ms FROM gh_manifest_activations WHERE retired_at_ms IS NOT NULL",
+            )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (member, retired_at_ms) in retired {
+                let item = json!({"member_id": member, "expected": false, "version": null,
+                    "payload_sha256": null, "verdict": null, "reason": null, "reported_at_ms": null,
+                    "retired_at_ms": retired_at_ms});
+                computers.insert(member, item);
+            }
+            let computers: Vec<_> = computers.into_values().collect();
             tx.commit()?;
             Ok(json!({"versions": versions, "computers": computers}))
         }).map_err(StoreOpError::from)

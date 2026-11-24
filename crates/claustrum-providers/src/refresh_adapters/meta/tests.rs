@@ -5,6 +5,7 @@ pub(super) fn device_tokens(optionals: bool) -> DeviceTokens {
     DeviceTokens {
         access_token: "meta-identity-token".into(),
         refresh_token: optionals.then(|| "meta-refresh-token".into()),
+        id_token: None,
         expires_at_ms: optionals.then_some(123),
         expiry_field_present: optionals,
     }
@@ -146,6 +147,24 @@ async fn meta_refresh_preserves_both_stored_tokens_and_only_mints_at_key_endpoin
     assert_eq!(http.requests().len(), 1);
     assert_eq!(http.requests()[0].url, "https://api.meta.ai/muse-code/key");
     assert!(MetaAdapter.non_mutating_check(&cred, &http).await.is_none());
+}
+
+#[tokio::test]
+async fn refresh_with_an_undecodable_session_requires_sign_in() {
+    let (record, _) = login_record(
+        device_tokens(true),
+        &FixtureTransport::ok(200, fixtures::KEY),
+    )
+    .await
+    .unwrap();
+    let mut cred = record.oauth.unwrap();
+    cred.refresh_token = String::from("not json").into();
+    let http = FixtureTransport::new(vec![]);
+    assert!(matches!(
+        MetaAdapter.refresh(&cred, &http).await,
+        Err(RefreshError::InvalidGrant(_))
+    ));
+    assert!(http.requests().is_empty());
 }
 
 #[tokio::test]

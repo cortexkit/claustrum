@@ -89,7 +89,7 @@ impl EncryptedStore {
         };
         // Kind is authenticated inside the envelope. Inspect it without changing record
         // state: the caller has not yet been authorized to use the record.
-        let kind = envelope::open(
+        let kind = open_credential_envelope(
             &self.key,
             &blob,
             &RecordBinding {
@@ -110,7 +110,7 @@ impl EncryptedStore {
 
     /// Persist a change and its audit row before making the admitted bind usable.
     pub fn record_settings_refs_seen(&self, set: &SettingsRefSet) -> Result<bool, StoreOpError> {
-        // SQLite INTEGER is signed; decimal text preserves the full wire u64.
+        // SQLite INTEGER is signed; decimal text preserves the full storage u64.
         let generation = set.generation.to_string();
         let refs_json = set.refs_json();
         let refs_sha256 = sha256_hex_of_bytes(refs_json.as_bytes());

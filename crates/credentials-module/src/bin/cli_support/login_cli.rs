@@ -9,7 +9,7 @@ use super::{
     parse_gateway_header, parse_inventory, preflight_login, provider_id_flags, provider_login,
     put_prompt, request_admin_status, store_op, tokio_block_on, AdminAuditOp, AdminOpBody,
     CliError, CredentialKind, DeviceKind, ExchangeWire, GlobalArgs, LoginProvider, RecordIdentity,
-    StoreMode, StoreOpError, VaultRecord, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+    StoreMode, VaultRecord, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
 };
 #[cfg(test)]
 use super::{help_verb, parse_plan_since, usage_short, windows_browser_command};
@@ -40,16 +40,7 @@ fn default_login_id(provider: &str) -> String {
     provider.to_string()
 }
 
-/// Whether a login `--id` is the provider's default id or a labeled sub-account of
-/// it (`<default_id>:<label>`, one non-empty label segment). Anything else would
-/// mint a mis-keyed credential.
-pub(super) fn login_id_is_valid(default_id: &str, id: &str) -> bool {
-    id == default_id
-        || id
-            .strip_prefix(default_id)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .is_some_and(|label| !label.is_empty() && !label.contains(':'))
-}
+pub(super) use credentials_core::oauth_login::login_id_is_valid;
 
 /// The login providers offered by the interactive picker, in display order. The
 /// display name is the subscription the operator recognizes; the key is what
@@ -385,56 +376,35 @@ fn cmd_device_login(
             presence(fields.key_expiry_field_present)
         );
         record
-    } else {
-        let (oauth, payload) = if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
-            let github_credential = credentials_core::oauth::OAuthCredential {
-                access_token: String::new().into(),
-                refresh_token: tokens.access_token.into(),
-                expires_at_ms: None,
-                token_url: github_copilot::TOKEN_URL.into(),
-                client_id: Some(github_copilot::CLIENT_ID.into()),
-                client_secret: None,
-                scopes: vec!["read:user".into()],
-            };
-            let exchanged = tokio_block_on(
-                github_copilot::GithubCopilotAdapter::new().refresh(&github_credential, &http),
-            )
-            .map_err(|e| CliError::Io(e.to_string()))?;
-            let oauth = credentials_core::oauth::OAuthCredential {
-                access_token: exchanged.access_token.clone(),
-                refresh_token: exchanged.refresh_token,
-                expires_at_ms: exchanged.expires_at_ms,
-                token_url: github_copilot::TOKEN_URL.into(),
-                client_id: Some(github_copilot::CLIENT_ID.into()),
-                client_secret: None,
-                scopes: vec!["read:user".into()],
-            };
-            let payload = credentials_core::secret::SecretBytes::new(
-                oauth.access_token.expose().as_bytes().to_vec(),
-            );
-            (oauth, payload)
-        } else {
-            let refresh_token = tokens.refresh_token.ok_or_else(|| {
-                CliError::Io(format!("{provider} device flow returned no refresh token"))
-            })?;
-            let oauth = credentials_core::oauth::OAuthCredential {
-                access_token: tokens.access_token.clone().into(),
-                refresh_token: refresh_token.into(),
-                expires_at_ms: tokens.expires_at_ms,
-                token_url: wire.token_url.to_string(),
-                client_id: Some(wire.client_id.to_string()),
-                client_secret: None,
-                scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
-            };
-            let payload = credentials_core::secret::SecretBytes::new(
-                oauth.access_token.expose().as_bytes().to_vec(),
-            );
-            (oauth, payload)
+    } else if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
+        let github_credential = credentials_core::oauth::OAuthCredential {
+            access_token: String::new().into(),
+            refresh_token: tokens.access_token.into(),
+            expires_at_ms: None,
+            token_url: github_copilot::TOKEN_URL.into(),
+            client_id: Some(github_copilot::CLIENT_ID.into()),
+            client_secret: None,
+            scopes: vec!["read:user".into()],
         };
-
-        // Other device-flow providers do not disclose an account identity in the response, so
-        // leave RecordIdentity empty rather than making an extra account lookup.
+        let exchanged = tokio_block_on(
+            github_copilot::GithubCopilotAdapter::new().refresh(&github_credential, &http),
+        )
+        .map_err(|e| CliError::Io(e.to_string()))?;
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: exchanged.access_token.clone(),
+            refresh_token: exchanged.refresh_token,
+            expires_at_ms: exchanged.expires_at_ms,
+            token_url: github_copilot::TOKEN_URL.into(),
+            client_id: Some(github_copilot::CLIENT_ID.into()),
+            client_secret: None,
+            scopes: vec!["read:user".into()],
+        };
+        let payload = credentials_core::secret::SecretBytes::new(
+            oauth.access_token.expose().as_bytes().to_vec(),
+        );
         VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload)
+    } else {
+        device_oauth_record(wire, tokens)?
     };
     if replace {
         commit_login_admin(
@@ -456,9 +426,7 @@ fn cmd_device_login(
             preflighted_key,
             args,
         );
-        if matches!(&result, Err(CliError::Store(StoreOpError::AlreadyExists)))
-            || matches!(&result, Err(CliError::RouteRefused(message)) if message.contains("already exists"))
-        {
+        if result.as_ref().is_err_and(CliError::is_already_exists) {
             return Err(CliError::Usage(format!(
                 "'{id}' already holds a credential; use --replace or a labeled id"
             )));
@@ -467,6 +435,91 @@ fn cmd_device_login(
         println!("logged in and stored {id}");
     }
     Ok(())
+}
+
+fn device_oauth_record(
+    wire: &LoginProvider,
+    tokens: credentials_core::device_flow::DeviceTokens,
+) -> Result<VaultRecord, CliError> {
+    let refresh_token = tokens.refresh_token.ok_or_else(|| {
+        CliError::Io(format!(
+            "{} device flow returned no refresh token",
+            wire.key
+        ))
+    })?;
+    let tokens = credentials_core::oauth_login::LoginTokens {
+        access_token: tokens.access_token,
+        refresh_token,
+        expires_at_ms: tokens.expires_at_ms,
+        id_token: tokens.id_token,
+        account: None,
+        organization: None,
+    };
+    let identity = match wire.device {
+        Some(DeviceKind::OpenAi | DeviceKind::Xai) => login_identity(wire.key, &tokens),
+        _ => RecordIdentity::default(),
+    };
+    let oauth = credentials_core::oauth::OAuthCredential {
+        access_token: tokens.access_token.into(),
+        refresh_token: tokens.refresh_token.into(),
+        expires_at_ms: tokens.expires_at_ms,
+        token_url: wire.token_url.to_string(),
+        client_id: Some(wire.client_id.to_string()),
+        client_secret: None,
+        scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
+    };
+    let payload =
+        credentials_core::secret::SecretBytes::new(oauth.access_token.expose().as_bytes().to_vec());
+    Ok(VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload).with_identity(identity))
+}
+
+fn login_identity(
+    provider: &str,
+    tokens: &credentials_core::oauth_login::LoginTokens,
+) -> RecordIdentity {
+    use credentials_core::oauth_login::{
+        account_id_for_adapter, decode_jwt_claims, extract_chatgpt_account_id,
+    };
+
+    let account_from_token = if provider == "xai" {
+        account_id_for_adapter(provider, &tokens.access_token)
+    } else {
+        extract_chatgpt_account_id(tokens)
+    };
+    if provider == "openai" {
+        match account_from_token.as_deref() {
+            Some(account) => println!("chatgpt account id: {account}"),
+            None => println!(
+                "WARNING: the minted token carries no chatgpt_account_id claim; \
+                 the ChatGPT wire family will refuse it — is this a ChatGPT-subscription account?"
+            ),
+        }
+    }
+    // Account identity is display metadata, not used for authorization. Anthropic
+    // sends it inline; OIDC providers include it in the identity token.
+    let identity = RecordIdentity {
+        account_id: tokens
+            .account
+            .as_ref()
+            .and_then(|a| a.uuid.clone())
+            .or(account_from_token),
+        email: tokens
+            .account
+            .as_ref()
+            .and_then(|a| a.email_address.clone())
+            .or_else(|| {
+                let claims = decode_jwt_claims(tokens.id_token.as_deref()?)?;
+                Some(claims.get("email")?.as_str()?.to_owned())
+            }),
+        org_name: tokens.organization.as_ref().and_then(|o| o.name.clone()),
+    };
+    if let Some(email) = identity.email.as_deref() {
+        match identity.org_name.as_deref() {
+            Some(org) => println!("account: {email} · {org}"),
+            None => println!("account: {email}"),
+        }
+    }
+    identity
 }
 
 struct OtherApiKeyChoice {
@@ -724,8 +777,8 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     let explicit_id = optional(args, "--id");
     check_deposit_provider_flags(explicit_id.as_deref(), &explicit_ids)?;
     use credentials_core::oauth_login::{
-        decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
-        extract_chatgpt_account_id, generate_pkce, generate_state,
+        access_token_expiry_ms, exchange_authorization_code, exchange_authorization_code_form,
+        generate_pkce, generate_state,
     };
 
     // With --provider the flow is fully flag-driven (scriptable); without it, the
@@ -865,9 +918,7 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
             println!("{}", api_key_login::NO_FREE_CHECK_MESSAGE);
         }
         let key = if let Some(path) = optional(args, "--payload-file") {
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
-            raw.trim().to_string()
+            super::credential_cli::read_key_file(&path)?
         } else {
             use dialoguer::Password;
             let prompt = format!(
@@ -968,11 +1019,7 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
                 preflighted_key,
                 args,
             );
-            let already_exists = match &result {
-                Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
-                Err(CliError::RouteRefused(m)) => m.contains("already exists"),
-                _ => false,
-            };
+            let already_exists = result.as_ref().is_err_and(CliError::is_already_exists);
             if already_exists {
                 return Err(CliError::Usage(format!(
                     "'{id}' already holds a credential.\n\
@@ -996,42 +1043,34 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     // The proprietary browser-poll / callback flows (Cursor, Devin, Snowflake,
     // DigitalOcean) run their own driver, which returns None for any other provider.
     let mut special_key = None;
-    let mut preflight_error = None;
     if let Some(special) = provider_login::run(
         &provider,
         args,
         interactive.id_override.as_deref(),
         interactive.replace,
-        &mut |id, replace| match preflight_login(
-            global,
-            id,
-            replace,
-            format!("'{id}' already holds a credential; use --replace"),
-        ) {
-            Ok(key) => {
-                special_key = Some(key);
-                Ok(())
-            }
-            Err(error) => {
-                preflight_error = Some(error);
-                Err("login preflight refused".into())
-            }
+        &mut |id, replace| {
+            special_key = Some(preflight_login(
+                global,
+                id,
+                replace,
+                format!("'{id}' already holds a credential; use --replace"),
+            )?);
+            Ok(())
         },
-    )
-    .map_err(|error| preflight_error.unwrap_or(CliError::Io(error)))?
-    {
+    )? {
         let mode = if special.replace {
             StoreMode::ReplaceUnconditional
         } else {
             StoreMode::Create
         };
+        let receipt = special.receipt();
         commit_login_admin(
             global,
             store_op(&special.id, special.record, AdminAuditOp::Login, mode),
             special_key.expect("special login ran preflight"),
             args,
         )?;
-        println!("logged in and stored {}", special.id);
+        println!("logged in and {receipt} {}", special.id);
         return Ok(());
     }
 
@@ -1144,6 +1183,7 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     browser_login::choose_and_present(args, approve_on, &plan.authorize_url)?;
     let callback = tokio_block_on(browser_login::read_callback(
         listener,
+        plan.redirect_uri,
         plan.paste_prompt,
         &state,
     ))?;
@@ -1195,56 +1235,11 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     // JWT carrying its own `exp` (seconds). Fall back to it so the refresh engine
     // sees the real expiry instead of never-expires (the official codex CLI reads
     // the same claim).
-    let expires_at_ms = tokens.expires_at_ms.or_else(|| {
-        decode_jwt_claims(&tokens.access_token)
-            .and_then(|c| c.get("exp")?.as_i64())
-            .map(|exp_s| exp_s.saturating_mul(1000))
-    });
+    let expires_at_ms = tokens
+        .expires_at_ms
+        .or_else(|| access_token_expiry_ms(&tokens.access_token));
 
-    // Non-secret identity sanity check for the ChatGPT wire: llm-runner derives the
-    // ChatGPT-Account-Id header from the access token's claims and fails loud when
-    // absent — surface that at mint time rather than at first read.
-    if provider == "openai" {
-        match extract_chatgpt_account_id(&tokens) {
-            Some(account) => println!("chatgpt account id: {account}"),
-            None => println!(
-                "WARNING: the minted token carries no chatgpt_account_id claim; \
-                 the ChatGPT wire family will refuse it — is this a ChatGPT-subscription account?"
-            ),
-        }
-    }
-
-    // Capture NON-secret account identity while we have the login artifacts in hand:
-    // Anthropic inlines account/organization blocks in the exchange response (its
-    // access tokens are opaque, so login is the only capture point); OIDC providers
-    // carry email in id_token claims. Stored on the record as display/routing
-    // metadata (ck-quota's per-account usage labels), never used for authorization.
-    let identity = credentials_core::record::RecordIdentity {
-        account_id: tokens
-            .account
-            .as_ref()
-            .and_then(|a| a.uuid.clone())
-            .or_else(|| extract_chatgpt_account_id(&tokens)),
-        email: tokens
-            .account
-            .as_ref()
-            .and_then(|a| a.email_address.clone())
-            .or_else(|| {
-                tokens.id_token.as_deref().and_then(|t| {
-                    decode_jwt_claims(t)?
-                        .get("email")?
-                        .as_str()
-                        .map(str::to_string)
-                })
-            }),
-        org_name: tokens.organization.as_ref().and_then(|o| o.name.clone()),
-    };
-    if let Some(email) = identity.email.as_deref() {
-        match identity.org_name.as_deref() {
-            Some(org) => println!("account: {email} · {org}"),
-            None => println!("account: {email}"),
-        }
-    }
+    let identity = login_identity(&provider, &tokens);
 
     // Build the canonical oauth credential + record. token_url and client_id are
     // stored on the record so the refresh path uses the same endpoint/client that
@@ -1302,13 +1297,7 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
         // The create-only refusal must not be a dead end: name both ways forward
         // (another account under a label, or swapping this credential). The route
         // path surfaces the same refusal as a RouteRefused string, so match both.
-        let already_exists = match &result {
-            Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
-            // The route path's refusal string for StoreOpError::AlreadyExists
-            // (admin_surface::store_err).
-            Err(CliError::RouteRefused(m)) => m.contains("already exists"),
-            _ => false,
-        };
+        let already_exists = result.as_ref().is_err_and(CliError::is_already_exists);
         if already_exists {
             return Err(CliError::Usage(format!(
                 "'{id}' already holds a credential.\n\
@@ -1372,6 +1361,9 @@ pub(super) fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), Cli
     } else {
         vec![id]
     };
+    if ids.is_empty() {
+        println!("no Snowflake credentials are present: nothing changed");
+    }
     for id in ids {
         logout_id(global, &id)?;
     }
@@ -1723,6 +1715,36 @@ mod login_regressions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_and_xai_device_records_keep_account_email() {
+        use base64::Engine as _;
+        let jwt = |claims: &[u8]| {
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims);
+            format!("e30.{body}.sig")
+        };
+        for (provider, id_claims) in [
+            ("openai", br#"{"email":"account@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}}"#.as_slice()),
+            ("xai", br#"{"email":"account@example.invalid"}"#.as_slice()),
+        ] {
+            let record = device_oauth_record(
+                login_provider(provider).unwrap(),
+                credentials_core::device_flow::DeviceTokens {
+                    access_token: jwt(br#"{"sub":"fixture-account"}"#),
+                    refresh_token: Some("fixture-refresh".into()),
+                    id_token: Some(jwt(id_claims)),
+                    expires_at_ms: None,
+                    expiry_field_present: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                record.identity.email.as_deref(),
+                Some("account@example.invalid")
+            );
+            assert_eq!(record.identity.account_id.as_deref(), Some("fixture-account"));
+        }
+    }
 
     /// The multi-account rail: a login id is the provider default or one labeled
     /// sub-account — any free-form id (e.g. a bare account name) would create a

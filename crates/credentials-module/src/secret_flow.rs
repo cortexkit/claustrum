@@ -1,5 +1,6 @@
 //! Basal's install-time consent and flow-only release boundary.
 use super::*;
+use credentials_core::agent_secret;
 use credentials_core::store::SecretUseOutcome;
 use serde_json::json;
 
@@ -32,14 +33,6 @@ fn admitted(principal: Option<&Principal>) -> bool {
     matches!(principal, Some(Principal::Reserved { module_id }) if module_id == "basal")
 }
 
-/// Whether `flow_id` carries one of the statement tags. An approval statement is one JSON
-/// object of ASCII keys, and the flow identity is one of its values: a flow id equal to the
-/// statement's own tag would take the `v` key's place in the object and cannot be signed as
-/// delivered.
-fn flow_id_reproduces_a_statement_tag(flow_id: &str) -> bool {
-    ["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"].contains(&flow_id)
-}
-
 fn invalid(store: &EncryptedStore, error: ValidationError) -> UseAnswer {
     store.record_secret_use_refusal(
         SecretSender::Basal,
@@ -68,6 +61,7 @@ fn outcome(
             }
             UseAnswer::Reply(outcome.reply)
         }
+        Err(SecretError::InvalidParams) => invalid(store, ValidationError::InvalidParams),
         Err(error) => UseAnswer::Reply(error.body()),
     }
 }
@@ -81,7 +75,7 @@ pub fn serve_approval(
     if !admitted(principal) {
         return UseAnswer::Reply(SecretError::NotFound.body());
     }
-    match parse_approval(store, params) {
+    match parse_approval(store, params, false) {
         Ok(call) => outcome(store, store.secret_request_flow_approval(&call, clock)),
         Err(answer) => answer,
     }
@@ -95,31 +89,41 @@ pub fn serve_approval(
 pub fn serve_approval_forwarded(
     store: &Arc<EncryptedStore>,
     asking_member: &str,
+    pairing_id: &str,
     params: &Value,
     clock: impl Fn() -> i64,
 ) -> UseAnswer {
-    match parse_approval(store, params) {
+    match parse_approval(store, params, true) {
         Ok(call) => outcome(
             store,
-            store.secret_request_flow_approval_from(&call, asking_member, clock),
+            store.secret_request_flow_approval_from(&call, asking_member, pairing_id, clock),
         ),
         Err(answer) => answer,
     }
 }
 
-fn parse_approval(store: &EncryptedStore, params: &Value) -> Result<SecretFlowApproval, UseAnswer> {
+fn parse_approval(
+    store: &EncryptedStore,
+    params: &Value,
+    forwarded: bool,
+) -> Result<SecretFlowApproval, UseAnswer> {
     let parsed: ApprovalParams = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
         Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
-    let target = parsed.target.into_use_target();
+    let target = match parsed.target.into_use_target() {
+        Ok(target) => target,
+        Err(error) => return Err(invalid(store, error)),
+    };
     let validation = (|| {
         validate_name(&parsed.name)?;
         parsed.flow.validate()?;
         // The statement encoder embeds the flow id in a JSON object beside its own tag, so
         // a flow id holding the statement's `v` value is refused at grammar rather than
         // left to whoever encodes it.
-        if flow_id_reproduces_a_statement_tag(&parsed.flow.flow_id) {
+        if agent_secret::flow_id_is_v1_statement_tag(&parsed.flow.flow_id)
+            || (forwarded && agent_secret::flow_id_is_v2_statement_tag(&parsed.flow.flow_id))
+        {
             return Err(ValidationError::InvalidParams);
         }
         target.validate()?;
@@ -172,7 +176,10 @@ fn parse_use(store: &EncryptedStore, params: &Value) -> Result<SecretFlowUse, Us
         Ok(p) => p,
         Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
-    let target = parsed.target.into_use_target();
+    let target = match parsed.target.into_use_target() {
+        Ok(target) => target,
+        Err(error) => return Err(invalid(store, error)),
+    };
     let validation = (|| {
         validate_name(&parsed.name)?;
         target.validate()?;
@@ -253,6 +260,7 @@ pub fn serve_revoke(
 pub fn serve_revoke_forwarded(
     store: &Arc<EncryptedStore>,
     asking_member: &str,
+    pairing_id: &str,
     params: &Value,
 ) -> UseAnswer {
     match parse_revoke(store, params) {
@@ -260,6 +268,7 @@ pub fn serve_revoke_forwarded(
             &parsed.flow_install_id,
             parsed.flow_version,
             asking_member,
+            pairing_id,
         )),
         Err(answer) => answer,
     }

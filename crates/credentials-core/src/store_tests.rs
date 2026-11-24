@@ -659,6 +659,101 @@ fn store_at(db: &std::path::Path, seed: u8) -> EncryptedStore {
     EncryptedStore::open(store, key).expect("open vault")
 }
 
+#[test]
+fn migration_enables_full_sync_for_commits_and_checkpoints() {
+    let (_dir, store) = tmp_store(0x57);
+    store
+        .store
+        .with_conn(|conn| {
+            for (pragma, expected) in [
+                ("synchronous", 2),
+                ("fullfsync", 1),
+                ("checkpoint_fullfsync", 1),
+            ] {
+                let actual: i64 = conn.pragma_query_value(None, pragma, |row| row.get(0))?;
+                assert_eq!(actual, expected, "PRAGMA {pragma}");
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn refresh_intent_is_healthy_at_the_age_limit_and_overdue_one_ms_later() {
+    use crate::health::{VaultHealthStatus, MAX_REFRESH_INTENT_AGE_MS};
+    let (_dir, store) = tmp_store(0x59);
+    let id = "oauth:pending";
+    store.create(id, &oauth_record()).unwrap();
+    store.open_intent(id, 1, "intent-hash").unwrap();
+    let started_at_ms = store.read_intent(id).unwrap().unwrap().started_at_ms;
+    let at_limit = store.health_snapshot_at(started_at_ms + MAX_REFRESH_INTENT_AGE_MS);
+    assert_eq!(at_limit.status, VaultHealthStatus::Ok);
+    assert_eq!(at_limit.open_intents, 1);
+    assert_eq!(at_limit.overdue_intents, 0);
+
+    let past_limit = store.health_snapshot_at(started_at_ms + MAX_REFRESH_INTENT_AGE_MS + 1);
+    assert_eq!(past_limit.status, VaultHealthStatus::Degraded);
+    assert_eq!(past_limit.open_intents, 1);
+    assert_eq!(past_limit.overdue_intents, 1);
+    assert_eq!(past_limit.overdue_intent_ids, [id]);
+}
+
+#[test]
+fn health_counts_intents_and_states_without_inventory_or_intent_details() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let (_dir, store) = tmp_store(0x59);
+    store.create("oauth:healthy", &oauth_record()).unwrap();
+    store
+        .open_intent("oauth:healthy", 1, "intent-hash")
+        .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "credential_gateway_settings",
+                    ..
+                }
+                | AuthAction::Read {
+                    table_name: "refresh_intent",
+                    column_name: "old_refresh_hash",
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }));
+            Ok(())
+        })
+        .unwrap();
+    let health = store.health_snapshot();
+    assert_eq!(health.status, crate::health::VaultHealthStatus::Ok);
+    assert_eq!(health.active, 1);
+    assert_eq!(health.open_intents, 1);
+}
+
+#[test]
+fn a_plain_credential_read_does_not_hash_the_envelope() {
+    let (_dir, store) = tmp_store(0x59);
+    store.create("oauth:hashing", &oauth_record()).unwrap();
+    ENVELOPE_DIGEST_COUNT.set(0);
+    assert_eq!(store.get("oauth:hashing").unwrap().record_version, 1);
+    assert_eq!(ENVELOPE_DIGEST_COUNT.get(), 0);
+    let read = store
+        .get_with_stale_pending_and_digest("oauth:hashing")
+        .unwrap();
+    assert_eq!(read.stored_digest_hex.len(), 64);
+    assert_eq!(ENVELOPE_DIGEST_COUNT.get(), 1);
+}
+
+#[test]
+fn logout_refuses_github_app_webhook_companions() {
+    let (_dir, store) = tmp_store(0x58);
+    assert!(matches!(
+        store.retire_and_revoke_all_audited(
+            "opaque:github-app-webhook:example",
+            AuditCtx::admin(AuditOp::Invalidate),
+        ),
+        Err(StoreOpError::GitHubAppCompanionProtected)
+    ));
+}
+
 #[path = "store_ssh_enrollment_tests.rs"]
 mod ssh_enrollment;
 
@@ -1097,6 +1192,32 @@ fn operator_deposits_refuse_short_term_bedrock_keys_and_accept_long_term_ones() 
         b"ABSKQmVkcm9ja0FQSUtleS1leGFtcGxl",
         "the refused overwrite left the long-term key in place"
     );
+}
+
+#[test]
+fn cas_overwrite_refuses_short_term_bedrock_keys() {
+    let (_dir, store) = tmp_store(171);
+    let id = "apikey:amazon-bedrock";
+    let initial =
+        VaultRecord::new_static(CredentialKind::ApiKey, "test", b"initial".to_vec(), None);
+    store.create(id, &initial).unwrap();
+    let short_term = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "test",
+        b"bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29tLz9BY3Rpb249Q2FsbFdpdGhCZWFyZXJUb2tlbg=="
+            .to_vec(),
+        None,
+    );
+    assert!(matches!(
+        store.overwrite_cas_audited(
+            id,
+            &short_term,
+            &payload_hash(initial.payload.expose()),
+            AuditCtx::admin(AuditOp::Overwrite)
+        ),
+        Err(StoreOpError::ShortTermBedrockKey { .. })
+    ));
+    assert_eq!(store.meta(id).unwrap().record_version, 1);
 }
 
 #[test]
@@ -3006,6 +3127,30 @@ fn replacement_refuses_explicit_identity_that_contradicts_claim() {
 }
 
 #[test]
+fn cas_overwrite_refuses_explicit_identity_that_contradicts_claim() {
+    let (_dir, store) = tmp_store(154);
+    let id = "oauth:openai";
+    let initial = openai_record("original", b"old");
+    store.create(id, &initial).unwrap();
+    let incoming = openai_record("claimed", b"new").with_identity(crate::record::RecordIdentity {
+        account_id: Some("supplied".into()),
+        ..Default::default()
+    });
+    let before = store.read_audit(None).unwrap().len();
+    assert!(matches!(
+        store.overwrite_cas_audited(
+            id,
+            &incoming,
+            &payload_hash(initial.payload.expose()),
+            AuditCtx::admin(AuditOp::Put)
+        ),
+        Err(StoreOpError::SuppliedIdentityContradictsClaim { .. })
+    ));
+    assert_eq!(store.meta(id).unwrap().record_version, 1);
+    assert_eq!(store.read_audit(None).unwrap().len(), before);
+}
+
+#[test]
 fn refresh_commit_cannot_restore_non_active_records() {
     let (_root, store) = tmp_store(155);
     for state in [
@@ -3858,6 +4003,61 @@ fn audit_chain_detects_tampering() {
         "tampered entry detected"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn audit_verifiers_reject_a_noncanonical_alarm() {
+    let seed = 13;
+    let (root, store) = tmp_store(seed);
+    let path = root.join("store.db");
+    let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+    store
+        .append_audit(&AuditRecord {
+            op: AuditOp::Put,
+            credential_id: None,
+            payload_hash: None,
+            actor: "test".into(),
+            alarm: Some(crate::audit::AlarmReason::AdminWrite),
+        })
+        .unwrap();
+    assert!(store.read_audit(None).unwrap()[0].alarm);
+    assert_eq!(verify_audit_chain_read_only(&path, &key).unwrap(), None);
+    store
+        .with_raw_conn(|conn| conn.execute("UPDATE audit_log SET alarm = 2", []))
+        .unwrap();
+    assert!(store.verify_audit_chain().is_err());
+    assert!(verify_audit_chain_read_only(&path, &key).is_err());
+    assert!(store.read_audit(None).is_err());
+    assert!(read_audit_read_only(&path, None).is_err());
+}
+
+#[test]
+fn audit_verifiers_stop_reading_at_the_first_broken_entry() {
+    let seed = 13;
+    let (root, store) = tmp_store(seed);
+    let path = root.join("store.db");
+    let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+    let record = AuditRecord {
+        op: AuditOp::Put,
+        credential_id: None,
+        payload_hash: None,
+        actor: "test".into(),
+        alarm: None,
+    };
+    store.append_audit(&record).unwrap();
+    store.append_audit(&record).unwrap();
+    // The first row has a bad MAC. Decoding the second row is an error, so
+    // the result distinguishes stopping at the first row from reading both.
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "UPDATE audit_log SET actor = 'changed' WHERE seq = 1;\
+         UPDATE audit_log SET actor = X'FF' WHERE seq = 2;",
+            )
+        })
+        .unwrap();
+    assert_eq!(store.verify_audit_chain().unwrap(), Some(1));
+    assert_eq!(verify_audit_chain_read_only(&path, &key).unwrap(), Some(1));
 }
 
 #[test]

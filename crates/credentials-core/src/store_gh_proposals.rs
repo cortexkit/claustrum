@@ -1,5 +1,7 @@
 use super::gh_manifests::{is_policy_root_id, POLICY_ROOT_CREDENTIAL_SETTING};
+use super::github_app_store::github_app_attested_agent;
 use super::{append_audit_tx, hex32, now_ms, payload_hash, EncryptedStore, StoreOpError};
+use super::{store_agent_secrets::secret_home_role_conn, SecretHomeRole};
 use crate::audit::{AuditCtx, AuditOp, AuditRecord, GhManifestAudit};
 use crate::gh_manifest::{GhManifest, ManifestBindingStatement, ManifestValue};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -52,6 +54,10 @@ pub fn manifest_one_tap_status_read_only(path: &std::path::Path) -> Result<Strin
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhManifestProposalError {
+    NotFound,
+    AppNotInstalled,
+    InstallationUnusable,
+    IdentityMismatch,
     OneTapDisabled,
     ManifestSetupIncomplete,
     AlreadyBound {
@@ -113,6 +119,13 @@ pub(super) fn setup_root_credential_id(conn: &Connection) -> rusqlite::Result<Op
     Ok(id.filter(|id| is_policy_root_id(id)))
 }
 
+fn has_ahead_activation(conn: &Connection, version: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM gh_manifest_activations WHERE retired_at_ms IS NULL AND version > ?1)",
+        [version], |row| row.get(0),
+    )
+}
+
 impl EncryptedStore {
     /// Read only an active GitHub App's OAuth material for proposal checks. Unlike
     /// ordinary credential reads, damaged bytes are not quarantined here: a refused
@@ -120,35 +133,34 @@ impl EncryptedStore {
     pub fn github_app_oauth_for_manifest_proposal(
         &self,
         record_id: &str,
-    ) -> Result<Option<crate::oauth::OAuthCredential>, StoreOpError> {
-        if !record_id.starts_with("github_app:") {
-            return Ok(None);
+        agent: &str,
+    ) -> Result<crate::oauth::OAuthCredential, GhManifestProposalError> {
+        use GhManifestProposalError as Error;
+        if !record_id
+            .strip_prefix("github_app:")
+            .is_some_and(crate::agent_policy::valid_app_slug)
+        {
+            return Err(Error::AppNotInstalled);
         }
         let row = self.store.with_conn(|conn| {
             conn.query_row(
-                "SELECT record_version,envelope FROM credentials WHERE credential_id=?1 AND state='active'",
+                "SELECT state, record_version, envelope, github_app_agent FROM credentials WHERE credential_id=?1",
                 [record_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Option<String>>(3)?)),
             ).optional()
-        }).map_err(StoreOpError::from)?;
-        let Some((version, blob)) = row else {
-            return Ok(None);
+        }).map_err(|_| Error::StoreError)?;
+        let Some((state, version, blob, attested_agent)) = row else {
+            return Err(Error::AppNotInstalled);
         };
-        let bytes = super::envelope::open(
-            &self.key,
-            &blob,
-            &super::RecordBinding {
-                credential_id: record_id,
-                record_version: version as u64,
-            },
-        )
-        .map_err(StoreOpError::Decrypt)?;
-        let record = super::VaultRecord::decode(&bytes)
-            .map_err(|error| StoreOpError::Corrupt(error.to_string()))?;
-        if record.kind != super::CredentialKind::Oauth {
-            return Ok(None);
+        if attested_agent.is_some_and(|current| current != agent) {
+            return Err(Error::IdentityMismatch);
         }
-        Ok(record.oauth)
+        if state != super::RecordState::Active.as_str() {
+            return Err(Error::InstallationUnusable);
+        }
+        self.open_github_app_material(record_id, version, &blob)
+            .map_err(|_| Error::StoreError)?
+            .ok_or(Error::InstallationUnusable)
     }
 
     /// Malformed or unreadable values never enable statement creation.
@@ -233,11 +245,7 @@ impl EncryptedStore {
                     }
                 }
             }
-            let ahead: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM gh_manifest_activations WHERE retired_at_ms IS NULL AND version > ?1)",
-                [version], |row| row.get(0),
-            )?;
-            if ahead { return Ok(Err(Error::StaleBase)); }
+            if has_ahead_activation(conn, version)? { return Ok(Err(Error::StaleBase)); }
             let prior = match GhManifest::parse_reproducible(&bytes) {
                 Ok(prior) if prior.version() == version && prior.manifest_sha256() == hash => prior,
                 _ => return Ok(Err(Error::NotReproducible)),
@@ -258,10 +266,20 @@ impl EncryptedStore {
         self.fenced_write(|tx| {
             use GhManifestProposalError as Error;
             if !before_deadline() { return Ok(Err(Error::GithubUnavailable)); }
+            match secret_home_role_conn(tx) {
+                SecretHomeRole::Single | SecretHomeRole::Home { .. } => {}
+                SecretHomeRole::Remote { .. } | SecretHomeRole::RemoteSetupIncomplete { .. } => return Ok(Err(Error::NotFound)),
+                SecretHomeRole::StoreError => return Ok(Err(Error::StoreError)),
+            }
             let now = clock();
+            let base = prepared.prior.version();
             let newest: Option<i64> = tx.query_row("SELECT MAX(version) FROM gh_manifests", [], |row| row.get(0))?;
-            if newest != Some(prepared.prior.version()) { return Ok(Err(Error::StaleBase)); }
+            if newest != Some(base) || has_ahead_activation(tx, base)? { return Ok(Err(Error::StaleBase)); }
             let input = &prepared.input;
+            if github_app_attested_agent(tx, &format!("github_app:{}", input.app_slug))?
+                .is_some_and(|agent| agent != input.agent_id) {
+                return Ok(Err(Error::IdentityMismatch));
+            }
             let pending = tx.query_row(
                 "SELECT proposal_id,agent_id,app_id,app_slug,repo,installation_permissions,base_version, \
                  manifest_bytes,manifest_sha256,statement_bytes,statement_sha256,created_at_ms,expires_at_ms \
@@ -269,7 +287,11 @@ impl EncryptedStore {
                 params![input.agent_id, input.repo], proposal_row,
             ).optional()?;
             if let Some(pending) = &pending {
-                if now < pending.expires_at_ms { return Ok(Ok(pending.clone())); }
+                if now < pending.expires_at_ms && pending.app_id == input.app_id && pending.app_slug == input.app_slug
+                    && serde_json::from_slice::<BTreeMap<String, String>>(&pending.installation_permissions)
+                        .is_ok_and(|permissions| permissions == input.installation_permissions) {
+                    return Ok(Ok(pending.clone()));
+                }
             }
             // External checks may finish after the operator turns off new proposals.
             if one_tap_status(tx) != "on" { return Ok(Err(Error::OneTapDisabled)); }
@@ -280,9 +302,10 @@ impl EncryptedStore {
                 Err(error) => return Ok(Err(error)),
             };
             if let Some(pending) = pending {
-                tx.execute("UPDATE gh_manifest_proposals SET state='expired' WHERE proposal_id=?1", [&pending.proposal_id])?;
+                let state = if now >= pending.expires_at_ms { "expired" } else { "superseded" };
+                tx.execute("UPDATE gh_manifest_proposals SET state=?1 WHERE proposal_id=?2", params![state, pending.proposal_id])?;
                 append_audit_tx(tx, &self.audit_key, &GhManifestAudit::ProposalState {
-                    proposal_id: &pending.proposal_id, from: "pending", to: "expired",
+                    proposal_id: &pending.proposal_id, from: "pending", to: state,
                 }.record(actor, None))?;
             }
             tx.execute(

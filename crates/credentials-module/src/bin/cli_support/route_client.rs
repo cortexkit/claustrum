@@ -133,16 +133,13 @@ pub fn route_request(channel: u16, epoch: u32, corr: u64, body: Value) -> Frame 
 }
 
 pub async fn read_control_response(stream: &mut TcpStream, corr: u64) -> Result<Frame, String> {
-    read_matching(stream, Some(0), corr).await
+    read_route_response(stream, 0, 0, corr).await
 }
 
-pub async fn read_route_response(stream: &mut TcpStream, corr: u64) -> Result<Frame, String> {
-    read_matching(stream, None, corr).await
-}
-
-async fn read_matching(
+pub async fn read_route_response(
     stream: &mut TcpStream,
-    required_channel: Option<u16>,
+    channel: u16,
+    epoch: u32,
     corr: u64,
 ) -> Result<Frame, String> {
     tokio::time::timeout(RPC_TIMEOUT, async {
@@ -151,7 +148,8 @@ async fn read_matching(
                 .await
                 .map_err(|e| format!("read: {e}"))?
                 .ok_or_else(|| "connection closed".to_string())?;
-            if required_channel.is_none_or(|channel| frame.header.channel == channel)
+            if frame.header.channel == channel
+                && frame.header.epoch == epoch
                 && frame.header.corr == corr
                 && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
             {
@@ -174,4 +172,39 @@ pub fn error_reason(body: &[u8]) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "module refused the operation".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn route_reply_must_match_channel_epoch_and_correlation() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (client, accepted) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let mut client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+        for (channel, epoch, corr) in [(1, 3, 4), (2, 2, 4), (2, 3, 5), (2, 3, 4)] {
+            let frame = Frame::build(
+                FrameType::Response,
+                Flags::new(false, Priority::Interactive, false),
+                channel,
+                epoch,
+                corr,
+                b"{}".to_vec(),
+            )
+            .unwrap();
+            write_frame(&mut server, &frame).await.unwrap();
+        }
+        let reply = read_route_response(&mut client, 2, 3, 4).await.unwrap();
+        assert_eq!(
+            (reply.header.channel, reply.header.epoch, reply.header.corr),
+            (2, 3, 4)
+        );
+    }
 }

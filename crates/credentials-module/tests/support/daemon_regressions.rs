@@ -97,7 +97,9 @@ async fn status_store_failures_are_transient_on_handle_resolution_and_metadata()
         failed.last_error_code.unwrap().class(),
         read_surface::ErrorClass::Transient
     );
-    assert_eq!(failed.credential_id.as_deref(), Some("apikey:active"));
+    // Handle resolution and metadata are one read, so a failure in either names no
+    // credential: the reply can't name a lifetime it never confirmed.
+    assert!(failed.credential_id.is_none());
 }
 
 #[tokio::test]

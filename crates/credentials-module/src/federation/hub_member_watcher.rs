@@ -6,10 +6,9 @@ use std::{
     sync::Arc,
 };
 
+use credentials_core::hub_counters::HubGeneration;
 use credentials_core::{
-    federation::{is_lower_hex_16_bytes, RemoteRecordSource, VAULT_TRANSFER_ID},
-    kem,
-    record::{CredentialKind, RecordState, VaultRecord},
+    federation::{is_lower_hex_16_bytes, RemoteRecordSource},
     signing::key_id_for_public,
     store::{EncryptedStore, HubLoginApply, HubLoginApplyMode, HubLoginHomeState, StoreOpError},
 };
@@ -24,6 +23,7 @@ use super::{
     hub_binding::{HubBinding, HubBindings},
     hub_logins::{decode_rows, LoginAad, LoginBody, LoginEnvelope, Snapshot},
     sharing::VaultSharingSnapshot,
+    transfer::{TransferKey, TransferKeyCache},
 };
 
 type Pairings = watch::Receiver<Option<Arc<VaultSharingSnapshot>>>;
@@ -68,6 +68,7 @@ async fn run_inner(
         reads: JoinSet::new(),
         refresh: Retry::default(),
         last_scanned: None,
+        keys: Arc::default(),
         #[cfg(test)]
         hooks,
     };
@@ -124,48 +125,123 @@ fn pairing_for<'a>(view: &'a VaultSharingSnapshot, home: &str) -> Option<&'a str
         .find_map(|(id, pair)| (id == fp).then_some(pair.as_str()))
 }
 
+/// A device of a class this build does not recognise is unmapped: it is not a
+/// computer, but it is no evidence that the computer went away either.
+fn unmapped(view: &VaultSharingSnapshot, home: &str) -> bool {
+    home.strip_prefix("fed-computer:")
+        .is_some_and(|fp| view.unrecognised.iter().any(|id| id == fp))
+}
+
+/// Whether a validated roster proves that copies made under `old` lost their
+/// pairing: the home is gone or re-paired. An unmapped home proves nothing.
+fn pairing_lost(view: &VaultSharingSnapshot, home: &str, old: Option<&str>) -> bool {
+    !unmapped(view, home) && (old.is_none() || old != pairing_for(view, home))
+}
+
+/// Acts on a confirmed unpair while no member watcher exists: before the hub
+/// connects, or for good when this registration has no hub. It removes only
+/// what [`MemberWatcher`] would remove for the same roster, and it is stopped
+/// before a member watcher starts, so its removals never race a hub apply.
+pub(crate) struct PairingLossRemover {
+    store: Arc<EncryptedStore>,
+    pairings: Pairings,
+    retry: Retry,
+}
+
+impl PairingLossRemover {
+    pub(crate) fn new(store: Arc<EncryptedStore>, pairings: Pairings) -> Self {
+        Self {
+            store,
+            pairings,
+            retry: Retry::default(),
+        }
+    }
+
+    /// Remove lost pairings until `other` completes. A removal that has started
+    /// always finishes before `other`'s output is returned.
+    pub(crate) async fn until<T>(&mut self, other: impl std::future::Future<Output = T>) -> T {
+        tokio::pin!(other);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut other => return output,
+                changed = self.pairings.changed() => {
+                    if changed.is_err() {
+                        return other.await;
+                    }
+                    self.retry.wake();
+                }
+                _ = deadline(self.retry.at) => {
+                    self.retry.at = None;
+                    if self.remove_lost().await {
+                        self.retry.delay.reset();
+                    } else {
+                        tracing::warn!(target: "federation", "hub login pairing removal failed; retrying");
+                        self.retry.failed();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn remove_lost(&mut self) -> bool {
+        // No roster (an unavailable or refused feed) is not evidence of anything.
+        let Some(view) = self.pairings.borrow_and_update().clone() else {
+            return true;
+        };
+        let store = Arc::clone(&self.store);
+        let removed = tokio::task::spawn_blocking(move || -> Result<(), StoreOpError> {
+            let copies = store
+                .list_remote_records()?
+                .into_iter()
+                .filter(|row| row.source == RemoteRecordSource::HomeWatch)
+                .map(|row| (row.home_member, row.home_pairing_id));
+            let accepted: Vec<_> = store
+                .list_hub_login_homes()?
+                .into_iter()
+                .filter_map(|state| {
+                    state
+                        .pairing_id
+                        .map(|pairing| (state.home_member, Some(pairing)))
+                })
+                .collect();
+            let lost: BTreeSet<String> = copies
+                .chain(accepted)
+                .filter(|(home, old)| pairing_lost(&view, home, old.as_deref()))
+                .map(|(home, _)| home)
+                .collect();
+            for home in lost {
+                store.remove_hub_login_home_audited(&home, pairing_for(&view, &home))?;
+            }
+            Ok(())
+        })
+        .await;
+        matches!(removed, Ok(Ok(())))
+    }
+}
+
 struct Recipient {
     member: String,
     key_id: String,
     incarnation: String,
-    key: VaultRecord,
+    key: Arc<TransferKey>,
 }
 
 impl Recipient {
-    fn read(store: &EncryptedStore) -> Result<Option<Self>, StoreOpError> {
+    fn read(
+        store: &EncryptedStore,
+        keys: &mut TransferKeyCache,
+    ) -> Result<Option<Self>, StoreOpError> {
         let Some(member) = store.federation_self_member()? else {
             return Ok(None);
         };
-        let meta = match store.meta(VAULT_TRANSFER_ID) {
-            Ok(meta) if meta.state == RecordState::Active => meta,
-            Ok(_) | Err(StoreOpError::NotFound) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let Some(incarnation) = meta.incarnation else {
-            return Ok(None);
-        };
-        let key = match store.get_snapshot(VAULT_TRANSFER_ID, &incarnation) {
-            Ok(read) if read.record.kind == CredentialKind::KemKey => read.record,
-            Ok(_)
-            | Err(
-                StoreOpError::NotFound
-                | StoreOpError::NeedsReauth
-                | StoreOpError::Quarantined
-                | StoreOpError::Corrupt(_)
-                | StoreOpError::Decrypt(_),
-            ) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let Some((_, key_id)) = std::str::from_utf8(key.payload.expose())
-            .ok()
-            .and_then(|pem| kem::public_half(pem).ok())
-        else {
+        let Some(key) = keys.read(store)? else {
             return Ok(None);
         };
         Ok(Some(Self {
             member,
-            key_id,
-            incarnation,
+            key_id: key.key_id.clone(),
+            incarnation: key.incarnation.clone(),
             key,
         }))
     }
@@ -208,7 +284,7 @@ impl Opened {
         {
             return None;
         }
-        let pem = std::str::from_utf8(recipient.key.payload.expose()).ok()?;
+        let pem = recipient.key.pem.expose();
         let inventory = match envelope.open(pem, binding.vault_transfer_x25519.as_ref()?)? {
             LoginBody::Ended {} => Inventory::Ended,
             LoginBody::Snapshot { logins } => {
@@ -252,6 +328,7 @@ impl Local {
     fn read(
         store: &EncryptedStore,
         scan_records: bool,
+        keys: &mut TransferKeyCache,
     ) -> Result<(Self, AutomaticCopies), StoreOpError> {
         let enabled = store.login_sharing()?;
         let mut free_collisions = BTreeMap::new();
@@ -274,7 +351,10 @@ impl Local {
             }
             accepted.insert(home.home_member.clone(), home);
         }
-        // Copies from the Callosum login stream have no hub generation to scan.
+        // Automatic copies carry no generation of their own. A pairing scan reads
+        // each copy's home and the pairing it was made under; a validated Callosum
+        // roster that no longer lists that home, or lists it under another pairing,
+        // proves the copy's pairing lost.
         let copies = if scan_records {
             store
                 .list_remote_records()?
@@ -288,7 +368,7 @@ impl Local {
         Ok((
             Self {
                 enabled,
-                recipient: Recipient::read(store)?.map(Arc::new),
+                recipient: Recipient::read(store, keys)?.map(Arc::new),
                 accepted,
                 free_collisions,
             },
@@ -330,6 +410,8 @@ struct HomeWork {
     read: Retry,
     reading: Option<AbortHandle>,
     removal: Option<(Option<String>, Retry)>,
+    /// The older generation last logged as dropped, so a replay logs once.
+    warned_older: Option<HubGeneration>,
 }
 
 impl HomeWork {
@@ -356,6 +438,7 @@ struct MemberWatcher {
     reads: JoinSet<PointRead>,
     refresh: Retry,
     last_scanned: Option<Arc<VaultSharingSnapshot>>,
+    keys: Arc<std::sync::Mutex<TransferKeyCache>>,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -373,6 +456,11 @@ struct TestHooks {
     before_apply: Option<super::ingress::IssueAuditGate>,
     apply_attempted: Option<Arc<tokio::sync::Notify>>,
     handled: Option<mpsc::UnboundedSender<HubEvent>>,
+    /// Receives the homes with a queued removal after each roster is reconciled.
+    reconciled: Option<mpsc::UnboundedSender<Vec<String>>>,
+    /// Receives the transfer-key decrypt count and the number of homes with held
+    /// state after each local refresh.
+    refreshed: Option<mpsc::UnboundedSender<(usize, usize)>>,
 }
 
 impl MemberWatcher {
@@ -436,8 +524,12 @@ impl MemberWatcher {
                 .as_ref()
                 .is_none_or(|prior| !Arc::ptr_eq(prior, current))
         });
-        let Ok(Ok((local, copies))) =
-            tokio::task::spawn_blocking(move || Local::read(&store, scan)).await
+        let keys = Arc::clone(&self.keys);
+        let Ok(Ok((local, copies))) = tokio::task::spawn_blocking(move || {
+            let mut keys = keys.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Local::read(&store, scan, &mut keys)
+        })
+        .await
         else {
             self.refresh.failed();
             return;
@@ -447,6 +539,16 @@ impl MemberWatcher {
             if scan {
                 self.reconcile_pairings(pairings, &local, copies);
                 self.last_scanned = Some(Arc::clone(pairings));
+                #[cfg(test)]
+                if let Some(sink) = &self.hooks.reconciled {
+                    let queued = self
+                        .homes
+                        .iter()
+                        .filter(|(_, work)| work.removal.is_some())
+                        .map(|(home, _)| home.clone())
+                        .collect();
+                    let _ = sink.send(queued);
+                }
             }
         }
         let bound: BTreeMap<_, _> = bindings
@@ -468,6 +570,11 @@ impl MemberWatcher {
             if !bound.contains_key(home) || local.recipient.is_none() {
                 work.cancel_read();
                 work.apply.at = None;
+            }
+            // A decrypted inventory is not held for a home that is not bound; the
+            // point read that follows a rebind fetches it again.
+            if !bound.contains_key(home) {
+                work.forget_pending();
             }
             if work.pending.as_ref().is_some_and(|pending| {
                 local
@@ -506,8 +613,20 @@ impl MemberWatcher {
                 }
             }
         }
+        // Forget homes with nothing left to do, so state does not accumulate for
+        // every home this vault was ever bound to.
+        self.homes.retain(|home, work| {
+            bound.contains_key(home)
+                || work.pending.is_some()
+                || work.removal.is_some()
+                || work.reading.is_some()
+        });
         self.bound = bound;
         self.local = local;
+        #[cfg(test)]
+        if let Some(sink) = &self.hooks.refreshed {
+            let _ = sink.send((self.keys.lock().unwrap().decrypts, self.homes.len()));
+        }
     }
 
     fn reconcile_pairings(
@@ -523,7 +642,7 @@ impl MemberWatcher {
                 .map(|pairing| (state.home_member.clone(), Some(pairing.clone())))
         });
         for (home, old_pair) in copies.into_iter().chain(changed) {
-            if old_pair.is_none() || old_pair.as_deref() != pairing_for(pairs, &home) {
+            if pairing_lost(pairs, &home, old_pair.as_deref()) {
                 let work = self.homes.entry(home).or_default();
                 // Convert an observed loss to a removal before admitting any hub value.
                 work.removal.get_or_insert_with(|| (None, Retry::default()));
@@ -539,10 +658,13 @@ impl MemberWatcher {
                 work.forget_pending();
             }
             if let Some((keep, retry)) = &mut work.removal {
-                if keep.as_deref() != current || retry.at.is_none() {
-                    retry.wake();
+                // An unmapped home leaves a queued removal exactly as it was.
+                if !unmapped(pairs, home) {
+                    if keep.as_deref() != current || retry.at.is_none() {
+                        retry.wake();
+                    }
+                    *keep = current.map(str::to_owned);
                 }
-                *keep = current.map(str::to_owned);
                 work.forget_pending();
                 work.cancel_read();
             }
@@ -677,6 +799,14 @@ impl MemberWatcher {
             work.apply = Retry::default();
             self.apply_pending(&home).await;
             return false;
+        }
+        if let Some(state) = accepted.filter(|state| generation < state.generation) {
+            // Authenticated but older than what this vault accepted: a restored home
+            // republishing from a rewound counter. Logged once per value.
+            if work.warned_older != Some(generation) {
+                tracing::warn!(target: "federation", %home, generation = generation.get(), accepted = state.generation.get(), "hub login list older than the accepted one; dropped");
+                work.warned_older = Some(generation);
+            }
         }
         let Some(accepted) = accepted.filter(|state| {
             point_read

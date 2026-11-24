@@ -42,7 +42,8 @@ use credentials_core::federation::{
     REJECT_REMOTE_SEAL_INVALID, VAULT_TRANSFER_ID,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
+use credentials_core::record::{CredentialKind, RecordIdentity, RecordState, VaultRecord};
+use credentials_core::secret::Secret;
 use credentials_core::store::{AuthEventPrincipal, AuthObservation, EncryptedStore, StoreOpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -527,7 +528,7 @@ impl From<TransferRefusal> for Stop {
 /// while `Active`) and that key's id.
 pub(super) struct OwnKey {
     pub(super) self_id: String,
-    pub(super) pem: String,
+    pub(super) pem: Secret<String>,
     pub(super) key_id: String,
 }
 
@@ -548,29 +549,123 @@ pub(super) fn own_key(
     let Some(self_id) = store.federation_self_member()? else {
         return Ok(Err(None));
     };
-    let pem = match store.get(VAULT_TRANSFER_ID) {
-        Ok(record) if record.kind == CredentialKind::KemKey => {
-            match std::str::from_utf8(record.payload.expose()) {
-                Ok(pem) => pem.to_string(),
-                Err(_) => return Ok(Err(Some(self_id))),
-            }
-        }
-        Ok(_)
-        | Err(StoreOpError::NotFound)
-        | Err(StoreOpError::NeedsReauth)
-        | Err(StoreOpError::Quarantined)
-        | Err(StoreOpError::Corrupt(_))
-        | Err(StoreOpError::Decrypt(_)) => return Ok(Err(Some(self_id))),
-        Err(error) => return Err(error),
-    };
-    let Ok((_, key_id)) = credentials_core::kem::public_half(&pem) else {
+    let Some(key) = transfer_key(store)? else {
         return Ok(Err(Some(self_id)));
     };
     Ok(Ok(OwnKey {
         self_id,
+        pem: key.pem,
+        key_id: key.key_id,
+    }))
+}
+
+/// This vault's transfer key as every federation path reads it: the private half
+/// in a buffer scrubbed on drop, its key id, and the row it was read from.
+pub(crate) struct TransferKey {
+    pub(crate) pem: Secret<String>,
+    pub(crate) key_id: String,
+    pub(crate) incarnation: String,
+    pub(crate) record_version: u64,
+}
+
+impl std::fmt::Debug for TransferKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransferKey")
+            .field("key_id", &self.key_id)
+            .field("incarnation", &self.incarnation)
+            .field("record_version", &self.record_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The one reader of `kem:vault-transfer:1`. `Ok(None)` when the key is absent, not
+/// `Active`, or not a readable KEM key; `Err` only for a store fault. The row is
+/// pinned by its incarnation and read without the quarantine a consumer read applies.
+pub(crate) fn transfer_key(store: &EncryptedStore) -> Result<Option<TransferKey>, StoreOpError> {
+    let meta = match store.meta(VAULT_TRANSFER_ID) {
+        Ok(meta) if meta.state == RecordState::Active => meta,
+        Ok(_) | Err(StoreOpError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(incarnation) = meta.incarnation else {
+        return Ok(None);
+    };
+    transfer_key_at(store, incarnation)
+}
+
+fn transfer_key_at(
+    store: &EncryptedStore,
+    incarnation: String,
+) -> Result<Option<TransferKey>, StoreOpError> {
+    let record = match store.get_snapshot(VAULT_TRANSFER_ID, &incarnation) {
+        Ok(read) if read.record.kind == CredentialKind::KemKey => read.record,
+        Ok(_)
+        | Err(
+            StoreOpError::NotFound
+            | StoreOpError::NeedsReauth
+            | StoreOpError::Quarantined
+            | StoreOpError::Corrupt(_)
+            | StoreOpError::Decrypt(_),
+        ) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Ok(pem) = std::str::from_utf8(record.payload.expose()) else {
+        return Ok(None);
+    };
+    let pem = Secret::new(pem.to_owned());
+    let Ok((_, key_id)) = credentials_core::kem::public_half(pem.expose()) else {
+        return Ok(None);
+    };
+    Ok(Some(TransferKey {
         pem,
         key_id,
+        incarnation,
+        record_version: record.record_version,
     }))
+}
+
+/// Holds the last transfer key read, so a task that rereads its inputs on every
+/// store write decrypts the key only when its row's incarnation or version moves.
+/// What a cached key was read from: the row's incarnation (the id that changes when
+/// the key is removed and created again) and its record version.
+type RowStamp = (String, u64);
+
+#[derive(Default)]
+pub(crate) struct TransferKeyCache {
+    cached: Option<(RowStamp, Option<Arc<TransferKey>>)>,
+    #[cfg(test)]
+    pub(crate) decrypts: usize,
+}
+
+impl TransferKeyCache {
+    pub(crate) fn read(
+        &mut self,
+        store: &EncryptedStore,
+    ) -> Result<Option<Arc<TransferKey>>, StoreOpError> {
+        let meta = match store.meta(VAULT_TRANSFER_ID) {
+            Ok(meta) if meta.state == RecordState::Active => meta,
+            Ok(_) | Err(StoreOpError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(incarnation) = meta.incarnation else {
+            return Ok(None);
+        };
+        let stamp = (incarnation, meta.record_version);
+        if let Some((cached, key)) = &self.cached {
+            if *cached == stamp {
+                return Ok(key.clone());
+            }
+        }
+        #[cfg(test)]
+        {
+            self.decrypts += 1;
+        }
+        let key = transfer_key_at(store, stamp.0.clone())?
+            .filter(|key| key.record_version == stamp.1)
+            .map(Arc::new);
+        self.cached = Some((stamp, key.clone()));
+        Ok(key)
+    }
 }
 
 /// One callosum lookup within what is left of `budget`. `None` for no client, no time
@@ -641,7 +736,7 @@ fn open_transfer(
 ) -> Result<(TransferAad, ValidBody, usize), TransferRefusal> {
     let aad = parse_transfer_aad(&sealed.aad).ok_or_else(TransferRefusal::seal_invalid)?;
     let plaintext = credentials_core::kem::open_auth(
-        &own.pem,
+        own.pem.expose(),
         sender_public,
         &sealed.enc,
         &sealed.ciphertext,
@@ -1209,7 +1304,7 @@ impl Transfers {
         .map_err(|_| TransferRefusal::store_error())?;
         let plaintext = serde_json::to_vec(&body).map_err(|_| TransferRefusal::store_error())?;
         let (enc, ciphertext) = credentials_core::kem::seal_auth(
-            &own.pem,
+            own.pem.expose(),
             &receiver_key.public,
             &plaintext,
             TRANSFER_INFO,
@@ -1352,16 +1447,25 @@ impl Transfers {
         budget: tokio::time::Instant,
     ) -> SendReport {
         let reply = self.deliver_once(row, budget).await;
+        // Report only what the store establishes: a row that expired meanwhile is
+        // not kept, and a row whose delete failed still is.
         let row_kept = if reply.keeps_row() {
-            let _ = self.store.note_outgoing_transfer_attempt(
+            match self.store.note_outgoing_transfer_attempt(
                 &row.transfer_id,
                 safe_code(reply.code()),
                 self.now(),
-            );
-            true
+            ) {
+                Ok(present) => present,
+                Err(_) => self.row_still_stored(&row.transfer_id),
+            }
         } else {
-            let _ = self.store.delete_outgoing_transfer(&row.transfer_id);
-            false
+            match self.store.delete_outgoing_transfer(&row.transfer_id) {
+                Ok(_) => false,
+                Err(_) => {
+                    tracing::warn!(target: "federation", transfer_id = %row.transfer_id, "could not delete a finished outgoing transfer; resume can still deliver it");
+                    self.row_still_stored(&row.transfer_id)
+                }
+            }
         };
         SendReport {
             transfer_id: row.transfer_id.clone(),
@@ -1370,6 +1474,12 @@ impl Transfers {
             reply,
             row_kept,
         }
+    }
+
+    /// Whether the outgoing row is still stored. A failed read cannot show it gone,
+    /// and the row existed before this delivery, so it counts as kept.
+    fn row_still_stored(&self, transfer_id: &str) -> bool {
+        !matches!(self.store.outgoing_transfer(transfer_id), Ok(None))
     }
 
     async fn deliver_once(

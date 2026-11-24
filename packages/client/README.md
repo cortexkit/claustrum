@@ -22,21 +22,16 @@ credential caching, refresh, account scheduling, and retry policy.
   that reason; handle `undefined` rather than defaulting it to a number, which would read
   as a version older than every real one.
 • Unknown server error classes are bounded to `transient`; callers must retry them
-  rather than treating a forward-compatible class as permanent.
+  rather than treating a forward-compatible class as permanent. A malformed success
+  reply is not retryable.
 • Account pools use the refresh adapter from `list_scoped` plus opaque `accountId`.
   Use `recordVersion` to invalidate cached material, never as part of a pool key:
   a token refresh must not split one account into a new pool.
-• **Changed in 0.13.0:** a transport `Error` frame whose answer no retry or reconnect
-  can change is reported as `permanent` with action `gone`, and the client no longer
-  reconnects for it: `unknown_method`, `invalid_params`, `invalid_request`,
-  `flow_scopes_unsupported`, `invalid_control_body`, `unknown_module`, and the SDK's
-  pre-send `missing_identity`. These are not verdicts about a credential: do not mark
-  anything gone or needing re-authentication on them; stop retrying and surface the
-  code. `unknown_method` from a vault means the vault predates that operation (for
-  example an enrollment op against a vault older than the enrollment ceremony):
-  update the vault. `watchScoped` is the exception: there `unknown_method` resolves
-  `closed` as `unsupported`, the signal to fall back to polling `listScoped`. Before 0.13.0 these were `transient`/`retry`. Every other
-  transport failure is still `transient`/`retry`.
+• For a coded terminal transport refusal, the SDK decides whether retry can help.
+  A refusal the SDK will not retry is `permanent` with action `gone`. This is not a
+  verdict about a credential; stop retrying and surface the code. `unknown_method`
+  means the vault does not implement the operation. For `watchScoped` it resolves
+  `closed` as `unsupported`, a signal to fall back to polling `listScoped`.
 • Since 0.13.0, when a terminal transport failure makes the client reconnect and the
   reconnect or the retried call then fails, the error carries the ORIGINAL call's code
   and class. Earlier versions threw the reconnect's error instead, usually
@@ -53,12 +48,14 @@ credential caching, refresh, account scheduling, and retry policy.
   credential, usually a category no credential carries yet (the operator's fix is
   `ck auth set-category`, or `ck auth reclassify --from-registry` for credentials created
   before categories existed). Both are `undefined` against a vault too old to send
-  them; treat that as unknown, not as zero. A present but malformed value refuses the
-  reply like any other malformed field.
+  them; treat that as unknown, not as zero. A malformed listing envelope refuses the
+  reply. A malformed credential row does not: `undecodableRows` names dropped rows
+  while `rows` still contains the healthy ones.
 • Since 0.14.0, `reportUsageScoped({ credentialId, reading, enrollmentToken? })`
   sends fire-and-forget quota readings. `accepted` means queued, never that the
-  usage-processing module insula applied the reading. Coalesce per credential and
-  never await it on a request path.
+  usage-processing module applied the reading. The client does not resend a
+  reading after a lost receipt. Coalesce per credential and never await it on a
+  request path.
   The client leaves reading validation to the vault, which refuses top-level
   `credentialId` and `vouched` keys and compact JSON readings over 15,360 bytes with
   `invalid_params`.

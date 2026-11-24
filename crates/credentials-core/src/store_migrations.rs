@@ -1484,25 +1484,6 @@ pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> rusqlite::Resu
 }
 
 impl EncryptedStore {
-    /// Apply the vault schema migrations to a freshly opened store and set the
-    /// vault's durability level. Idempotent. Call once, right after opening, before
-    /// any credential write.
-    ///
-    /// Sets `PRAGMA synchronous=FULL` on the store's connection: the vault's SQLite
-    /// IS its own source of truth, so it must fsync every commit.
-    ///
-    /// The consequence rather than the adjective, because a severity word travels
-    /// unchecked while an observable does not: a provider that ROTATES its refresh token
-    /// hands back a new one and kills the old in the same exchange. If the commit
-    /// recording the new token is lost to power failure, the vault holds a token the
-    /// provider has already retired and there is no second copy anywhere -- the
-    /// credential is dead until an operator re-authenticates it interactively. This is stronger than WAL's default
-    /// `synchronous=NORMAL` (which can lose the last transaction on power loss) and
-    /// is set vault-locally rather than in `cortexkit-store`, because the other
-    /// consumers hold rebuildable projections that are correct at NORMAL and should
-    /// not pay FULL's fsync-per-commit. `SqliteStore` is one connection behind a
-    /// mutex, so setting it once here covers every later `with_conn`/
-    /// `with_conn_fenced` call.
     /// Read the database's recorded master-key fingerprint WITHOUT the master key:
     /// the plaintext `key_id` of the sealed audit-key row (which always exists from
     /// vault-init). This is the crash-safe-resolve anchor — the resolver compares it
@@ -1546,6 +1527,7 @@ impl EncryptedStore {
     }
 
     /// Apply the schema chain and refuse a store newer than this binary.
+    /// Call after opening the store and before writing any credentials.
     ///
     /// Migration 10 is planned in Rust before its transaction starts because selector
     /// conversion must be total and reach preserving. Call [`Self::migrate_with_key`]
@@ -1561,6 +1543,10 @@ impl EncryptedStore {
         Self::migrate_inner(store, Some(key), newest_migration_version())
     }
 
+    /// Apply the migrations and set the vault's durability level. The vault syncs
+    /// each commit because losing a newly rotated refresh token to a power failure
+    /// leaves only the old token, which the provider has already retired. Other
+    /// users of `cortexkit-store` can rebuild their data and need not pay that cost.
     fn migrate_inner(
         store: &SqliteStore,
         key: Option<&MasterKey>,
@@ -1663,7 +1649,12 @@ impl EncryptedStore {
         }
 
         store
-            .with_conn(|conn| conn.pragma_update(None, "synchronous", "FULL"))
+            .with_conn(|conn| {
+                conn.pragma_update(None, "synchronous", "FULL")?;
+                // On macOS, fsync alone need not flush the drive's write cache.
+                conn.pragma_update(None, "fullfsync", "ON")?;
+                conn.pragma_update(None, "checkpoint_fullfsync", "ON")
+            })
             .map_err(|error| StoreError::Backend(error.to_string()))
     }
 }

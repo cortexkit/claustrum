@@ -161,8 +161,12 @@ impl RefreshAdapter for AnthropicAdapter {
         // already rotated away) → the credential needs re-auth.
         if resp.status == 400 {
             let text = String::from_utf8_lossy(&resp.body);
-            if text.contains("invalid_grant") {
-                return Err(RefreshError::InvalidGrant(text.into_owned()));
+            if serde_json::from_slice::<serde_json::Value>(&resp.body)
+                .is_ok_and(|body| body["error"].as_str() == Some("invalid_grant"))
+            {
+                return Err(RefreshError::InvalidGrant(
+                    "Anthropic refresh token was rejected".into(),
+                ));
             }
             return Err(RefreshError::Status(400, text.into_owned()));
         }
@@ -184,6 +188,7 @@ impl RefreshAdapter for AnthropicAdapter {
         // field is optional on the wire).
         let refresh_token = parsed
             .refresh_token
+            .filter(|token| !token.is_empty())
             .unwrap_or_else(|| cred.refresh_token.expose().to_string());
         Ok(RefreshedTokens {
             access_token: parsed.access_token.into(),
@@ -284,6 +289,20 @@ mod tests {
         assert_eq!(sent["grant_type"], "refresh_token");
         assert_eq!(sent["refresh_token"], "old-refresh");
         assert_eq!(sent["client_id"], CLAUDE_CODE_CLIENT_ID);
+    }
+
+    #[tokio::test]
+    async fn mentions_of_invalid_grant_are_not_terminal() {
+        for body in [
+            r#"{"error":"invalid_request","error_description":"not invalid_grant"}"#,
+            "unexpected text mentioning invalid_grant",
+        ] {
+            let http = FixtureTransport::ok(400, body);
+            assert!(matches!(
+                AnthropicAdapter::new().refresh(&cred(), &http).await,
+                Err(RefreshError::Status(400, _))
+            ));
+        }
     }
 
     #[tokio::test]

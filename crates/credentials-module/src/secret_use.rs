@@ -61,16 +61,16 @@ enum Target {
     Local(LocalTarget),
 }
 impl Target {
-    fn into_use_target(self) -> UseTarget {
+    fn into_use_target(self) -> Result<UseTarget, ValidationError> {
         match self {
-            Self::Api(t) => UseTarget::ApiKey {
+            Self::Api(t) => Ok(UseTarget::ApiKey {
                 scheme: t.scheme,
                 host: t.host,
                 port: t.port,
                 path: t.path,
-            },
-            Self::Login(t) => UseTarget::SiteLogin { origin: t.origin },
-            Self::Local(_) => unreachable!("local targets are parsed before legacy targets"),
+            }),
+            Self::Login(t) => Ok(UseTarget::SiteLogin { origin: t.origin }),
+            Self::Local(_) => Err(ValidationError::InvalidParams),
         }
     }
 }
@@ -554,7 +554,10 @@ fn parse_use(
     if !matches!(params.coverage.as_str(), "scope" | "agent_and_workers") {
         return Err(invalid(ValidationError::InvalidParams));
     }
-    let target = params.target.into_use_target();
+    let target = match params.target.into_use_target() {
+        Ok(target) => target,
+        Err(error) => return Err(invalid(error)),
+    };
     if let Err(e) = target.validate() {
         return Err(invalid(e));
     }

@@ -280,6 +280,40 @@ mod scoped_watch {
     }
 
     #[tokio::test]
+    async fn draining_keeps_ping_live_while_watch_end_waits_for_route_capacity() {
+        use std::{future::Future, task::Poll};
+
+        let mut rig = Rig::new();
+        let (route, rx) = mpsc::channel(1);
+        rig.egress.route = route;
+        rig.rx = rx;
+        rig.bind(1, reserved("watcher"));
+        rig.open(1, 11, json!({})).await;
+        rig.notice(1, 11, 1).await;
+        let filler = Frame::build_with_version(PROTOCOL_VERSION, FrameType::Response,
+            control_flags(), 1, 1, 77, Vec::new()).unwrap();
+        rig.egress.route.try_send(filler).unwrap();
+        let body = serde_json::to_vec(&subc_protocol::session::ModuleControlCommand::Draining {
+            reason: subc_protocol::RouteCloseReason::Reload, deadline_ms: 4_102_444_800_000,
+        }).unwrap();
+        let control = |ty, corr, body| Frame::build_with_version(PROTOCOL_VERSION, ty,
+            control_flags(), 0, 0, corr, body).unwrap();
+        {
+            let mut handling = std::pin::pin!(handle_frame(control(FrameType::Push, 0, body),
+                &rig.egress, &rig.surface, &rig.admin, &rig.routes));
+            let keep_reading = std::future::poll_fn(|cx| Poll::Ready(handling.as_mut().poll(cx))).await;
+            assert!(matches!(keep_reading, Poll::Ready(Ok(true))), "route capacity blocked the frame loop");
+        }
+        handle_frame(control(FrameType::Ping, 88, Vec::new()),
+            &rig.egress, &rig.surface, &rig.admin, &rig.routes).await.unwrap();
+        assert_eq!(rig._control.try_recv().unwrap().header.ty, FrameType::Pong);
+        assert_eq!(rig.rx.try_recv().unwrap().header.corr, 77);
+        let end = rig.next().await;
+        assert_eq!((end.header.ty, end.header.corr), (FrameType::StreamEnd, 11));
+        assert!(rig.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn watch_scoped_drain_and_shutdown_end_before_closing() {
         for ty in [FrameType::Push, FrameType::Goodbye] {
             let mut rig = Rig::new();
@@ -310,14 +344,14 @@ mod scoped_watch {
                 .await
                 .unwrap();
             assert_eq!(keep_open, ty != FrameType::Goodbye);
-            let mut frames = [
-                rig.rx
-                    .try_recv()
-                    .expect("first STREAM_END queued before closing"),
-                rig.rx
-                    .try_recv()
-                    .expect("second STREAM_END queued before closing"),
-            ];
+            let mut frames = if keep_open {
+                [rig.next().await, rig.next().await]
+            } else {
+                [
+                    rig.rx.try_recv().expect("first STREAM_END queued before closing"),
+                    rig.rx.try_recv().expect("second STREAM_END queued before closing"),
+                ]
+            };
             frames.sort_by_key(|frame| frame.header.channel);
             for (index, frame) in frames.iter().enumerate() {
                 assert_eq!(frame.header.ty, FrameType::StreamEnd);
@@ -612,6 +646,46 @@ mod scoped_watch {
     }
 
     #[tokio::test]
+    async fn scoped_inventory_keeps_registry_and_conditions_with_the_admitted_row_version() {
+        use credentials_core::store::{AuthEventPrincipal, ConditionReport, RegisteredProviderSettings};
+
+        let rig = Rig::new();
+        let id = "oauth:antigravity:snapshot";
+        let record = oauth_record_with_adapter("antigravity");
+        rig.store.create(id, &record).unwrap();
+        rig.grant("watcher", id);
+        let incarnation = rig.store.credential_incarnation(id).unwrap();
+        let link = super::consumer_condition_tests::verification_link();
+        assert!(rig.store.report_condition_in_incarnation(id, 1, &incarnation,
+            ConditionReport { reason: "provider_verification_required", provider_status: 403, action_url: Some(link.as_str()) },
+            AuditCtx::route_admin(AuditOp::ReportCondition, "condition-reporter"),
+            AuthEventPrincipal::Reserved("condition-reporter")).unwrap());
+        let replace_registry = |store: &EncryptedStore, host: &str| {
+            assert!(store.set_registered_provider_settings_audited("antigravity", &[], &[],
+                Some(&RegisteredProviderSettings {
+                    hosts: vec![host.into()], auth_header: Some("x-api-key".into()),
+                    auth_scheme: Some("raw".into()), fusiform_provider_id: None,
+                }), AuditCtx::admin(AuditOp::ProviderSet)).unwrap());
+        };
+        replace_registry(&rig.store, "api.example.com");
+        let caller = federation::ingress::ScopedCaller::hand_only(Some(reserved("watcher")));
+        let params = read_surface::ListScopedParams { enrollment_token: None };
+        let before = rig.surface.list_scoped(&caller, &params).unwrap();
+        let row = serde_json::to_value(&before.credentials[0]).unwrap();
+        assert!(row.get("condition").is_some());
+        let store = rig.store.clone();
+        rig.surface.set_incarnation_hook("inventory-projection", move || {
+            store.overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Overwrite)).unwrap();
+            replace_registry(&store, "other.example.com");
+        });
+        let during = rig.surface.watch_scoped(&caller, &params).unwrap();
+        assert_eq!(during.0, before.view);
+        let after = rig.surface.list_scoped(&caller, &params).unwrap();
+        assert_ne!(after.view, before.view);
+        assert!(serde_json::to_value(&after.credentials[0]).unwrap().get("condition").is_none());
+    }
+
+    #[tokio::test]
     async fn watch_scoped_registry_hosts_change_emits_through_committed_write() {
         let mut rig = Rig::new();
         let settings = |host: &str| credentials_core::store::RegisteredProviderSettings {
@@ -820,6 +894,29 @@ mod scoped_watch {
     /// digest moves, so granting it the key must move that digest. Any other watcher's
     /// digest stays blind to the transfer key.
     #[tokio::test]
+    async fn bus_purpose_keys_need_exact_grants_in_inventory_and_watch() {
+        let rig = Rig::new();
+        let id = credentials_core::signing::BUS_SIGNING_KEY_IDS[0];
+        rig.store.create(id, &VaultRecord::new_static(CredentialKind::SigningKey, "test",
+            test_ed25519_pem().into_bytes(), None)).unwrap();
+        rig.store.set_categories_audited(id, SetCategoryMode::Set, &["bus-purpose".into()],
+            AuditCtx::admin(AuditOp::SetCategory)).unwrap();
+        rig.store.create_read_grant_audited("reserved", "ckbus", SelectorKind::Category, "bus-purpose",
+            GrantOperation::Sign, AuditCtx::admin(AuditOp::GrantCreate)).unwrap();
+        let caller = federation::ingress::ScopedCaller::hand_only(Some(reserved("ckbus")));
+        let params = read_surface::ListScopedParams { enrollment_token: None };
+        assert!(!rig.store.evaluate_scoped_coverage("reserved", "ckbus", id, GrantOperation::Sign,
+            &credentials_core::store::DeclaredGrantSet::empty()).unwrap().covered);
+        let before = rig.surface.watch_scoped(&caller, &params).unwrap();
+        assert!(rig.surface.list_scoped(&caller, &params).unwrap().credentials.is_empty());
+        grant_for(&rig.store, "ckbus", id, GrantOperation::Read);
+        let listing = rig.surface.list_scoped(&caller, &params).unwrap();
+        let row = serde_json::to_value(&listing.credentials[0]).unwrap();
+        assert_eq!(row["operations"], json!(["read"]));
+        assert_ne!(before.1, rig.surface.watch_scoped(&caller, &params).unwrap().1);
+    }
+
+    #[tokio::test]
     async fn the_transfer_key_moves_callosums_keys_and_no_one_elses() {
         use credentials_core::federation::VAULT_TRANSFER_ID;
         let mut rig = Rig::new();
@@ -948,6 +1045,52 @@ mod scoped_watch {
             let refusal = rig.next().await;
             assert_eq!(refusal.header.ty, FrameType::Response);
             assert_eq!(refusal.body, listing.body);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_enrollment_token_never_inherits_a_replacement_enrollments_grants() {
+        for method in [OP_GET_SCOPED, OP_LIST_SCOPED, OP_WATCH_SCOPED] {
+            let mut rig = Rig::new();
+            let secret = "a1".repeat(32);
+            let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+            let request = rig.store.propose_enrollment("watcher", &hash).unwrap();
+            rig.store.approve_enrollment(&request.request_id, "watcher", "test").unwrap();
+            let credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } =
+                rig.store.poll_enrollment(&request.request_id, &secret).unwrap() else { panic!("approved") };
+            let replacement = "b2".repeat(32);
+            let replacement_hash = credentials_core::enrollment::enrollment_secret_hash(&replacement).unwrap();
+            let db = rig.db_path.clone();
+            rig.surface.set_incarnation_hook("before-enrollment-admission", move || {
+                let writer = rusqlite::Connection::open(db).unwrap();
+                let tx = writer.unchecked_transaction().unwrap();
+                tx.execute("UPDATE enrolled_consumers SET revoked_at_ms=1 WHERE name='watcher'", []).unwrap();
+                tx.execute(
+                    "INSERT INTO enrolled_consumers (enrollment_id,name,token_hash,approved_at_ms,approved_by) \
+                     VALUES ('replacement','watcher',?1,2,'test')", [&replacement_hash],
+                ).unwrap();
+                tx.execute(
+                    "INSERT INTO read_grants (principal_kind,principal_id,selector_kind,selector,operation,created_at_ms) \
+                     VALUES ('enrolled','watcher','exact','apikey:active','read',2)", [],
+                ).unwrap();
+                tx.commit().unwrap();
+            });
+            rig.bind(1, reserved("ambient"));
+            rig.grant("ambient", "apikey:active");
+            let params = if method == OP_GET_SCOPED {
+                json!({"enrollment_token":token, "credential_id":"apikey:active"})
+            } else {
+                json!({"enrollment_token":token})
+            };
+            rig.dispatch(1, 11, FrameType::Request, method, params).await;
+            let reply = rig.next().await;
+            assert_eq!(reply.header.ty, FrameType::Response, "{method}");
+            let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["result"]["error"]["code"], "not_found", "{method}");
+
+            let valid = scoped_route_request(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED,
+                json!({"enrollment_token":replacement})).await;
+            assert_eq!(valid["result"]["credentials"][0]["id"], "apikey:active");
         }
     }
 

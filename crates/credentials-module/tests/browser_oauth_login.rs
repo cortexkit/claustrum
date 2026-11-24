@@ -527,7 +527,8 @@ fn browser_callback_wins_without_waiting_for_stdin_to_close() {
     browser.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut page = String::new();
     browser.read_to_string(&mut page).unwrap();
-    assert!(page.contains("Authentication successful"));
+    assert!(page.contains("Callback received"));
+    assert!(!page.contains("Authentication successful"));
     // Keep the stdin writer alive until the child exits. EOF cannot rescue the race.
     assert!(login.stdin.is_some());
     login.finish(true);

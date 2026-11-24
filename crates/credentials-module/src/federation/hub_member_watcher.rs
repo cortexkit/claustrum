@@ -7,9 +7,7 @@ use std::{
 };
 
 use credentials_core::{
-    federation::{is_lower_hex_16_bytes, RemoteRecordSource, VAULT_TRANSFER_ID},
-    kem,
-    record::{CredentialKind, RecordState, VaultRecord},
+    federation::{is_lower_hex_16_bytes, RemoteRecordSource},
     signing::key_id_for_public,
     store::{EncryptedStore, HubLoginApply, HubLoginApplyMode, HubLoginHomeState, StoreOpError},
 };
@@ -24,6 +22,7 @@ use super::{
     hub_binding::{HubBinding, HubBindings},
     hub_logins::{decode_rows, LoginAad, LoginBody, LoginEnvelope, Snapshot},
     sharing::VaultSharingSnapshot,
+    transfer::{TransferKey, TransferKeyCache},
 };
 
 type Pairings = watch::Receiver<Option<Arc<VaultSharingSnapshot>>>;
@@ -68,6 +67,7 @@ async fn run_inner(
         reads: JoinSet::new(),
         refresh: Retry::default(),
         last_scanned: None,
+        keys: Arc::default(),
         #[cfg(test)]
         hooks,
     };
@@ -219,44 +219,24 @@ struct Recipient {
     member: String,
     key_id: String,
     incarnation: String,
-    key: VaultRecord,
+    key: Arc<TransferKey>,
 }
 
 impl Recipient {
-    fn read(store: &EncryptedStore) -> Result<Option<Self>, StoreOpError> {
+    fn read(
+        store: &EncryptedStore,
+        keys: &mut TransferKeyCache,
+    ) -> Result<Option<Self>, StoreOpError> {
         let Some(member) = store.federation_self_member()? else {
             return Ok(None);
         };
-        let meta = match store.meta(VAULT_TRANSFER_ID) {
-            Ok(meta) if meta.state == RecordState::Active => meta,
-            Ok(_) | Err(StoreOpError::NotFound) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let Some(incarnation) = meta.incarnation else {
-            return Ok(None);
-        };
-        let key = match store.get_snapshot(VAULT_TRANSFER_ID, &incarnation) {
-            Ok(read) if read.record.kind == CredentialKind::KemKey => read.record,
-            Ok(_)
-            | Err(
-                StoreOpError::NotFound
-                | StoreOpError::NeedsReauth
-                | StoreOpError::Quarantined
-                | StoreOpError::Corrupt(_)
-                | StoreOpError::Decrypt(_),
-            ) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let Some((_, key_id)) = std::str::from_utf8(key.payload.expose())
-            .ok()
-            .and_then(|pem| kem::public_half(pem).ok())
-        else {
+        let Some(key) = keys.read(store)? else {
             return Ok(None);
         };
         Ok(Some(Self {
             member,
-            key_id,
-            incarnation,
+            key_id: key.key_id.clone(),
+            incarnation: key.incarnation.clone(),
             key,
         }))
     }
@@ -299,7 +279,7 @@ impl Opened {
         {
             return None;
         }
-        let pem = std::str::from_utf8(recipient.key.payload.expose()).ok()?;
+        let pem = recipient.key.pem.expose();
         let inventory = match envelope.open(pem, binding.vault_transfer_x25519.as_ref()?)? {
             LoginBody::Ended {} => Inventory::Ended,
             LoginBody::Snapshot { logins } => {
@@ -343,6 +323,7 @@ impl Local {
     fn read(
         store: &EncryptedStore,
         scan_records: bool,
+        keys: &mut TransferKeyCache,
     ) -> Result<(Self, AutomaticCopies), StoreOpError> {
         let enabled = store.login_sharing()?;
         let mut free_collisions = BTreeMap::new();
@@ -379,7 +360,7 @@ impl Local {
         Ok((
             Self {
                 enabled,
-                recipient: Recipient::read(store)?.map(Arc::new),
+                recipient: Recipient::read(store, keys)?.map(Arc::new),
                 accepted,
                 free_collisions,
             },
@@ -447,6 +428,7 @@ struct MemberWatcher {
     reads: JoinSet<PointRead>,
     refresh: Retry,
     last_scanned: Option<Arc<VaultSharingSnapshot>>,
+    keys: Arc<std::sync::Mutex<TransferKeyCache>>,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -466,6 +448,8 @@ struct TestHooks {
     handled: Option<mpsc::UnboundedSender<HubEvent>>,
     /// Receives the homes with a queued removal after each roster is reconciled.
     reconciled: Option<mpsc::UnboundedSender<Vec<String>>>,
+    /// Receives the transfer-key decrypt count after each local refresh.
+    refreshed: Option<mpsc::UnboundedSender<usize>>,
 }
 
 impl MemberWatcher {
@@ -529,13 +513,21 @@ impl MemberWatcher {
                 .as_ref()
                 .is_none_or(|prior| !Arc::ptr_eq(prior, current))
         });
-        let Ok(Ok((local, copies))) =
-            tokio::task::spawn_blocking(move || Local::read(&store, scan)).await
+        let keys = Arc::clone(&self.keys);
+        let Ok(Ok((local, copies))) = tokio::task::spawn_blocking(move || {
+            let mut keys = keys.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Local::read(&store, scan, &mut keys)
+        })
+        .await
         else {
             self.refresh.failed();
             return;
         };
         self.refresh = Retry::default();
+        #[cfg(test)]
+        if let Some(sink) = &self.hooks.refreshed {
+            let _ = sink.send(self.keys.lock().unwrap().decrypts);
+        }
         if let Some(pairings) = &pairings {
             if scan {
                 self.reconcile_pairings(pairings, &local, copies);

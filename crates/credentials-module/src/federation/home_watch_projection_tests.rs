@@ -1,6 +1,7 @@
 use super::*;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
-use credentials_core::federation::MemberGrantSource;
+use credentials_core::federation::{MemberGrantSource, VAULT_TRANSFER_ID};
+use credentials_core::record::CredentialKind;
 use credentials_core::key::MasterKey;
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::refresh_adapters::{HttpResponse, HttpTransport};

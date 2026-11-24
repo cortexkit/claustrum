@@ -51,9 +51,10 @@ use credentials_core::agent_secret::{validate_name, SecretError, SecretSender};
 use credentials_core::audit::{AuthEventKind, ReporterSource};
 use credentials_core::federation::{
     valid_member_id, NewRemoteRecord, RemoteHomeState, RemoteHomeSuccess, RemoteRecord,
-    RemoteRecordWrite, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
+    RemoteRecordWrite, MEMBER_ID_PREFIX,
 };
 use credentials_core::plan_detection::DetectedPlan;
+use credentials_core::secret::Secret;
 use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
@@ -1070,34 +1071,17 @@ impl RemoteReader {
 
     /// This vault's own requester setup: its self id and its transfer key's private
     /// half and key id.
-    fn own_setup(&self) -> Result<(String, String, String), Failure> {
+    fn own_setup(&self) -> Result<(String, Secret<String>, String), Failure> {
         let self_id = match self.store.federation_self_member() {
             Ok(Some(self_id)) => self_id,
             Ok(None) => return Err(Failure::transfer_key_missing(None)),
             Err(_) => return Err(Failure::store_error()),
         };
-        let pem = match self.store.get(VAULT_TRANSFER_ID) {
-            Ok(record) if record.kind == CredentialKind::KemKey => {
-                match std::str::from_utf8(record.payload.expose()) {
-                    Ok(pem) => pem.to_string(),
-                    Err(_) => return Err(Failure::transfer_key_missing(Some(self_id))),
-                }
-            }
-            Ok(_)
-            | Err(StoreOpError::NotFound)
-            | Err(StoreOpError::NeedsReauth)
-            | Err(StoreOpError::Quarantined)
-            | Err(StoreOpError::Corrupt(_))
-            | Err(StoreOpError::Decrypt(_)) => {
-                return Err(Failure::transfer_key_missing(Some(self_id)))
-            }
-            Err(_) => return Err(Failure::store_error()),
-        };
-        let key_id = match credentials_core::kem::public_half(&pem) {
-            Ok((_, key_id)) => key_id,
-            Err(_) => return Err(Failure::transfer_key_missing(Some(self_id))),
-        };
-        Ok((self_id, pem, key_id))
+        match super::transfer::transfer_key(&self.store) {
+            Ok(Some(key)) => Ok((self_id, key.pem, key.key_id)),
+            Ok(None) => Err(Failure::transfer_key_missing(Some(self_id))),
+            Err(_) => Err(Failure::store_error()),
+        }
     }
 
     /// The time left before `budget`, or `None` when it is spent.
@@ -1213,7 +1197,7 @@ impl RemoteReader {
             )
             .await
             .map_err(map_outbound_error)?;
-        self.classify_reply(&reply, &aad, &pem, &home_key.public, home, &self_id)
+        self.classify_reply(&reply, &aad, pem.expose(), &home_key.public, home, &self_id)
     }
 
     /// Turn the home's answer into a validated reply or a consumer-table row.
@@ -1884,9 +1868,9 @@ impl RemoteReader {
         match reply.get("status").and_then(Value::as_str) {
             Some("sealed") => {
                 let released = if ssh {
-                    open_release_for(&reply, &aad, &pem, &home_key.public, true)?
+                    open_release_for(&reply, &aad, pem.expose(), &home_key.public, true)?
                 } else {
-                    open_release(&reply, &aad, &pem, &home_key.public)?
+                    open_release(&reply, &aad, pem.expose(), &home_key.public)?
                 };
                 Ok((released, if ssh { "signed" } else { "released" }))
             }

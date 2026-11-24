@@ -1,4 +1,9 @@
 use super::*;
+use credentials_core::{
+    federation::VAULT_TRANSFER_ID,
+    kem,
+    record::{CredentialKind, VaultRecord},
+};
 use crate::federation::{
     hub::{
         stand_in::{StandIn, StandInClient},
@@ -160,6 +165,7 @@ struct Rig {
     pairs: watch::Sender<Option<Arc<VaultSharingSnapshot>>>,
     handled: mpsc::UnboundedReceiver<HubEvent>,
     reconciled: mpsc::UnboundedReceiver<Vec<String>>,
+    refreshed: mpsc::UnboundedReceiver<usize>,
     attempted: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -187,6 +193,7 @@ impl Rig {
             pairs: watch::channel(pair).0,
             handled: mpsc::unbounded_channel().1,
             reconciled: mpsc::unbounded_channel().1,
+            refreshed: mpsc::unbounded_channel().1,
             attempted: Arc::new(Notify::new()),
             task: None,
         }
@@ -208,6 +215,8 @@ impl Rig {
         self.handled = rx;
         let (reconciled, rx) = mpsc::unbounded_channel();
         self.reconciled = rx;
+        let (refreshed, rx) = mpsc::unbounded_channel();
+        self.refreshed = rx;
         self.attempted = Arc::new(Notify::new());
         self.task = Some(tokio::spawn(run_inner(
             Arc::clone(&self.store),
@@ -219,6 +228,7 @@ impl Rig {
                 apply_attempted: Some(Arc::clone(&self.attempted)),
                 handled: Some(handled),
                 reconciled: Some(reconciled),
+                refreshed: Some(refreshed),
             },
         )));
     }
@@ -734,6 +744,19 @@ async fn applying_waits_for_current_binding_and_serializes_with_pairing_removal(
             assert!(rig.row(ID).is_none());
             assert!(rig.row(OTHER).is_some());
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_transfer_key_is_decrypted_once_across_unrelated_writes() {
+    let mut rig = Rig::new(true);
+    rig.start();
+    rig.opened(1).await;
+    assert_eq!(wait(rig.refreshed.recv()).await, Some(1));
+    for n in 0..5 {
+        // Each write wakes a refresh of every local input.
+        rig.add_handmade(&format!("oauth:unrelated-{n}"));
+        assert_eq!(wait(rig.refreshed.recv()).await, Some(1));
     }
 }
 

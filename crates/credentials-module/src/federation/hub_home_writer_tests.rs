@@ -367,7 +367,11 @@ async fn oversize_list_leaves_old_value_but_return_to_sealed_rows_clears_stale()
         .unwrap();
     rig.bind(Some(paired(PAIR, MEMBER_SCALAR)));
     let mut observer = rig.watch().await;
-    rig.start();
+    let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    rig.start_with(TestHooks {
+        refusals: Some(Arc::clone(&refusals)),
+        ..TestHooks::default()
+    });
     let initial = put(observer.as_mut()).await;
     let (_, _, size) = open(&initial, MEMBER_SCALAR, &key(HOME_SCALAR));
     assert!(size > 65_536);
@@ -381,6 +385,15 @@ async fn oversize_list_leaves_old_value_but_return_to_sealed_rows_clears_stale()
         .unwrap();
     until(|| rig.target(MEMBER).is_some_and(|target| target.stale)).await;
     assert_eq!(rig.entry().await.unwrap(), initial);
+    // Unrelated writes repeat the same refusal; it is logged once.
+    for n in 0..3 {
+        let _ = tokio::time::timeout(Duration::ZERO, rig.decided.notified()).await;
+        rig.store
+            .create(&format!("oauth:unrelated-{n}"), &login())
+            .unwrap();
+        wait(rig.decided.notified()).await;
+    }
+    assert_eq!(refusals.load(std::sync::atomic::Ordering::SeqCst), 1);
     rig.store
         .revoke_member_grant_audited(
             MEMBER,
@@ -585,7 +598,7 @@ async fn rekey_then_revoke_and_unpair_use_the_correct_recipient_and_home_rotatio
             )
             .unwrap();
         let own = own_key(&rig.store).unwrap().unwrap();
-        kem::public_half(&own.pem).unwrap().0
+        kem::public_half(own.pem.expose()).unwrap().0
     };
     let resealed = put(observer.as_mut()).await;
     assert_eq!(open(&resealed, newer, &new_home).1, json!({"kind":"ended"}));
@@ -868,4 +881,23 @@ async fn newer_commit_cancels_the_snapshot_retry_in_backoff_or_conflict_reread()
         hub.release.notify_one();
         assert_eq!(hub.creates.load(Ordering::SeqCst), 2);
     }
+}
+
+#[tokio::test]
+async fn a_recipient_writer_that_ends_is_restarted() {
+    let mut rig = Rig::new();
+    rig.setup();
+    rig.bind(Some(paired(PAIR, MEMBER_SCALAR)));
+    let mut observer = rig.watch().await;
+    let exit = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    rig.start_with(TestHooks {
+        exit_once: Some(Arc::clone(&exit)),
+        ..TestHooks::default()
+    });
+    // The first writer for the recipient ends before it publishes anything.
+    let published = put(observer.as_mut()).await;
+    assert!(!exit.load(std::sync::atomic::Ordering::SeqCst));
+    let (aad, contents, _) = open(&published, MEMBER_SCALAR, &key(HOME_SCALAR));
+    assert_eq!(aad.generation.get(), 1);
+    assert_eq!(contents["kind"], "snapshot");
 }

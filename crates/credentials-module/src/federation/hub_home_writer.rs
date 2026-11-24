@@ -76,6 +76,7 @@ async fn supervise(
         }
     };
     let mut started = BTreeSet::new();
+    let mut members = std::collections::HashMap::new();
     let mut tasks = JoinSet::new();
     loop {
         if let Some(current) = bindings.borrow_and_update().as_ref() {
@@ -83,9 +84,9 @@ async fn supervise(
         }
         for member_id in stored.drain(..) {
             if started.insert(member_id.clone()) {
-                tasks.spawn(
+                let task = tasks.spawn(
                     MemberTask {
-                        member_id,
+                        member_id: member_id.clone(),
                         hub: Arc::clone(hub),
                         writes: store.subscribe_writes(),
                         store: Arc::clone(&store),
@@ -96,12 +97,25 @@ async fn supervise(
                     }
                     .run(),
                 );
+                members.insert(task.id(), member_id);
             }
         }
         tokio::select! {
             change = bindings.changed() => if change.is_err() { return; },
-            // Closing the task group avoids silently leaving a recipient without a writer.
-            _ = tasks.join_next(), if !tasks.is_empty() => return,
+            // A recipient is never left without a writer: one that ends for any
+            // reason is logged and started again.
+            ended = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let id = match &ended {
+                    Some(Ok((id, ()))) => *id,
+                    Some(Err(error)) => error.id(),
+                    None => continue,
+                };
+                if let Some(member) = members.remove(&id) {
+                    tracing::error!(target: "federation", %member, "hub login writer for a recipient stopped; restarting it");
+                    started.remove(&member);
+                    stored.push(member);
+                }
+            }
         }
     }
 }
@@ -160,6 +174,10 @@ struct TestHooks {
     project: Option<super::ingress::IssueAuditGate>,
     decided: Option<Arc<tokio::sync::Notify>>,
     failed: Option<Arc<tokio::sync::Notify>>,
+    /// Makes the next member task end at once, as an unexpected exit would.
+    exit_once: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Counts refusal warnings this writer logs.
+    refusals: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 struct Recipient {
@@ -282,6 +300,11 @@ struct MemberState {
     last_kind: Option<HubLoginKind>,
     last_rows: Vec<RemoteWatchRow>,
     resumed: bool,
+    /// The refusal last logged for this recipient. A refusal repeats on every
+    /// store write until its cause changes, so it is logged once per change.
+    refused: Option<&'static str>,
+    #[cfg(test)]
+    refusals: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl Default for MemberState {
@@ -291,11 +314,25 @@ impl Default for MemberState {
             last_kind: None,
             last_rows: Vec::new(),
             resumed: true,
+            refused: None,
+            #[cfg(test)]
+            refusals: None,
         }
     }
 }
 
 impl MemberState {
+    fn refuse(&mut self, reason: &'static str, member: &str, at_max: bool) {
+        if self.refused != Some(reason) {
+            tracing::warn!(target: "federation", member, at_max, "{reason}");
+            #[cfg(test)]
+            if let Some(count) = &self.refusals {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.refused = Some(reason);
+    }
+
     fn commit(
         &mut self,
         store: &EncryptedStore,
@@ -355,7 +392,11 @@ impl MemberState {
                 if let Some(row) = current.as_ref().filter(|row| !row.stale) {
                     store.mark_hub_login_target_stale(member, row.generation)?;
                 }
-                tracing::warn!(target: "federation", member, at_max, "hub login value exceeds size or generation limit");
+                self.refuse(
+                    "hub login value exceeds size or generation limit",
+                    member,
+                    at_max,
+                );
                 current = None;
             } else {
                 let recipient_id = key_id_for_public(&recipient.key);
@@ -379,7 +420,7 @@ impl MemberState {
                                 sender_key_id: sender.key_id,
                                 recipient_key_id: recipient_id,
                             },
-                            &sender.pem,
+                            sender.pem.expose(),
                             &recipient.key,
                             &plaintext,
                         )?;
@@ -394,12 +435,13 @@ impl MemberState {
                         if let Some(row) = current.as_ref().filter(|row| !row.stale) {
                             store.mark_hub_login_target_stale(member, row.generation)?;
                         }
-                        tracing::warn!(target: "federation", member, "cannot seal hub login value");
+                        self.refuse("cannot seal hub login value", member, false);
                         self.resumed = true;
                         return Ok(None);
                     }
                     Err(error) => return Err(error),
                 };
+                self.refused = None;
                 current = Some(HubLoginTarget {
                     member_id: member.into(),
                     box_id: recipient.box_id,
@@ -524,7 +566,20 @@ impl MemberTask {
     }
 
     async fn run(mut self) {
+        #[cfg(test)]
+        if self
+            .hooks
+            .exit_once
+            .as_ref()
+            .is_some_and(|exit| exit.swap(false, std::sync::atomic::Ordering::SeqCst))
+        {
+            return;
+        }
         let mut state = MemberState::default();
+        #[cfg(test)]
+        {
+            state.refusals = self.hooks.refusals.clone();
+        }
         let mut local_backoff = Backoff::default();
         let mut hub_backoff = Backoff::default();
         let mut decide_at = Some(Instant::now());

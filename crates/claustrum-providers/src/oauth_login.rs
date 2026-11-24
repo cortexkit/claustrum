@@ -207,6 +207,15 @@ pub struct LoginTokens {
     pub organization: Option<ExchangeOrganization>,
 }
 
+/// A login id is either the provider's default or that id with one nonempty label.
+pub fn login_id_is_valid(default_id: &str, id: &str) -> bool {
+    id == default_id
+        || id
+            .strip_prefix(default_id)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|label| !label.is_empty() && !label.contains(':'))
+}
+
 /// The `account` block of Anthropic's token exchange response: the provider-stable
 /// account uuid and the login email. Non-secret display/routing metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -237,8 +246,7 @@ pub enum LoginError {
     StateMismatch,
     /// A transport/HTTP error reaching the token endpoint.
     Transport(String),
-    /// The token endpoint returned a non-success status (the body is included for
-    /// the operator, but never the pasted code).
+    /// The token endpoint returned a non-success status and a safe diagnostic.
     Status(u16, String),
     /// A success status with an undecodable body.
     Decode(String),
@@ -306,6 +314,45 @@ struct FormExchangeResponseBody {
     id_token: Option<String>,
 }
 
+fn decode_exchange_response<T: serde::de::DeserializeOwned>(
+    response: crate::refresh_adapters::HttpResponse,
+) -> Result<T, LoginError> {
+    if response.status != 200 {
+        // Provider diagnostics may repeat the callback code or the verifier.
+        let code = serde_json::from_slice::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|body| {
+                match body["error"]
+                    .as_str()
+                    .or_else(|| body["error"]["code"].as_str())
+                {
+                    Some(
+                        code @ ("invalid_request"
+                        | "invalid_client"
+                        | "invalid_grant"
+                        | "unauthorized_client"
+                        | "unsupported_grant_type"
+                        | "invalid_scope"
+                        | "access_denied"
+                        | "server_error"
+                        | "temporarily_unavailable"),
+                    ) => Some(code.to_owned()),
+                    _ => None,
+                }
+            });
+        return Err(LoginError::Status(
+            response.status,
+            code.unwrap_or_else(|| "provider rejected the exchange".into()),
+        ));
+    }
+    serde_json::from_slice(&response.body).map_err(|_| {
+        LoginError::Decode(format!(
+            "HTTP {} reply did not contain valid token data",
+            response.status
+        ))
+    })
+}
+
 /// Validate the callback's state against the expected state, then exchange the code
 /// for tokens at the provider's token endpoint. State is checked BEFORE the network
 /// call so a mismatched callback never reaches the provider.
@@ -341,15 +388,7 @@ pub async fn exchange_authorization_code(
 
     let resp = http.post(token_url, &[], "application/json", body).await?;
 
-    if resp.status != 200 {
-        return Err(LoginError::Status(
-            resp.status,
-            String::from_utf8_lossy(&resp.body).into_owned(),
-        ));
-    }
-
-    let parsed: ExchangeResponseBody =
-        serde_json::from_slice(&resp.body).map_err(|e| LoginError::Decode(e.to_string()))?;
+    let parsed: ExchangeResponseBody = decode_exchange_response(resp)?;
 
     Ok(LoginTokens {
         access_token: parsed.access_token,
@@ -409,15 +448,7 @@ pub async fn exchange_authorization_code_form(
         )
         .await?;
 
-    if resp.status != 200 {
-        return Err(LoginError::Status(
-            resp.status,
-            String::from_utf8_lossy(&resp.body).into_owned(),
-        ));
-    }
-
-    let parsed: FormExchangeResponseBody =
-        serde_json::from_slice(&resp.body).map_err(|e| LoginError::Decode(e.to_string()))?;
+    let parsed: FormExchangeResponseBody = decode_exchange_response(resp)?;
 
     Ok(LoginTokens {
         access_token: parsed.access_token,
@@ -487,7 +518,7 @@ pub async fn exchange_authorization_code_google(
 }
 
 /// Compare callback state without data-dependent early exits for equal-length values.
-pub(crate) fn states_equal(actual: &str, expected: &str) -> bool {
+pub fn states_equal(actual: &str, expected: &str) -> bool {
     use subtle::ConstantTimeEq;
     bool::from(actual.as_bytes().ct_eq(expected.as_bytes()))
 }
@@ -500,7 +531,7 @@ pub(crate) fn relative_expiry_ms(now_ms: i64, seconds: Option<i64>) -> Option<i6
 }
 
 /// A non-JWT access token has no decodable expiry, so its expiry remains unknown.
-pub(crate) fn access_token_expiry_ms(token: &str) -> Option<i64> {
+pub fn access_token_expiry_ms(token: &str) -> Option<i64> {
     decode_jwt_claims(token)?
         .get("exp")?
         .as_i64()
@@ -571,6 +602,64 @@ pub fn account_id_for_adapter(adapter: &str, access_token: &str) -> Option<Strin
 mod tests {
     use super::*;
     use crate::refresh_adapters::fixture::FixtureTransport;
+
+    #[tokio::test]
+    async fn exchange_diagnostics_do_not_echo_provider_body() {
+        let callback = Callback {
+            code: "synthetic-callback-value".into(),
+            state: "state".into(),
+        };
+        let verifier = "synthetic-verifier-value";
+        for use_form in [false, true] {
+            for (status, body, expected) in [
+                (
+                    400,
+                    serde_json::json!({"error":"invalid_grant","error_description":format!("{} {verifier}",callback.code)}),
+                    "invalid_grant",
+                ),
+                (400, serde_json::json!({"error":callback.code}), "400"),
+                (
+                    200,
+                    serde_json::json!({"access_token":"issued","refresh_token":"renewal","expires_in":verifier}),
+                    "decode error",
+                ),
+            ] {
+                let http = FixtureTransport::ok(status, serde_json::to_vec(&body).unwrap());
+                let result = if use_form {
+                    exchange_authorization_code_form(
+                        &http,
+                        "unused",
+                        "client",
+                        "redirect",
+                        &callback,
+                        "state",
+                        verifier,
+                        &[],
+                        0,
+                    )
+                    .await
+                } else {
+                    exchange_authorization_code(
+                        &http, "unused", "client", "redirect", &callback, "state", verifier, 0,
+                    )
+                    .await
+                };
+                let Err(error) = result else {
+                    panic!("exchange must fail");
+                };
+                let message = error.to_string();
+                assert!(message.contains(expected));
+                assert!(
+                    !message.contains(&callback.code),
+                    "diagnostic echoed the callback code"
+                );
+                assert!(
+                    !message.contains(verifier),
+                    "diagnostic echoed the verifier"
+                );
+            }
+        }
+    }
 
     #[test]
     fn provider_error_controls_are_visible_not_terminal_commands() {

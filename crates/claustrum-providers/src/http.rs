@@ -9,6 +9,8 @@ use async_trait::async_trait;
 
 use crate::refresh_adapters::{HttpProbeResponse, HttpResponse, HttpTransport, RefreshError};
 
+pub(crate) const PROVIDER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 // Token/profile replies are small JSON objects; GitHub installation discovery is
 // the larger, list-shaped reply. One MiB leaves headroom for token strings and
 // installation metadata, not downloads, and also bounds error and chunked bodies.
@@ -46,7 +48,7 @@ impl ReqwestTransport {
     /// HTTP/1.1 would break refresh while this pin stands.
     pub fn new() -> Result<Self, RefreshError> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(PROVIDER_REQUEST_TIMEOUT)
             // Token-exchange bodies contain secrets; redirects must be surfaced, never followed.
             .redirect(reqwest::redirect::Policy::none())
             .http1_only()

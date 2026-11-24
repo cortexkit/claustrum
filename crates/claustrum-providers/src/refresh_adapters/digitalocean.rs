@@ -64,7 +64,7 @@ pub fn parse_fragment_capture(
     Ok(LoginTokens {
         access_token,
         refresh_token: String::new(),
-        expires_at_ms: Some(now_ms.saturating_add(expires_in.saturating_mul(1000))),
+        expires_at_ms: crate::oauth_login::relative_expiry_ms(now_ms, Some(expires_in)),
         id_token: None,
         account: None,
         organization: None,
@@ -129,6 +129,14 @@ mod tests {
         assert!(tokens.refresh_token.is_empty());
         assert_eq!(tokens.expires_at_ms, Some(3_601_000));
         assert!(tokens.account.is_none());
+    }
+
+    #[test]
+    fn fragment_ignores_a_negative_lifetime() {
+        let tokens =
+            parse_fragment_capture("#access_token=t&expires_in=-1&state=state", "state", 5000)
+                .unwrap();
+        assert_eq!(tokens.expires_at_ms, None);
     }
 
     #[test]

@@ -932,7 +932,15 @@ async fn a_rewound_target_seals_above_the_generation_already_on_the_hub() {
     rig.start();
     let next = put(observer.as_mut()).await;
     let (aad, contents, _) = open(&next, MEMBER_SCALAR, &key(HOME_SCALAR));
-    assert!(aad.generation.get() > 3, "republished at {}", aad.generation.get());
+    assert!(
+        aad.generation.get() > 3,
+        "republished at {}",
+        aad.generation.get()
+    );
     assert_eq!(contents["logins"][0]["identity"]["org_name"], "third");
-    until(|| rig.target(MEMBER).is_some_and(|row| row.generation == aad.generation)).await;
+    until(|| {
+        rig.target(MEMBER)
+            .is_some_and(|row| row.generation == aad.generation)
+    })
+    .await;
 }

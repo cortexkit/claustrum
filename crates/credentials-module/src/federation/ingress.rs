@@ -35,7 +35,6 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use credentials_core::agent_secret::SecretSender;
-use credentials_core::secret::Secret;
 use credentials_core::audit::{AuditCtx, AuditOp, AuthEventKind, ReporterSource};
 use credentials_core::engine::{EngineError, GetWithRefreshStatus, RefreshEngine};
 use credentials_core::federation::{
@@ -45,6 +44,7 @@ use credentials_core::federation::{
 use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{RecordIdentity, RecordState, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
+use credentials_core::secret::Secret;
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
     ReleaseRequest, SealedRelease, SecretHomeRole, StoreOpError,

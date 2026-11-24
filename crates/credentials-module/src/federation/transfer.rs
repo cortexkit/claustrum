@@ -626,9 +626,12 @@ fn transfer_key_at(
 
 /// Holds the last transfer key read, so a task that rereads its inputs on every
 /// store write decrypts the key only when its row's incarnation or version moves.
+/// A key row's incarnation and record version: what a cached key was read from.
+type RowStamp = (String, u64);
+
 #[derive(Default)]
 pub(crate) struct TransferKeyCache {
-    cached: Option<((String, u64), Option<Arc<TransferKey>>)>,
+    cached: Option<(RowStamp, Option<Arc<TransferKey>>)>,
     #[cfg(test)]
     pub(crate) decrypts: usize,
 }

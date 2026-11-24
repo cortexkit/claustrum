@@ -16,8 +16,8 @@ use credentials_core::{
 use serde_json::{json, Value};
 
 use super::support::{
-    poll_until_ready, temp_root, wait_until, Held, HomeStore, Reply, SharedCallosumStandIn, VaultFixture,
-    TARGET_MODULE,
+    poll_until_ready, temp_root, wait_until, Held, HomeStore, Reply, SharedCallosumStandIn,
+    VaultFixture, TARGET_MODULE,
 };
 
 const HOME_FP: &str = "00000000000000000000000000000007";

@@ -348,7 +348,8 @@ impl EncryptedStore {
 
     /// How many local reports this process has recorded, identical ones included.
     pub fn hub_own_report_records(&self) -> u64 {
-        self.own_report_records.load(std::sync::atomic::Ordering::SeqCst)
+        self.own_report_records
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn hub_own_report(&self) -> Result<Option<HubOwnReport>, StoreOpError> {

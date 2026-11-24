@@ -886,7 +886,14 @@ async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
     let (published, task) = record_published(&rig);
     // Each round publishes the read's roster, then withdraws it when the watch is
     // refused, just before the loop sleeps.
-    let rounds = || published.lock().unwrap().iter().filter(|seen| seen.is_none()).count();
+    let rounds = || {
+        published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.is_none())
+            .count()
+    };
     wait_until(|| rounds() == 1).await;
     let mut gaps = Vec::new();
     for round in 2..=5 {
@@ -898,7 +905,14 @@ async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
                 tokio::task::yield_now().await;
             }
             // The next round starts with a read, which waits for its reply.
-            if rig.vault.outbound.pending_waiter_count_for_test().await.unwrap_or(0) > 0 {
+            if rig
+                .vault
+                .outbound
+                .pending_waiter_count_for_test()
+                .await
+                .unwrap_or(0)
+                > 0
+            {
                 break;
             }
             assert!(seconds <= 64, "no reread after {seconds} s");
@@ -912,7 +926,9 @@ async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
     let distinct: std::collections::BTreeSet<_> = warnings.iter().collect();
     assert_eq!(distinct.len(), warnings.len(), "{warnings:?}");
     assert!(
-        warnings.iter().any(|warning| warning.contains("fed_not_ready")),
+        warnings
+            .iter()
+            .any(|warning| warning.contains("fed_not_ready")),
         "{warnings:?}"
     );
     task.abort();
@@ -924,7 +940,8 @@ async fn stalled_first_notices_reopen_both_local_feeds_after_the_setup_budget() 
     const PEER_KEYS_WATCH: &str = "callosum.peer_keys_watch";
     let rig = Rig::new("sharing-first-notice", snapshot("all_classes")).await;
     // Both watches are accepted and never send a notice.
-    rig.callosum.answer(TARGET_MODULE, WATCH, Reply::SilentWatch);
+    rig.callosum
+        .answer(TARGET_MODULE, WATCH, Reply::SilentWatch);
     rig.callosum
         .answer(TARGET_MODULE, PEER_KEYS_WATCH, Reply::SilentWatch);
     let (observed, _bindings) = tokio::sync::watch::channel(None);
@@ -934,14 +951,12 @@ async fn stalled_first_notices_reopen_both_local_feeds_after_the_setup_budget() 
         "00000000000000000000000000000001",
         observed,
     ));
-    wait_until(|| method_count(&rig, WATCH) == 1 && method_count(&rig, PEER_KEYS_WATCH) == 1)
-        .await;
+    wait_until(|| method_count(&rig, WATCH) == 1 && method_count(&rig, PEER_KEYS_WATCH) == 1).await;
     tokio::time::advance(ADMIN_OP_BUDGET).await;
     // Both accepted-but-silent watches are given up and cancelled.
     wait_until(|| rig.callosum.cancelled_watches() == 2).await;
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    wait_until(|| method_count(&rig, WATCH) == 2 && method_count(&rig, PEER_KEYS_WATCH) == 2)
-        .await;
+    wait_until(|| method_count(&rig, WATCH) == 2 && method_count(&rig, PEER_KEYS_WATCH) == 2).await;
     assert_eq!(method_count(&rig, READ), 2);
     task.abort();
 }
@@ -992,7 +1007,14 @@ async fn a_roster_reaches_hub_workers_only_after_it_validates_and_its_grants_com
     wait_until(|| showed(paired)).await;
     let before = rig.home.store.list_member_grants().unwrap();
     // The loop withdraws its roster just before it sleeps after a failure.
-    let withdrawn = || published.lock().unwrap().iter().filter(|seen| seen.is_none()).count();
+    let withdrawn = || {
+        published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.is_none())
+            .count()
+    };
 
     // A roster that omits the paired computer and names another one with a
     // pairing id the store refuses is no roster at all.
@@ -1019,7 +1041,10 @@ async fn a_roster_reaches_hub_workers_only_after_it_validates_and_its_grants_com
     let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
     conn.execute_batch("CREATE TRIGGER fail_grant_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'member_grant_create' BEGIN SELECT RAISE(ABORT, 'grant audit failed'); END;").unwrap();
     let mut fresh = snapshot("all_classes");
-    fresh["devices"].as_array_mut().unwrap().push(json!({"class": "computer",
+    fresh["devices"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"class": "computer",
         "fingerprint": OTHER, "pairing_id": "pair-other",
         "shares": [{"share": "vault", "enabled": true}]}));
     let retry = Held::new();

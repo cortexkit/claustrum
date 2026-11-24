@@ -761,11 +761,17 @@ async fn fleet_positional_arrays_refuse_at_request_item_and_wrap_level_before_st
     for (method, params) in [
         ("fleet.epoch_seal", json!(["", ""])),
         ("fleet.epoch_open", positional_open.clone()),
-        ("fleet.epoch_seal_batch", json!([[{"aad":"","plaintext":""}]])),
+        (
+            "fleet.epoch_seal_batch",
+            json!([[{"aad":"","plaintext":""}]]),
+        ),
         ("fleet.epoch_seal_batch", json!({"items":[["", ""]]})),
         ("fleet.epoch_open_batch", json!({"items":[positional_open]})),
         ("fleet.epoch_status", json!([])),
-        ("fleet.epoch_commit", json!([1, URL_SAFE_NO_PAD.encode([0; 16])])),
+        (
+            "fleet.epoch_commit",
+            json!([1, URL_SAFE_NO_PAD.encode([0; 16])]),
+        ),
         ("fleet.epoch_import", json!([wrap])),
         ("fleet.epoch_import", json!({"wrap":positional_wrap})),
         ("fleet.epoch_wrap_for", json!([member(2)])),

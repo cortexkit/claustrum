@@ -561,6 +561,9 @@ impl Drop for Subscription {
     }
 }
 
+#[cfg(test)]
+type SubscribeHook = Box<dyn FnOnce(&Link) + Send>;
+
 struct Inner {
     connection_file: std::path::PathBuf,
     consumer_identity: Option<ConsumerIdentity>,
@@ -577,7 +580,7 @@ struct Inner {
     /// Runs between a subscription taking its binding and registering its stream,
     /// so a test can close the connection at exactly that point.
     #[cfg(test)]
-    subscribe_hook: Mutex<Option<Box<dyn FnOnce(&Link) + Send>>>,
+    subscribe_hook: Mutex<Option<SubscribeHook>>,
 }
 
 impl std::fmt::Debug for OutboundClient {
@@ -697,7 +700,10 @@ impl OutboundClient {
             used: Mutex::new(None),
             completed: false,
         };
-        match self.call_inner(route_key, &call, budget, &binding.used).await {
+        match self
+            .call_inner(route_key, &call, budget, &binding.used)
+            .await
+        {
             Ok(reply) => {
                 binding.completed = true;
                 Ok(reply)
@@ -1767,7 +1773,8 @@ mod tests {
             let writers = Arc::new(Mutex::new(Vec::new()));
             let accepted = Arc::clone(&writers);
             tokio::spawn(async move {
-                for index in 0.. {
+                let mut index = 0;
+                loop {
                     let mut stream = listener.accept().await.unwrap().0;
                     subc_transport::authenticate_server(
                         &mut stream,
@@ -1792,6 +1799,7 @@ mod tests {
                             let _ = frames_tx.send((index, frame));
                         }
                     });
+                    index += 1;
                 }
             });
             Self {
@@ -1846,7 +1854,9 @@ mod tests {
         }
     }
 
-    fn spawn_call(client: &OutboundClient) -> tokio::task::JoinHandle<Result<Value, OutboundError>> {
+    fn spawn_call(
+        client: &OutboundClient,
+    ) -> tokio::task::JoinHandle<Result<Value, OutboundError>> {
         let client = client.clone();
         tokio::spawn(async move {
             client
@@ -1871,7 +1881,13 @@ mod tests {
         let conn = daemon.open_route(12).await;
         let (_, request) = daemon.next().await;
         assert_eq!(request.header.channel, 12);
-        daemon.send(conn, FrameType::Response, 12, request.header.corr, json!({"ok": true}));
+        daemon.send(
+            conn,
+            FrameType::Response,
+            12,
+            request.header.corr,
+            json!({"ok": true}),
+        );
         assert_eq!(call.await.unwrap().unwrap(), json!({"ok": true}));
         conn
     }
@@ -1886,14 +1902,26 @@ mod tests {
         let early = spawn_call(&client);
         let (_, early_request) = daemon.next().await;
         let refusal = json!({"code": "route_refused", "message": "test"});
-        daemon.send(conn, FrameType::Error, 0, early_request.header.corr, refusal.clone());
+        daemon.send(
+            conn,
+            FrameType::Error,
+            0,
+            early_request.header.corr,
+            refusal.clone(),
+        );
         assert!(early.await.unwrap().is_err());
         assert_eq!(cached_channel(&client), None);
         let newer = spawn_call(&client);
         daemon.open_route(13).await;
         let (_, newer_request) = daemon.next().await;
         assert_eq!(newer_request.header.channel, 13);
-        daemon.send(conn, FrameType::Response, 13, newer_request.header.corr, json!({"ok": true}));
+        daemon.send(
+            conn,
+            FrameType::Response,
+            13,
+            newer_request.header.corr,
+            json!({"ok": true}),
+        );
         assert!(newer.await.unwrap().is_ok());
         daemon.send(conn, FrameType::Error, 0, late_request.header.corr, refusal);
         assert!(late.await.unwrap().is_err());
@@ -1930,7 +1958,13 @@ mod tests {
         let (conn, watch) = daemon.next().await;
         assert_eq!((conn, watch.header.channel), (1, 12));
         let mut subscription = reopened.await.unwrap().unwrap();
-        daemon.send(1, FrameType::StreamData, 12, watch.header.corr, json!({"n": 1}));
+        daemon.send(
+            1,
+            FrameType::StreamData,
+            12,
+            watch.header.corr,
+            json!({"n": 1}),
+        );
         assert_eq!(
             subscription.next_event().await.unwrap(),
             SubscriptionEvent::Data(json!({"n": 1}))
@@ -1954,13 +1988,25 @@ mod tests {
         let mut subscription = subscribing.await.unwrap().unwrap();
         let sent = SUBSCRIPTION_BUFFER + 50;
         for n in 0..sent {
-            daemon.send(conn, FrameType::StreamData, 12, watch.header.corr, json!({"n": n}));
+            daemon.send(
+                conn,
+                FrameType::StreamData,
+                12,
+                watch.header.corr,
+                json!({"n": n}),
+            );
         }
         // The reader handles frames in order, so once this later reply arrives it
         // has handled every notice above.
         let fence = spawn_call(&client);
         let (_, request) = daemon.next().await;
-        daemon.send(conn, FrameType::Response, 12, request.header.corr, json!({"ok": true}));
+        daemon.send(
+            conn,
+            FrameType::Response,
+            12,
+            request.header.corr,
+            json!({"ok": true}),
+        );
         assert!(fence.await.unwrap().is_ok());
         assert!(subscription.replies.len() <= SUBSCRIPTION_BUFFER);
         let mut data = Vec::new();

@@ -6,12 +6,12 @@ use std::{
     sync::Arc,
 };
 
+use credentials_core::hub_counters::HubGeneration;
 use credentials_core::{
     federation::{is_lower_hex_16_bytes, RemoteRecordSource},
     signing::key_id_for_public,
     store::{EncryptedStore, HubLoginApply, HubLoginApplyMode, HubLoginHomeState, StoreOpError},
 };
-use credentials_core::hub_counters::HubGeneration;
 use tokio::{
     sync::{mpsc, watch},
     task::{AbortHandle, JoinSet},
@@ -199,7 +199,11 @@ impl PairingLossRemover {
             let accepted: Vec<_> = store
                 .list_hub_login_homes()?
                 .into_iter()
-                .filter_map(|state| state.pairing_id.map(|pairing| (state.home_member, Some(pairing))))
+                .filter_map(|state| {
+                    state
+                        .pairing_id
+                        .map(|pairing| (state.home_member, Some(pairing)))
+                })
                 .collect();
             let lost: BTreeSet<String> = copies
                 .chain(accepted)

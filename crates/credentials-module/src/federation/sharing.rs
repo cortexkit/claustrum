@@ -484,7 +484,9 @@ pub(super) async fn next_notice(
         SubscriptionEvent::Data(body) => Ok(Some(body)),
         SubscriptionEvent::End => Ok(None),
         SubscriptionEvent::Error { code, .. } => Err(format!("{feed} watch refused: {code}")),
-        SubscriptionEvent::Response(_) => Err(format!("{feed} watch answered instead of streaming")),
+        SubscriptionEvent::Response(_) => {
+            Err(format!("{feed} watch answered instead of streaming"))
+        }
     }
 }
 

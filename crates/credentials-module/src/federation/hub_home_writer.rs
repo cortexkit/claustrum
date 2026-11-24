@@ -4,9 +4,9 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
 use credentials_core::{
     federation::{MemberGrantOperation, RemoteWatchRow},
+    hub_counters::HubGeneration,
     kem::MAX_HUB_LOGINS_PLAINTEXT,
     signing::key_id_for_public,
-    hub_counters::HubGeneration,
     store::{EncryptedStore, HubLoginKind, HubLoginRecipient, HubLoginTarget, StoreOpError},
 };
 use serde_json::json;
@@ -362,25 +362,24 @@ impl MemberState {
         let kind = inventory.kind();
         // The hub holds a value this home published at or above the local row's
         // generation (a restored backup): only a new, higher generation can replace it.
-        let behind = floor.is_some_and(|floor| {
-            target
-                .as_ref()
-                .is_none_or(|row| row.generation <= floor)
-        });
-        let seal = behind || target.as_ref().is_none_or(|row| {
-            row.kind != kind
-                || row.box_id != recipient.box_id
-                || row.pairing_id != recipient.pairing_id
-                || row.transfer_public_key != recipient.key
-                || !matches_sender(row, &sender, home_box)
-        }) || match &inventory {
-            Inventory::Eligible(rows) => {
-                self.starting
-                    || target.as_ref().is_some_and(|row| row.stale)
-                    || !remote_watch_lists_equal(&self.last_rows, rows)
-            }
-            Inventory::Ended => self.last_kind == Some(HubLoginKind::Snapshot),
-        };
+        let behind =
+            floor.is_some_and(|floor| target.as_ref().is_none_or(|row| row.generation <= floor));
+        let seal = behind
+            || target.as_ref().is_none_or(|row| {
+                row.kind != kind
+                    || row.box_id != recipient.box_id
+                    || row.pairing_id != recipient.pairing_id
+                    || row.transfer_public_key != recipient.key
+                    || !matches_sender(row, &sender, home_box)
+            })
+            || match &inventory {
+                Inventory::Eligible(rows) => {
+                    self.starting
+                        || target.as_ref().is_some_and(|row| row.stale)
+                        || !remote_watch_lists_equal(&self.last_rows, rows)
+                }
+                Inventory::Ended => self.last_kind == Some(HubLoginKind::Snapshot),
+            };
         let mut current = target;
         if seal {
             let plaintext = match &inventory {
@@ -499,7 +498,9 @@ fn attempt(hub: Arc<dyn Hub>, row: Arc<HubLoginTarget>, at: Instant) -> HubAttem
         };
         let key = format!("{}.{}", hub.box_id(), row.box_id);
         match hub.entry(SHARED_LOGINS, &key).await? {
-            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => Ok(None),
+            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => {
+                Ok(None)
+            }
             Some(entry)
                 if published_generation(&entry, hub.box_id(), &row.box_id)
                     .is_some_and(|published| published > row.generation) =>
@@ -520,7 +521,11 @@ fn attempt(hub: Arc<dyn Hub>, row: Arc<HubLoginTarget>, at: Instant) -> HubAttem
 
 /// The generation in a hub value's readable header, when it names this home's box
 /// and the recipient's box.
-fn published_generation(entry: &HubEntry, home_box: &str, member_box: &str) -> Option<HubGeneration> {
+fn published_generation(
+    entry: &HubEntry,
+    home_box: &str,
+    member_box: &str,
+) -> Option<HubGeneration> {
     if entry.operation != HubOperation::Put {
         return None;
     }
@@ -582,8 +587,8 @@ impl MemberTask {
             {
                 return (state, None);
             }
-            let next =
-                decision.and_then(|decision| state.commit(&store, &member, &home_box, decision, floor));
+            let next = decision
+                .and_then(|decision| state.commit(&store, &member, &home_box, decision, floor));
             (state, Some(next))
         })
         .await

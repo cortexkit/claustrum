@@ -353,7 +353,7 @@ impl EncryptedStore {
         self.fleet_read(|conn| {
             let myself = self_member(conn)?;
             let row = current_row(conn)?
-                .filter(|r| r.members.iter().any(|id| *id == myself))
+                .filter(|r| r.members.contains(&myself))
                 .ok_or(FleetError::EpochUnavailable)?;
             if any_removed(conn, &row.members)? {
                 return Err(FleetError::EpochUnavailable);

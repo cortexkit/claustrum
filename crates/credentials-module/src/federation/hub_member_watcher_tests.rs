@@ -1,9 +1,4 @@
 use super::*;
-use credentials_core::{
-    federation::VAULT_TRANSFER_ID,
-    kem,
-    record::{CredentialKind, VaultRecord},
-};
 use crate::federation::{
     hub::{
         stand_in::{StandIn, StandInClient},
@@ -21,6 +16,11 @@ use credentials_core::{
     key::MasterKey,
     record::RecordIdentity,
     test_support::TestTempDir,
+};
+use credentials_core::{
+    federation::VAULT_TRANSFER_ID,
+    kem,
+    record::{CredentialKind, VaultRecord},
 };
 use serde_json::{json, Value};
 use std::{
@@ -752,11 +752,21 @@ async fn the_transfer_key_is_decrypted_once_across_unrelated_writes() {
     let mut rig = Rig::new(true);
     rig.start();
     rig.opened(1).await;
-    assert_eq!(wait(rig.refreshed.recv()).await.map(|(decrypts, _)| decrypts), Some(1));
+    assert_eq!(
+        wait(rig.refreshed.recv())
+            .await
+            .map(|(decrypts, _)| decrypts),
+        Some(1)
+    );
     for n in 0..5 {
         // Each write wakes a refresh of every local input.
         rig.add_handmade(&format!("oauth:unrelated-{n}"));
-        assert_eq!(wait(rig.refreshed.recv()).await.map(|(decrypts, _)| decrypts), Some(1));
+        assert_eq!(
+            wait(rig.refreshed.recv())
+                .await
+                .map(|(decrypts, _)| decrypts),
+            Some(1)
+        );
     }
 }
 

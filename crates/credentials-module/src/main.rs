@@ -56,12 +56,7 @@ use credentials_core::audit::AuthEventKind;
 use credentials_core::engine::RefreshEngine;
 use credentials_core::enrollment::{EnrollmentDisposition, EnrollmentError, EnrollmentRefusal};
 use credentials_core::http::ReqwestTransport;
-use credentials_core::refresh_adapters::{
-    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, cursor::CursorAdapter,
-    devin::DevinAdapter, digitalocean::DigitalOceanAdapter, github_app::GithubAppAdapter,
-    github_copilot::GithubCopilotAdapter, google::GoogleAdapter, kimi::KimiAdapter,
-    openai::OpenAiAdapter, snowflake::SnowflakeAdapter, xai::XaiAdapter, RefreshAdapter,
-};
+use credentials_core::refresh_adapters::registered_refresh_adapters;
 use credentials_core::resolver::{self, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 #[cfg(test)]
@@ -831,7 +826,13 @@ fn spawn_health_refresher(surface: Arc<ReadSurface>) -> tokio::task::JoinHandle<
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            surface.refresh_health();
+            let surface = Arc::clone(&surface);
+            if tokio::task::spawn_blocking(move || surface.refresh_health())
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     })
 }
@@ -995,35 +996,6 @@ async fn build_surface(
         login_sharing,
         org_learner,
     ))
-}
-
-/// Every refresh adapter the daemon registers, in one place so a test can enumerate
-/// them. A new adapter added here also needs its `auth_method` decided in
-/// `credentials_core::list_auth_method` and listed in the expected map of
-/// `every_registered_refresh_adapter_has_an_explicit_auth_method` below, which fails
-/// naming any registered adapter the map does not list.
-fn registered_refresh_adapters(kimi_device_id_file: PathBuf) -> Vec<Arc<dyn RefreshAdapter>> {
-    vec![
-        Arc::new(AnthropicAdapter::new()),
-        Arc::new(CursorAdapter::new()),
-        Arc::new(DevinAdapter::new()),
-        Arc::new(DigitalOceanAdapter::new()),
-        Arc::new(OpenAiAdapter::new()),
-        // Google defaults to the public gemini-cli client (id + secret) that opencode
-        // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
-        // is required for the common case.
-        Arc::new(GoogleAdapter::new()),
-        Arc::new(GoogleAdapter::gmail()),
-        Arc::new(SnowflakeAdapter::new()),
-        Arc::new(XaiAdapter::new()),
-        Arc::new(GithubCopilotAdapter::new()),
-        Arc::new(GithubAppAdapter::new()),
-        Arc::new(credentials_core::refresh_adapters::meta::MetaAdapter),
-        Arc::new(KimiAdapter::from_device_id_file(kimi_device_id_file)),
-        // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
-        // from the gemini-cli client the google adapter uses.
-        Arc::new(AntigravityAdapter::new()),
-    ]
 }
 
 /// Record WHY boot reconciliation forced any credential to `needs_reauth`.
@@ -1505,7 +1477,7 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         VaultHealthStatus::Degraded => HealthStatus::Degraded,
         VaultHealthStatus::Failing => HealthStatus::Failing,
     };
-    let detail = if health.refresher_stalled {
+    let mut detail = if health.refresher_stalled {
         Some(
             "health refresher stalled: the background snapshot task stopped updating \
              (wedged or panicked); serving a possibly-stale snapshot, restart the daemon"
@@ -1538,6 +1510,20 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
     } else {
         None
     };
+    if health.status == VaultHealthStatus::Degraded && health.overdue_intents > 0 {
+        let overdue = format!(
+            "{} overdue refresh intent(s) [{}]",
+            health.overdue_intents,
+            health.overdue_intent_ids.join(", ")
+        );
+        match &mut detail {
+            Some(detail) => {
+                detail.push_str("; ");
+                detail.push_str(&overdue);
+            }
+            None => detail = Some(overdue),
+        }
+    }
     // The counts are OMITTED when the store could not be read, rather than reported as
     // zero.
     //
@@ -3977,6 +3963,7 @@ mod tests {
     struct TtlFixtureAdapter {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         fresh_ttl_ms: i64,
+        release_first_exchange: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait::async_trait]
@@ -3993,7 +3980,10 @@ mod tests {
             credentials_core::refresh_adapters::RefreshedTokens,
             credentials_core::refresh_adapters::RefreshError,
         > {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let prior_calls = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let (0, Some(release)) = (prior_calls, self.release_first_exchange.as_ref()) {
+                release.notified().await;
+            }
             Ok(credentials_core::refresh_adapters::RefreshedTokens {
                 access_token: "fresh-after-ttl-check".to_string().into(),
                 refresh_token: credential.refresh_token.clone(),
@@ -4018,11 +4008,24 @@ mod tests {
         Arc<EncryptedStore>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        ttl_surface_with_exchange_gate(seed, fresh_ttl_ms, None)
+    }
+
+    fn ttl_surface_with_exchange_gate(
+        seed: u8,
+        fresh_ttl_ms: i64,
+        release_first_exchange: Option<Arc<tokio::sync::Notify>>,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<EncryptedStore>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let (_unused_surface, store, _db_path, _root) = tmp_surface_with_store(seed);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let adapter = TtlFixtureAdapter {
             calls: Arc::clone(&calls),
             fresh_ttl_ms,
+            release_first_exchange,
         };
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(
@@ -4032,6 +4035,45 @@ mod tests {
         ));
         let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
         (surface, store, calls)
+    }
+
+    #[tokio::test]
+    async fn a_single_flight_waiter_checks_its_own_minimum_ttl_after_one_exchange() {
+        use std::future::{poll_fn, Future};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (surface, store, calls) =
+            ttl_surface_with_exchange_gate(91, 600_000, Some(release.clone()));
+        let handle = seed_ttl_refreshable(&store, "oauth:ttl-shared", 0);
+        let leader_params = GetParams {
+            handle: handle.clone(),
+            min_ttl_ms: Some(300_000),
+            force_refresh: false,
+        };
+        let waiter_params = GetParams {
+            handle,
+            min_ttl_ms: Some(1_200_000),
+            force_refresh: false,
+        };
+        let leader = surface.get(91, &leader_params);
+        let waiter = surface.get(92, &waiter_params);
+        tokio::pin!(leader, waiter);
+        poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(waiter.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.notify_one();
+        assert!(matches!(leader.await, read_surface::GetOutcome::Ok(_)));
+        let outcome = waiter.await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(outcome, read_surface::GetOutcome::Err { error } if error.code == read_surface::ReadError::TtlUnsatisfiable)
+        );
     }
 
     fn seed_ttl_refreshable(
@@ -13409,6 +13451,36 @@ mod tests {
     /// The first cached snapshot must expose exactly the same tip pair as the store.
     /// This proves the health path emits the current entry MAC rather than only a
     /// convenient sequence count.
+    #[tokio::test]
+    async fn overdue_refresh_intent_degrades_health_and_names_the_credential() {
+        let (surface, store, db, _root) = tmp_surface_with_store(204);
+        store
+            .remove_audited("apikey:dead", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        seed_ttl_refreshable(&store, "oauth:stuck", 600_000);
+        store.open_intent("oauth:stuck", 1, "intent-hash").unwrap();
+        surface.refresh_health();
+        assert_eq!(
+            surface.health_snapshot().status,
+            credentials_core::health::VaultHealthStatus::Ok
+        );
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute("UPDATE refresh_intent SET started_at_ms = 0", [])
+            .unwrap();
+        surface.refresh_health();
+        let snapshot = surface.health_snapshot();
+        assert_eq!(snapshot.open_intents, 1);
+        let ModuleControlResponse::HealthCheck { status, detail, .. } = health_report(&snapshot)
+        else {
+            panic!("expected a health response");
+        };
+        assert_eq!(status, HealthStatus::Degraded);
+        let detail = detail.unwrap();
+        assert!(detail.contains("1 overdue refresh intent"));
+        assert!(detail.contains("oauth:stuck"));
+    }
+
     #[tokio::test]
     async fn health_snapshot_audit_tip_matches_store_tip_pair() {
         let (surface, store, _db, _root) = tmp_surface_with_store(10);

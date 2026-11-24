@@ -3,9 +3,29 @@
 use super::github_app_store::managed_github_app_companion;
 use super::*;
 
-/// Refuse a static record whose payload is a short-term Amazon Bedrock API key. Applied at
-/// every operator deposit sink (create, import, login and `put --replace` all reach one of
-/// the two), so no door can store a key that dies within 12 hours.
+struct CredentialSnapshot {
+    record: VaultRecord,
+    incarnation: String,
+    mark: StaleMark,
+    has_refresh_intent: bool,
+    envelope: Vec<u8>,
+}
+
+impl CredentialSnapshot {
+    fn with_digest(self) -> StoredRead {
+        StoredRead {
+            record: self.record,
+            incarnation: self.incarnation,
+            mark: self.mark,
+            has_refresh_intent: self.has_refresh_intent,
+            stored_digest_hex: sha256_hex_of_bytes(&self.envelope),
+        }
+    }
+}
+
+/// Refuse a static record whose payload is a short-term Amazon Bedrock API key.
+/// Check every path where an operator stores a credential so none can store a
+/// key that dies within 12 hours.
 pub(super) fn refuse_short_term_bedrock_key(record: &VaultRecord) -> Result<(), StoreOpError> {
     if record.kind == CredentialKind::Oauth {
         return Ok(());
@@ -41,6 +61,33 @@ pub(super) fn refuse_incoming_agent_ssh(record: &VaultRecord) -> Result<(), Stor
         return Err(StoreOpError::InvalidAgentSsh);
     }
     Ok(())
+}
+
+fn check_overwrite_input(credential_id: &str, record: &VaultRecord) -> Result<(), StoreOpError> {
+    check_github_app_companion_id(credential_id)?;
+    refuse_incoming_agent_ssh(record)?;
+    refuse_short_term_bedrock_key(record)
+}
+
+fn validate_overwrite_identity(
+    credential_id: &str,
+    record: &VaultRecord,
+) -> Result<VaultRecord, StoreOpError> {
+    let incoming = normalize_record_identity(record.clone());
+    if let (Some(supplied), Some(derived)) = (
+        incoming.identity.account_id.as_ref(),
+        derived_account_id(&incoming),
+    ) {
+        if supplied != &derived {
+            return Err(StoreOpError::SuppliedIdentityContradictsClaim {
+                credential_id: credential_id.to_string(),
+                supplied_account_id: supplied.clone(),
+                derived_account_id: derived,
+            });
+        }
+    }
+    validate_record_identity(&incoming)?;
+    Ok(incoming)
 }
 
 /// Use plaintext row identity, not the old envelope: replacing a damaged key must
@@ -476,8 +523,7 @@ impl EncryptedStore {
         expected_payload_hash: &[u8; 32],
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        check_github_app_companion_id(credential_id)?;
-        refuse_incoming_agent_ssh(record)?;
+        check_overwrite_input(credential_id, record)?;
         validate_deposit_credential_id(credential_id)?;
         // A CAS replace at the current version is still a replace: the transfer key's
         // active record cannot be overwritten under it.
@@ -494,8 +540,7 @@ impl EncryptedStore {
             return Err(StoreOpError::CasMismatch);
         }
         let next_version = current.record_version.saturating_add(1);
-        let mut record = normalize_record_identity(record.clone());
-        validate_record_identity(&record)?;
+        let mut record = validate_overwrite_identity(credential_id, record)?;
         retain_detected_plan(&mut record, Some(&current));
         record.record_version = next_version;
         let blob = self.seal_record(credential_id, &record)?;
@@ -536,15 +581,7 @@ impl EncryptedStore {
                     current.record_version as i64
                 ],
             )?;
-            // Clear any dangling intent in the same txn (see `create`): an admin
-            // overwrite with fresh valid tokens must clear the old intent, or boot
-            // reconciliation's hash-mismatch check would later undo this re-login.
             if n > 0 {
-                if let Some(companion) = companion {
-                    tx.execute("DELETE FROM credentials WHERE credential_id = ?1", [companion])?;
-                }
-                clear_intent_tx(tx, credential_id)?;
-                delete_local_condition_tx(tx, credential_id)?;
                 clear_plan_on_account_change_tx(
                     tx,
                     &audit_key,
@@ -553,18 +590,7 @@ impl EncryptedStore {
                     &record.identity,
                     ctx,
                 )?;
-                clear_agent_ssh_state_tx(tx, credential_id)?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: ctx.op,
-                        credential_id: Some(credential_id.to_string()),
-                        payload_hash: Some(payload_hash_hex),
-                        actor: ctx.actor.to_string(),
-                        alarm: ctx.alarm,
-                    },
-                )?;
+                self.finish_overwrite_tx(tx, credential_id, companion, payload_hash_hex, ctx)?;
             }
             Ok(Ok(Some(n)))
         })?;
@@ -621,24 +647,9 @@ impl EncryptedStore {
         preserve_existing_identity: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        check_github_app_companion_id(credential_id)?;
-        refuse_incoming_agent_ssh(record)?;
-        refuse_short_term_bedrock_key(record)?;
+        check_overwrite_input(credential_id, record)?;
         self.check_vault_transfer_key_writable(credential_id)?;
-        let incoming = normalize_record_identity(record.clone());
-        if let (Some(supplied), Some(derived)) = (
-            incoming.identity.account_id.as_ref(),
-            derived_account_id(&incoming),
-        ) {
-            if supplied != &derived {
-                return Err(StoreOpError::SuppliedIdentityContradictsClaim {
-                    credential_id: credential_id.to_string(),
-                    supplied_account_id: supplied.clone(),
-                    derived_account_id: derived,
-                });
-            }
-        }
-        validate_record_identity(&incoming)?;
+        let incoming = validate_overwrite_identity(credential_id, record)?;
         let incoming_account_id = preserve_existing_identity
             .then_some(())
             .filter(|_| incoming.identity.is_empty())
@@ -739,25 +750,7 @@ impl EncryptedStore {
                 ],
             )?;
             if n > 0 {
-                if let Some(companion) = companion {
-                    tx.execute("DELETE FROM credentials WHERE credential_id = ?1", [companion])?;
-                }
-                clear_intent_tx(tx, credential_id)?;
-                delete_local_condition_tx(tx, credential_id)?;
-                clear_agent_ssh_state_tx(tx, credential_id)?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: ctx.op,
-                        credential_id: Some(credential_id.to_string()),
-                        payload_hash: Some(payload_hash_hex),
-                        actor: ctx.actor.to_string(),
-                        alarm: ctx.alarm,
-                    },
-                )?;
-            }
-            if n > 0 {
+                self.finish_overwrite_tx(tx, credential_id, companion, payload_hash_hex, ctx)?;
                 clear_plan_on_account_change_tx(
                     tx,
                     &audit_key,
@@ -785,6 +778,38 @@ impl EncryptedStore {
             IdentityPolicyOverwriteOutcome::Updated(0) => Err(StoreOpError::CasMismatch),
             IdentityPolicyOverwriteOutcome::Updated(_) => Ok(()),
         }
+    }
+
+    fn finish_overwrite_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        credential_id: &str,
+        companion: Option<String>,
+        payload_hash_hex: String,
+        ctx: AuditCtx<'_>,
+    ) -> rusqlite::Result<()> {
+        if let Some(companion) = companion {
+            tx.execute(
+                "DELETE FROM credentials WHERE credential_id = ?1",
+                [companion],
+            )?;
+        }
+        // Reconciliation must not use an intent left over from the previous tokens.
+        clear_intent_tx(tx, credential_id)?;
+        delete_local_condition_tx(tx, credential_id)?;
+        clear_agent_ssh_state_tx(tx, credential_id)?;
+        append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AuditRecord {
+                op: ctx.op,
+                credential_id: Some(credential_id.to_string()),
+                payload_hash: Some(payload_hash_hex),
+                actor: ctx.actor.to_string(),
+                alarm: ctx.alarm,
+            },
+        )?;
+        Ok(())
     }
 
     /// Replace only non-secret account identity, preserving every secret field and the
@@ -994,7 +1019,7 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<(VaultRecord, StaleMark), StoreOpError> {
-        let read = self.get_with_stale_pending_and_digest(credential_id)?;
+        let read = self.read_snapshot(credential_id, None, None)?;
         Ok((read.record, read.mark))
     }
 
@@ -1005,7 +1030,8 @@ impl EncryptedStore {
         credential_id: &str,
         incarnation: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, Some(incarnation))
+        self.read_snapshot(credential_id, Some(incarnation), None)
+            .map(CredentialSnapshot::with_digest)
     }
 
     /// The same read as [`Self::get_with_stale_pending`], plus the SHA-256 of the exact
@@ -1021,14 +1047,24 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, None)
+        self.read_snapshot(credential_id, None, None)
+            .map(CredentialSnapshot::with_digest)
+    }
+
+    pub(crate) fn get_for_reconciliation(
+        &self,
+        intent: &RefreshIntent,
+    ) -> Result<(VaultRecord, String), StoreOpError> {
+        self.read_snapshot(&intent.credential_id, None, Some(intent.record_version))
+            .map(|read| (read.record, read.incarnation))
     }
 
     fn read_snapshot(
         &self,
         credential_id: &str,
         expected_incarnation: Option<&str>,
-    ) -> Result<StoredRead, StoreOpError> {
+        retained_intent_version: Option<u64>,
+    ) -> Result<CredentialSnapshot, StoreOpError> {
         let row = self
             .store
             .with_conn(|c| {
@@ -1069,14 +1105,24 @@ impl EncryptedStore {
         if expected_incarnation.is_some_and(|expected| expected != incarnation) {
             return Err(StoreOpError::NotFound);
         }
+        let decode_state = if state == RecordState::NeedsReauth.as_str()
+            && has_refresh_intent
+            && retained_intent_version == Some(version as u64)
+        {
+            // Only startup reconciliation may inspect a needs_reauth record with
+            // its intent still open; this does not change the serving state.
+            RecordState::Active.as_str()
+        } else {
+            &state
+        };
         let (record, pending) = self.decode_record_row(
             credential_id,
             (version, &incarnation),
-            &state,
+            decode_state,
             stale_pending,
             &blob,
         )?;
-        Ok(StoredRead {
+        Ok(CredentialSnapshot {
             record,
             incarnation,
             mark: StaleMark {
@@ -1084,7 +1130,7 @@ impl EncryptedStore {
                 record_written_at_ms: updated_at_ms,
             },
             has_refresh_intent,
-            stored_digest_hex: sha256_hex_of_bytes(&blob),
+            envelope: blob,
         })
     }
 
@@ -1109,7 +1155,7 @@ impl EncryptedStore {
             credential_id,
             record_version: version as u64,
         };
-        let plaintext = match envelope::open(&self.key, blob, &binding) {
+        let plaintext = match open_credential_envelope(&self.key, blob, &binding) {
             Ok(pt) => pt,
             Err(e) => {
                 // Per-record quarantine: a single undecryptable row is isolated so
@@ -1162,13 +1208,10 @@ impl EncryptedStore {
     ///
     /// This closes a false-invalidation race: a consumer reports a 401 for the token it
     /// held at version N, but the vault has meanwhile refreshed to N+1 (a fresh, working
-    /// token); the stale report must NOT kill the healthy N+1 credential. Because every
-    /// durable mutation is serialized through the store's single writer connection, this
-    /// CAS and a concurrent `commit_refresh` can never interleave: report-first flips
-    /// state at version N and the refresh's `WHERE record_version = N` still overwrites it
-    /// back to active N+1; refresh-first bumps to N+1 and this CAS matches 0 rows → no-op.
-    /// Either ordering converges on the fresh token. It also neuters malicious
-    /// invalidation: a consumer can only ever kill the exact version it was served.
+    /// token); the stale report does not invalidate the healthy N+1 credential.
+    /// If the report commits first, the credential stays `needs_reauth` and the
+    /// in-flight refresh result is discarded with `CasMismatch`. If the refresh
+    /// commits first, the changed version makes the report a no-op.
     ///
     /// A no-op (Ok(false)) if the id is absent.
     pub fn invalidate_if_version_audited(
@@ -1359,10 +1402,14 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<InvalidateOutcome, StoreOpError> {
+        check_github_app_companion_id(credential_id)?;
         self.check_vault_transfer_key_writable(credential_id)?;
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        self.fenced_write(|tx| {
+        self.fenced_write_or_refuse(|tx| {
+            if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
+                return Ok(Err(StoreOpError::PolicyRootProtected));
+            }
             let state_changed = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
                  WHERE credential_id = ?1 AND state IN (?4, ?5)",
@@ -1406,13 +1453,12 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(InvalidateOutcome {
+            Ok(Ok(InvalidateOutcome {
                 state_changed,
                 intent_cleared,
                 handles_revoked: revoked,
-            })
+            }))
         })
-        .map_err(StoreOpError::from)
     }
 
     /// The COMPOUND authoritative invalidate: mark `needs_reauth`, clear any

@@ -834,7 +834,7 @@ fn usage_short() -> String {
        reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
        events              why credentials failed to authenticate\n\
-       usable              which credentials can still serve or refresh\n\
+       usable              check which credentials can serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
        verify-github-apps  check GitHub App record ids against GitHub's slugs\n\
        github-app          create Apps or manage their webhook relay\n\
@@ -844,7 +844,7 @@ fn usage_short() -> String {
          federation          member setup and config-file sharing status\n\
            secret              agent secrets; phone, multi-host, basic-auth gates\n\
            module-secret       list, delete or move module-owned secrets\n\
-       rotate-master-key   rotate the vault master key (offline)\n\
+       rotate-master-key   rotate the master key and report corrupt rows (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
      GLOBAL FLAGS\n\
@@ -1691,10 +1691,10 @@ fn help_verb(verb: &str) -> String {
              The only command that decrypts. 'status' and 'list' read plaintext metadata, so\n\
              neither can see a record that decrypts to nothing usable.\n\
              \n\
-             Scores STRANDED: a record holding neither a usable access token nor any refresh\n\
-             material, so it can never serve again without an operator login. Expiry is\n\
-             printed but never scored -- an expired access token beside live refresh material\n\
-             is the routine state of a healthy credential, and it refreshes on the next read.\n\
+             STRANDED means neither a usable access token nor refresh material remains.\n\
+             Expiry alone is normal for an active record that can refresh on the next read.\n\
+             If a record needs a refresh but its adapter cannot use the stored material,\n\
+             the report says 'unsupported refresh configuration'.\n\
              \n\
              Safe while the daemon runs: read-only, takes no lease, writes nothing.\n\
              \n\
@@ -1731,8 +1731,9 @@ fn help_verb(verb: &str) -> String {
             "ck auth rotate-master-key\n\
              \n\
              NOTES\n\
-             Crash-safe two-slot rotation of the vault master key (ALWAYS offline; stop the\n\
-             daemon first). Re-seals every record under the new key."
+             Rotate the vault master key using two crash-safe slots. Stop the daemon first.\n\
+             Re-seal readable rows under the new key. Rows newly marked corrupt are listed\n\
+             separately from rows already marked corrupt before rotation."
         }
         "bootstrap" => {
             "ck auth bootstrap\n\

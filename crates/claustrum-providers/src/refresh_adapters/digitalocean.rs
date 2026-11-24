@@ -88,6 +88,10 @@ impl RefreshAdapter for DigitalOceanAdapter {
         ADAPTER_NAME
     }
 
+    fn can_refresh(&self) -> bool {
+        false
+    }
+
     async fn refresh(
         &self,
         _cred: &OAuthCredential,

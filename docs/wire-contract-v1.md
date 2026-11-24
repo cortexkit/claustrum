@@ -59,7 +59,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_recipient_key` | permanent | a `credential.seal` recipient key is not 32 bytes, or is a low-order X25519 point |
 | `seal_rate_limited` | transient | this connection has reached the scoped refusal threshold `credential.open` and `credential.seal` share |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
-| `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
+| `refresh_unsupported` | permanent | an operation that requires a refresh cannot run for this record |
 | `needs_reauth` | auth_required | the provider refused the stored login for good (for example `invalid_grant`, or a GitHub App that is no longer installed) and it stays refused until a new login, the credential was deliberately retired, or it has an unresolved refresh intent |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
@@ -791,7 +791,8 @@ someone withdrew it, never that the credential behind it was fixed.
 
 Two optional levers, and they are the same lever pointed differently:
 
-- `force_refresh: true` — exchange before serving, unconditionally.
+- `force_refresh: true` — exchange before serving if the record has a refresh adapter.
+  A record with no refresh adapter still serves its stored secret.
 - `min_ttl_ms: <n>` — exchange if the token has less than `n` remaining.
 
 `min_ttl_ms` is evaluated **only when you supply it**. There is no implicit floor, and

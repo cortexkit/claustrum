@@ -42,6 +42,32 @@ pub mod openai;
 pub mod snowflake;
 pub mod xai;
 
+/// The provider registry shared by the daemon and offline diagnostics.
+pub fn registered_refresh_adapters(
+    kimi_device_id_file: std::path::PathBuf,
+) -> Vec<std::sync::Arc<dyn RefreshAdapter>> {
+    use std::sync::Arc;
+
+    vec![
+        Arc::new(anthropic::AnthropicAdapter::new()),
+        Arc::new(cursor::CursorAdapter::new()),
+        Arc::new(devin::DevinAdapter::new()),
+        Arc::new(digitalocean::DigitalOceanAdapter::new()),
+        Arc::new(openai::OpenAiAdapter::new()),
+        // Google defaults to the public gemini-cli client and allows environment overrides.
+        Arc::new(google::GoogleAdapter::new()),
+        Arc::new(google::GoogleAdapter::gmail()),
+        Arc::new(snowflake::SnowflakeAdapter::new()),
+        Arc::new(xai::XaiAdapter::new()),
+        Arc::new(github_copilot::GithubCopilotAdapter::new()),
+        Arc::new(github_app::GithubAppAdapter::new()),
+        Arc::new(meta::MetaAdapter),
+        Arc::new(kimi::KimiAdapter::from_device_id_file(kimi_device_id_file)),
+        // Antigravity uses a different Google OAuth client from gemini-cli.
+        Arc::new(antigravity::AntigravityAdapter::new()),
+    ]
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 #[cfg(test)]
@@ -319,6 +345,11 @@ pub(crate) fn form_urlencode(pairs: &[(&str, &str)]) -> String {
 pub trait RefreshAdapter: Send + Sync {
     /// The adapter's stable name (matches `VaultRecord::refresh_adapter`).
     fn name(&self) -> &str;
+
+    /// Whether this adapter can exchange refresh material for a fresh access token.
+    fn can_refresh(&self) -> bool {
+        true
+    }
 
     /// Exchange the credential's refresh token for new tokens. ROTATES — never
     /// called during crash recovery.

@@ -989,6 +989,113 @@ impl Drop for GrantCliVault {
 }
 
 #[test]
+fn usable_reports_an_unsupported_refresh_adapter_separately() {
+    let vault = GrantCliVault::new("usable-unsupported-adapter");
+    vault.bootstrap();
+    let raw = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    })
+    .unwrap();
+    EncryptedStore::migrate(&raw).unwrap();
+    let key = credentials_core::resolver::resolve(
+        &credentials_core::resolver::ResolverConfig {
+            data_dir: vault.data_dir.clone(),
+            source: credentials_core::resolver::KeySource::OperatorPath {
+                path: vault.key_path.clone(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let store = EncryptedStore::open(raw, key).unwrap();
+    for (id, adapter) in [
+        ("oauth:unknown", "unknown-fixture"),
+        ("oauth:known", "anthropic"),
+        ("oauth:static-adapter", "digitalocean"),
+    ] {
+        let record = credentials_core::record::VaultRecord::new_oauth(
+            "test",
+            adapter,
+            credentials_core::oauth::OAuthCredential {
+                access_token: "expired".to_owned().into(),
+                refresh_token: "sample".to_owned().into(),
+                expires_at_ms: Some(0),
+                token_url: String::new(),
+                client_id: None,
+                client_secret: None,
+                scopes: Vec::new(),
+            },
+            b"test-material".to_vec(),
+        );
+        store.create(id, &record).unwrap();
+    }
+    drop(store);
+    let result = vault.run(&["usable"]);
+    assert!(result.status.success());
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let unknown = stdout
+        .lines()
+        .find(|line| line.contains("oauth:unknown"))
+        .unwrap();
+    assert!(unknown.contains("unsupported refresh configuration"));
+    assert!(!unknown.contains("refreshes on next get"));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("oauth:known") && line.contains("refreshes on next get")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("oauth:static-adapter")
+            && line.contains("unsupported refresh configuration")));
+    assert!(stdout.contains("serviceable: 1"));
+}
+
+#[test]
+fn rotation_labels_preexisting_corruption_separately() {
+    let vault = GrantCliVault::new("rotation-corruption-label");
+    vault.bootstrap();
+    for id in ["apikey:previous", "apikey:new"] {
+        assert!(vault
+            .run(&[
+                "put",
+                "--id",
+                id,
+                "--payload-file",
+                &payload_file("fixture")
+            ])
+            .status
+            .success());
+    }
+    {
+        let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+        conn.execute_batch(
+            "UPDATE credentials SET envelope = X'00' WHERE credential_id IN ('apikey:previous', 'apikey:new');
+             UPDATE credentials SET state = 'corrupt' WHERE credential_id = 'apikey:previous';"
+        ).unwrap();
+    }
+    let result = vault.run(&["rotate-master-key"]);
+    assert!(result.status.success());
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let new = stderr
+        .lines()
+        .find(|line| line.contains("quarantined as corrupt"))
+        .unwrap();
+    assert!(new.contains("apikey:new"));
+    assert!(!new.contains("apikey:previous"));
+    assert!(stderr
+        .lines()
+        .any(|line| line.contains("already corrupt") && line.contains("apikey:previous")));
+}
+
+#[test]
 fn cli_review_minted_bearer_is_stdout_only() {
     let vault = GrantCliVault::new("mint-streams");
     vault.bootstrap();

@@ -358,14 +358,36 @@ pub struct StoredRead {
     pub(crate) stored_digest_hex: String,
 }
 
+/// Rows that need operator repair after a master-key rotation.
+#[derive(Debug, Default)]
+pub struct KeyRotationReport {
+    pub newly_quarantined: Vec<String>,
+    pub already_corrupt: Vec<String>,
+}
+
 /// Lowercase-hex SHA-256 of arbitrary bytes, the encoding every digest this store and
 /// its callers compare uses.
 pub(crate) fn sha256_hex_of_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    #[cfg(test)]
+    ENVELOPE_DIGEST_COUNT.set(ENVELOPE_DIGEST_COUNT.get() + 1);
+    hex32(&Sha256::digest(bytes).into())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ENVELOPE_DIGEST_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CREDENTIAL_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn open_credential_envelope(
+    key: &MasterKey,
+    blob: &[u8],
+    binding: &RecordBinding<'_>,
+) -> Result<Zeroizing<Vec<u8>>, envelope::EnvelopeError> {
+    #[cfg(test)]
+    CREDENTIAL_OPEN_COUNT.set(CREDENTIAL_OPEN_COUNT.get() + 1);
+    envelope::open(key, blob, binding)
 }
 
 fn credential_incarnation_matches(
@@ -1924,12 +1946,21 @@ impl EncryptedStore {
     /// in the same transaction and its id is collected, rather than silently skipped
     /// while the rotation still reports success. Dropping the old key loses nothing
     /// further (the row was already unreadable), but marking it `corrupt` means the
-    /// post-rotation health scan and the returned id list SURFACE it instead of leaving a
-    /// still-old-key-sealed row behind a "success". The returned `Vec` is the quarantined
-    /// ids (empty on a clean rotation) so the CLI can warn the operator.
+    /// post-rotation health scan and the returned id list surface it. The returned
+    /// list contains only rows that became `corrupt` during this rotation.
     ///
     /// On success the store's in-memory key + key_id are swapped to the new key.
     pub fn rotate_master_key(&mut self, new_key: MasterKey) -> Result<Vec<String>, StoreOpError> {
+        Ok(self
+            .rotate_master_key_with_report(new_key)?
+            .newly_quarantined)
+    }
+
+    /// Rotate the key and report new quarantines separately from already-corrupt rows.
+    pub fn rotate_master_key_with_report(
+        &mut self,
+        new_key: MasterKey,
+    ) -> Result<KeyRotationReport, StoreOpError> {
         let old_key = &self.key;
         let new_key_id_hex = new_key.key_id().to_hex();
         let audit_key = self.audit_key.clone();
@@ -1942,25 +1973,29 @@ impl EncryptedStore {
         let new_audit_envelope =
             envelope::seal(&new_key, &*audit_key, &audit_binding).map_err(StoreOpError::Decrypt)?;
 
-        let quarantined = self
+        let report = self
             .fenced_write(|tx| {
-                // Snapshot every record id + version + current envelope.
-                let rows: Vec<(String, i64, Vec<u8>)> = {
+                let rows = {
                     let mut stmt = tx.prepare(
-                        "SELECT credential_id, record_version, envelope FROM credentials",
+                        "SELECT credential_id, record_version, envelope, state FROM credentials",
                     )?;
                     let mapped = stmt.query_map([], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, i64>(1)?,
                             r.get::<_, Vec<u8>>(2)?,
+                            r.get::<_, String>(3)?,
                         ))
                     })?;
                     mapped.collect::<rusqlite::Result<Vec<_>>>()?
                 };
 
-                let mut quarantined: Vec<String> = Vec::new();
-                for (id, version, old_blob) in rows {
+                let mut report = KeyRotationReport::default();
+                for (id, version, old_blob, state) in rows {
+                    let already_corrupt = state == RecordState::Corrupt.as_str();
+                    if already_corrupt {
+                        report.already_corrupt.push(id.clone());
+                    }
                     let binding = RecordBinding {
                         credential_id: &id,
                         record_version: version as u64,
@@ -1972,11 +2007,13 @@ impl EncryptedStore {
                     let plaintext = match envelope::open(old_key, &old_blob, &binding) {
                         Ok(pt) => pt,
                         Err(_) => {
-                            tx.execute(
-                                "UPDATE credentials SET state = ?2 WHERE credential_id = ?1",
-                                rusqlite::params![id, RecordState::Corrupt.as_str()],
-                            )?;
-                            quarantined.push(id);
+                            if !already_corrupt {
+                                tx.execute(
+                                    "UPDATE credentials SET state = ?2 WHERE credential_id = ?1",
+                                    rusqlite::params![id, RecordState::Corrupt.as_str()],
+                                )?;
+                                report.newly_quarantined.push(id);
+                            }
                             continue;
                         }
                     };
@@ -1991,12 +2028,8 @@ impl EncryptedStore {
                     )?;
                 }
 
-                quarantined.extend(store_agent_secrets::rotate_agent_secrets_tx(
-                    tx, old_key, &new_key,
-                )?);
-                quarantined.extend(module_secrets::rotate_module_secrets_tx(
-                    tx, old_key, &new_key,
-                )?);
+                store_agent_secrets::rotate_agent_secrets_tx(tx, old_key, &new_key, &mut report)?;
+                module_secrets::rotate_module_secrets_tx(tx, old_key, &new_key, &mut report)?;
                 fleet_store::rotate_fleet_epochs_tx(tx, old_key, &new_key)?;
 
                 // Re-seal the audit-key secret row under the new key.
@@ -2018,14 +2051,14 @@ impl EncryptedStore {
                         alarm: Some(AlarmReason::AdminWrite),
                     },
                 )?;
-                Ok(quarantined)
+                Ok(report)
             })
             .map_err(StoreOpError::from)?;
 
         // Commit succeeded: the new key now opens everything. Swap in-memory state.
         self.key_id = new_key.key_id();
         self.key = new_key;
-        Ok(quarantined)
+        Ok(report)
     }
 
     /// Seal a record into a cipher envelope bound to its id + version.

@@ -54,6 +54,34 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 impl EncryptedStore {
     // ---- refresh intent log (crash-safe rotation) -----------------------
 
+    /// Clear a checked intent and restore a credential parked by a prior check.
+    pub(crate) fn confirm_refresh_intent_valid(
+        &self,
+        intent: &RefreshIntent,
+        incarnation: &str,
+        version: u64,
+    ) -> Result<(), StoreOpError> {
+        let changed = self.fenced_write(|tx| {
+            let cleared = tx.execute(
+                "DELETE FROM refresh_intent WHERE credential_id = ?1 AND record_version = ?2 \
+                   AND old_refresh_hash = ?3 AND lease_epoch = ?4 AND started_at_ms = ?5 \
+                   AND EXISTS (SELECT 1 FROM credentials WHERE credential_id = ?1 \
+                               AND incarnation = ?6 AND record_version = ?7 \
+                               AND state IN ('active', 'needs_reauth'))",
+                rusqlite::params![intent.credential_id, intent.record_version, intent.old_refresh_hash,
+                                  intent.lease_epoch, intent.started_at_ms, incarnation, version],
+            )?;
+            if cleared != 0 {
+                tx.execute(
+                    "UPDATE credentials SET state = 'active' WHERE credential_id = ?1 AND state = 'needs_reauth'",
+                    [&intent.credential_id],
+                )?;
+            }
+            Ok(cleared != 0)
+        })?;
+        changed.then_some(()).ok_or(StoreOpError::CasMismatch)
+    }
+
     /// Durably open a refresh intent (txn1 of the refresh state machine): the
     /// fsynced marker written BEFORE the provider's rotating endpoint is called.
     ///
@@ -115,8 +143,6 @@ impl EncryptedStore {
         new_record: &VaultRecord,
         github_app: Option<&GithubAppIdentity>,
     ) -> Result<u64, StoreOpError> {
-        let next_version = expected_version.saturating_add(1);
-        let mut new_record = new_record.clone();
         // The sealed tier of the row this commit replaces decides whether the tier's
         // first-seen time carries over. Read it without `get`, which refuses
         // non-active rows and quarantines unreadable ones: this read must neither write
@@ -135,7 +161,7 @@ impl EncryptedStore {
                 .optional()
             })?
             .and_then(|sealed| {
-                envelope::open(
+                open_credential_envelope(
                     &self.key,
                     &sealed,
                     &RecordBinding {
@@ -146,7 +172,30 @@ impl EncryptedStore {
                 .ok()
             })
             .and_then(|plain| VaultRecord::decode(&plain).ok());
-        retain_detected_plan(&mut new_record, previous.as_ref());
+        self.commit_refresh_with_previous(
+            credential_id,
+            expected_version,
+            expected_incarnation,
+            previous.as_ref(),
+            new_record.clone(),
+            github_app,
+        )
+        .map(|(record, _)| record.record_version)
+    }
+
+    /// Commit using the opened record the engine actually exchanged. Return the
+    /// committed record and the digest of the exact envelope written, without a reread.
+    pub(crate) fn commit_refresh_with_previous(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        expected_incarnation: &str,
+        previous: Option<&VaultRecord>,
+        mut new_record: VaultRecord,
+        github_app: Option<&GithubAppIdentity>,
+    ) -> Result<(VaultRecord, String), StoreOpError> {
+        let next_version = expected_version.saturating_add(1);
+        retain_detected_plan(&mut new_record, previous);
         new_record.record_version = next_version;
         let blob = self.seal_record(credential_id, &new_record)?;
         let key_id_hex = self.key_id.to_hex();
@@ -205,7 +254,7 @@ impl EncryptedStore {
         if changed == 0 {
             return Err(StoreOpError::CasMismatch);
         }
-        Ok(next_version)
+        Ok((new_record, sha256_hex_of_bytes(&blob)))
     }
 
     /// Hold a Claude profile until the next refresh, without writing the sealed record.

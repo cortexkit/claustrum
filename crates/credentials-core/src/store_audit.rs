@@ -101,11 +101,6 @@ pub(super) fn load_or_create_audit_key(
     Ok(audit_key)
 }
 
-/// Append an audit entry within an open transaction: read the current tip mac,
-/// compute this entry's mac over it, insert it. Used both standalone and folded
-/// into a mutation's own transaction so the audit entry and the mutation commit
-/// together. The single-writer lease guarantees no concurrent appender, so reading
-/// the tip and inserting the next seq is race-free.
 /// Verify the audit chain from a store file WITHOUT taking the single-writer lease.
 ///
 /// Separate from [`EncryptedStore::verify_audit_chain`] for the reason that method
@@ -165,20 +160,7 @@ pub fn verify_audit_chain_read_only(
         .map_err(|_| StoreOpError::from(StoreError::Backend("audit key length".into())))?;
     let audit_key = Zeroizing::new(audit_key);
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, \
-                    alarm_reason, prev_mac, entry_mac \
-             FROM audit_log ORDER BY seq ASC",
-        )
-        .map_err(map)?;
-    let entries = stmt
-        .query_map([], row_to_audit)
-        .map_err(map)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map)?;
-
-    Ok(audit::verify_chain(&audit_key, &entries))
+    verify_audit_cursor(&conn, &audit_key).map_err(map)
 }
 
 /// Credential ids whose diagnostic history is AT the retention cap, and has therefore
@@ -489,6 +471,9 @@ pub(super) fn trim_auth_events_tx(
     Ok(())
 }
 
+/// Append an entry using the current tip MAC. When called in a mutation's
+/// transaction, the audit entry and mutation commit together. The writer lease
+/// prevents another appender from changing the tip between the read and insert.
 pub(crate) fn append_audit_tx(
     tx: &rusqlite::Transaction,
     audit_key: &[u8; 32],
@@ -567,6 +552,21 @@ pub(crate) fn append_audit_tx(
 }
 
 pub(super) fn row_to_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
+    let alarm = match row.get::<_, i64>(6)? {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Integer,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid audit alarm value {value}"),
+                )
+                .into(),
+            ))
+        }
+    };
     Ok(AuditEntry {
         seq: row.get(0)?,
         ts_ms: row.get(1)?,
@@ -574,11 +574,32 @@ pub(super) fn row_to_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEnt
         credential_id: row.get(3)?,
         payload_hash: row.get(4)?,
         actor: row.get(5)?,
-        alarm: row.get::<_, i64>(6)? != 0,
+        alarm,
         alarm_reason: row.get(7)?,
         prev_mac: row.get(8)?,
         entry_mac: row.get(9)?,
     })
+}
+
+fn verify_audit_cursor(
+    conn: &rusqlite::Connection,
+    audit_key: &[u8; 32],
+) -> rusqlite::Result<Option<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, \
+                alarm_reason, prev_mac, entry_mac \
+         FROM audit_log ORDER BY seq ASC",
+    )?;
+    let entries = stmt.query_map([], row_to_audit)?;
+    let mut expected_prev = audit::GENESIS_MAC.to_string();
+    for entry in entries {
+        let entry = entry?;
+        if !audit::entry_verifies(audit_key, &expected_prev, &entry) {
+            return Ok(Some(entry.seq));
+        }
+        expected_prev = entry.entry_mac;
+    }
+    Ok(None)
 }
 
 impl EncryptedStore {
@@ -900,8 +921,7 @@ impl EncryptedStore {
     }
 
     /// Read the audit chain (oldest first), capped at `limit` most-recent entries
-    /// when `limit` is `Some`. Used by status/monitoring to surface alarms and by
-    /// the integrity check.
+    /// when `limit` is `Some`. Used by status/monitoring to surface alarms.
     pub fn read_audit(&self, limit: Option<usize>) -> Result<Vec<AuditEntry>, StoreOpError> {
         self.store
             .with_conn(|c| {
@@ -923,7 +943,8 @@ impl EncryptedStore {
     /// Verify the full audit chain against the persisted audit key, sealed under the master key.
     /// Returns the seq of the first broken entry, or `None` if it verifies.
     pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreOpError> {
-        let entries = self.read_audit(None)?;
-        Ok(audit::verify_chain(&self.audit_key, &entries))
+        self.store
+            .with_conn(|conn| verify_audit_cursor(conn, &self.audit_key))
+            .map_err(StoreOpError::from)
     }
 }

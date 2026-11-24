@@ -181,6 +181,78 @@ fn secret_approval_resend_of_an_applied_envelope_answers_with_its_first_reply() 
 }
 
 #[test]
+fn secret_approval_refuses_future_envelopes_without_caching_them() {
+    let (_root, store, request) = approval_setup("approve-future");
+    let skew = crate::agent_secret::SECRET_ISSUE_SKEW_LIMIT_MS;
+    for issued in [NOW + skew + 1, NOW + 864_000_000] {
+        let e = envelope(vec![item(&request)], "hour", issued);
+        assert_eq!(
+            phone(&store, &signed(&e, false), NOW).unwrap(),
+            json!({"results":[refused(&request)]})
+        );
+    }
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM secret_approval_replies"),
+        0
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 0);
+
+    let edge = signed(&envelope(vec![item(&request)], "hour", NOW + skew), false);
+    let applied = phone(&store, &edge, NOW).unwrap();
+    assert_eq!(applied, json!({"results":[granted(&request)]}));
+    assert_eq!(phone(&store, &edge, NOW + 1).unwrap(), applied);
+}
+
+#[test]
+fn secret_approval_rejects_agent_attribution_that_differs_from_the_card() {
+    let (_root, store, request) = approval_setup("approve-attribution");
+    store
+        .fenced_write(|tx| {
+            tx.execute(
+                "UPDATE secret_pending_requests SET agent_id='other-agent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let e = envelope(vec![item(&request)], "hour", NOW);
+    assert_eq!(
+        phone(&store, &signed(&e, false), NOW).unwrap(),
+        json!({"results":[refused(&request)]})
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 0);
+}
+
+#[test]
+fn secret_home_can_move_with_only_expired_grants_and_inactive_requests() {
+    let (_root, store, request) = approval_setup("secret-home-inactive");
+    let e = envelope(vec![item(&request)], "hour", NOW);
+    phone(&store, &signed(&e, false), NOW).unwrap();
+    let mut unapproved = call();
+    unapproved.scope.scope_ref = "other-head".into();
+    assert_eq!(
+        use_reply(&store, &unapproved, NOW)["status"],
+        "approval_required"
+    );
+    store
+        .fenced_write(|tx| {
+            tx.execute(
+                "UPDATE secret_pending_requests SET request_expires_at_ms=?1 WHERE consumed=1",
+                [i64::MAX],
+            )?;
+            tx.execute("DELETE FROM agent_secrets", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let other_member = "fed-computer:33333333333333333333333333333333";
+    let change = store
+        .set_secret_home_audited(Some(other_member), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    assert!(change.changed);
+    assert_eq!(change.stored.as_deref(), Some(other_member));
+}
+
+#[test]
 fn secret_approval_stored_reply_ends_with_the_skew_window() {
     let (_root, store, r) = approval_setup("approve-resend-late");
     let e = envelope(vec![item(&r)], "hour", NOW);

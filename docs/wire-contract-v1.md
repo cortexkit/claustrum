@@ -3248,8 +3248,9 @@ malformed `card_ref`, 65 bytes included, is `invalid_params`.
 ```
 
 Reply `{results: [{request_id, outcome: "granted"} | {request_id, outcome: "refused",
-code}]}`, one entry per envelope item in envelope order. `code` is always
-`approval_invalid` and never says which check failed.
+code}]}`, one entry per envelope item in envelope order. A local-program item is refused
+with `secret_local_programs_disabled` when `secret.local_programs` is off or unreadable.
+Other item refusals use `approval_invalid` and do not identify the failed check.
 
 <!-- golden:approve.result -->
 ```json
@@ -3276,8 +3277,9 @@ case. The signed delete commit follows the same rule.
 
 Request `{}`. Reply `{secrets: [{name, kind, incarnation, state, host?, path_prefix?,
 location?, origin?, grants: [{grant_id, scope: {owner, kind, ref}, coverage, duration,
-agent_id, expires_at_ms?, last_use_ms?}], flow_grants: [{grant_id, flow: {flow_id,
-version, install_id}, duration, methods?, last_use_ms?}]}]}`. An API key carries `host`,
+agent_id, expires_at_ms?, last_use_ms?, local_use?}], flow_grants: [{grant_id, flow: {flow_id,
+version, install_id}, duration, methods?, last_use_ms?}]}],
+ssh_keys?: [{credential_id, incarnation, fingerprint, grants}]}`. An API key carries `host`,
 `location` and `path_prefix` (omitted when it covers every path); a login carries `origin`.
 `state` is `active` or `corrupt`. An agent grant always names its `agent_id`, `null` when
 the statement named no agent, and omits `expires_at_ms` when its duration is `permanent`.
@@ -3285,6 +3287,10 @@ A flow grant appears in `flow_grants` with `flow` and duration `version` in plac
 asking scope and coverage, and carries `methods` only for an API key. A grant of either
 kind omits `last_use_ms` until it has served a call. Material, its digests and requested
 paths never appear.
+
+A local-program grant includes `local_use: {program, use, target}`. `ssh_keys` lists
+keys with live SSH signing grants and is omitted when none exist. Each key's `grants`
+use the same shape as the agent grants in `secrets`, including `local_use`.
 
 <!-- golden:list.request -->
 ```json
@@ -3920,7 +3926,7 @@ the message is fixed text and never echoes the request.
 | `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
 | `secret_multi_host_disabled` | `permanent` | result error | creating an API key with multiple rules or a wildcard, or a login with multiple origins, while `secret.multi_host` is off or unreadable |
 | `secret_basic_auth_disabled` | `permanent` | result error | creating a Basic sign-in secret while `secret.basic_auth` is off or unreadable |
-| `secret_local_programs_disabled` | `permanent` | result error | creating or depositing a local-program secret while `secret.local_programs` is off or unreadable |
+| `secret_local_programs_disabled` | `permanent` | result error or refused `secret.approve` item | creating or depositing a local-program secret, or approving a local-program item, while `secret.local_programs` is off or unreadable |
 | `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
 | `manifest_setup_incomplete` | `permanent` | result error | `manifest.approve` only (§17): the home lacks an active configured policy root, a stored manifest version or its own federation member id |
 | `superseded` | `permanent` | result error | `manifest.approve` only (§17): a newer manifest version was stored after the proposal was made |
@@ -4380,8 +4386,8 @@ when the scope names an agent, or `null` otherwise. Sudo statements carry
 `secret: {name, kind: "local_program", incarnation}`; SSH statements instead carry
 `key: {credential_id, incarnation, fingerprint}`. These identities are supplied by
 the vault, not the asking program. SSH statements and stored local-use members
-omit `purpose`; sudo statement bytes are unchanged. The statement tag remains
-`ck-secret-local-use-statement/v1`.
+omit `purpose`. Forwarded local-use statements add `asking_member_id` and keep the
+`ck-secret-local-use-statement/v1` tag.
 
 Card text (`command`, `workdir`, and sudo-only `purpose` and `expects`)
 must be nonempty and contain no Cc, Cf, Zl or Zp characters. UTF-8 byte caps are

@@ -1482,9 +1482,18 @@ async fn federation_flow_goldens_are_the_unchanged_secret_shapes() {
     const ASKER: &str = "fed-computer:11111111111111111111111111111111";
     let flow = SecretFlow::new(214).await;
     flow.deposit_both().await;
+    flow.store
+        .create_member_grant_audited(
+            ASKER,
+            credentials_core::federation::MemberGrantOperation::SecretUse,
+            &credentials_core::federation::MemberGrantSelector::None,
+            "pair-M",
+        )
+        .unwrap();
     let asked = sc_use_answer(crate::secret_use::serve_flow_approval_forwarded(
         &flow.store,
         ASKER,
+        "pair-M",
         &request,
         sc_now_ms,
     ));
@@ -1502,6 +1511,7 @@ async fn federation_flow_goldens_are_the_unchanged_secret_shapes() {
     let revoked = sc_use_answer(crate::secret_use::serve_revoke_flow_grants_forwarded(
         &flow.store,
         ASKER,
+        "pair-M",
         &revoke_request,
     ));
     assert_eq!(revoked, secret_golden("federation.secret_revoke_flow_grants.result"));

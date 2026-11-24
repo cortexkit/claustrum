@@ -27,6 +27,40 @@ fn selected_reply(store: &EncryptedStore, call: &SecretUseByTarget) -> Value {
 }
 
 #[test]
+fn nameless_basic_miss_records_an_unaddressed_refusal_diagnostic() {
+    let (_root, store) = setup("basic-miss-diagnostic");
+    let query = "SELECT COUNT(*) FROM auth_events WHERE credential_id='secret-use|unaddressed' AND detail='unknown_name'";
+    assert_eq!(count(&store, query), 0);
+    assert_eq!(
+        selected_reply(&store, &by_target(call())),
+        SecretError::NotFound.body()
+    );
+    assert_eq!(count(&store, query), 1);
+}
+
+#[test]
+fn nameless_basic_repeat_release_does_not_take_another_write() {
+    let (_root, store) = setup("basic-repeat-read");
+    sql(&store, "DELETE FROM agent_secrets");
+    seed(
+        &store,
+        "key",
+        &basic_scope(),
+        &SecretMaterial::ApiKey(Secret::new(b"token".to_vec())),
+    );
+    grant(&store, "hour", "hour", NOW + 3_600_000, NOW);
+    let request = by_target(call());
+
+    let first_write = store.subscribe_writes();
+    assert_eq!(selected_reply(&store, &request)["status"], "released");
+    assert!(first_write.has_changed().unwrap());
+
+    let repeat_write = store.subscribe_writes();
+    assert_eq!(selected_reply(&store, &request)["status"], "released");
+    assert!(!repeat_write.has_changed().unwrap());
+}
+
+#[test]
 fn nameless_never_selects_bearer_header_query_login_or_local_secrets() {
     let (_root, store) = setup("basic-excluded");
     for (name, location) in [
@@ -168,14 +202,16 @@ fn nameless_refuses_cerebellum_basal_flow_and_non_https_443_targets_uniformly() 
             SecretError::NotFound.body()
         );
     }
-    let mut request = by_target(call());
-    request.scope.kind = "flow".into();
-    assert_eq!(
-        selected_reply(&store, &request),
-        SecretError::NotFound.body()
-    );
+    for kind in ["flow", "ephemeral"] {
+        let mut request = by_target(call());
+        request.scope.kind = kind.into();
+        assert_eq!(
+            selected_reply(&store, &request),
+            SecretError::NotFound.body()
+        );
+    }
     for (scheme, port) in [("http", 443), ("https", 80), ("https", 444)] {
-        request = by_target(call());
+        let mut request = by_target(call());
         if let agent_secret::UseTarget::ApiKey {
             scheme: s, port: p, ..
         } = &mut request.target

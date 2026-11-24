@@ -166,7 +166,9 @@ impl EncryptedStore {
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(stored) = stored {
+        let issued_at_ms = envelope.issued_at_ms as i64;
+        let in_window = now.abs_diff(issued_at_ms) <= SECRET_ISSUE_SKEW_LIMIT_MS as u64;
+        if let Some(stored) = stored.filter(|_| in_window) {
             return match serde_json::from_str(&stored) {
                 Ok(reply) => Ok(Ok(reply)),
                 Err(_) => Err(rusqlite_err("stored approval reply is unreadable")),
@@ -200,12 +202,13 @@ impl EncryptedStore {
         let reply = json!({"results":results});
         // Stored for as long as the envelope's issue time stays inside the skew window,
         // which is the longest a resend of these bytes could still be applied.
-        let expires_at_ms =
-            (envelope.issued_at_ms as i64).saturating_add(SECRET_ISSUE_SKEW_LIMIT_MS);
-        tx.execute(
-            "INSERT INTO secret_approval_replies (envelope_sha256,fingerprint,delete_op,reply,expires_at_ms) VALUES (?1,?2,?3,?4,?5)",
-            rusqlite::params![hash, fingerprint, delete, reply.to_string(), expires_at_ms],
-        )?;
+        if in_window {
+            let expires_at_ms = issued_at_ms.saturating_add(SECRET_ISSUE_SKEW_LIMIT_MS);
+            tx.execute(
+                "INSERT INTO secret_approval_replies (envelope_sha256,fingerprint,delete_op,reply,expires_at_ms) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![hash, fingerprint, delete, reply.to_string(), expires_at_ms],
+            )?;
+        }
         Ok(Ok(reply))
     }
 
@@ -303,24 +306,7 @@ impl EncryptedStore {
             {
                 return Ok(false);
             }
-            for table in [
-                "secret_grants",
-                "secret_flow_grants",
-                "secret_pending_requests",
-            ] {
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE incarnation=?1"),
-                    [&p.incarnation],
-                )?;
-            }
-            tx.execute(
-                "DELETE FROM agent_secrets WHERE incarnation=?1",
-                [&p.incarnation],
-            )?;
-            tx.execute(
-                "DELETE FROM auth_events WHERE credential_id=?1",
-                [format!("secret|{}", p.name)],
-            )?;
+            delete_secret_rows_tx(tx, &p.name, &p.incarnation)?;
             envelope_audit(
                 tx,
                 &self.audit_key,
@@ -345,17 +331,6 @@ impl EncryptedStore {
             || p.methods.is_some();
         if !flow_item
             && (e.duration == "version"
-                || statement["v"]
-                    != if scope_json.is_some() {
-                        agent_secret::USE_STATEMENT_V3
-                    } else if p.asking_member.is_empty() {
-                        "ck-secret-use-statement/v1"
-                    } else {
-                        "ck-secret-use-statement/v2"
-                    }
-                || statement["scope"]
-                    != json!({"owner":p.owner,"kind":p.scope_kind,"ref":p.scope_ref,"epoch":p.epoch})
-                || statement["coverage"] != json!(p.coverage)
                 || !matches!(p.scope_kind.as_deref(), Some("head" | "worker"))
                 || !matches!(p.coverage.as_deref(), Some("scope" | "agent_and_workers"))
                 || (p.coverage.as_deref() == Some("agent_and_workers")
@@ -394,8 +369,38 @@ impl EncryptedStore {
                 now,
             );
         }
-        let sealed_use = scope.use_fields();
-        if statement["secret"]["kind"] != scope.kind() || statement["use"] != sealed_use {
+        let (Some(owner), Some(kind), Some(scope_ref), Some(epoch), Some(coverage)) = (
+            p.owner.as_deref(),
+            p.scope_kind.as_deref(),
+            p.scope_ref.as_deref(),
+            p.epoch,
+            p.coverage.as_deref(),
+        ) else {
+            return Ok(false);
+        };
+        let asking = agent_secret::AskingScope {
+            owner: owner.to_owned(),
+            kind: kind.to_owned(),
+            scope_ref: scope_ref.to_owned(),
+            epoch,
+        };
+        let expected = agent_secret::approval_statement_for_asker(
+            &item.request_id,
+            &p.member,
+            &p.incarnation,
+            agent_secret::AgentApprovalSubject {
+                name: &p.name,
+                scope: &asking,
+                coverage,
+                agent_id: p.agent_id.as_deref(),
+            },
+            &scope,
+            p.expiry,
+            &p.asking_member,
+        );
+        if serde_json::to_vec(&expected).map_err(|_| rusqlite_err("statement encoding failed"))?
+            != p.bytes
+        {
             return Ok(false);
         }
         let id = agent_secret::request_id(now)
@@ -652,6 +657,35 @@ impl EncryptedStore {
         }
         tx.execute_batch("RELEASE secret_quarantine")
     }
+}
+
+/// Delete every row owned by one secret incarnation. Each caller writes the audit
+/// appropriate to its own authorization path.
+pub(super) fn delete_secret_rows_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    incarnation: &str,
+) -> rusqlite::Result<()> {
+    for table in [
+        "secret_grants",
+        "secret_flow_grants",
+        "secret_pending_requests",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE incarnation=?1"),
+            [incarnation],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM agent_secrets WHERE incarnation=?1",
+        [incarnation],
+    )?;
+    // Diagnostics belong to the secret's subject, not to a credential of the same name.
+    tx.execute(
+        "DELETE FROM auth_events WHERE credential_id=?1",
+        [format!("secret|{name}")],
+    )?;
+    Ok(())
 }
 
 fn envelope_audit(
@@ -1967,6 +2001,7 @@ console.log('2 Node Ed25519 verification checks passed');
     const V2_HOME: &str = "fed-computer:22222222222222222222222222222222";
     const V2_ASKER: &str = "fed-computer:11111111111111111111111111111111";
     const V2_OTHER_ASKER: &str = "fed-computer:33333333333333333333333333333333";
+    const V2_PAIRING: &str = "pair-M";
     const V2_FP: &str = "11111111111111111111111111111111";
     const V2_NOW: i64 = 1_700_000_000_000;
 
@@ -2025,6 +2060,22 @@ console.log('2 Node Ed25519 verification checks passed');
             },
             methods: Some(vec!["GET".to_string()]),
         }
+    }
+
+    fn v2_flow_request_from(
+        store: &EncryptedStore,
+        call: &agent_secret::SecretFlowApproval,
+        asker: &str,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        if !asker.is_empty() {
+            store.fenced_write(|tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO member_grants (member_id,operation,selector_kind,selector,pairing_id,created_at_ms,source) VALUES (?1,'secret_use','none','',?2,?3,'operator')",
+                    rusqlite::params![asker, V2_PAIRING, V2_NOW],
+                ).map(|_| ())
+            }).unwrap();
+        }
+        store.secret_request_flow_approval_from(call, asker, V2_PAIRING, || V2_NOW)
     }
 
     fn v2_setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
@@ -2299,8 +2350,7 @@ console.log('2 Node Ed25519 verification checks passed');
     #[test]
     fn forwarded_flow_approval_grants_v2_and_inherits_the_asker() {
         let (_root, store) = v2_setup("v2-appr-flow-fwd");
-        let request = store
-            .secret_request_flow_approval_from(&v2_flow_call(), V2_ASKER, || V2_NOW)
+        let request = v2_flow_request_from(&store, &v2_flow_call(), V2_ASKER)
             .unwrap()
             .reply;
         let reply = v2_approve(&store, &request, "version");
@@ -2327,13 +2377,12 @@ console.log('2 Node Ed25519 verification checks passed');
         );
         // Forwarded refuses it at the request boundary.
         assert!(matches!(
-            store.secret_request_flow_approval_from(&local_call, V2_ASKER, || V2_NOW),
+            v2_flow_request_from(&store, &local_call, V2_ASKER),
             Err(agent_secret::SecretError::InvalidParams)
         ));
         // And at the approval boundary, a smuggled row with that flow id is refused.
         let (_root, store) = v2_setup("v2-appr-flow-tag-fwd");
-        let request = store
-            .secret_request_flow_approval_from(&v2_flow_call(), V2_ASKER, || V2_NOW)
+        let request = v2_flow_request_from(&store, &v2_flow_call(), V2_ASKER)
             .unwrap()
             .reply;
         let request_id = request["request_id"].as_str().unwrap().to_owned();
@@ -2433,7 +2482,7 @@ console.log('2 Node Ed25519 verification checks passed');
 
         fn pending(store: &EncryptedStore, login: bool, flow: bool, asker: &str) -> Value {
             let result = if flow {
-                store.secret_request_flow_approval_from(&flow_call(login), asker, || V2_NOW)
+                v2_flow_request_from(store, &flow_call(login), asker)
             } else {
                 store.secret_use_from(&call(login), asker, || V2_NOW)
             };
@@ -2642,8 +2691,7 @@ console.log('2 Node Ed25519 verification checks passed');
                         let (_root, store) = setup(login);
                         let mut call = flow_call(login);
                         call.flow.flow_id = tag.into();
-                        let result =
-                            store.secret_request_flow_approval_from(&call, asker, || V2_NOW);
+                        let result = v2_flow_request_from(&store, &call, asker);
                         if tag.ends_with("/v2") && asker.is_empty() {
                             let request = result.unwrap().reply;
                             assert_eq!(statement(&request)["v"], agent_secret::FLOW_STATEMENT_V3);

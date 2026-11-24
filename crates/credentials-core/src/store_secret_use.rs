@@ -55,9 +55,16 @@ struct Grant {
 
 type AgentUseAnswer = Result<Result<SecretUseOutcome, SecretError>, Refusal>;
 
+enum BasicSnapshot {
+    Selection(SecretError),
+    Refusal(SecretUse, Refusal),
+    FastPath(Record, Grant),
+    Write,
+}
+
 /// How long the home answers a same-nonce retry of a forwarded release with the reply
 /// it already sealed. A paired computer gives up retrying one sender call well before
-/// this, so a nonce is never answered afresh after its receipt has been deleted.
+/// this, so a nonce is never answered afresh after its sealed payload has been swept.
 pub const SECRET_RELEASE_RECEIPT_LIFETIME_MS: i64 = 10 * 60 * 1000;
 
 /// The `detail` of the refusal audit written when a same-nonce retry is denied.
@@ -81,17 +88,25 @@ pub struct ReleaseRequest<'a> {
     pub aad: &'a [u8],
 }
 
+fn member_grant_is_live(
+    tx: &rusqlite::Transaction<'_>,
+    member: &str,
+    pairing_id: &str,
+) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM member_grants WHERE member_id=?1 AND pairing_id=?2 \
+         AND operation='secret_use' AND selector_kind='none' AND selector='')",
+        [member, pairing_id],
+        |row| row.get(0),
+    )
+}
+
 impl ReleaseRequest<'_> {
     // Call inside the release's fenced write. Revoking a member grant is also a
     // fenced write, and SQLite runs one write transaction at a time, so the grant
     // cannot disappear between this check and returning a receipt or a new release.
     fn member_grant_is_live(&self, tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
-        tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM member_grants WHERE member_id=?1 AND pairing_id=?2 \
-             AND operation='secret_use' AND selector_kind='none' AND selector='')",
-            [self.requester, self.pairing_id],
-            |row| row.get(0),
-        )
+        member_grant_is_live(tx, self.requester, self.pairing_id)
     }
 
     fn validate(&self) -> Result<(), SecretError> {
@@ -154,16 +169,16 @@ impl ReceiptGrant {
 impl EncryptedStore {
     fn select_basic_auth(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        conn: &rusqlite::Connection,
         call: &agent_secret::SecretUseByTarget,
     ) -> rusqlite::Result<Result<SecretUse, SecretError>> {
         if call.sender != SecretSender::Aft
-            || !matches!(call.scope.kind.as_str(), "head" | "worker" | "ephemeral")
+            || !matches!(call.scope.kind.as_str(), "head" | "worker")
             || !matches!(&call.target, agent_secret::UseTarget::ApiKey { scheme, port: 443, .. } if scheme == "https")
         {
             return Ok(Err(SecretError::NotFound));
         }
-        let mut stmt = tx.prepare("SELECT name,kind,host,path_prefix,location,origin,scope_json FROM agent_secrets WHERE state='active' AND kind='agent_api_key' AND location LIKE 'authorization_basic:%'")?;
+        let mut stmt = conn.prepare("SELECT name,kind,host,path_prefix,location,origin,scope_json FROM agent_secrets WHERE state='active' AND kind='agent_api_key' AND location LIKE 'authorization_basic:%'")?;
         let mut rows = stmt.query([])?;
         let mut selected = None;
         while let Some(row) = rows.next()? {
@@ -187,13 +202,48 @@ impl EncryptedStore {
             .ok_or(SecretError::NotFound))
     }
 
-    /// Select by coverage and check the selected secret's grant in one write
-    /// transaction. Selection never consults grants, even when one already exists.
+    /// Select by coverage and check the selected secret's grant against one snapshot.
+    /// Selection never consults grants. Repeat releases stay read-only; every other
+    /// decision is rechecked together in one write transaction.
     pub fn secret_use_by_target(
         &self,
         call: &agent_secret::SecretUseByTarget,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
+        let now = clock();
+        let snapshot = self.store.with_conn(|conn| {
+            let named = match self.select_basic_auth(conn, call)? {
+                Ok(named) => named,
+                Err(error) => return Ok(BasicSnapshot::Selection(error)),
+            };
+            let record = match self.check_secret_use(conn, &named)? {
+                Ok(record) => record,
+                Err(refusal) => return Ok(BasicSnapshot::Refusal(named, refusal)),
+            };
+            let grant = choose_grant(conn, &named, LOCAL_ASKING_MEMBER, &record.incarnation, now)?;
+            let expired: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM secret_grants WHERE duration != 'permanent' AND expires_at_ms<=?1)", [now], |r| r.get(0))?;
+            Ok(match grant {
+                Some(grant) if grant.first && grant.duration != "once" && !expired => {
+                    BasicSnapshot::FastPath(record, grant)
+                }
+                _ => BasicSnapshot::Write,
+            })
+        }).map_err(|_| SecretError::StoreError)?;
+        match snapshot {
+            BasicSnapshot::Selection(SecretError::NotFound) => {
+                self.record_secret_use_refusal(call.sender, None, "unknown_name");
+                return Err(SecretError::NotFound);
+            }
+            BasicSnapshot::Selection(error) => return Err(error),
+            BasicSnapshot::Refusal(call, refusal) => return self.use_refused(&call, refusal),
+            BasicSnapshot::FastPath(record, grant) => {
+                return Ok(SecretUseOutcome {
+                    reply: release(&record, now)?,
+                    last_use: Some((grant.id, now)),
+                });
+            }
+            BasicSnapshot::Write => {}
+        }
         let mut selected = None;
         let answer = self
             .fenced_write(|tx| {
@@ -207,6 +257,10 @@ impl EncryptedStore {
             })
             .map_err(|_| SecretError::StoreError)?;
         match answer {
+            Ok(Err(SecretError::NotFound)) if selected.is_none() => {
+                self.record_secret_use_refusal(call.sender, None, "unknown_name");
+                Err(SecretError::NotFound)
+            }
             Ok(answer) => answer,
             // A refusal comes only from the named path, which runs after a secret was
             // selected; a missing selection would be a store bug, answered as one
@@ -735,7 +789,7 @@ impl EncryptedStore {
     /// `once` grant excepted). Otherwise it is refused `not_found` with a refusal audit
     /// and is never released afresh. Every one of these is compared against `clock` on
     /// each request, so a receipt or grant past its expiry is refused even before the
-    /// sweep deletes it.
+    /// sweep clears its payload.
     ///
     /// The caller must have authenticated `request.requester` and checked its pairing,
     /// its `secret_use` member grant and its announced key, on the first request and on
@@ -794,14 +848,25 @@ impl EncryptedStore {
     ) -> Result<Result<ForwardedUse, E>, SecretError> {
         request.validate()?;
         let mut selected = None;
+        let mut missed = false;
         let mut seal_failure = None;
         let answer = self.fenced_write(|tx| {
             if !request.member_grant_is_live(tx)? {
                 return Ok(Forwarded::Answer(Err(SecretError::NotFound)));
             }
-            let named = match self.select_basic_auth(tx, call)? {
-                Ok(named) => named,
-                Err(error) => return Ok(Forwarded::Answer(Err(error))),
+            let named = match self.basic_auth_receipt(tx, call, request)? {
+                (true, Some(named)) => named,
+                (true, None) => {
+                    missed = true;
+                    return Ok(Forwarded::Answer(Err(SecretError::NotFound)));
+                }
+                (false, _) => match self.select_basic_auth(tx, call)? {
+                    Ok(named) => named,
+                    Err(error) => {
+                        missed = error == SecretError::NotFound;
+                        return Ok(Forwarded::Answer(Err(error)));
+                    }
+                },
             };
             let answer =
                 self.secret_use_sealed_tx(tx, &named, request, seal, &mut seal_failure, clock());
@@ -811,7 +876,11 @@ impl EncryptedStore {
         if let Some(error) = seal_failure {
             return Ok(Err(error));
         }
-        match answer.map_err(|_| SecretError::StoreError)? {
+        let answer = answer.map_err(|_| SecretError::StoreError)?;
+        if missed {
+            self.record_secret_use_refusal(call.sender, None, "unknown_name");
+        }
+        match answer {
             Forwarded::Answer(answer) => answer.map(Ok),
             Forwarded::Refused(refusal) => match selected.as_ref() {
                 Some(call) => {
@@ -821,6 +890,30 @@ impl EncryptedStore {
                 None => Err(SecretError::StoreError),
             },
         }
+    }
+
+    /// A name-less retry belongs to the secret named by its receipt, not to a fresh
+    /// coverage selection that may have become ambiguous since the first release. The
+    /// boolean records whether a receipt exists; the call is absent if its secret is gone.
+    fn basic_auth_receipt(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        call: &agent_secret::SecretUseByTarget,
+        request: &ReleaseRequest<'_>,
+    ) -> rusqlite::Result<(bool, Option<SecretUse>)> {
+        let row = tx
+            .query_row(
+                "SELECT (SELECT name FROM agent_secrets WHERE agent_secrets.incarnation=secret_release_receipts.incarnation) \
+             FROM secret_release_receipts \
+             WHERE secret_release_receipts.requester=?1 AND secret_release_receipts.nonce=?2",
+                [request.requester, request.nonce],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok((
+            row.is_some(),
+            row.flatten().map(|name| call.with_name(name)),
+        ))
     }
 
     fn secret_use_sealed_tx<E>(
@@ -1108,6 +1201,8 @@ fn replay(
         .find(|k| k.as_str() == kind)
         .ok_or_else(|| rusqlite_err("invalid release receipt grant kind"))?;
     if expires_at_ms <= now
+        || enc.is_empty()
+        || ciphertext.is_empty()
         || stored_aad != aad_sha256
         || stored_incarnation != incarnation
         || !kinds.contains(&kind)
@@ -1805,7 +1900,7 @@ mod receipt_tests {
         );
         assert_eq!(
             store
-                .revoke_flow_grants_from("install-A", None, ASKER)
+                .revoke_flow_grants_from("install-A", None, ASKER, PAIRING)
                 .unwrap(),
             1
         );
@@ -1829,15 +1924,136 @@ mod receipt_tests {
         let store = reopen(&root, tag);
         assert_eq!(forward(&store, &aad(), NOW + 1, &seals), Ok(sealed(1)));
         assert_eq!(releases(&store), 1);
-        // A local call that reaches the write path sweeps; before expiry it keeps the
-        // receipt, at expiry it deletes it.
+        // A local call that reaches the write path sweeps the payload at expiry,
+        // but the nonce remains spent.
         for (now, left) in [(NOW + LIFETIME - 1, 1), (NOW + LIFETIME, 0)] {
             let _ = store.secret_use(&call(), || now);
             assert_eq!(
-                count(&store, "SELECT COUNT(*) FROM secret_release_receipts"),
+                count(&store, "SELECT COUNT(*) FROM secret_release_receipts WHERE length(enc) != 0 OR length(ciphertext) != 0"),
                 left
             );
+            assert_eq!(
+                count(&store, "SELECT COUNT(*) FROM secret_release_receipts"),
+                1
+            );
         }
+    }
+
+    #[test]
+    fn a_swept_release_nonce_cannot_spend_a_grant_again() {
+        for duration in ["permanent", "once"] {
+            let (_root, store) = setup(duration);
+            agent_grant(&store, "original", duration, NOW + LIFETIME * 2);
+            let seals = Cell::new(0);
+            assert_eq!(forward(&store, &aad(), NOW, &seals), Ok(sealed(1)));
+            if duration == "once" {
+                agent_grant(&store, "replacement", "once", NOW + LIFETIME * 2);
+            }
+
+            // A different admitted operation reaches the receipt sweep before the resend.
+            let _ = store.secret_use(&call(), || NOW + LIFETIME);
+            assert!(matches!(
+                forward(&store, &aad(), NOW + LIFETIME + 1, &seals),
+                Err(SecretError::NotFound)
+            ));
+            assert_eq!(seals.get(), 1);
+            assert_eq!(releases(&store), 1);
+            assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 1);
+        }
+    }
+
+    #[test]
+    fn a_nameless_retry_replays_its_receipt_before_selecting_candidates() {
+        let (_root, store) = setup("receipt-nameless-selection");
+        let basic_scope = || SecretScope::ApiKey {
+            host: "x.test".into(),
+            path_prefix: Some("/repos/a".into()),
+            location: "authorization_basic:git".into(),
+        };
+        let seed_basic = |name: &str, incarnation: &str| {
+            let scope = basic_scope();
+            let blob = agent_secret::seal(
+                &store.key,
+                incarnation,
+                name,
+                &scope,
+                &SecretMaterial::ApiKey(Secret::new(b"material-canary".to_vec())),
+            )
+            .unwrap();
+            let (host, prefix, location, origin) = phone::columns(&scope);
+            store.fenced_write(|tx| {
+                tx.execute(
+                    "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES (?1,?2,?3,'active',?4,?5,?6,?7,1,?8,?9,?10)",
+                    rusqlite::params![name, scope.kind(), incarnation, host, prefix, location, origin, store.key_id.to_hex(), blob, NOW],
+                ).map(|_| ())
+            }).unwrap();
+        };
+        seed_basic("basic", "00000000000000000000000000000003");
+        store.fenced_write(|tx| {
+            tx.execute(
+                "INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,asking_member_id) SELECT 'once-basic',name,incarnation,'reserved:prefrontal-core','head','H','scope','once',?1,?2,'envelope-hash',?3 FROM agent_secrets WHERE name='basic'",
+                rusqlite::params![NOW + LIFETIME * 2, NOW, ASKER],
+            ).map(|_| ())
+        }).unwrap();
+        let named = call();
+        let target = agent_secret::SecretUseByTarget {
+            sender: named.sender,
+            scope: named.scope,
+            worker_parent: named.worker_parent,
+            coverage: named.coverage,
+            agent_id: named.agent_id,
+            target: named.target,
+        };
+        let seals = Cell::new(0);
+        let forward = |request: &ReleaseRequest<'_>| {
+            let seal = |_: &Value| -> Result<SealedRelease, ()> {
+                seals.set(seals.get() + 1);
+                let ForwardedUse::Sealed(sealed) = sealed(seals.get()) else {
+                    unreachable!()
+                };
+                Ok(sealed)
+            };
+            store
+                .secret_use_by_target_sealed(&target, request, seal, || NOW)
+                .map(|answer| answer.expect("seal"))
+        };
+        let aad = aad();
+        assert_eq!(forward(&request(&aad)), Ok(sealed(1)));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM secret_grants WHERE secret_name='basic'"
+            ),
+            0
+        );
+
+        seed_basic("other", "00000000000000000000000000000004");
+        assert_eq!(forward(&request(&aad)), Ok(sealed(1)));
+        assert_eq!(seals.get(), 1);
+        assert_eq!(releases(&store), 1);
+
+        let other_nonce = "1123456789abcdef0123456789abcdef";
+        let other_aad = String::from_utf8(aad.clone())
+            .unwrap()
+            .replace(NONCE, other_nonce);
+        let other_request = ReleaseRequest {
+            requester: ASKER,
+            pairing_id: PAIRING,
+            nonce: other_nonce,
+            aad: other_aad.as_bytes(),
+        };
+        assert_eq!(forward(&other_request), Err(SecretError::Ambiguous));
+        assert_eq!(seals.get(), 1);
+
+        seed_basic("third", "00000000000000000000000000000005");
+        store
+            .fenced_write(|tx| {
+                tx.execute("DELETE FROM agent_secrets WHERE name='basic'", [])
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(forward(&request(&aad)), Err(SecretError::NotFound));
+        assert_eq!(seals.get(), 1);
     }
 
     #[test]

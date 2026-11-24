@@ -339,7 +339,8 @@ pub fn local_approval_statement(
                 json!({"name":call.name,"kind":"local_program","incarnation":incarnation})
         }
         LocalUseKind::Ssh { .. } => {
-            statement["key"] = json!({"credential_id":call.name,"incarnation":incarnation,"fingerprint":fingerprint.expect("vault SSH fingerprint")})
+            let fingerprint = fingerprint.ok_or(SecretError::InvalidParams)?;
+            statement["key"] = json!({"credential_id":call.name,"incarnation":incarnation,"fingerprint":fingerprint})
         }
     }
     Ok(statement)
@@ -356,6 +357,38 @@ mod local_statement_tests {
 
     fn ssh() -> serde_json::Value {
         json!({"program":"ssh","use":"ssh_sign","target":{"user":"u","host":"::1","port":22},"command":"ssh u@host","workdir":"/"})
+    }
+
+    #[test]
+    fn ssh_approval_statement_requires_the_vault_key_fingerprint() {
+        let local = LocalUse::from_value(&ssh()).unwrap();
+        let call = crate::agent_secret::SecretUse {
+            name: "signing:example".into(),
+            sender: crate::agent_secret::SecretSender::Aft,
+            scope: crate::agent_secret::AskingScope {
+                owner: "reserved:prefrontal-core".into(),
+                kind: "head".into(),
+                scope_ref: "H".into(),
+                epoch: 1,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: None,
+            target: crate::agent_secret::UseTarget::LocalProgram(local.clone()),
+        };
+        assert_eq!(
+            local_approval_statement(
+                "request",
+                "member",
+                "incarnation",
+                &call,
+                &local,
+                None,
+                1_000,
+                ""
+            ),
+            Err(SecretError::InvalidParams)
+        );
     }
 
     #[test]
@@ -648,34 +681,52 @@ pub fn approval_statement(
     scope: &super::SecretScope,
     expiry: i64,
 ) -> serde_json::Value {
-    use serde_json::json;
-    let use_scope = scope.use_fields();
-    let tag = if scope.is_extended() {
-        USE_STATEMENT_V3
-    } else {
-        "ck-secret-use-statement/v1"
-    };
-    json!({"v":tag,"request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent_id":call.agent_id,"coverage":call.coverage,"secret":{"name":call.name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry})
+    approval_statement_for_asker(id, member, incarnation, call, scope, expiry, "")
+}
+
+/// The request fields signed on an agent approval card.
+pub struct AgentApprovalSubject<'a> {
+    pub name: &'a str,
+    pub scope: &'a super::AskingScope,
+    pub coverage: &'a str,
+    pub agent_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a super::SecretUse> for AgentApprovalSubject<'a> {
+    fn from(call: &'a super::SecretUse) -> Self {
+        Self {
+            name: &call.name,
+            scope: &call.scope,
+            coverage: &call.coverage,
+            agent_id: call.agent_id.as_deref(),
+        }
+    }
 }
 
 /// The statement for a request `asking_member` forwarded to this vault. A local
 /// legacy request keeps v1 locally and adds `asking_member_id` under v2 when
 /// forwarded. Extended scopes use v3 in both cases, with the asker only when forwarded.
-pub fn approval_statement_for_asker(
+pub fn approval_statement_for_asker<'a>(
     id: &str,
     member: &str,
     incarnation: &str,
-    call: &super::SecretUse,
+    subject: impl Into<AgentApprovalSubject<'a>>,
     scope: &super::SecretScope,
     expiry: i64,
     asking_member: &str,
 ) -> serde_json::Value {
-    let mut statement = approval_statement(id, member, incarnation, call, scope, expiry);
+    use serde_json::json;
+    let subject = subject.into();
+    let tag = if scope.is_extended() {
+        USE_STATEMENT_V3
+    } else if asking_member.is_empty() {
+        "ck-secret-use-statement/v1"
+    } else {
+        USE_STATEMENT_V2
+    };
+    let mut statement = json!({"v":tag,"request_id":id,"member_id":member,"scope":{"owner":subject.scope.owner,"kind":subject.scope.kind,"ref":subject.scope.scope_ref,"epoch":subject.scope.epoch},"agent_id":subject.agent_id,"coverage":subject.coverage,"secret":{"name":subject.name,"kind":scope.kind(),"incarnation":incarnation},"use":scope.use_fields(),"durations":if subject.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry});
     if !asking_member.is_empty() {
-        statement["asking_member_id"] = serde_json::json!(asking_member);
-        if !scope.is_extended() {
-            statement["v"] = serde_json::json!(USE_STATEMENT_V2);
-        }
+        statement["asking_member_id"] = json!(asking_member);
     }
     statement
 }
@@ -785,6 +836,11 @@ pub fn flow_approval_statement(
 /// accepted, with v1 for a legacy scope or v3 for an extended scope.
 pub fn flow_id_is_v2_statement_tag(flow_id: &str) -> bool {
     flow_id == USE_STATEMENT_V2 || flow_id == FLOW_STATEMENT_V2
+}
+
+/// A v1 statement tag in a flow id would collide with the statement's own `v` member.
+pub fn flow_id_is_v1_statement_tag(flow_id: &str) -> bool {
+    ["ck-secret-use-statement/v1", "ck-secret-flow-statement/v1"].contains(&flow_id)
 }
 
 pub fn flow_id_is_v3_statement_tag(flow_id: &str) -> bool {

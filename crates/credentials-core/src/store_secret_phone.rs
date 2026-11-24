@@ -663,7 +663,7 @@ fn observation(
     pairing: Option<&str>,
     now: i64,
 ) -> rusqlite::Result<()> {
-    tx.execute("INSERT INTO secret_phone_observations (fingerprint,pairing_id,observed_at_ms) VALUES (?1,?2,?3) ON CONFLICT(fingerprint) DO UPDATE SET pairing_id=excluded.pairing_id,observed_at_ms=excluded.observed_at_ms", rusqlite::params![fp,pairing,now])?;
+    tx.execute("INSERT INTO secret_phone_observations (fingerprint,pairing_id,observed_at_ms) VALUES (?1,?2,?3) ON CONFLICT(fingerprint) DO UPDATE SET pairing_id=excluded.pairing_id,observed_at_ms=excluded.observed_at_ms WHERE excluded.observed_at_ms >= secret_phone_observations.observed_at_ms", rusqlite::params![fp,pairing,now])?;
     Ok(())
 }
 
@@ -741,8 +741,11 @@ pub(super) fn sweep_release_receipts(
     tx: &rusqlite::Transaction<'_>,
     now: i64,
 ) -> rusqlite::Result<()> {
+    // Keep the nonce spent after discarding the sealed payload. Zero expiry
+    // keeps spent markers out of the indexed range for later sweeps.
     tx.execute(
-        "DELETE FROM secret_release_receipts WHERE expires_at_ms <= ?1",
+        "UPDATE secret_release_receipts SET enc=X'', ciphertext=X'', expires_at_ms=0 \
+             WHERE expires_at_ms > 0 AND expires_at_ms <= ?1",
         [now],
     )?;
     Ok(())
@@ -798,8 +801,9 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         }
         Ok(value)
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
+    let mut flows = tx.prepare("SELECT grant_id,flow_id,flow_version,flow_install_id,methods,last_use_ms FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id")?;
     for secret in &mut secrets {
-        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id,local_use FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
         secret["grants"] = Value::Array(
             grants
                 .query_map(
@@ -811,7 +815,6 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         // A flow grant answers a different question: "which installed flow version may
         // use this?" It therefore names its flow instead of an asking scope, has no
         // coverage and never expires, and carries `methods` only for an API key.
-        let mut flows = tx.prepare("SELECT grant_id,flow_id,flow_version,flow_install_id,methods,last_use_ms FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id")?;
         let flow_grants = flows.query_map([secret["incarnation"].as_str().expect("incarnation")], |r| {
             let methods: Option<String> = r.get(4)?;
             let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"flow":{"flow_id":r.get::<_,String>(1)?,"version":r.get::<_,u64>(2)?,"install_id":r.get::<_,String>(3)?},"duration":"version"});

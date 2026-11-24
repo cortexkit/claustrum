@@ -1730,9 +1730,20 @@ impl HomeVault {
         let store = self.engine.store();
         let answer = if method == OP_SECRET_REQUEST_FLOW_APPROVAL {
             let clock = Arc::clone(&self.secret_clock);
-            crate::secret_use::serve_flow_approval_forwarded(store, member, params, move || clock())
+            crate::secret_use::serve_flow_approval_forwarded(
+                store,
+                member,
+                &pairing_id,
+                params,
+                move || clock(),
+            )
         } else {
-            crate::secret_use::serve_revoke_flow_grants_forwarded(store, member, params)
+            crate::secret_use::serve_revoke_flow_grants_forwarded(
+                store,
+                member,
+                &pairing_id,
+                params,
+            )
         };
         match answer {
             UseAnswer::Reply(reply) => {

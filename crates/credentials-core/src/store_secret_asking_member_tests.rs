@@ -9,6 +9,7 @@ use super::*;
 
 const ASKER_B: &str = "fed-computer:33333333333333333333333333333333";
 const ASKER_C: &str = "fed-computer:44444444444444444444444444444444";
+const PAIRING: &str = "pair-A";
 
 fn use_from(store: &EncryptedStore, asker: &str) -> Value {
     store
@@ -17,8 +18,14 @@ fn use_from(store: &EncryptedStore, asker: &str) -> Value {
 }
 
 fn request_from(store: &EncryptedStore, asker: &str) -> Value {
+    store.fenced_write(|tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO member_grants (member_id,operation,selector_kind,selector,pairing_id,created_at_ms,source) VALUES (?1,'secret_use','none','',?2,?3,'operator')",
+            rusqlite::params![asker, PAIRING, NOW],
+        ).map(|_| ())
+    }).unwrap();
     store
-        .secret_request_flow_approval_from(&install(), asker, || NOW)
+        .secret_request_flow_approval_from(&install(), asker, PAIRING, || NOW)
         .map_or_else(|e| e.body(), |o| o.reply)
 }
 
@@ -133,7 +140,7 @@ fn flow_grants_release_and_revoke_per_asker() {
 
     // B's revoke removes B's grant only; this vault's grant and C's request stay.
     assert_eq!(
-        store.revoke_flow_grants_from("install-A", None, ASKER_B),
+        store.revoke_flow_grants_from("install-A", None, ASKER_B, PAIRING),
         Ok(1)
     );
     assert_eq!(grant_askers(&store, "secret_flow_grants"), [""]);
@@ -146,7 +153,7 @@ fn flow_grants_release_and_revoke_per_asker() {
     assert!(grant_askers(&store, "secret_flow_grants").is_empty());
     assert_eq!(request_from(&store, ASKER_C), from_c);
     assert_eq!(
-        store.revoke_flow_grants_from("install-A", None, ASKER_C),
+        store.revoke_flow_grants_from("install-A", None, ASKER_C, PAIRING),
         Ok(0)
     );
     assert_eq!(

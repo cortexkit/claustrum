@@ -534,6 +534,47 @@ fn phone_deadline_keeps_observation_but_not_mutation_and_admitted_commit_finishe
 }
 
 #[test]
+fn an_older_phone_pairing_lookup_cannot_replace_a_newer_observation() {
+    let (_root, store, _) = setup("phone-observation-order");
+    for (pairing, observed_at) in [(None, 3000), (Some("pair-A"), 2000)] {
+        let _ = store.secret_phone_operation(
+            FP,
+            pairing,
+            observed_at,
+            &PhoneOperation::List,
+            || false,
+            || 3000,
+        );
+    }
+    let row = store
+        .store
+        .with_conn(|conn| {
+            conn.query_row(
+            "SELECT pairing_id,observed_at_ms FROM secret_phone_observations WHERE fingerprint=?1",
+            [FP],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+        )
+        })
+        .unwrap();
+    assert_eq!(row, (None, 3000));
+}
+
+#[test]
+fn phone_list_prepares_grant_statements_once_per_call() {
+    let source = include_str!("store_secret_phone.rs");
+    let list = source.split("fn list(tx:").nth(1).unwrap();
+    let loop_start = list.find("for secret in &mut secrets").unwrap();
+    for statement in ["let mut grants = tx.prepare", "let mut flows = tx.prepare"] {
+        let prepare = list.find(statement).unwrap();
+        assert!(
+            prepare < loop_start,
+            "{statement} must precede the secret loop"
+        );
+        assert_eq!(list.matches(statement).count(), 1);
+    }
+}
+
+#[test]
 fn phone_list_sweeps_only_after_current_registration() {
     let (_root, store, sender) = setup("phone-list-sweep");
     let result = run(

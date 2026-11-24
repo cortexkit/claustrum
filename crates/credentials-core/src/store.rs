@@ -36,7 +36,7 @@
 //! reset — auto-wiping on perceived corruption is itself a data-loss/DoS vector).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use cortexkit_store::{Migration, SqliteStore, StoreError};
@@ -1235,6 +1235,10 @@ pub struct EncryptedStore {
     // would show up as a value that failed to rise — caught by a human comparing two
     // numbers, if they compare them.
     fenced_out: AtomicBool,
+    // How many times this process has turned login sharing on. Write notices
+    // coalesce, so a quick off-then-on leaves the setting where it started; a
+    // watcher compares this count instead and still sees the turn-on.
+    login_sharing_enables: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
     deposit_cookie_audit_fault: AtomicBool,
 }
@@ -1783,6 +1787,7 @@ impl EncryptedStore {
             key_id,
             audit_key,
             fenced_out: AtomicBool::new(false),
+            login_sharing_enables: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             deposit_cookie_audit_fault: AtomicBool::new(false),
         };

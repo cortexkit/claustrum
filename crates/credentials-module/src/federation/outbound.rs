@@ -67,6 +67,11 @@ pub const ADMIN_OP_BUDGET: Duration = Duration::from_secs(10);
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(3);
 
+/// How many undelivered frames one held subscription may queue. A subscriber that
+/// falls this far behind loses the subscription instead of growing the queue: every
+/// caller reopens a lost subscription with a full read, so nothing is missed.
+pub(super) const SUBSCRIPTION_BUFFER: usize = 64;
+
 /// Mints consumer claims over the owner's registration egress while the daemon's
 /// frame loop continues answering probes and configuration traffic. Claims are
 /// held only by the call that presents them, never cached or logged.
@@ -446,7 +451,7 @@ enum WaiterKey {
     Route(u16, u64),
 }
 
-type StreamSender = mpsc::UnboundedSender<Result<Frame, String>>;
+type StreamSender = mpsc::Sender<Result<Frame, String>>;
 
 /// One frame delivered to a held subscription, keeping terminal replies distinct
 /// from a clean stream end so callers can decide whether to retry or reconcile.
@@ -467,7 +472,7 @@ pub struct Subscription {
     link: Arc<Link>,
     key: WaiterKey,
     binding: Arc<Binding>,
-    replies: mpsc::UnboundedReceiver<Result<Frame, String>>,
+    replies: mpsc::Receiver<Result<Frame, String>>,
 }
 
 impl Subscription {
@@ -569,6 +574,10 @@ struct Inner {
     connector: AsyncMutex<()>,
     bindings: Mutex<HashMap<String, Arc<Binding>>>,
     next_corr: std::sync::atomic::AtomicU64,
+    /// Runs between a subscription taking its binding and registering its stream,
+    /// so a test can close the connection at exactly that point.
+    #[cfg(test)]
+    subscribe_hook: Mutex<Option<Box<dyn FnOnce(&Link) + Send>>>,
 }
 
 impl std::fmt::Debug for OutboundClient {
@@ -629,6 +638,8 @@ impl OutboundClient {
                 connector: AsyncMutex::new(()),
                 bindings: Mutex::new(HashMap::new()),
                 next_corr: std::sync::atomic::AtomicU64::new(1),
+                #[cfg(test)]
+                subscribe_hook: Mutex::new(None),
             }),
         }
     }
@@ -683,15 +694,16 @@ impl OutboundClient {
         let mut binding = BindingRegistration {
             client: self,
             route_key,
+            used: Mutex::new(None),
             completed: false,
         };
-        match self.call_inner(route_key, &call, budget).await {
+        match self.call_inner(route_key, &call, budget, &binding.used).await {
             Ok(reply) => {
                 binding.completed = true;
                 Ok(reply)
             }
             Err(failure) => {
-                self.drop_binding(route_key);
+                binding.drop_used();
                 binding.completed = true;
                 if let Some(dead) = failure.dead.as_ref() {
                     self.retire(dead, budget).await;
@@ -718,15 +730,9 @@ impl OutboundClient {
         body
     }
 
-    fn drop_binding(&self, route_key: &str) {
-        self.inner
-            .bindings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(route_key);
-    }
-
-    pub(super) fn invalidate_subscription(&self, route_key: &str, subscription: &Subscription) {
+    /// Forget `binding` if it is still the one cached for `route_key`. A call that
+    /// fails late must not evict a binding a concurrent call has opened since.
+    fn drop_binding(&self, route_key: &str, binding: &Arc<Binding>) {
         let mut bindings = self
             .inner
             .bindings
@@ -734,10 +740,14 @@ impl OutboundClient {
             .unwrap_or_else(|p| p.into_inner());
         if bindings
             .get(route_key)
-            .is_some_and(|current| Arc::ptr_eq(current, &subscription.binding))
+            .is_some_and(|current| Arc::ptr_eq(current, binding))
         {
             bindings.remove(route_key);
         }
+    }
+
+    pub(super) fn invalidate_subscription(&self, route_key: &str, subscription: &Subscription) {
+        self.drop_binding(route_key, &subscription.binding);
     }
 
     fn next_corr(&self) -> u64 {
@@ -822,6 +832,7 @@ impl OutboundClient {
         route_key: &str,
         call: &RouteCall,
         budget: tokio::time::Instant,
+        used: &Mutex<Option<Arc<Binding>>>,
     ) -> Result<Value, LinkFailure> {
         let link = self.link(budget).await.map_err(failure)?;
 
@@ -843,6 +854,7 @@ impl OutboundClient {
         }
 
         let binding = self.route_binding(&link, route_key, call, budget).await?;
+        *used.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&binding));
         let corr = self.next_corr();
         let request = self.route_request(&binding, corr, call)?;
         let reply = self
@@ -953,9 +965,19 @@ impl OutboundClient {
             .route_binding(&link, route_key, &call, budget)
             .await
             .map_err(|error| error.error)?;
+        #[cfg(test)]
+        if let Some(hook) = self
+            .inner
+            .subscribe_hook
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            hook(&link);
+        }
         let corr = self.next_corr();
         let key = WaiterKey::Route(binding.channel, corr);
-        let (send, replies) = mpsc::unbounded_channel();
+        let (send, replies) = mpsc::channel(SUBSCRIPTION_BUFFER);
         link.streams
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -966,6 +988,16 @@ impl OutboundClient {
             binding: Arc::clone(&binding),
             replies,
         };
+        // The reader marks the link closed before it drains the streams, so after
+        // registering, either its drain reaches this stream or this check sees the
+        // mark. Without it a subscription opened as the connection dies would write
+        // its request into a socket nobody reads and wait for a notice for ever.
+        if link.is_closed() {
+            self.retire(&link, budget).await;
+            return Err(OutboundError::Unavailable(
+                "the connection closed before the watch was sent".into(),
+            ));
+        }
         if !link.holds(&binding) {
             return Err(OutboundError::Unavailable(
                 "watch route closed before subscription".into(),
@@ -1090,13 +1122,24 @@ impl OutboundClient {
 struct BindingRegistration<'a> {
     client: &'a OutboundClient,
     route_key: &'a str,
+    /// The binding this call sent on, once it has one. Only that binding is dropped
+    /// when the call fails or is cancelled.
+    used: Mutex<Option<Arc<Binding>>>,
     completed: bool,
+}
+
+impl BindingRegistration<'_> {
+    fn drop_used(&self) {
+        if let Some(binding) = self.used.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            self.client.drop_binding(self.route_key, &binding);
+        }
+    }
 }
 
 impl Drop for BindingRegistration<'_> {
     fn drop(&mut self) {
         if !self.completed {
-            self.client.drop_binding(self.route_key);
+            self.drop_used();
         }
     }
 }
@@ -1163,10 +1206,13 @@ where
                     };
                     if let Some(key) = stream_key {
                         let terminal = frame.header.ty != FrameType::StreamData;
-                        if let Some(stream) = streams.get(&key) {
-                            let _ = stream.send(Ok(frame));
-                        }
-                        if terminal {
+                        // A full queue ends the subscription rather than growing:
+                        // once its sender is gone, the subscriber reads what is
+                        // queued and then an error, and reopens with a full read.
+                        let overflowed = streams
+                            .get(&key)
+                            .is_some_and(|stream| stream.try_send(Ok(frame)).is_err());
+                        if terminal || overflowed {
                             streams.remove(&key);
                         }
                         continue;
@@ -1252,7 +1298,8 @@ fn close_route(link: &Link, channel: u16) {
         .unwrap_or_else(|p| p.into_inner())
         .retain(|key, sender| {
             if matches!(key, WaiterKey::Route(on, _) if *on == channel) {
-                let _ = sender.send(Err("the daemon closed the route".into()));
+                // A full queue already ends in an error once the sender is dropped.
+                let _ = sender.try_send(Err("the daemon closed the route".into()));
                 false
             } else {
                 true
@@ -1279,7 +1326,7 @@ fn fail_all(link: &Link, why: &str) {
         .unwrap_or_else(|p| p.into_inner())
         .drain()
     {
-        let _ = sender.send(Err(why.to_string()));
+        let _ = sender.try_send(Err(why.to_string()));
     }
 }
 
@@ -1685,5 +1732,247 @@ mod tests {
         }
         minting.await.unwrap();
         serving.await.unwrap();
+    }
+
+    /// A scripted daemon: the test reads every frame the client sends, tagged with
+    /// the index of the connection it arrived on, and writes the replies itself.
+    struct FakeDaemon {
+        _root: credentials_core::test_support::TestTempDir,
+        path: std::path::PathBuf,
+        frames: mpsc::UnboundedReceiver<(usize, Frame)>,
+        writers: Arc<Mutex<Vec<mpsc::UnboundedSender<Frame>>>>,
+    }
+
+    impl FakeDaemon {
+        async fn start(tag: &str) -> Self {
+            let root = credentials_core::test_support::TestTempDir::new(format!("fake-{tag}"));
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let path = root.join("connection.json");
+            let conn = subc_transport::ConnectionInfo {
+                schema: connection_file::SCHEMA_VERSION,
+                wire_version: None,
+                endpoints: vec![subc_transport::Endpoint {
+                    host: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                    port: listener.local_addr().unwrap().port(),
+                }],
+                key: vec![7; 32],
+                daemon_id: [11; 16],
+                pid: std::process::id(),
+                daemon_ver: "test".into(),
+            };
+            connection_file::write_atomic(&path, &conn).unwrap();
+            let (frames_tx, frames) = mpsc::unbounded_channel();
+            let writers = Arc::new(Mutex::new(Vec::new()));
+            let accepted = Arc::clone(&writers);
+            tokio::spawn(async move {
+                for index in 0.. {
+                    let mut stream = listener.accept().await.unwrap().0;
+                    subc_transport::authenticate_server(
+                        &mut stream,
+                        &conn.key,
+                        &conn.daemon_id,
+                        "test",
+                        Duration::from_secs(2),
+                    )
+                    .await
+                    .unwrap();
+                    let (mut read, mut write) = tokio::io::split(stream);
+                    let (out_tx, mut out) = mpsc::unbounded_channel::<Frame>();
+                    accepted.lock().unwrap().push(out_tx);
+                    tokio::spawn(async move {
+                        while let Some(frame) = out.recv().await {
+                            write_frame(&mut write, &frame).await.unwrap();
+                        }
+                    });
+                    let frames_tx = frames_tx.clone();
+                    tokio::spawn(async move {
+                        while let Ok(Some(frame)) = read_frame(&mut read).await {
+                            let _ = frames_tx.send((index, frame));
+                        }
+                    });
+                }
+            });
+            Self {
+                _root: root,
+                path,
+                frames,
+                writers,
+            }
+        }
+
+        async fn next(&mut self) -> (usize, Frame) {
+            self.frames.recv().await.unwrap()
+        }
+
+        fn send(&self, conn: usize, ty: FrameType, channel: u16, corr: u64, body: Value) {
+            let epoch = u32::from(channel != 0);
+            let frame = Frame::build(
+                ty,
+                Flags::new(false, Priority::Interactive, false),
+                channel,
+                epoch,
+                corr,
+                serde_json::to_vec(&body).unwrap(),
+            )
+            .unwrap();
+            self.writers.lock().unwrap()[conn].send(frame).unwrap();
+        }
+
+        /// Answer the next frame, which must be a `route.open`, with `channel`.
+        async fn open_route(&mut self, channel: u16) -> usize {
+            let (conn, open) = self.next().await;
+            assert_eq!(
+                serde_json::from_slice::<Value>(&open.body).unwrap()["op"],
+                "route.open"
+            );
+            self.send(
+                conn,
+                FrameType::Response,
+                0,
+                open.header.corr,
+                json!({"route_channel": channel, "route_epoch": 1}),
+            );
+            conn
+        }
+    }
+
+    fn test_call() -> RouteCall {
+        RouteCall {
+            target: management_surface("callosum"),
+            prelude: None,
+            request: json!({"op": "test"}),
+        }
+    }
+
+    fn spawn_call(client: &OutboundClient) -> tokio::task::JoinHandle<Result<Value, OutboundError>> {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .call("route", test_call(), Duration::from_secs(5))
+                .await
+        })
+    }
+
+    fn cached_channel(client: &OutboundClient) -> Option<u16> {
+        client
+            .inner
+            .bindings
+            .lock()
+            .unwrap()
+            .get("route")
+            .map(|binding| binding.channel)
+    }
+
+    /// Open route 12 on the first connection with one successful call.
+    async fn first_route(daemon: &mut FakeDaemon, client: &OutboundClient) -> usize {
+        let call = spawn_call(client);
+        let conn = daemon.open_route(12).await;
+        let (_, request) = daemon.next().await;
+        assert_eq!(request.header.channel, 12);
+        daemon.send(conn, FrameType::Response, 12, request.header.corr, json!({"ok": true}));
+        assert_eq!(call.await.unwrap().unwrap(), json!({"ok": true}));
+        conn
+    }
+
+    #[tokio::test]
+    async fn a_late_failure_keeps_the_binding_a_newer_call_opened() {
+        let mut daemon = FakeDaemon::start("late-failure").await;
+        let client = OutboundClient::new(&daemon.path, None);
+        let conn = first_route(&mut daemon, &client).await;
+        let late = spawn_call(&client);
+        let (_, late_request) = daemon.next().await;
+        let early = spawn_call(&client);
+        let (_, early_request) = daemon.next().await;
+        let refusal = json!({"code": "route_refused", "message": "test"});
+        daemon.send(conn, FrameType::Error, 0, early_request.header.corr, refusal.clone());
+        assert!(early.await.unwrap().is_err());
+        assert_eq!(cached_channel(&client), None);
+        let newer = spawn_call(&client);
+        daemon.open_route(13).await;
+        let (_, newer_request) = daemon.next().await;
+        assert_eq!(newer_request.header.channel, 13);
+        daemon.send(conn, FrameType::Response, 13, newer_request.header.corr, json!({"ok": true}));
+        assert!(newer.await.unwrap().is_ok());
+        daemon.send(conn, FrameType::Error, 0, late_request.header.corr, refusal);
+        assert!(late.await.unwrap().is_err());
+        assert_eq!(cached_channel(&client), Some(13));
+    }
+
+    #[tokio::test]
+    async fn a_subscription_opened_as_its_connection_closes_fails_and_the_next_dials_fresh() {
+        let mut daemon = FakeDaemon::start("subscribe-close").await;
+        let client = OutboundClient::new(&daemon.path, None);
+        assert_eq!(first_route(&mut daemon, &client).await, 0);
+        // The reader handles a channel-zero Goodbye after the subscription has taken
+        // its cached binding but before it registers its stream. The socket's write
+        // half is still open, so only the closed mark can stop the request.
+        *client.inner.subscribe_hook.lock().unwrap() = Some(Box::new(|link: &Link| {
+            link.closed.store(true, Ordering::SeqCst);
+            fail_all(link, "the daemon said goodbye");
+        }));
+        assert!(client
+            .subscribe("route", test_call(), Duration::from_secs(5))
+            .await
+            .is_err());
+        let reopened = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .subscribe("route", test_call(), Duration::from_secs(5))
+                    .await
+            })
+        };
+        // Nothing was sent on the closed connection: the next frame is the new
+        // connection's route.open.
+        assert_eq!(daemon.open_route(12).await, 1);
+        let (conn, watch) = daemon.next().await;
+        assert_eq!((conn, watch.header.channel), (1, 12));
+        let mut subscription = reopened.await.unwrap().unwrap();
+        daemon.send(1, FrameType::StreamData, 12, watch.header.corr, json!({"n": 1}));
+        assert_eq!(
+            subscription.next_event().await.unwrap(),
+            SubscriptionEvent::Data(json!({"n": 1}))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_that_outruns_its_reader_ends_instead_of_buffering() {
+        let mut daemon = FakeDaemon::start("subscribe-overflow").await;
+        let client = OutboundClient::new(&daemon.path, None);
+        let conn = first_route(&mut daemon, &client).await;
+        let subscribing = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .subscribe("route", test_call(), Duration::from_secs(5))
+                    .await
+            })
+        };
+        let (_, watch) = daemon.next().await;
+        let mut subscription = subscribing.await.unwrap().unwrap();
+        let sent = SUBSCRIPTION_BUFFER + 50;
+        for n in 0..sent {
+            daemon.send(conn, FrameType::StreamData, 12, watch.header.corr, json!({"n": n}));
+        }
+        // The reader handles frames in order, so once this later reply arrives it
+        // has handled every notice above.
+        let fence = spawn_call(&client);
+        let (_, request) = daemon.next().await;
+        daemon.send(conn, FrameType::Response, 12, request.header.corr, json!({"ok": true}));
+        assert!(fence.await.unwrap().is_ok());
+        assert!(subscription.replies.len() <= SUBSCRIPTION_BUFFER);
+        let mut data = Vec::new();
+        let error = loop {
+            match subscription.next_event().await {
+                Ok(SubscriptionEvent::Data(body)) => data.push(body),
+                Ok(other) => panic!("unexpected event {other:?}"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(error, OutboundError::Unavailable(_)));
+        assert_eq!(data.len(), SUBSCRIPTION_BUFFER);
+        assert_eq!(data[0], json!({"n": 0}));
     }
 }

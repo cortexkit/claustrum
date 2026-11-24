@@ -124,6 +124,97 @@ fn pairing_for<'a>(view: &'a VaultSharingSnapshot, home: &str) -> Option<&'a str
         .find_map(|(id, pair)| (id == fp).then_some(pair.as_str()))
 }
 
+/// A device of a class this build does not recognise is unmapped: it is not a
+/// computer, but it is no evidence that the computer went away either.
+fn unmapped(view: &VaultSharingSnapshot, home: &str) -> bool {
+    home.strip_prefix("fed-computer:")
+        .is_some_and(|fp| view.unrecognised.iter().any(|id| id == fp))
+}
+
+/// Whether a validated roster proves that copies made under `old` lost their
+/// pairing: the home is gone or re-paired. An unmapped home proves nothing.
+fn pairing_lost(view: &VaultSharingSnapshot, home: &str, old: Option<&str>) -> bool {
+    !unmapped(view, home) && (old.is_none() || old != pairing_for(view, home))
+}
+
+/// Acts on a confirmed unpair while no member watcher exists: before the hub
+/// connects, or for good when this registration has no hub. It removes only
+/// what [`MemberWatcher`] would remove for the same roster, and it is stopped
+/// before a member watcher starts, so its removals never race a hub apply.
+pub(crate) struct PairingLossRemover {
+    store: Arc<EncryptedStore>,
+    pairings: Pairings,
+    retry: Retry,
+}
+
+impl PairingLossRemover {
+    pub(crate) fn new(store: Arc<EncryptedStore>, pairings: Pairings) -> Self {
+        Self {
+            store,
+            pairings,
+            retry: Retry::default(),
+        }
+    }
+
+    /// Remove lost pairings until `other` completes. A removal that has started
+    /// always finishes before `other`'s output is returned.
+    pub(crate) async fn until<T>(&mut self, other: impl std::future::Future<Output = T>) -> T {
+        tokio::pin!(other);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut other => return output,
+                changed = self.pairings.changed() => {
+                    if changed.is_err() {
+                        return other.await;
+                    }
+                    self.retry.wake();
+                }
+                _ = deadline(self.retry.at) => {
+                    self.retry.at = None;
+                    if self.remove_lost().await {
+                        self.retry.delay.reset();
+                    } else {
+                        tracing::warn!(target: "federation", "hub login pairing removal failed; retrying");
+                        self.retry.failed();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn remove_lost(&mut self) -> bool {
+        // No roster (an unavailable or refused feed) is not evidence of anything.
+        let Some(view) = self.pairings.borrow_and_update().clone() else {
+            return true;
+        };
+        let store = Arc::clone(&self.store);
+        let removed = tokio::task::spawn_blocking(move || -> Result<(), StoreOpError> {
+            let copies = store
+                .list_remote_records()?
+                .into_iter()
+                .filter(|row| row.source == RemoteRecordSource::HomeWatch)
+                .map(|row| (row.home_member, row.home_pairing_id));
+            let accepted: Vec<_> = store
+                .list_hub_login_homes()?
+                .into_iter()
+                .filter_map(|state| state.pairing_id.map(|pairing| (state.home_member, Some(pairing))))
+                .collect();
+            let lost: BTreeSet<String> = copies
+                .chain(accepted)
+                .filter(|(home, old)| pairing_lost(&view, home, old.as_deref()))
+                .map(|(home, _)| home)
+                .collect();
+            for home in lost {
+                store.remove_hub_login_home_audited(&home, pairing_for(&view, &home))?;
+            }
+            Ok(())
+        })
+        .await;
+        matches!(removed, Ok(Ok(())))
+    }
+}
+
 struct Recipient {
     member: String,
     key_id: String,
@@ -373,6 +464,8 @@ struct TestHooks {
     before_apply: Option<super::ingress::IssueAuditGate>,
     apply_attempted: Option<Arc<tokio::sync::Notify>>,
     handled: Option<mpsc::UnboundedSender<HubEvent>>,
+    /// Receives the homes with a queued removal after each roster is reconciled.
+    reconciled: Option<mpsc::UnboundedSender<Vec<String>>>,
 }
 
 impl MemberWatcher {
@@ -447,6 +540,16 @@ impl MemberWatcher {
             if scan {
                 self.reconcile_pairings(pairings, &local, copies);
                 self.last_scanned = Some(Arc::clone(pairings));
+                #[cfg(test)]
+                if let Some(sink) = &self.hooks.reconciled {
+                    let queued = self
+                        .homes
+                        .iter()
+                        .filter(|(_, work)| work.removal.is_some())
+                        .map(|(home, _)| home.clone())
+                        .collect();
+                    let _ = sink.send(queued);
+                }
             }
         }
         let bound: BTreeMap<_, _> = bindings
@@ -523,7 +626,7 @@ impl MemberWatcher {
                 .map(|pairing| (state.home_member.clone(), Some(pairing.clone())))
         });
         for (home, old_pair) in copies.into_iter().chain(changed) {
-            if old_pair.is_none() || old_pair.as_deref() != pairing_for(pairs, &home) {
+            if pairing_lost(pairs, &home, old_pair.as_deref()) {
                 let work = self.homes.entry(home).or_default();
                 // Convert an observed loss to a removal before admitting any hub value.
                 work.removal.get_or_insert_with(|| (None, Retry::default()));
@@ -539,10 +642,13 @@ impl MemberWatcher {
                 work.forget_pending();
             }
             if let Some((keep, retry)) = &mut work.removal {
-                if keep.as_deref() != current || retry.at.is_none() {
-                    retry.wake();
+                // An unmapped home leaves a queued removal exactly as it was.
+                if !unmapped(pairs, home) {
+                    if keep.as_deref() != current || retry.at.is_none() {
+                        retry.wake();
+                    }
+                    *keep = current.map(str::to_owned);
                 }
-                *keep = current.map(str::to_owned);
                 work.forget_pending();
                 work.cancel_read();
             }

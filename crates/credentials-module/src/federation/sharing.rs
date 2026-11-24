@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use credentials_core::federation::{
-    is_lower_hex_16_bytes, is_lower_hex_sha256, VaultSharingMember,
+    is_lower_hex_16_bytes, is_lower_hex_sha256, valid_pairing_id, VaultSharingMember,
 };
 use credentials_core::fleet::FleetRemoval;
 use credentials_core::store::EncryptedStore;
@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::outbound::{management_surface, OutboundClient, RouteCall, ADMIN_OP_BUDGET};
+use super::outbound::{Subscription, SubscriptionEvent};
 
 // Ignore additional Callosum metadata so a newer reply can still revoke a
 // computer's grants when its vault-sharing switch turns off.
@@ -76,6 +77,9 @@ pub struct VaultSharingSnapshot {
     pub enabled: bool,
     pub devices: Vec<(String, String)>,
     pub computers: Vec<(String, String)>,
+    /// Fingerprints of devices whose class this build does not recognise. Such a
+    /// device is unmapped: it is neither a computer nor proof that one went away.
+    pub unrecognised: Vec<String>,
     pub tombstones: Vec<SharingTombstone>,
 }
 
@@ -91,9 +95,12 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     let mut enabled = false;
     let mut devices = Vec::new();
     let mut computers = Vec::new();
+    let mut unrecognised = Vec::new();
     for device in snapshot.devices {
+        // One pairing-id rule for the whole roster, the store's own: a roster the
+        // store would refuse is never published to anyone as evidence of pairing.
         if !is_lower_hex_16_bytes(&device.fingerprint)
-            || device.pairing_id.is_empty()
+            || !valid_pairing_id(&device.pairing_id)
             || !fingerprints.insert(device.fingerprint.clone())
         {
             return None;
@@ -115,6 +122,9 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
         }
         if device.class == Class::Computer {
             computers.push((device.fingerprint.clone(), device.pairing_id.clone()));
+        }
+        if device.class == Class::Unknown {
+            unrecognised.push(device.fingerprint.clone());
         }
         devices.push((device.fingerprint, device.pairing_id));
     }
@@ -138,6 +148,7 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
         enabled,
         devices,
         computers,
+        unrecognised,
         tombstones,
     })
 }
@@ -150,10 +161,12 @@ fn request(method: &str) -> RouteCall {
     }
 }
 
+/// Validate the whole roster, commit its grant changes, and only then publish it.
+/// Consumers therefore never act on a roster the store refused or on grants that
+/// never committed; after a failure they keep the previous snapshot.
 async fn apply(
     store: Arc<EncryptedStore>,
     body: Value,
-    retries: &mut RetryState,
     removals: &Arc<PendingRemovals>,
     manifest_watches: Option<&super::manifest_watch_ingress::ManifestWatchHub>,
     hub_pairings: Option<&PairingSnapshots>,
@@ -161,27 +174,25 @@ async fn apply(
     let snapshot = Arc::new(
         decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?,
     );
-    if let Some(hub) = manifest_watches {
-        hub.paired_devices(snapshot.devices.clone());
-    }
-    if let Some(pairings) = hub_pairings {
-        pairings.send_replace(Some(Arc::clone(&snapshot)));
-    }
     let removals = Arc::clone(removals);
+    let reconciled = Arc::clone(&snapshot);
     tokio::task::spawn_blocking(move || {
-        removals.record(&store, snapshot.tombstones.clone());
-        if snapshot.enabled {
+        removals.record(&store, reconciled.tombstones.clone());
+        if reconciled.enabled {
             super::transfer::ensure_transfer_key(&store, "vault")?;
         }
         store
-            .reconcile_vault_sharing_audited(&snapshot.members)
+            .reconcile_vault_sharing_audited(&reconciled.members)
             .map(|_| ())
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    if retries.applied() {
-        tracing::info!(target: "federation", "vault sharing snapshot reconciliation recovered");
+    if let Some(hub) = manifest_watches {
+        hub.paired_devices(snapshot.devices.clone());
+    }
+    if let Some(pairings) = hub_pairings {
+        pairings.send_replace(Some(snapshot));
     }
     Ok(())
 }
@@ -211,6 +222,11 @@ impl RetryState {
             self.last_error = Some(error.to_string());
         }
         (retry_delay(self.failures), warn)
+    }
+
+    fn ended(&mut self) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        retry_delay(self.failures)
     }
 
     fn applied(&mut self) -> bool {
@@ -340,7 +356,7 @@ async fn reconcile(
 ) {
     let mut retries = RetryState::default();
     let mut writes = store.subscribe_writes();
-    let mut enabled = store.login_sharing().unwrap_or(false);
+    let mut enables = store.login_sharing_enables();
     'watching: loop {
         let outcome = {
             let attempt = watch(
@@ -357,14 +373,18 @@ async fn reconcile(
                     result = &mut attempt => break result,
                     changed = writes.changed() => {
                         if changed.is_err() { return; }
-                        let current = store.login_sharing().unwrap_or(false);
-                        let turned_on = !enabled && current;
-                        enabled = current;
-                        if turned_on {
-                            if let Some(pairings) = &hub_pairings {
-                                pairings.send_replace(None);
+                        // Write notices coalesce, so an off-then-on pair can look
+                        // like no change at all. Every turn-on is counted instead,
+                        // and any change that ends at on rereads the roster.
+                        let current = store.login_sharing_enables();
+                        if current != enables {
+                            enables = current;
+                            if store.login_sharing().unwrap_or(false) {
+                                if let Some(pairings) = &hub_pairings {
+                                    pairings.send_replace(None);
+                                }
+                                continue 'watching;
                             }
-                            continue 'watching;
                         }
                     }
                 }
@@ -373,6 +393,8 @@ async fn reconcile(
         if let Some(pairings) = &hub_pairings {
             pairings.send_replace(None);
         }
+        // Only an applied watch notice resets the backoff, so a Callosum that serves
+        // the read but refuses or drops the watch is retried ever more slowly.
         let delay = match outcome {
             Err(error) => {
                 let (delay, warn) = retries.failed(&error);
@@ -381,12 +403,14 @@ async fn reconcile(
                 }
                 delay
             }
-            Ok(()) => retry_delay(1),
+            Ok(()) => retries.ended(),
         };
         tokio::time::sleep(delay).await;
     }
 }
 
+/// Read the full roster, then hold the watch. The initial read alone is not proof
+/// that the watch works, so only a notice applied from the watch counts as success.
 async fn watch(
     store: Arc<EncryptedStore>,
     client: &OutboundClient,
@@ -406,7 +430,6 @@ async fn watch(
     apply(
         Arc::clone(&store),
         snapshot,
-        retries,
         removals,
         manifest_watches,
         hub_pairings,
@@ -420,22 +443,49 @@ async fn watch(
         )
         .await
         .map_err(|e| e.message().to_string())?;
-    while let Some(snapshot) = subscription
-        .next()
-        .await
-        .map_err(|e| e.message().to_string())?
-    {
+    let mut first = true;
+    loop {
+        let snapshot = match next_notice(&mut subscription, first, "paired-device").await? {
+            Some(snapshot) => snapshot,
+            None => return Ok(()),
+        };
+        first = false;
         apply(
             Arc::clone(&store),
             snapshot,
-            retries,
             removals,
             manifest_watches,
             hub_pairings,
         )
         .await?;
+        if retries.applied() {
+            tracing::info!(target: "federation", "vault sharing snapshot reconciliation recovered");
+        }
     }
-    Ok(())
+}
+
+/// The next data notice of a Callosum watch, `None` at a clean end. A refusal or
+/// a reply in place of the stream is a failure that names its code. The first
+/// notice is bounded: a service that accepts the watch but never starts it would
+/// otherwise hold the feed for ever.
+pub(super) async fn next_notice(
+    subscription: &mut Subscription,
+    first: bool,
+    feed: &str,
+) -> Result<Option<Value>, String> {
+    let event = if first {
+        tokio::time::timeout(ADMIN_OP_BUDGET, subscription.next_event())
+            .await
+            .map_err(|_| format!("no first {feed} notice within the setup budget"))?
+    } else {
+        subscription.next_event().await
+    };
+    match event.map_err(|e| e.message().to_string())? {
+        SubscriptionEvent::Data(body) => Ok(Some(body)),
+        SubscriptionEvent::End => Ok(None),
+        SubscriptionEvent::Error { code, .. } => Err(format!("{feed} watch refused: {code}")),
+        SubscriptionEvent::Response(_) => Err(format!("{feed} watch answered instead of streaming")),
+    }
 }
 
 #[cfg(test)]

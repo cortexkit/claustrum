@@ -88,7 +88,9 @@ impl ConfigPoll {
             Err(error) => {
                 let error = error.to_string();
                 if self.failure.as_deref() != Some(error.as_str()) {
-                    tracing::warn!(target: "federation", path = %self.path.display(), %error, "login sharing configuration apply failed; retrying");
+                    // The error text only decides whether this failure is new; it is not
+                    // logged, so the line stays the documented fixed apply-failure text.
+                    tracing::warn!(target: "federation", path = %self.path.display(), "login sharing configuration apply failed; retrying");
                     self.failure = Some(error);
                 }
             }

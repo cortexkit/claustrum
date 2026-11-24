@@ -997,8 +997,12 @@ impl EncryptedStore {
                         None
                     };
                     let is_gateway = if let Some(settings) = gateways.get(&id) {
+                        // Settings left from an earlier lifetime of this id can't describe
+                        // this row. Omit the row rather than fail every caller's listing:
+                        // both were read in this one transaction, so this is stale data,
+                        // not a race a retry would cure.
                         if settings.incarnation != incarnation {
-                            return Err(rusqlite::Error::InvalidQuery);
+                            continue;
                         }
                         true
                     } else {

@@ -1784,7 +1784,7 @@ secret_error_golden! {
     SecretSetupIncomplete => "secret_setup_incomplete", "permanent", "result error";
     SecretMultiHostDisabled => "secret_multi_host_disabled", "permanent", "result error";
     SecretBasicAuthDisabled => "secret_basic_auth_disabled", "permanent", "result error";
-    SecretLocalProgramsDisabled => "secret_local_programs_disabled", "permanent", "result error";
+    SecretLocalProgramsDisabled => "secret_local_programs_disabled", "permanent", "result error or refused `secret.approve` item";
     ApprovalInvalid => "approval_invalid", "permanent", "result error, or the `code` of a refused `results` item";
     ManifestSetupIncomplete => "manifest_setup_incomplete", "permanent", "result error";
     Superseded => "superseded", "permanent", "result error";

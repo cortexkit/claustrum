@@ -20799,6 +20799,15 @@ mod tests {
     ///             fixed text, member id and a limit boolean; never the value
     ///   warn!     hub manifest report persistence, admission reconcile or activation
     ///             write failure: fixed text and member id only; never report bytes
+    ///   warn!     hub value older than the one already accepted, or newer than the
+    ///             local store (login list or manifest report): fixed text, member or
+    ///             home id and generation/sequence integers only; never the value
+    ///   warn!     hub login pairing removal failed: fixed retry text only
+    ///   error!    hub login writer for a recipient stopped and restarted: fixed text
+    ///             and member id only
+    ///   info!     login-sharing config apply recovered: path and fixed text only
+    ///   debug!    manifest watch projection timed out or failed: fixed text and
+    ///             member id only, never the projection or its error
     ///
     /// `policy.request_action` and `credential.policy_token` have no log sites. Phone
     /// approvals have no operation-specific logs; `policy.approve_action` uses the
@@ -20892,7 +20901,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 31, 0),
+            (1, 2, 37, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -20937,6 +20946,7 @@ mod tests {
             ("warn".into(), "target: \"federation\", %error, \"vault sharing unchanged until Callosum supplies a valid snapshot\"".into()),
         ]);
         assert_eq!(output_site_arguments(sources[13], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![
+            ("info".into(), "target: \"federation\", path = %self.path.display(), \"login sharing configuration apply recovered\"".into()),
             ("warn".into(), "target: \"federation\", path = %self.path.display(), %reason, \"invalid login sharing configuration; applied value retained or off at startup\"".into()),
             ("warn".into(), "target: \"federation\", path = %self.path.display(), \"login sharing configuration apply failed; retrying\"".into()),
         ]);
@@ -20950,7 +20960,9 @@ mod tests {
         assert_eq!(output_site_arguments(sources[10], &shapes).into_iter().map(|(level, args)| (level, args.split_whitespace().collect::<Vec<_>>().join(" "))).collect::<Vec<_>>(), vec![("warn".into(), "member_id, reported = lower.reported, active = lower.active, \"lower manifest version reported\"".into())]);
         assert_eq!(output_site_arguments(sources[9], &shapes), vec![
             ("debug".into(), "target: \"federation\", home = %aad.home, %id, \"hub login row rejected; existing row unchanged\"".into()),
+            ("warn".into(), "target: \"federation\", \"hub login pairing removal failed; retrying\"".into()),
             ("warn".into(), "target: \"federation\", %home, \"hub login pairing removal failed; retrying\"".into()),
+            ("warn".into(), "target: \"federation\", %home, generation = generation.get(), accepted = state.generation.get(), \"hub login list older than the accepted one; dropped\"".into()),
             ("warn".into(), "target: \"federation\", %home, \"hub login apply failed; retrying\"".into()),
         ]);
         assert_eq!(output_site_arguments(sources[8], &shapes), vec![("info".into(), "target: \"connectors\", \"unsigned_desktop_development_admission admitted connectors read\"".into())]);

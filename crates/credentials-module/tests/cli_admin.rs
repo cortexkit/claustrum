@@ -6293,10 +6293,10 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // which flags may precede the verb. Version exits before that parser runs.
     let src = include_str!("../src/bin/credentials_cli.rs");
     let hoisted = src
-        .split_once("const GLOBAL_WITH_VALUE:")
+        .split_once("const GLOBAL_FLAGS:")
         .expect("global hoist definition")
         .1
-        .split_once("= [")
+        .split_once("= &[")
         .expect("global hoist array")
         .1
         .split_once("];")
@@ -8275,7 +8275,7 @@ fn github_app_cli_reconciles_when_route_peer_commits_and_disconnects() {
     assert_eq!(output.status.code(), Some(5));
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = stdout.join().unwrap();
-    assert!(stderr.contains("Check `ck auth list`"));
+    assert!(stderr.contains("Check GitHub and `ck auth list`"));
     assert!(stderr.contains("relay-retry"));
     assert!(!stderr.to_ascii_lowercase().contains("delete"));
     assert!(!format!("{stdout}{stderr}{callback}").contains("manifest-fixture-canary"));

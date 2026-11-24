@@ -24,20 +24,38 @@ test('list_scoped decodes gateway producer samples with bracketed IPv6 hosts', (
   }
 })
 
-test('auth_method accepts only the five supported spellings', () => {
+test('list_scoped decodes the advertised auth_method and keeps an omitted method absent', () => {
   for (const value of ['apikey', 'chatgpt', 'antigravity', 'oauth', 'gateway'] as const) {
     const sample = producerSample('gateway-list-scoped-v1.json')
     const rows = sample.result.credentials as Record<string, unknown>[]
     rows[0]!.auth_method = value
     expect(decodeScopedInventory(sample, () => {}).rows[0]!.authMethod).toBe(value)
   }
-  for (const value of [null, false, 7, [], {}, '', 'unknown', 'Gateway', 'gateway ', 'gateway\n']) {
+  const sample = producerSample('gateway-list-scoped-v1.json')
+  const rows = sample.result.credentials as Record<string, unknown>[]
+  delete rows[0]!.auth_method
+  const inventory = decodeScopedInventory(sample, () => {})
+  expect(inventory.rows).toHaveLength(2)
+  expect(inventory.rows[0]!.authMethod).toBeUndefined()
+  expect(inventory.undecodableRows).toBeUndefined()
+})
+
+for (const [label, value] of [
+  ['null', null], ['boolean', false], ['number', 7], ['array', []], ['object', {}],
+  ['empty string', ''], ['unknown string', 'unknown'], ['wrong case', 'Gateway'],
+  ['trailing space', 'gateway '], ['trailing newline', 'gateway\n'],
+] as const) {
+  test(`list_scoped drops only the row with ${label} as auth_method`, () => {
     const sample = producerSample('gateway-list-scoped-v1.json')
     const rows = sample.result.credentials as Record<string, unknown>[]
     rows[0]!.auth_method = value
-    expect(() => decodeScopedInventory(sample, () => {})).toThrow()
-  }
-})
+    const inventory = decodeScopedInventory(sample, () => {})
+    expect(inventory.undecodableRows).toEqual(['apikey:anthropic-gw-acme: invalid_response'])
+    expect(inventory.rows.map(({ id, authMethod }) => ({ id, authMethod }))).toEqual([
+      { id: 'apikey:anthropic-gw-acme:empty', authMethod: 'gateway' },
+    ])
+  })
+}
 
 for (const [label, file, headers] of [
   ['populated', 'gateway-get-scoped-v1.json', { 'x-a': 'a"b\\c', 'x-z': 'engineering' }],

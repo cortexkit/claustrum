@@ -8,7 +8,8 @@
 //! Two provider-specific shapes the wire-format research pinned down (verified
 //! against the official `openai/codex` CLI source, not invented):
 //! - A 401 means the refresh grant is unusable. A 400 is terminal only when its
-//!   error code is `invalid_grant`, whether flat or nested.
+//!   flat or nested error code is `invalid_grant`, `refresh_token_expired`,
+//!   `refresh_token_reused`, or `refresh_token_invalidated`.
 //! - The official refresh path does not consume `expires_in` (the CLI reads the
 //!   access token's own JWT expiry), so it is parsed optionally here and absence
 //!   falls back to the access token's JWT expiry (unknown for opaque tokens).
@@ -107,13 +108,20 @@ impl OpenAiAdapter {
         }
     }
 
-    fn is_invalid_grant(body: &[u8]) -> bool {
+    fn is_dead_refresh_error(body: &[u8]) -> bool {
         serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|e| {
-            e["error"]["code"]
-                .as_str()
-                .or_else(|| e["error"].as_str())
-                .or_else(|| e["code"].as_str())
-                == Some("invalid_grant")
+            matches!(
+                e["error"]["code"]
+                    .as_str()
+                    .or_else(|| e["error"].as_str())
+                    .or_else(|| e["code"].as_str()),
+                Some(
+                    "invalid_grant"
+                        | "refresh_token_expired"
+                        | "refresh_token_reused"
+                        | "refresh_token_invalidated"
+                )
+            )
         })
     }
 }
@@ -134,7 +142,7 @@ impl RefreshAdapter for OpenAiAdapter {
             .post(Self::endpoint(cred), &[], "application/json", body)
             .await?;
 
-        if resp.status == 401 || (resp.status == 400 && Self::is_invalid_grant(&resp.body)) {
+        if resp.status == 401 || (resp.status == 400 && Self::is_dead_refresh_error(&resp.body)) {
             return Err(RefreshError::InvalidGrant(
                 "OpenAI refresh token was rejected".into(),
             ));

@@ -570,7 +570,7 @@ mod token_response_rules {
                 serde_json::json!({"error":code}),
                 serde_json::json!({"code":code}),
             ] {
-                let http = FixtureTransport::ok(401, serde_json::to_vec(&body).unwrap());
+                let http = FixtureTransport::ok(400, serde_json::to_vec(&body).unwrap());
                 assert!(matches!(
                     openai::OpenAiAdapter::new()
                         .refresh(&credential(), &http)

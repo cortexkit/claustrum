@@ -351,8 +351,10 @@ impl Local {
             }
             accepted.insert(home.home_member.clone(), home);
         }
-        // Automatic copies carry no generation of their own; a pairing scan reads
-        // each copy's home and pairing to find those a roster proves lost.
+        // Automatic copies carry no generation of their own. A pairing scan reads
+        // each copy's home and the pairing it was made under; a validated Callosum
+        // roster that no longer lists that home, or lists it under another pairing,
+        // proves the copy's pairing lost.
         let copies = if scan_records {
             store
                 .list_remote_records()?

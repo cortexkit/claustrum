@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(rows_read() - rows_before, 1);
         assert_eq!(scans(), scans_before);
 
-        // Replaying recorded tombstones neither commits nor wakes subscribers.
+        // Replaying recorded removals neither commits nor wakes subscribers.
         let mut writes = store.subscribe_writes();
         writes.borrow_and_update();
         let audit = audit_len(&store);

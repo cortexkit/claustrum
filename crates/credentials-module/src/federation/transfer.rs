@@ -626,7 +626,8 @@ fn transfer_key_at(
 
 /// Holds the last transfer key read, so a task that rereads its inputs on every
 /// store write decrypts the key only when its row's incarnation or version moves.
-/// A key row's incarnation and record version: what a cached key was read from.
+/// What a cached key was read from: the row's incarnation (the id that changes when
+/// the key is removed and created again) and its record version.
 type RowStamp = (String, u64);
 
 #[derive(Default)]

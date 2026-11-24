@@ -870,8 +870,9 @@ impl RemoteReader {
         let (mut done, joined_at) = {
             let mut ids = self.lock();
             let now = (self.mono)();
-            // Do not retain token bytes that no consumer can use. Keep the per-id
-            // ordering state so the sweep cannot invalidate an in-flight verdict.
+            // Do not retain token bytes that no consumer can use. Ordering state is
+            // kept while a flight or a waiting caller may still read it, so the sweep
+            // cannot invalidate an in-flight verdict; anything else idle is dropped.
             for state in ids.values_mut() {
                 if state.cache.as_ref().is_some_and(|entry| {
                     !entry.resident(now) || !lifetime_ok(&entry.reply, entry.t0_mono, now, 0)
@@ -2297,13 +2298,20 @@ mod tests {
         {
             let mut ids = reader.lock();
             RemoteReader::state_for(&mut ids, &active).cache = Some(make_entry(None, None));
-            for (id, entry) in [
-                ("oauth:short-recheck", make_entry(None, Some(1))),
-                ("oauth:expires", make_entry(Some(EXPIRY_SKEW_MS + 1), None)),
+            // A caller still waiting on the first id keeps its ordering state; the
+            // second has no flight, cache or waiter left once its reply is released.
+            for (id, entry, waiters) in [
+                ("oauth:short-recheck", make_entry(None, Some(1)), 1),
+                (
+                    "oauth:expires",
+                    make_entry(Some(EXPIRY_SKEW_MS + 1), None),
+                    0,
+                ),
             ] {
                 expired_replies.push(Arc::downgrade(&entry.reply));
                 let mut state = IdState::new("test-incarnation");
                 state.verdicts = 7;
+                state.waiters = waiters;
                 state.cache = Some(entry);
                 ids.insert(id.into(), state);
             }
@@ -2319,6 +2327,7 @@ mod tests {
             .all(|reply| reply.upgrade().is_none()));
         let ids = reader.lock();
         assert_eq!(ids["oauth:short-recheck"].verdicts, 7);
+        assert!(!ids.contains_key("oauth:expires"));
         assert!(ids[&active.credential_id].cache.is_some());
     }
 

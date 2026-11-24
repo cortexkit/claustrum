@@ -20789,6 +20789,10 @@ mod tests {
     ///             status and a fixed reason; never any header, response body or error text
     ///   warn!     skipped declaration: module id and digest from the daemon's bind attestation, fixed reasons and indices; never entry values, grants_json or request fields
     ///   warn!     declaration persistence failure: module id and digest from the daemon's bind attestation and fixed text; never entry values, grants_json or request fields
+    ///   warn!     invalid settings references: module id, approved generation and
+    ///             fixed text only; never reference values
+    ///   warn!     settings reference persistence failure: module id and approved
+    ///             generation only; never reference values or store error details
     ///   warn!     incomplete declared inventory: fixed text only; no module id, digest, entry values, grants_json or request fields
     ///   warn!     fleet removal persistence failure: fixed retry text only, never
     ///             member ids, removal ids, wraps or error details
@@ -20902,7 +20906,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 37, 0),
+            (1, 2, 39, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

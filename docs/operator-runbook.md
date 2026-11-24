@@ -778,7 +778,7 @@ same handle twice can accept that code; otherwise check the target before procee
 ck auth grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
 ck auth grant --principal enrolled:<name>   --selector-kind category --selector <category> --operation read
 ck auth grants          # hand-made grants, read-only
-ck auth grants --declared # last-seen declared grants, read-only
+ck auth grants --declared # last-seen declared and settings grants, read-only
 ck auth revoke-grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
 ```
 
@@ -859,6 +859,24 @@ compute plain SHA-256 of the exact stored `grants_json` bytes and compare lowerc
 An unchanged bind does not add another row, even if only the approved-declarations digest
 or origin changed. A store failure gives the new route no declared grants; inspect the
 WARN and retry the bind after repairing the store.
+
+### Keys picked in module settings
+
+On stamped installs, approving a key in a module's settings gives that module exact
+read access to the key. The key must be an API key, including a gateway key. Other
+credential kinds remain unavailable. On an unstamped install, a settings pick still
+needs a hand grant.
+
+`ck auth grants --declared` shows last-seen picks in a separate table with source
+`settings`. Plain `ck auth grants` continues to show hand grants only. The settings
+table is not a live-route check, and the connectors page does not list this source.
+`ck auth revoke-grant` refuses a settings-only tuple and tells you to remove the key
+from the module's approved setting. The next bind applies the new setting. If a
+matching hand grant also exists, you can revoke it normally without changing the pick.
+
+`settings_refs_seen` is written when the approved revision or the list differs from
+the last one this module bound with. It records the hash of the sorted list, not its
+contents. Repeating the same snapshot produces no new audit row.
 
 ### Enrollments
 
@@ -1212,6 +1230,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `grant_create` | Create a principal-scoped exact or category operation grant. |
 | `grant_revoke` | Revoke a principal-scoped exact or category operation grant. |
 | `declaration_seen` | Replace a module's last-seen declaration; `payload_hash` is lowercase-hex SHA-256 of the stored `grants_json` bytes. |
+| `settings_refs_seen` | Replace a module's last-seen settings revision or reference list; `payload_hash` is lowercase-hex SHA-256 of the stored `refs_json` bytes. |
 | `enroll.approve` | Approve a pending enrolled-consumer incarnation. |
 | `enroll.label` | Set or clear a live enrollment's display name. |
 | `enroll.deny` | Deny a pending enrollment request. |

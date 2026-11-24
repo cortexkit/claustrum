@@ -112,6 +112,7 @@ fn scoped_remote_rows(
 }
 
 fn scoped_coverage_conn(
+    store: &EncryptedStore,
     conn: &rusqlite::Connection,
     principal_kind: &str,
     principal_id: &str,
@@ -139,6 +140,7 @@ fn scoped_coverage_conn(
             covered: grants.iter().any(|(kind, selector)| {
                 kind == SelectorKind::Audience.as_str() && credential_id == selector
             }),
+            settings_read: None,
             caller_active_grants,
             holds_category_selector: false,
             id_exists: false,
@@ -151,6 +153,7 @@ fn scoped_coverage_conn(
             covered: grants.iter().any(|(kind, selector)| {
                 kind == SelectorKind::Category.as_str() && categories.contains(selector)
             }),
+            settings_read: None,
             caller_active_grants,
             holds_category_selector: grants
                 .iter()
@@ -195,9 +198,26 @@ fn scoped_coverage_conn(
         None
     };
 
+    // Inspect the envelope in the same snapshot as grants and categories.
+    let settings_read = if !covered
+        && operation == GrantOperation::Read
+        && principal_kind == "reserved"
+        && tables == Some(MetadataTables::Local)
+        && declared.settings_refs.as_ref().is_some_and(|set| {
+            set.module_id() == principal_id
+                && set
+                    .refs()
+                    .binary_search_by(|id| id.as_str().cmp(credential_id))
+                    .is_ok()
+        }) {
+        store.settings_read_pin(conn, credential_id)?
+    } else {
+        None
+    };
     Ok(ScopedCoverage {
-        covered,
-        caller_active_grants,
+        covered: covered || settings_read.is_some(),
+        caller_active_grants: caller_active_grants + u32::from(settings_read.is_some()),
+        settings_read,
         holds_category_selector,
         id_exists,
         id_category_count,
@@ -677,6 +697,7 @@ impl EncryptedStore {
         self.store
             .with_read(|conn| {
                 scoped_coverage_conn(
+                    self,
                     conn,
                     principal_kind,
                     principal_id,
@@ -707,6 +728,7 @@ impl EncryptedStore {
                     return Ok(None);
                 };
                 let coverage = scoped_coverage_conn(
+                    self,
                     conn,
                     "enrolled",
                     &name,

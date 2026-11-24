@@ -119,6 +119,10 @@ pub(super) fn request_admin_status_with_schema(
         &mut result,
         credentials_core::store::declared_grant_sets_read_only(&db),
     );
+    credentials_core::admin_ops::attach_settings_grants(
+        &mut result,
+        credentials_core::store::settings_ref_sets_read_only(&db),
+    );
     Ok((result, meta_schema.or(grant_schema)))
 }
 

@@ -2274,6 +2274,21 @@ pub fn apply(
                 operation,
                 AuditCtx::route_admin(AuditOp::GrantRevoke, actor),
             ) {
+                Err(StoreOpError::NotFound)
+                    if principal_kind == "reserved"
+                        && selector_kind == SelectorKind::Exact
+                        && operation == GrantOperation::Read
+                        && store.list_settings_ref_sets().is_ok_and(|listing| {
+                            listing.rows.iter().any(|row| {
+                                row.set.module_id() == principal_id
+                                    && row.set.refs().contains(&stored_selector)
+                            })
+                        }) =>
+                {
+                    return Err(StoreOpError::SettingsGrant {
+                        module_id: principal_id,
+                    });
+                }
                 Err(StoreOpError::NotFound) if declared => {
                     return Err(StoreOpError::DeclaredGrant {
                         module_id: principal_id,
@@ -2602,6 +2617,12 @@ pub fn apply(
                     .list_declared_grant_sets()
                     .map_err(|error| error.to_string()),
             );
+            attach_settings_grants(
+                &mut result,
+                store
+                    .list_settings_ref_sets()
+                    .map_err(|error| error.to_string()),
+            );
             Ok(result)
         }
     }
@@ -2736,6 +2757,39 @@ pub fn attach_declared_grants(
     }
     if listing.incomplete {
         result["declared_grants_incomplete"] = serde_json::json!(true);
+    }
+}
+
+/// Show the last approved refs seen at bind, not the authority of a live route.
+pub fn attach_settings_grants(
+    result: &mut serde_json::Value,
+    listing: Result<crate::store::SettingsRefListing, String>,
+) {
+    let listing = listing.unwrap_or_else(|_| crate::store::SettingsRefListing {
+        incomplete: true,
+        ..Default::default()
+    });
+    let rows: Vec<_> = listing
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.set.refs().iter().map(|id| {
+                serde_json::json!({
+                    "module_id": row.set.module_id(),
+                    "selector_kind": "exact",
+                    "selector": id,
+                    "operation": "read",
+                    "first_seen_ms": row.seen_at_ms,
+                    "source": "settings",
+                })
+            })
+        })
+        .collect();
+    if !rows.is_empty() {
+        result["settings_grants"] = serde_json::json!(rows);
+    }
+    if listing.incomplete {
+        result["settings_grants_incomplete"] = serde_json::json!(true);
     }
 }
 

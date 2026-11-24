@@ -1019,7 +1019,7 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<(VaultRecord, StaleMark), StoreOpError> {
-        let read = self.read_snapshot(credential_id, None, None)?;
+        let read = self.read_snapshot(credential_id, None, None, None)?;
         Ok((read.record, read.mark))
     }
 
@@ -1030,8 +1030,22 @@ impl EncryptedStore {
         credential_id: &str,
         incarnation: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, Some(incarnation), None)
+        self.read_snapshot(credential_id, Some(incarnation), None, None)
             .map(CredentialSnapshot::with_digest)
+    }
+
+    pub(crate) fn get_pinned_snapshot(
+        &self,
+        credential_id: &str,
+        pin: &SettingsReadPin,
+    ) -> Result<StoredRead, StoreOpError> {
+        self.read_snapshot(
+            credential_id,
+            Some(&pin.incarnation),
+            Some(pin.record_version),
+            None,
+        )
+        .map(CredentialSnapshot::with_digest)
     }
 
     /// The same read as [`Self::get_with_stale_pending`], plus the SHA-256 of the exact
@@ -1047,7 +1061,7 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<StoredRead, StoreOpError> {
-        self.read_snapshot(credential_id, None, None)
+        self.read_snapshot(credential_id, None, None, None)
             .map(CredentialSnapshot::with_digest)
     }
 
@@ -1055,14 +1069,20 @@ impl EncryptedStore {
         &self,
         intent: &RefreshIntent,
     ) -> Result<(VaultRecord, String), StoreOpError> {
-        self.read_snapshot(&intent.credential_id, None, Some(intent.record_version))
-            .map(|read| (read.record, read.incarnation))
+        self.read_snapshot(
+            &intent.credential_id,
+            None,
+            None,
+            Some(intent.record_version),
+        )
+        .map(|read| (read.record, read.incarnation))
     }
 
     fn read_snapshot(
         &self,
         credential_id: &str,
         expected_incarnation: Option<&str>,
+        expected_version: Option<u64>,
         retained_intent_version: Option<u64>,
     ) -> Result<CredentialSnapshot, StoreOpError> {
         let row = self
@@ -1102,7 +1122,9 @@ impl EncryptedStore {
 
         let (version, state, stale_pending, blob, updated_at_ms, incarnation, has_refresh_intent) =
             row.ok_or(StoreOpError::NotFound)?;
-        if expected_incarnation.is_some_and(|expected| expected != incarnation) {
+        if expected_incarnation.is_some_and(|expected| expected != incarnation)
+            || expected_version.is_some_and(|expected| expected != version as u64)
+        {
             return Err(StoreOpError::NotFound);
         }
         let decode_state = if state == RecordState::NeedsReauth.as_str()

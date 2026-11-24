@@ -123,7 +123,8 @@ impl ReadSurface {
                     &audience,
                     GrantOperation::AccountToken,
                 )
-                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?;
+                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?
+                .principal;
             let key = candidate(&surface.engine, &surface.account_tokens.path()?)
                 .map_err(|_| AccountTokenError::login())?;
             Ok((kind, id, key))

@@ -1022,9 +1022,19 @@ pub(super) const MIGRATIONS: &[Migration] = &[
                      CREATE TRIGGER credential_orgs_remove AFTER DELETE ON credentials BEGIN \
                          DELETE FROM credential_orgs WHERE credential_id = OLD.credential_id; \
                      END; \
-                     CREATE TRIGGER credential_orgs_insert AFTER INSERT ON credentials BEGIN \
-                         DELETE FROM credential_orgs WHERE credential_id = NEW.credential_id; \
-                     END;",
+                      CREATE TRIGGER credential_orgs_insert AFTER INSERT ON credentials BEGIN \
+                          DELETE FROM credential_orgs WHERE credential_id = NEW.credential_id; \
+                      END;",
+    },
+    Migration {
+        version: SETTINGS_REFS_SCHEMA_VERSION,
+        statements: "CREATE TABLE settings_ref_sets (\
+                          module_id TEXT NOT NULL PRIMARY KEY, \
+                          generation TEXT NOT NULL, \
+                          refs_json TEXT NOT NULL, \
+                          refs_sha256 TEXT NOT NULL, \
+                          seen_at_ms INTEGER NOT NULL\
+                      );",
     },
 ];
 

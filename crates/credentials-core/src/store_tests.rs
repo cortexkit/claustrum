@@ -5092,7 +5092,7 @@ fn exact_selectors_are_literal_not_like_patterns() {
 fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
     assert_eq!(
         newest_migration_version(),
-        54,
+        55,
         "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

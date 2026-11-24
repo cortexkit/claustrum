@@ -92,7 +92,7 @@ impl ReadSurface {
         // to an unauthorized caller. The write or dispatch checks that lifetime again.
         let copy = self.remote.remote_record(id);
         let incarnation = store.credential_incarnation(id);
-        let (kind, name) =
+        let authorization =
             match self.authorize_scoped_as(caller, enrollment_token, id, GrantOperation::Read) {
                 Ok(principal) => principal,
                 Err(error) => return condition_reply(field, Err(error)),
@@ -100,8 +100,20 @@ impl ReadSurface {
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
 
+        if let Some(pin) = &authorization.settings_read {
+            if let Err(error) = self.require_settings_record(id, pin) {
+                return condition_reply(field, Err(error));
+            }
+            if version != pin.record_version {
+                return condition_reply(field, Ok(false));
+            }
+        }
+
         match copy {
             Ok(Some(copy)) => {
+                if authorization.settings_read.is_some() {
+                    return condition_reply(field, Err(ReadError::NotFound));
+                }
                 let report = match mutation {
                     Mutation::Report(report) => {
                         if let Err(error) = check_condition_report(
@@ -128,6 +140,14 @@ impl ReadSurface {
             Ok(incarnation) => incarnation,
             Err(error) => return condition_reply(field, Err(map_store_error(&error))),
         };
+        if authorization
+            .settings_read
+            .as_ref()
+            .is_some_and(|pin| pin.incarnation != incarnation)
+        {
+            return condition_reply(field, Err(ReadError::NotFound));
+        }
+        let (kind, name) = authorization.principal;
         let (actor, principal) = if kind == "enrolled" {
             (
                 format!("enrolled:{name}"),
@@ -159,6 +179,11 @@ impl ReadSurface {
                 store.clear_condition_in_incarnation(id, version, &incarnation, audit, principal)
             }
         };
+        if let Some(pin) = authorization.settings_read {
+            if let Err(error) = self.require_settings_record(id, &pin) {
+                return condition_reply(field, Err(error));
+            }
+        }
         condition_reply(field, result.map_err(|error| condition_error(&error)))
     }
 }

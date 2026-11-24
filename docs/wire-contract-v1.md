@@ -916,7 +916,8 @@ Local current-value detection times are sealed beside the existing detection
 metadata. No old time is backfilled: existing records stay unknown until their
 tier next changes. Reasserting an unchanged operator value is still a no-op.
 Both clients decode these three fields as optional; omission by an older vault and
-explicit `null` both mean absent. The TypeScript names are `provider`, `incarnation`
+explicit `null` both mean absent. The Rust client applies the same rule to
+`plan_tier_since_ms`, `org_id` and `github_app`. The TypeScript names are `provider`, `incarnation`
 and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
 `ck auth list --json` includes the same fields (and nulls), including
 `plan_tier_since_ms`, in each ordinary row.

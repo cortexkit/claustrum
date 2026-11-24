@@ -42,6 +42,7 @@ pub(crate) fn valid_manifest_hash(hash: &str) -> bool {
 }
 
 pub fn parse_active_report(params: &Value) -> Option<ReportParams> {
+    params.as_object()?;
     serde_json::from_value::<ReportParams>(params.clone())
         .ok()
         .filter(ReportParams::valid)

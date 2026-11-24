@@ -72,6 +72,10 @@ fn refusal(code: &str, class: &str) -> ProposeAnswer {
 fn store_refusal(error: GhManifestProposalError) -> ProposeAnswer {
     use GhManifestProposalError as Error;
     match error {
+        Error::NotFound => refusal("not_found", "permanent"),
+        Error::AppNotInstalled => refusal("not_installed", "permanent"),
+        Error::InstallationUnusable => refusal("installation_unusable", "permanent"),
+        Error::IdentityMismatch => refusal("identity_mismatch", "permanent"),
         Error::AlreadyBound {
             version,
             manifest_sha256,
@@ -95,6 +99,9 @@ fn preflight(
 ) -> Result<Params, ProposeAnswer> {
     if !matches!(principal, Some(Principal::Reserved { module_id }) if module_id == "plexus") {
         return Err(refusal("not_found", "permanent"));
+    }
+    if !params.is_object() {
+        return Err(ProposeAnswer::InvalidParams);
     }
     let params: Params =
         serde_json::from_value(params.clone()).map_err(|_| ProposeAnswer::InvalidParams)?;
@@ -193,11 +200,11 @@ async fn checked_proposal(
         Err(()) => return refusal("github_unavailable", "transient"),
     };
     let record_id = format!("github_app:{}", params.app_slug);
-    let credential = match store.github_app_oauth_for_manifest_proposal(&record_id) {
-        Ok(Some(credential)) => credential,
-        Ok(None) => return refusal("not_installed", "permanent"),
-        Err(_) => return refusal("store_error", "transient"),
-    };
+    let credential =
+        match store.github_app_oauth_for_manifest_proposal(&record_id, &params.agent_id) {
+            Ok(credential) => credential,
+            Err(error) => return store_refusal(error),
+        };
     let installation_result = tokio::time::timeout_at(
         deadline,
         check_github_repository(&record_id, &credential, &params.repo, http),

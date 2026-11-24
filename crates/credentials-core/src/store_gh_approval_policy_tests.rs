@@ -60,6 +60,124 @@ fn assert_pending(store: &EncryptedStore, proposal_id: &str) {
 }
 
 #[test]
+fn one_tap_refuses_unrecognized_rule_set_source_without_writing() {
+    let (_dir, store, public) = ready("one-tap-unrecognized-default");
+    let mut policy = initial_policy(&public);
+    let mut rules = github_default_rule_set().unwrap();
+    rules.source.release = "cortexkit-defaults-2026.10".into();
+    policy.rule_sets.insert("github".into(), rules);
+    let bytes = policy.canonical_bytes().unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "INSERT INTO agent_policies VALUES (1,?1,?2,?3,zeroblob(64),?4,'ceremony',1,28)",
+                rusqlite::params![bytes, hash(&bytes), policy.root_key_id, NOW],
+            )
+        })
+        .unwrap();
+    let p = propose(&store, "Octo/New", NOW);
+    refuses(
+        &store,
+        &approve(&envelope(&p, NOW)),
+        NOW,
+        SecretError::PolicyBindingConflict,
+    );
+    assert_pending(&store, &p.proposal_id);
+}
+
+#[test]
+fn github_app_creation_respects_head_rules_before_activation() {
+    let (_dir, store, public) = ready("app-creation-head-rules");
+    let defaults = store.prepare_github_app_manifest(FIRST_AGENT).unwrap();
+    let baseline =
+        json!({"actions":"read", "contents":"read", "issues":"read", "pull_requests":"read"});
+    assert_ne!(defaults["default_permissions"], baseline);
+    sign_policy(&store, &initial_policy(&public), 28);
+    assert_eq!(
+        store
+            .with_raw_conn(active_agent_policy_version_conn)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.prepare_github_app_manifest(FIRST_AGENT).unwrap()["default_permissions"],
+        baseline
+    );
+}
+
+fn create_bound_apps(store: &EncryptedStore, policy: &AgentPolicy) -> BTreeMap<String, String> {
+    let pem = include_str!("../tests/fixtures/github_app/test_private_key_pkcs1.pem")
+        .to_owned()
+        .into();
+    policy
+        .bindings
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            store
+                .create_github_app_audited(
+                    crate::store::GitHubAppCreation {
+                        slug: b.identity.strip_prefix("github_app:").unwrap(),
+                        agent: &b.agent,
+                        app_id: i as u64 + 1,
+                        pem: &pem,
+                        client_id: "test-client-id",
+                        relay: None,
+                    },
+                    "test",
+                )
+                .unwrap();
+            (b.agent.clone(), b.identity.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn derive_preserves_narrowed_head_rules() {
+    let (_dir, store, public) = ready("derive-head-rules");
+    let mut policy = initial_policy(&public);
+    let mut rules = github_default_rule_set().unwrap();
+    rules.actions.remove(0);
+    policy.rule_sets.insert("github".into(), rules);
+    let identities = create_bound_apps(&store, &policy);
+    sign_policy(&store, &policy, 28);
+    let v29 = std::str::from_utf8(V28)
+        .unwrap()
+        .replace("\"manifest_version\": 28", "\"manifest_version\": 29");
+    store
+        .sign_gh_manifest_admin(&v29, "operator", "test")
+        .unwrap();
+    let bytes = store.derive_agent_policy_admin(29, &identities).unwrap();
+    let derived = AgentPolicy::parse_canonical(bytes.as_bytes()).unwrap();
+    assert_eq!(derived.rule_sets, policy.rule_sets);
+}
+
+#[test]
+fn policy_sign_and_derive_refuse_an_app_binding_across_owners() {
+    let manifest = std::str::from_utf8(V28).unwrap().replace(
+        "  \"bindings\": {\n",
+        &format!("  \"bindings\": {{\n    \"other/repo\": \"{EXISTING_AGENT}\",\n"),
+    );
+    let (_dir, store, public) = ready_with_manifest("sign-mixed-owners", manifest.as_bytes());
+    let mut policy = initial_policy(&public);
+    policy.bindings[0].resources.insert(0, "other/repo".into());
+    let identities = create_bound_apps(&store, &policy);
+    let bytes = String::from_utf8(policy.canonical_bytes().unwrap()).unwrap();
+    let before = snapshot(&store);
+    for result in [
+        store.derive_agent_policy_admin(28, &identities).map(|_| ()),
+        store
+            .sign_agent_policy_admin(&bytes, 28, "operator", "test")
+            .map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(crate::store::StoreOpError::Encode(ref code)) if code == "policy_binding_conflict")
+        );
+    }
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
 fn github_app_attestation_rejects_the_same_mismatch_on_every_policy_signing_path() {
     use crate::store::{GitHubAppCreation, StoreOpError};
 
@@ -311,7 +429,7 @@ fn one_tap_policy_preserves_pending_ceremony_rules_in_p3_and_pairs_successive_ap
         .insert("github".into(), github_default_rule_set().unwrap());
     sign_policy(&store, &policy, 28);
     store
-        .report_gh_manifest_active(
+        .record_hub_own_report(
             &GhManifestActivationReport {
                 member_id: MEMBER,
                 version: 28,
@@ -351,16 +469,19 @@ fn one_tap_policy_preserves_pending_ceremony_rules_in_p3_and_pairs_successive_ap
     let p2_rules = p2_tail
         .strip_suffix(r#","schema":"ck-agent-policy/v1","version":2}"#)
         .unwrap();
-    let expected_p3_bindings =
-        BINDINGS_V28.replace(r#"["zulu/existing"]"#, r#"["alpha/new","zulu/existing"]"#);
+    let expected_p3_bindings = BINDINGS_V28.replace(
+        r#"["zulu/existing"]"#,
+        r#"["zulu/earlier","zulu/existing"]"#,
+    );
     let expected = |version, bindings: &str| {
         format!(
-            r#"{{"bindings":{bindings},"issued_at_unix_secs":42,"root_key_id":"{}","rule_sets":{p2_rules},"schema":"ck-agent-policy/v1","version":{version}}}"#,
+            r#"{{"bindings":{bindings},"issued_at_unix_secs":{},"root_key_id":"{}","rule_sets":{p2_rules},"schema":"ck-agent-policy/v1","version":{version}}}"#,
+            NOW / 1000,
             key_id_for_public(&public),
         )
     };
 
-    let p = propose_for(&store, EXISTING_AGENT, "zulu-bot", "Alpha/New", NOW);
+    let p = propose_for(&store, EXISTING_AGENT, "zulu-bot", "Zulu/Earlier", NOW);
     let sibling = propose(&store, "Octo/Sibling", NOW);
     let op = approve(&envelope(&p, NOW));
     let approved = run(&store, &op, NOW).unwrap();
@@ -475,9 +596,9 @@ fn one_tap_policy_refuses_conflicting_identities_and_invalid_resources_without_w
     let (_dir, store, public) = ready("one-tap-policy-identity-conflicts");
     sign_policy(&store, &initial_policy(&public), 28);
     for (agent, slug, repo) in [
-        (EXISTING_AGENT, "different-bot", "Octo/Mismatch"),
+        (EXISTING_AGENT, "different-bot", "Zulu/Mismatch"),
         (FIRST_AGENT, "zulu-bot", "Octo/Shared"),
-        (EXISTING_AGENT, "zulu-bot", "Octo/Contains Space"),
+        (EXISTING_AGENT, "zulu-bot", "Zulu/Contains Space"),
     ] {
         let p = propose_for(&store, agent, slug, repo, NOW);
         refuses(
@@ -523,7 +644,7 @@ fn one_tap_policy_refuses_manifest_projection_mismatch_and_case_collision_withou
                 AuditCtx::admin(AuditOp::GhManifestStore),
             )
             .unwrap();
-        let p = propose_for(&store, EXISTING_AGENT, "zulu-bot", "Octo/New", NOW);
+        let p = propose_for(&store, EXISTING_AGENT, "zulu-bot", "Zulu/New", NOW);
         refuses(
             &store,
             &approve(&envelope(&p, NOW)),
@@ -543,7 +664,7 @@ fn one_tap_policy_refuses_both_size_layers_before_writing() {
     let mut manifest_bindings = String::from("  \"bindings\": {\n");
     while remaining > 0 {
         use std::fmt::Write as _;
-        let prefix = format!("pad/r{:05}", padding.len());
+        let prefix = format!("zulu/a{:05}", padding.len());
         let overhead = prefix.len() + 3; // quotes, comma, and the unique repository prefix
         let len = if remaining <= 80 {
             remaining
@@ -565,17 +686,18 @@ fn one_tap_policy_refuses_both_size_layers_before_writing() {
     assert_eq!(original.len(), document_len);
 
     for (repo, app_slug, over_document_cap) in [
-        ("A/B", "zulu-bot", false),
+        ("Zulu/B", "zulu-bot", false),
         (
-            "Alpha/Long-Enough-To-Cross-The-Document-Limit",
+            "Zulu/Long-Enough-To-Cross-The-Document-Limit",
             "zulu-bot",
             true,
         ),
         // The size refusal takes precedence over an identity mismatch.
-        ("A/C", "different-bot", false),
+        ("Zulu/C", "different-bot", false),
     ] {
-        // The ASCII repository contributes its bytes, two quotes and a comma.
-        let successor_len = original.len() + repo.len() + 3;
+        // The repository adds its quoted text and comma. The approval timestamp
+        // also takes more bytes than the predecessor's two-digit issue time.
+        let successor_len = original.len() + repo.len() + 3 + (NOW / 1000).to_string().len() - 2;
         assert!(successor_len + AGENT_POLICY_SEPARATOR.len() > MAX_SIGN_PAYLOAD);
         assert_eq!(successor_len > MAX_POLICY_DOCUMENT_BYTES, over_document_cap);
         let p = propose_for(&store, EXISTING_AGENT, app_slug, repo, NOW);

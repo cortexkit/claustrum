@@ -102,12 +102,17 @@ fn read_policy(store: &EncryptedStore, method: &str) -> Result<Option<ActiveAgen
 }
 
 pub(crate) fn policy_watch_snapshot(store: &EncryptedStore) -> Value {
-    match read_policy(store, OP_POLICY_WATCH) {
-        Ok(Some(policy)) => {
+    let Ok((role, policy)) = store.active_agent_policy_summary() else {
+        return refusal("store_error", "transient");
+    };
+    if let Some(reply) = role_refusal(role, OP_POLICY_WATCH) {
+        return reply;
+    }
+    match policy {
+        Some(policy) => {
             json!({"version": policy.version, "policy_sha256": policy.policy_sha256})
         }
-        Ok(None) => json!({"version": null, "policy_sha256": null}),
-        Err(reply) => reply,
+        None => json!({"version": null, "policy_sha256": null}),
     }
 }
 
@@ -138,7 +143,7 @@ pub(crate) async fn serve(
     } else {
         None
     };
-    let version = if method == OP_ACTIVE_STATUS {
+    let version = if method == OP_ACTIVE_STATUS && params.is_object() {
         serde_json::from_value::<VersionParams>(params.clone())
             .ok()
             .filter(|p| p.version > 0)

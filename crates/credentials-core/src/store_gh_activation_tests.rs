@@ -46,7 +46,10 @@ fn record(
     report: &GhManifestActivationReport<'_>,
 ) -> GhManifestActivationOutcome {
     store
-        .report_gh_manifest_active(report, AuditCtx::vault(AuditOp::GhManifestActivation))
+        .seed_gh_manifest_activation_for_tests(
+            report,
+            AuditCtx::vault(AuditOp::GhManifestActivation),
+        )
         .unwrap()
 }
 
@@ -475,7 +478,7 @@ fn report_and_retire_roll_back_on_audit_failure() {
         .unwrap();
     let before = snapshot(&store);
     let err = store
-        .report_gh_manifest_active(
+        .seed_gh_manifest_activation_for_tests(
             &report("member"),
             AuditCtx::vault(AuditOp::GhManifestActivation),
         )
@@ -504,7 +507,10 @@ fn report_and_retire_roll_back_on_audit_failure() {
     invalid.verdict = GhManifestVerdict::Invalid;
     invalid.reason = Some("failure");
     assert!(store
-        .report_gh_manifest_active(&invalid, AuditCtx::vault(AuditOp::GhManifestActivation))
+        .seed_gh_manifest_activation_for_tests(
+            &invalid,
+            AuditCtx::vault(AuditOp::GhManifestActivation)
+        )
         .is_err());
     assert_eq!(snapshot(&store), before);
     assert!(store

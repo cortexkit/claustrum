@@ -483,6 +483,8 @@ async fn manifest_propose_setup_and_credential_refusals_write_nothing() {
             propose(&rig, &IdentityStub::good(), &http).await,
             if change.contains("envelope") {
                 "store_error"
+            } else if change.contains("needs_reauth") {
+                "installation_unusable"
             } else {
                 "not_installed"
             },
@@ -495,6 +497,97 @@ async fn manifest_propose_setup_and_credential_refusals_write_nothing() {
         assert_eq!(http.calls.load(Ordering::SeqCst), 0);
         assert_eq!(snapshot(&rig), before);
     }
+}
+
+#[tokio::test]
+async fn manifest_propose_refuses_an_app_attested_for_another_agent() {
+    let rig = rig("");
+    let id = "github_app:plex-alfonso";
+    let oauth = rig.store.get(id).unwrap().oauth.unwrap();
+    rig.store
+        .remove_audited(id, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    rig.store
+        .create_github_app_audited(
+            credentials_core::store::GitHubAppCreation {
+                slug: "plex-alfonso",
+                agent: "agent_1111111111111111",
+                app_id: 123,
+                pem: &oauth.refresh_token,
+                client_id: oauth.client_id.as_deref().unwrap(),
+                relay: None,
+            },
+            "test",
+        )
+        .unwrap();
+    let before = snapshot(&rig);
+    let http = HttpStub::good();
+    assert_refusal(
+        propose(&rig, &IdentityStub::good(), &http).await,
+        "identity_mismatch",
+        "permanent",
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot(&rig), before);
+}
+
+#[tokio::test]
+async fn manifest_propose_refuses_a_github_app_id_with_another_adapter() {
+    let rig = rig("");
+    let id = "github_app:plex-alfonso";
+    let mut record = rig.store.get(id).unwrap();
+    record.refresh_adapter = Some("anthropic".into());
+    rig.store
+        .overwrite_unconditional_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+        .unwrap();
+    let before = snapshot(&rig);
+    let http = HttpStub::good();
+    assert_refusal(
+        propose(&rig, &IdentityStub::good(), &http).await,
+        "installation_unusable",
+        "permanent",
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot(&rig), before);
+}
+
+#[tokio::test]
+async fn manifest_propose_replaces_pending_approval_when_installation_permissions_change() {
+    let rig = rig("");
+    let identity = IdentityStub::good();
+    let old = reply(propose(&rig, &identity, &HttpStub::good()).await);
+    let permissions = json!({"contents":"read"});
+    let new = reply(
+        propose(
+            &rig,
+            &identity,
+            &http_with_installation_permissions(permissions.clone()),
+        )
+        .await,
+    );
+    assert_eq!(new["status"], "approval_required");
+    assert_ne!(new["proposal_id"], old["proposal_id"]);
+    assert_eq!(
+        reply(
+            propose(
+                &rig,
+                &identity,
+                &http_with_installation_permissions(permissions)
+            )
+            .await
+        ),
+        new
+    );
+    let state: String = rig
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT state FROM gh_manifest_proposals WHERE proposal_id=?1",
+                [old["proposal_id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(state, "superseded");
 }
 
 #[tokio::test]

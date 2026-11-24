@@ -11,8 +11,7 @@ use super::gh_admin::{manifest_root_error, sql};
 use super::gh_manifests::ManifestRootReadError;
 use super::github_app_store::github_app_attested_agent;
 use super::{
-    append_audit_tx, envelope, now_ms, AuditOp, AuditRecord, CredentialKind, EncryptedStore,
-    RecordBinding, RecordState, StoreOpError, VaultRecord,
+    append_audit_tx, now_ms, AuditOp, AuditRecord, EncryptedStore, RecordState, StoreOpError,
 };
 use crate::agent_policy::{
     github_default_rule_set, manifest_projection, policy_sha256, signed_input,
@@ -137,6 +136,24 @@ fn require_head_bindings(
     Ok(())
 }
 
+pub(super) fn validate_binding_owners(bindings: &[Binding]) -> Result<(), StoreOpError> {
+    for binding in bindings
+        .iter()
+        .filter(|binding| binding.service == "github")
+    {
+        let mut owners = binding
+            .resources
+            .iter()
+            .filter_map(|resource| resource.split_once('/').map(|(owner, _)| owner));
+        if let Some(first) = owners.next() {
+            if owners.any(|owner| owner != first) {
+                return Err(refusal("policy_binding_conflict"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn policy_text(bytes: Vec<u8>) -> Result<String, StoreOpError> {
     String::from_utf8(bytes).map_err(|_| StoreOpError::Corrupt("policy is not UTF-8".into()))
 }
@@ -237,6 +254,7 @@ impl EncryptedStore {
         let input = signed_input(policy_bytes.as_bytes()).map_err(policy_error)?;
         let policy = AgentPolicy::parse_canonical(policy_bytes.as_bytes()).map_err(policy_error)?;
         validate_signer_rule_sets(&policy).map_err(policy_error)?;
+        validate_binding_owners(&policy.bindings)?;
         self.manifest_admin_transaction(|tx| {
             let manifest = pairing_candidate(tx, manifest_version)?;
             let head = head_agent_policy_conn(tx)?;
@@ -364,6 +382,7 @@ impl EncryptedStore {
                     bindings.push(binding);
                 }
                 require_head_bindings(&bindings, head.as_ref())?;
+                validate_binding_owners(&bindings)?;
 
                 let root = self
                     .gh_manifest_root_in_tx(&tx)
@@ -376,10 +395,13 @@ impl EncryptedStore {
                     version: next_version(head.as_ref()),
                     issued_at_unix_secs: now_ms() / 1000,
                     root_key_id: public.key_id,
-                    rule_sets: BTreeMap::from([(
-                        "github".into(),
-                        github_default_rule_set().map_err(policy_error)?,
-                    )]),
+                    rule_sets: match head {
+                        Some(head) => head.rule_sets,
+                        None => BTreeMap::from([(
+                            "github".into(),
+                            github_default_rule_set().map_err(policy_error)?,
+                        )]),
+                    },
                     bindings,
                 };
                 policy_text(policy.canonical_signing_bytes().map_err(policy_error)?)
@@ -391,7 +413,6 @@ impl EncryptedStore {
 
     fn require_active_github_app(&self, conn: &Connection, id: &str) -> Result<(), StoreOpError> {
         let invalid = || refusal("policy_identity_not_active_github_app");
-        let adapter = crate::refresh_adapters::github_app::ADAPTER_NAME;
         if !id
             .strip_prefix("github_app:")
             .is_some_and(crate::agent_policy::valid_app_slug)
@@ -403,22 +424,8 @@ impl EncryptedStore {
             rusqlite::params![id, RecordState::Active.as_str()],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         ).optional().map_err(sql)?.ok_or_else(invalid)?;
-        let plaintext = envelope::open(
-            &self.key,
-            &blob,
-            &RecordBinding {
-                credential_id: id,
-                record_version: version,
-            },
-        )
-        .map_err(StoreOpError::Decrypt)?;
-        let record = VaultRecord::decode(&plaintext)
-            .map_err(|error| StoreOpError::Corrupt(error.to_string()))?;
-        if record.kind != CredentialKind::Oauth
-            || record.refresh_adapter.as_deref() != Some(adapter)
-        {
-            return Err(invalid());
-        }
-        Ok(())
+        self.open_github_app_material(id, version, &blob)?
+            .map(|_| ())
+            .ok_or_else(invalid)
     }
 }

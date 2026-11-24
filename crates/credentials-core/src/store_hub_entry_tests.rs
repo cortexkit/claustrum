@@ -81,13 +81,13 @@ fn hub_migration_clears_self_and_peer_fields_but_keeps_roster_retirement_and_aud
     seed_self_and_manifest(&store);
     grant_peer(&store, "pair");
     store
-        .report_gh_manifest_active(&report(HOME), ACTIVATION)
+        .seed_gh_manifest_activation_for_tests(&report(HOME), ACTIVATION)
         .unwrap();
     store
-        .report_gh_manifest_active(&report(PEER), ACTIVATION)
+        .seed_gh_manifest_activation_for_tests(&report(PEER), ACTIVATION)
         .unwrap();
     store
-        .report_gh_manifest_active(&report("retired"), ACTIVATION)
+        .seed_gh_manifest_activation_for_tests(&report("retired"), ACTIVATION)
         .unwrap();
     store
         .retire_gh_manifest_member("retired", 123, AuditCtx::admin(AuditOp::GhManifestRetire))
@@ -158,7 +158,7 @@ fn readiness_masks_revoked_peer_fields_in_same_snapshot() {
         .record_hub_own_report(&report(HOME), ACTIVATION)
         .unwrap();
     store
-        .report_gh_manifest_active(&report(PEER), ACTIVATION)
+        .seed_gh_manifest_activation_for_tests(&report(PEER), ACTIVATION)
         .unwrap();
     assert!(store.gh_manifest_active_status(28).unwrap().unwrap().ready);
     // Leave the peer report untouched to isolate the readiness predicate from clear-on-revoke.

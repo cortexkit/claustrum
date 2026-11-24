@@ -299,7 +299,7 @@ async fn manifest_report_records_self_and_active_status_tracks_missing_invalid_a
         json!({"member_id":OTHER,"version":null,"payload_sha256":null,"verdict":null,"reason":null,"reported_at_ms":null})
     );
     rig.store
-        .report_gh_manifest_active(
+        .seed_gh_manifest_activation_for_tests(
             &credentials_core::store::GhManifestActivationReport {
                 member_id: OTHER,
                 version: 28,
@@ -389,6 +389,35 @@ async fn manifest_report_reason_accepts_512_characters_and_refuses_513() {
     assert_eq!(frame.header.ty, FrameType::Error);
     assert_eq!(body(&frame)["code"], "invalid_params");
     assert_eq!(rig.snapshot(), before);
+}
+
+#[tokio::test]
+async fn manifest_decoders_refuse_positional_arrays_after_admission() {
+    let mut rig = Rig::new();
+    rig.self_member();
+    rig.store_version(28);
+    let report = report(28);
+    let before = rig.snapshot();
+    for (op, module, params) in [
+        (OP_ACTIVE_STATUS, "plexus", json!([28])),
+        (
+            OP_REPORT_ACTIVE,
+            "aft",
+            json!([28, report["payload_sha256"], "valid", null]),
+        ),
+        (
+            "manifest.propose_binding",
+            "plexus",
+            json!(["agent", 1, "app", "org/repo"]),
+        ),
+    ] {
+        rig.request(caller(module), op, params, 1, 1).await;
+        let frame = rig.rx.recv().await.unwrap();
+        assert_eq!(frame.header.ty, FrameType::Error, "{op}: {}", body(&frame));
+        assert_eq!(body(&frame)["code"], "invalid_params");
+        assert!(body(&frame).get("class").is_none());
+        assert_eq!(rig.snapshot(), before);
+    }
 }
 
 #[tokio::test]

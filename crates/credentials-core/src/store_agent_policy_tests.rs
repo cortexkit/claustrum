@@ -1003,6 +1003,94 @@ fn typed_policy_store_requires_the_one_tap_manifests_own_approval() {
 }
 
 #[test]
+fn policy_token_reuses_parsed_policy_but_rechecks_authorization() {
+    use crate::store::policy_token::POLICY_TOKEN_POLICY_PARSES;
+    use crate::store::{PolicyTokenError, PolicyTokenHandoff, PolicyTokenRequest};
+
+    let (_dir, store) = taxonomy_tests::rig("policy-token-parse-memo", 124);
+    let id = "github_app:agent";
+    let agent = "agent_ab64ea0873bbee0c";
+    let member = "fed-computer:22222222222222222222222222222222";
+    let mut policy = policy_fixture(1, KEY_ID);
+    policy.bindings.push(crate::agent_policy::Binding {
+        service: "github".into(),
+        agent: agent.into(),
+        identity: id.into(),
+        resources: vec!["org/r".into()],
+    });
+    store.with_raw_conn(|conn| {
+        conn.execute("INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 1)", params![crate::federation::SELF_MEMBER_SETTING, member])?;
+        raw_manifest(conn, 41)?;
+        let mut row = raw_policy(1, 41);
+        row[1] = policy.canonical_bytes().unwrap().into();
+        conn.execute("INSERT INTO agent_policies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params_from_iter(row))?;
+        conn.execute("INSERT INTO gh_manifest_activations (member_id, version, payload_sha256, verdict, reported_at_ms) VALUES (?1, 41, ?2, 'valid', 1)", params![member, HASH])?;
+        Ok(())
+    }).unwrap();
+    let pem = include_str!("../tests/fixtures/github_app/test_private_key_pkcs1.pem")
+        .to_owned()
+        .into();
+    store
+        .create_github_app_audited(
+            crate::store::GitHubAppCreation {
+                slug: "agent",
+                agent,
+                app_id: 1,
+                pem: &pem,
+                client_id: "fixture-client",
+                relay: None,
+            },
+            "test",
+        )
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "aft",
+            SelectorKind::Exact,
+            id,
+            GrantOperation::PolicyToken,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let request = PolicyTokenRequest {
+        identity: id.into(),
+        service: "github".into(),
+        kind: "add_issue_comment".into(),
+        resource: "org/r".into(),
+        policy_version: 1,
+        approval_request_id: None,
+        request_sha256: None,
+    };
+    POLICY_TOKEN_POLICY_PARSES.with(|count| count.set(0));
+    for _ in 0..3 {
+        let plan = store
+            .prepare_policy_token("aft", Some(&request), || 1)
+            .unwrap();
+        assert!(matches!(
+            store.handoff_policy_token("aft", &request, &plan.record.key, 100, None, || 1),
+            Ok(PolicyTokenHandoff::Released)
+        ));
+    }
+    assert_eq!(POLICY_TOKEN_POLICY_PARSES.with(|count| count.get()), 1);
+    let plan = store
+        .prepare_policy_token("aft", Some(&request), || 1)
+        .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "DELETE FROM read_grants WHERE principal_id = 'aft' AND operation = 'policy_token'",
+                [],
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        store.handoff_policy_token("aft", &request, &plan.record.key, 100, None, || 1),
+        Err(PolicyTokenError::NotFound)
+    ));
+}
+
+#[test]
 fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
     use crate::store::{PolicyTokenError, PolicyTokenRequest};
     use rusqlite::TransactionBehavior;

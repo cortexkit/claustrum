@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent_policy::{Class, Consent, Identity, AGENT_POLICY_SCHEMA_V1};
+use crate::agent_policy::{
+    github_default_rule_set, Class, Consent, Identity, AGENT_POLICY_SCHEMA_V1,
+};
 
 fn with_shipped_default(edit: impl FnOnce(&mut RuleSet)) -> Result<(), PolicyError> {
     let mut rules = github_default_rule_set().unwrap();

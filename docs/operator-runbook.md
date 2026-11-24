@@ -461,8 +461,8 @@ the App is created without webhook delivery to this vault.
 If create loses its daemon reply and reports that the App may be saved, check
 `ck auth list`. Do not resubmit the manifest code. If the App is listed with
 a relay slot, use `ck auth github-app relay-retry --slug <slug>` to finish
-registration. Retry never opens another slot; it cannot repair an expired
-slot or an App mismatch.
+registration. Retry never opens another slot. If registration fails permanently
+(for example, the slot expired or belongs to another App), recreate the App.
 
 Use `ck auth github-app rotate-webhook-secret --slug <slug>` to change the
 webhook secret on the relay and then on GitHub. If interrupted, rerun rotation

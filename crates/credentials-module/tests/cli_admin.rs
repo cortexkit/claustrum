@@ -650,6 +650,13 @@ struct GithubAppServer {
 #[cfg(all(debug_assertions, feature = "test-support"))]
 impl GithubAppServer {
     fn new(responses: Vec<(u16, serde_json::Value)>) -> Self {
+        Self::with_before_reply(responses, || {})
+    }
+
+    fn with_before_reply(
+        responses: Vec<(u16, serde_json::Value)>,
+        before_reply: impl Fn() + Send + 'static,
+    ) -> Self {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
@@ -679,6 +686,7 @@ impl GithubAppServer {
                         .starts_with("authorization: bearer ");
                 }
                 assert!(authenticated, "discovery must use an App JWT");
+                before_reply();
                 let body = serde_json::to_vec(&body).unwrap();
                 write!(
                     stream,
@@ -702,6 +710,57 @@ impl GithubAppServer {
             .recv_timeout(std::time::Duration::from_secs(120))
             .expect("installations requests completed");
     }
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+#[test]
+fn verify_github_apps_releases_the_wal_snapshot_before_contacting_github() {
+    if skips_staged_github_api(
+        "verify_github_apps_releases_the_wal_snapshot_before_contacting_github",
+    ) {
+        return;
+    }
+    let vault = GrantCliVault::new("github-app-verify-snapshot");
+    vault.bootstrap();
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let record = credentials_core::record::VaultRecord::new_oauth(
+        "operator",
+        "github_app",
+        github_app_oauth(),
+        Vec::new(),
+    );
+    store.create("github_app:plex-alfonso", &record).unwrap();
+    let (notify, entered) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let server =
+        GithubAppServer::with_before_reply(vec![(200, github_app_installations())], move || {
+            notify.send(()).unwrap();
+            resume.recv().unwrap();
+        });
+    let child = cli()
+        .env("CK_AUTH_TEST_LOGIN_WIRE", server.wire())
+        .arg("verify-github-apps")
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    store.create("github_app:other", &record).unwrap();
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let busy: i64 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+    server.finish();
+    assert_eq!(busy, 0, "GitHub requests must not pin the WAL checkpoint");
 }
 
 #[cfg(all(debug_assertions, feature = "test-support"))]

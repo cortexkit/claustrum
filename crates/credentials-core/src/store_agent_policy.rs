@@ -142,26 +142,60 @@ pub(super) fn head_agent_policy_conn(
 pub(super) fn active_agent_policy_version_conn(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<Option<i64>> {
+    Ok(active_agent_policy_summary_conn(conn)?.map(|policy| policy.version))
+}
+
+pub(super) fn active_agent_policy_summary_conn(
+    conn: &Connection,
+) -> rusqlite::Result<Option<AgentPolicySummary>> {
     use super::gh_activations::{gh_manifest_expected_computers_conn, gh_manifest_reports_ready};
 
     let computers = gh_manifest_expected_computers_conn(conn)?;
     let Some(manifest_version) = computers.first().and_then(|computer| computer.version) else {
         return Ok(None);
     };
-    let candidate: Option<(i64, String)> = conn
+    let candidate: Option<(AgentPolicySummary, String)> = conn
         .query_row(
-            "SELECT p.version, m.manifest_sha256 FROM agent_policies p \
+            "SELECT p.version, p.policy_sha256, m.manifest_sha256 FROM agent_policies p \
          JOIN gh_manifests m ON m.version = p.manifest_version WHERE m.version = ?1",
             [manifest_version],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    AgentPolicySummary {
+                        version: row.get(0)?,
+                        policy_sha256: row.get(1)?,
+                    },
+                    row.get(2)?,
+                ))
+            },
         )
         .optional()?;
-    Ok(candidate.and_then(|(version, digest)| {
-        gh_manifest_reports_ready(&computers, manifest_version, &digest).then_some(version)
+    Ok(candidate.and_then(|(policy, digest)| {
+        gh_manifest_reports_ready(&computers, manifest_version, &digest).then_some(policy)
     }))
 }
 
 impl EncryptedStore {
+    /// Watchers need the ready pair but never the signed policy document.
+    pub fn active_agent_policy_summary(
+        &self,
+    ) -> Result<(SecretHomeRole, Option<AgentPolicySummary>), StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let role = secret_home_role_conn(&tx);
+                let summary =
+                    if matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
+                        active_agent_policy_summary_conn(&tx)?
+                    } else {
+                        None
+                    };
+                tx.commit()?;
+                Ok((role, summary))
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Resolve the serving role and the ready pair from the same read snapshot.
     /// Non-serving vaults return their role without reading any policy row.
     pub fn active_agent_policy(
@@ -193,7 +227,7 @@ impl EncryptedStore {
                 let policy = if exists {
                     None
                 } else {
-                    active_agent_policy_conn(&tx)?
+                    head_agent_policy_conn(&tx).map_err(|_| rusqlite::Error::InvalidQuery)?
                 };
                 tx.commit()?;
                 Ok((role, exists, policy))
@@ -208,10 +242,7 @@ impl EncryptedStore {
             ));
         }
         let rules = match policy {
-            Some(policy) => AgentPolicy::parse_canonical(policy.policy_text.as_bytes())
-                .map_err(|_| manifest_policy_unavailable())?
-                .rule_sets
-                .remove("github"),
+            Some(mut policy) => policy.rule_sets.remove("github"),
             None => Some(github_default_rule_set().map_err(|_| manifest_policy_unavailable())?),
         };
 

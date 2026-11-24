@@ -1239,6 +1239,9 @@ pub struct EncryptedStore {
     // coalesce, so a quick off-then-on leaves the setting where it started; a
     // watcher compares this count instead and still sees the turn-on.
     login_sharing_enables: AtomicU64,
+    // How many local manifest reports this process has recorded. An identical
+    // repeat changes no row, so the reporter compares this count to see it.
+    own_report_records: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
     deposit_cookie_audit_fault: AtomicBool,
 }
@@ -1788,6 +1791,7 @@ impl EncryptedStore {
             audit_key,
             fenced_out: AtomicBool::new(false),
             login_sharing_enables: AtomicU64::new(0),
+            own_report_records: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             deposit_cookie_audit_fault: AtomicBool::new(false),
         };

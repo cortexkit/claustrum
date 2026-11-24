@@ -901,3 +901,38 @@ async fn a_recipient_writer_that_ends_is_restarted() {
     assert_eq!(aad.generation.get(), 1);
     assert_eq!(contents["kind"], "snapshot");
 }
+
+#[tokio::test]
+async fn a_rewound_target_seals_above_the_generation_already_on_the_hub() {
+    let mut rig = Rig::new();
+    rig.setup();
+    rig.bind(Some(paired(PAIR, MEMBER_SCALAR)));
+    let mut observer = rig.watch().await;
+    rig.start();
+    put(observer.as_mut()).await;
+    let mut row = login();
+    for org in ["second", "third"] {
+        row.identity.org_name = Some(org.into());
+        rig.overwrite(&row);
+        put(observer.as_mut()).await;
+    }
+    until(|| {
+        rig.target(MEMBER)
+            .is_some_and(|row| row.delivered && row.generation.get() == 3)
+    })
+    .await;
+    rig.stop().await;
+    // A store restored from an older backup: the hub still holds generation 3.
+    rig.raw
+        .execute(
+            "UPDATE hub_login_targets SET generation = 1 WHERE member_id = ?1",
+            [MEMBER],
+        )
+        .unwrap();
+    rig.start();
+    let next = put(observer.as_mut()).await;
+    let (aad, contents, _) = open(&next, MEMBER_SCALAR, &key(HOME_SCALAR));
+    assert!(aad.generation.get() > 3, "republished at {}", aad.generation.get());
+    assert_eq!(contents["logins"][0]["identity"]["org_name"], "third");
+    until(|| rig.target(MEMBER).is_some_and(|row| row.generation == aad.generation)).await;
+}

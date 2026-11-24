@@ -548,6 +548,18 @@ fn apply(
         },
     )? {
         warn_on_downgrade(&binding.member_id, outcome);
+    } else if current {
+        // An authenticated report below the recorded high-water is dropped. A
+        // restored peer starts below it, so say so rather than drop it silently.
+        let behind = store.list_hub_manifest_high_waters()?.into_iter().any(|mark| {
+            mark.member_id == binding.member_id
+                && mark.box_id == binding.box_id
+                && mark.pairing_id == binding.pairing_id
+                && body.seq < mark.seq
+        });
+        if behind {
+            tracing::warn!(target: "federation", member = %binding.member_id, seq = body.seq.get(), "hub manifest report older than the one already recorded; dropped");
+        }
     }
     Ok(current)
 }

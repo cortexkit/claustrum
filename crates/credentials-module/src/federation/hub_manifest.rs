@@ -104,6 +104,18 @@ pub(super) fn matches_report(
         && body.reason == public_reason(report.verdict)
 }
 
+/// The sequence of a value this vault signed for `box_id` with the key `key_id`,
+/// read from its header without checking the signature.
+pub(super) fn published_seq(
+    bytes: &[u8],
+    box_id: &str,
+    member: &str,
+    key_id: &str,
+) -> Option<HubReportSeq> {
+    let (envelope, body) = decode(bytes)?;
+    (envelope.key_id == key_id && body.r#box == box_id && body.member == member).then_some(body.seq)
+}
+
 fn decode(bytes: &[u8]) -> Option<(Envelope, Body)> {
     if bytes.len() > MAX_HUB_MANIFEST_VALUE_BYTES {
         return None;

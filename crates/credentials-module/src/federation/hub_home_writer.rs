@@ -6,6 +6,7 @@ use credentials_core::{
     federation::{MemberGrantOperation, RemoteWatchRow},
     kem::MAX_HUB_LOGINS_PLAINTEXT,
     signing::key_id_for_public,
+    hub_counters::HubGeneration,
     store::{EncryptedStore, HubLoginKind, HubLoginRecipient, HubLoginTarget, StoreOpError},
 };
 use serde_json::json;
@@ -339,6 +340,7 @@ impl MemberState {
         member: &str,
         home_box: &str,
         decision: Decision,
+        floor: Option<HubGeneration>,
     ) -> Result<Option<HubLoginTarget>, StoreOpError> {
         let (target, recipient, sender, inventory) = match decision {
             Decision::Unknown => {
@@ -358,7 +360,14 @@ impl MemberState {
             } => (target, recipient, sender, inventory),
         };
         let kind = inventory.kind();
-        let seal = target.as_ref().is_none_or(|row| {
+        // The hub holds a value this home published at or above the local row's
+        // generation (a restored backup): only a new, higher generation can replace it.
+        let behind = floor.is_some_and(|floor| {
+            target
+                .as_ref()
+                .is_none_or(|row| row.generation <= floor)
+        });
+        let seal = behind || target.as_ref().is_none_or(|row| {
             row.kind != kind
                 || row.box_id != recipient.box_id
                 || row.pairing_id != recipient.pairing_id
@@ -401,7 +410,7 @@ impl MemberState {
             } else {
                 let recipient_id = key_id_for_public(&recipient.key);
                 let mut bytes = Vec::new();
-                let generation = store.commit_hub_login_target(
+                let generation = store.commit_hub_login_target_above(
                     &HubLoginRecipient {
                         member_id: member,
                         box_id: &recipient.box_id,
@@ -409,6 +418,7 @@ impl MemberState {
                         pairing_id: &recipient.pairing_id,
                     },
                     kind,
+                    floor,
                     |generation| {
                         bytes = hub_logins::seal(
                             &LoginAad {
@@ -476,27 +486,48 @@ fn matches_sender(row: &HubLoginTarget, sender: &OwnKey, home_box: &str) -> bool
     })
 }
 
-type HubAttempt = Pin<Box<dyn Future<Output = Result<(), HubError>> + Send>>;
+/// `Ok(Some(generation))` when the hub already holds a value from this home at a
+/// higher generation, so writing the local row would move it backwards. A different
+/// value at the same generation is a damaged copy and is repaired with the same bytes.
+type HubAttempt = Pin<Box<dyn Future<Output = Result<Option<HubGeneration>, HubError>> + Send>>;
 
 fn attempt(hub: Arc<dyn Hub>, row: Arc<HubLoginTarget>, at: Instant) -> HubAttempt {
     Box::pin(async move {
         sleep_until(at).await;
         let Some(bytes) = &row.sealed_bytes else {
-            return Ok(());
+            return Ok(None);
         };
         let key = format!("{}.{}", hub.box_id(), row.box_id);
         match hub.entry(SHARED_LOGINS, &key).await? {
-            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => Ok(()),
+            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => Ok(None),
+            Some(entry)
+                if published_generation(&entry, hub.box_id(), &row.box_id)
+                    .is_some_and(|published| published > row.generation) =>
+            {
+                Ok(published_generation(&entry, hub.box_id(), &row.box_id))
+            }
             Some(entry) => hub
                 .update(SHARED_LOGINS, &key, bytes.clone(), entry.revision)
                 .await
-                .map(|_| ()),
+                .map(|_| None),
             None => hub
                 .create(SHARED_LOGINS, &key, bytes.clone())
                 .await
-                .map(|_| ()),
+                .map(|_| None),
         }
     })
+}
+
+/// The generation in a hub value's readable header, when it names this home's box
+/// and the recipient's box.
+fn published_generation(entry: &HubEntry, home_box: &str, member_box: &str) -> Option<HubGeneration> {
+    if entry.operation != HubOperation::Put {
+        return None;
+    }
+    let envelope: LoginEnvelope = serde_json::from_slice(&entry.value).ok()?;
+    let aad: LoginAad = serde_json::from_str(&envelope.aad).ok()?;
+    (envelope.v == 1 && aad.home_box == home_box && aad.member_box == member_box)
+        .then_some(aad.generation)
 }
 
 async fn repair_needed(
@@ -525,6 +556,7 @@ impl MemberTask {
     async fn evaluate(
         &mut self,
         mut state: MemberState,
+        floor: Option<HubGeneration>,
     ) -> (
         MemberState,
         Option<Result<Option<HubLoginTarget>, StoreOpError>>,
@@ -551,7 +583,7 @@ impl MemberTask {
                 return (state, None);
             }
             let next =
-                decision.and_then(|decision| state.commit(&store, &member, &home_box, decision));
+                decision.and_then(|decision| state.commit(&store, &member, &home_box, decision, floor));
             (state, Some(next))
         })
         .await
@@ -586,6 +618,10 @@ impl MemberTask {
         let mut current: Option<Arc<HubLoginTarget>> = None;
         let mut publishing: Option<HubAttempt> = None;
         let mut repair_again = false;
+        // The highest generation found on the hub for this recipient that the local
+        // row had not reached. Kept for the task's life; the store row passes it once
+        // the next value is sealed.
+        let mut floor: Option<HubGeneration> = None;
         loop {
             tokio::select! {
                 biased;
@@ -598,7 +634,7 @@ impl MemberTask {
                     decide_at = Some(Instant::now());
                 }
                 _ = async { sleep_until(decide_at.expect("a decision is queued")).await }, if decide_at.is_some() => {
-                    let (new_state, next) = self.evaluate(state).await;
+                    let (new_state, next) = self.evaluate(state, floor).await;
                     state = new_state;
                     let Some(next) = next else { continue };
                     #[cfg(test)]
@@ -636,6 +672,16 @@ impl MemberTask {
                     }
                 }
                 result = async { publishing.as_mut().expect("an attempt is queued").await }, if publishing.is_some() && decide_at.is_none() => {
+                    if let Ok(Some(published)) = result {
+                        // Never overwrite a newer value: seal again above it.
+                        tracing::warn!(target: "federation", member = %self.member_id, published = published.get(), "hub holds a newer login list from this home than the local store; sealing above it");
+                        floor = floor.max(Some(published));
+                        current = None;
+                        publishing = None;
+                        state.resumed = true;
+                        decide_at = Some(Instant::now());
+                        continue;
+                    }
                     let row = current.as_ref().expect("attempt has a committed target");
                     let delivered = result.is_ok() && (row.delivered || self.store.mark_hub_login_target_delivered(
                         &self.member_id, row.generation, row.sealed_bytes.as_deref().expect("attempt has bytes"),

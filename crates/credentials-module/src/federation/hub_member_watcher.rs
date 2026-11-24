@@ -11,6 +11,7 @@ use credentials_core::{
     signing::key_id_for_public,
     store::{EncryptedStore, HubLoginApply, HubLoginApplyMode, HubLoginHomeState, StoreOpError},
 };
+use credentials_core::hub_counters::HubGeneration;
 use tokio::{
     sync::{mpsc, watch},
     task::{AbortHandle, JoinSet},
@@ -403,6 +404,8 @@ struct HomeWork {
     read: Retry,
     reading: Option<AbortHandle>,
     removal: Option<(Option<String>, Retry)>,
+    /// The older generation last logged as dropped, so a replay logs once.
+    warned_older: Option<HubGeneration>,
 }
 
 impl HomeWork {
@@ -776,6 +779,14 @@ impl MemberWatcher {
             work.apply = Retry::default();
             self.apply_pending(&home).await;
             return false;
+        }
+        if let Some(state) = accepted.filter(|state| generation < state.generation) {
+            // Authenticated but older than what this vault accepted: a restored home
+            // republishing from a rewound counter. Logged once per value.
+            if work.warned_older != Some(generation) {
+                tracing::warn!(target: "federation", %home, generation = generation.get(), accepted = state.generation.get(), "hub login list older than the accepted one; dropped");
+                work.warned_older = Some(generation);
+            }
         }
         let Some(accepted) = accepted.filter(|state| {
             point_read

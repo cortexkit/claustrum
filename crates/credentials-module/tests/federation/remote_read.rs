@@ -1385,6 +1385,31 @@ async fn a_delayed_reply_after_mapping_removal_refuses_its_waiter() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_removed_mappings_state_is_dropped_once_its_late_reply_is_refused() {
+    let rig = Rig::new("remote-remove-prune").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let held = rig.hold(Step::Forward);
+    let old = rig.record(TOKEN_ID);
+    let pending = {
+        let reader = Arc::clone(&rig.reader);
+        tokio::spawn(async move { wait_for_signal(reader.get(&old, None)).await })
+    };
+    held.arrived().await;
+    assert_eq!(rig.reader.tracked_ids_for_test(), 1);
+    rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
+    held.release();
+    let RemoteAnswer::Refused(refusal) = pending.await.unwrap() else {
+        panic!("a reply for the removed mapping reached its waiter");
+    };
+    assert_eq!(code(&refusal), ("not_found", "permanent", None));
+    // Nothing is kept for an id with no cache, flight or waiter left.
+    assert_eq!(rig.reader.tracked_ids_for_test(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_cached_reply_for_a_removed_mapping_refuses_a_stale_snapshot() {
     let rig = Rig::new("remote-remove-cache").await;
     rig.login(

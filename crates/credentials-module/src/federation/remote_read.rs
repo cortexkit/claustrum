@@ -647,9 +647,17 @@ struct IdState {
     /// applied while it waited wins over the result it was waiting for.
     verdicts: u64,
     last_verdict: Option<RemoteRefusal>,
+    /// Callers still to read this state after their flight. While any remain, or a
+    /// flight or cache does, the state is kept; otherwise it is dropped, so the map
+    /// holds only ids in use rather than every id ever fetched.
+    waiters: usize,
 }
 
 impl IdState {
+    fn idle(&self) -> bool {
+        self.cache.is_none() && self.flights.is_empty() && self.waiters == 0
+    }
+
     fn new(incarnation: &str) -> Self {
         Self {
             incarnation: incarnation.to_string(),
@@ -661,6 +669,30 @@ impl IdState {
             flights: Vec::new(),
             verdicts: 0,
             last_verdict: None,
+            waiters: 0,
+        }
+    }
+}
+
+/// Counts one caller as waiting on an id's state until it has read it, including
+/// when the caller is dropped mid-wait.
+struct Waiting<'a> {
+    reader: &'a RemoteReader,
+    credential_id: &'a str,
+    incarnation: &'a str,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut ids = self.reader.lock();
+        if let Some(state) = ids
+            .get_mut(self.credential_id)
+            .filter(|state| state.incarnation == self.incarnation)
+        {
+            state.waiters = state.waiters.saturating_sub(1);
+            if state.idle() {
+                ids.remove(self.credential_id);
+            }
         }
     }
 }
@@ -794,6 +826,12 @@ impl RemoteReader {
         self.store.remote_record(credential_id)
     }
 
+    /// How many remote ids this reader holds state for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tracked_ids_for_test(&self) -> usize {
+        self.lock().len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, IdState>> {
         self.ids
             .lock()
@@ -841,6 +879,7 @@ impl RemoteReader {
                     state.cache = None;
                 }
             }
+            ids.retain(|_, state| !state.idle());
             let state = Self::state_for(&mut ids, record);
             if let Some(entry) = state.cache.as_ref() {
                 if lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
@@ -878,7 +917,13 @@ impl RemoteReader {
                     done
                 }
             };
+            state.waiters += 1;
             (done, state.verdicts)
+        };
+        let _waiting = Waiting {
+            reader: self,
+            credential_id: &record.credential_id,
+            incarnation: &record.incarnation,
         };
 
         let result = match tokio::time::timeout_at(budget, done.wait_for(Option::is_some)).await {
@@ -904,6 +949,20 @@ impl RemoteReader {
             // The record was removed (and perhaps added again) while this call waited.
             return RemoteAnswer::Refused(RemoteRefusal::new("not_found", "permanent"));
         };
+        let answer = Self::answer_from(state, joined_at, &result, (self.mono)(), min_ttl);
+        drop(ids);
+        answer
+    }
+
+    /// The answer for a caller that joined at `joined_at` verdicts, from its flight's
+    /// `result` and the id's state after it.
+    fn answer_from(
+        state: &IdState,
+        joined_at: u64,
+        result: &FlightResult,
+        now: u64,
+        min_ttl: i64,
+    ) -> RemoteAnswer {
         if state.verdicts > joined_at {
             if let Some(verdict) = state.last_verdict.clone() {
                 return RemoteAnswer::Refused(verdict);
@@ -911,7 +970,7 @@ impl RemoteReader {
         }
         match &result.fetched {
             Fetched::Token(reply) => {
-                if lifetime_ok(reply, result.t0_mono, (self.mono)(), min_ttl) {
+                if lifetime_ok(reply, result.t0_mono, now, min_ttl) {
                     RemoteAnswer::Served(served(reply, result.t0_wall))
                 } else {
                     // A fresh reply from this call's own fetch still misses the
@@ -971,6 +1030,9 @@ impl RemoteReader {
         {
             self.apply(state, &record, seq, generation, &result);
             state.flights.retain(|flight| flight.seq != seq);
+            if state.idle() {
+                ids.remove(&record.credential_id);
+            }
         }
         drop(ids);
         publish.send_replace(Some(result));

@@ -452,8 +452,9 @@ struct TestHooks {
     handled: Option<mpsc::UnboundedSender<HubEvent>>,
     /// Receives the homes with a queued removal after each roster is reconciled.
     reconciled: Option<mpsc::UnboundedSender<Vec<String>>>,
-    /// Receives the transfer-key decrypt count after each local refresh.
-    refreshed: Option<mpsc::UnboundedSender<usize>>,
+    /// Receives the transfer-key decrypt count and the number of homes with held
+    /// state after each local refresh.
+    refreshed: Option<mpsc::UnboundedSender<(usize, usize)>>,
 }
 
 impl MemberWatcher {
@@ -528,10 +529,6 @@ impl MemberWatcher {
             return;
         };
         self.refresh = Retry::default();
-        #[cfg(test)]
-        if let Some(sink) = &self.hooks.refreshed {
-            let _ = sink.send(self.keys.lock().unwrap().decrypts);
-        }
         if let Some(pairings) = &pairings {
             if scan {
                 self.reconcile_pairings(pairings, &local, copies);
@@ -567,6 +564,11 @@ impl MemberWatcher {
             if !bound.contains_key(home) || local.recipient.is_none() {
                 work.cancel_read();
                 work.apply.at = None;
+            }
+            // A decrypted inventory is not held for a home that is not bound; the
+            // point read that follows a rebind fetches it again.
+            if !bound.contains_key(home) {
+                work.forget_pending();
             }
             if work.pending.as_ref().is_some_and(|pending| {
                 local
@@ -605,8 +607,20 @@ impl MemberWatcher {
                 }
             }
         }
+        // Forget homes with nothing left to do, so state does not accumulate for
+        // every home this vault was ever bound to.
+        self.homes.retain(|home, work| {
+            bound.contains_key(home)
+                || work.pending.is_some()
+                || work.removal.is_some()
+                || work.reading.is_some()
+        });
         self.bound = bound;
         self.local = local;
+        #[cfg(test)]
+        if let Some(sink) = &self.hooks.refreshed {
+            let _ = sink.send((self.keys.lock().unwrap().decrypts, self.homes.len()));
+        }
     }
 
     fn reconcile_pairings(

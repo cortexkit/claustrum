@@ -165,7 +165,7 @@ struct Rig {
     pairs: watch::Sender<Option<Arc<VaultSharingSnapshot>>>,
     handled: mpsc::UnboundedReceiver<HubEvent>,
     reconciled: mpsc::UnboundedReceiver<Vec<String>>,
-    refreshed: mpsc::UnboundedReceiver<usize>,
+    refreshed: mpsc::UnboundedReceiver<(usize, usize)>,
     attempted: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -752,12 +752,31 @@ async fn the_transfer_key_is_decrypted_once_across_unrelated_writes() {
     let mut rig = Rig::new(true);
     rig.start();
     rig.opened(1).await;
-    assert_eq!(wait(rig.refreshed.recv()).await, Some(1));
+    assert_eq!(wait(rig.refreshed.recv()).await.map(|(decrypts, _)| decrypts), Some(1));
     for n in 0..5 {
         // Each write wakes a refresh of every local input.
         rig.add_handmade(&format!("oauth:unrelated-{n}"));
-        assert_eq!(wait(rig.refreshed.recv()).await, Some(1));
+        assert_eq!(wait(rig.refreshed.recv()).await.map(|(decrypts, _)| decrypts), Some(1));
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unbound_home_holds_no_pending_value_and_a_rebind_reads_it_again() {
+    let mut rig = Rig::new(true);
+    rig.sharing(false);
+    rig.start();
+    rig.opened(1).await;
+    // With sharing off the authenticated value is held, not applied.
+    rig.put_seen(&login(1, vec![row(ID, 1)])).await;
+    assert!(rig.row(ID).is_none());
+    while rig.refreshed.try_recv().is_ok() {}
+    // The home's peer key lapses: it is no longer bound, though still paired.
+    rig.views(Some(PAIR), None);
+    let (_, held) = wait(rig.refreshed.recv()).await.unwrap();
+    assert_eq!(held, 0, "no state is held for an unbound home");
+    rig.views(Some(PAIR), Some((PAIR, HOME_BOX, SENDER)));
+    rig.sharing(true);
+    until(|| rig.row(ID).is_some()).await;
 }
 
 #[tokio::test(start_paused = true)]

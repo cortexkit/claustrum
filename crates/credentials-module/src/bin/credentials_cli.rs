@@ -3509,7 +3509,13 @@ mod deposit_cli_tests {
                     "github_app",
                     OAuthCredential {
                         access_token: "sample".to_string().into(),
-                        refresh_token: "sample".to_string().into(),
+                        // Policy signing opens the App's real signing material, so the
+                        // identity needs a key that parses, not a placeholder string.
+                        refresh_token: include_str!(
+                            "../../../credentials-core/tests/fixtures/github_app/test_private_key_pkcs1.pem"
+                        )
+                        .to_string()
+                        .into(),
                         expires_at_ms: None,
                         token_url: String::new(),
                         client_id: Some("sample".into()),

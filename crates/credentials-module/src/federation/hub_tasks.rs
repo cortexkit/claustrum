@@ -35,7 +35,15 @@ pub(crate) fn start(
         Some(pairings_tx),
     ));
     let tasks = tokio::spawn(async move {
-        let Some(hub) = hub.await else { return };
+        // A confirmed unpair removes automatic copies whether or not the hub ever
+        // connects. The remover stops before the member watcher takes over.
+        let mut removals =
+            hub_member_watcher::PairingLossRemover::new(Arc::clone(&store), pairings_rx.clone());
+        let Some(hub) = removals.until(hub).await else {
+            removals.until(std::future::pending::<()>()).await;
+            return;
+        };
+        drop(removals);
         let (joined_tx, joined_rx) = watch::channel(None);
         // The same Hub stays with all workers as its NATS connection changes.
         // In particular the home writer retains pending work across replacement.

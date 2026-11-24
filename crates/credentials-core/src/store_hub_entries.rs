@@ -218,6 +218,19 @@ impl EncryptedStore {
         kind: HubLoginKind,
         seal: impl FnOnce(HubGeneration) -> Result<Vec<u8>, StoreOpError>,
     ) -> Result<HubGeneration, StoreOpError> {
+        self.commit_hub_login_target_above(recipient, kind, None, seal)
+    }
+
+    /// As [`Self::commit_hub_login_target`], with the next generation also above
+    /// `floor`: the highest generation this home is known to have published, for
+    /// example one found on the hub after the local row was restored from a backup.
+    pub fn commit_hub_login_target_above(
+        &self,
+        recipient: &HubLoginRecipient<'_>,
+        kind: HubLoginKind,
+        floor: Option<HubGeneration>,
+        seal: impl FnOnce(HubGeneration) -> Result<Vec<u8>, StoreOpError>,
+    ) -> Result<HubGeneration, StoreOpError> {
         check_member_id(recipient.member_id)?;
         super::federation_store::check_pairing_id(recipient.pairing_id)?;
         if !is_lower_hex_16_bytes(recipient.box_id) {
@@ -226,6 +239,7 @@ impl EncryptedStore {
         self.fenced_write_or_refuse(|tx| {
             let current = tx.query_row("SELECT generation FROM hub_login_targets WHERE member_id = ?1",
                 [recipient.member_id], |row| generation(row, 0)).optional()?;
+            let current = current.max(floor);
             let Some(next) = current.map_or(Some(HubGeneration::FIRST), HubGeneration::checked_next) else {
                 return Ok(Err(StoreOpError::Encode("hub login generation exhausted".into())));
             };
@@ -318,6 +332,11 @@ impl EncryptedStore {
                 return Ok(Err(StoreOpError::NotFound));
             }
             let outcome = self.report_gh_manifest_active_tx(tx, report, ctx)?;
+            // Counted before the commit wakes the reporter. An explicit report, even
+            // one identical to the last, asks it for a fresh signed value with a higher
+            // sequence: a Home that cleared its copy (a revoked and restored grant)
+            // accepts only a newer one. A rolled-back commit only costs a spare signature.
+            self.own_report_records.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tx.execute("UPDATE gh_manifest_activations SET report_box_id = NULL WHERE member_id = ?1", [report.member_id])?;
             tx.execute("INSERT INTO hub_own_report (singleton, version, payload_sha256, verdict, reason) \
                 VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, \
@@ -325,6 +344,12 @@ impl EncryptedStore {
                 params![report.version, report.payload_sha256, report.verdict.as_str(), report.reason])?;
             Ok(Ok(outcome))
         })
+    }
+
+    /// How many local reports this process has recorded, identical ones included.
+    pub fn hub_own_report_records(&self) -> u64 {
+        self.own_report_records
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn hub_own_report(&self) -> Result<Option<HubOwnReport>, StoreOpError> {
@@ -355,11 +380,24 @@ impl EncryptedStore {
         expected: &HubOwnReport,
         sign: impl FnOnce(HubReportSeq) -> Result<Vec<u8>, StoreOpError>,
     ) -> Result<Option<HubReportSeq>, StoreOpError> {
+        self.commit_hub_report_bytes_above(expected, None, sign)
+    }
+
+    /// As [`Self::commit_hub_report_bytes`], with the next sequence also above
+    /// `floor`: the highest sequence this vault is known to have published, for
+    /// example one found on the hub after the local row was restored from a backup.
+    pub fn commit_hub_report_bytes_above(
+        &self,
+        expected: &HubOwnReport,
+        floor: Option<HubReportSeq>,
+        sign: impl FnOnce(HubReportSeq) -> Result<Vec<u8>, StoreOpError>,
+    ) -> Result<Option<HubReportSeq>, StoreOpError> {
         self.fenced_write_or_refuse(|tx| {
             if own_report_conn(tx)?.as_ref() != Some(expected) {
                 return Ok(Ok(None));
             }
             let current = tx.query_row("SELECT seq FROM hub_report_task WHERE singleton = 1", [], |row| report_seq(row, 0)).optional()?;
+            let current = current.max(floor);
             let Some(next) = current.map_or(Some(HubReportSeq::FIRST), HubReportSeq::checked_next) else {
                 return Ok(Err(StoreOpError::Encode("hub manifest report seq exhausted".into())));
             };

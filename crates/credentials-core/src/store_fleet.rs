@@ -18,11 +18,29 @@ struct EpochRow {
 redacted_debug!(EpochRow);
 
 fn rows(conn: &rusqlite::Connection) -> Result<Vec<EpochRow>, FleetError> {
-    let mut stmt = conn.prepare(
-        "SELECT epoch, key, minter, members_json, mint_id, state FROM fleet_epochs ORDER BY epoch",
-    )?;
+    rows_where(conn, "", [])
+}
+
+/// Hot reads (seal and open) select only the row they use, so their cost does
+/// not grow with the retained epoch history.
+fn epoch_row(conn: &rusqlite::Connection, epoch: u32) -> Result<Option<EpochRow>, FleetError> {
+    Ok(rows_where(conn, "WHERE epoch = ?1", [epoch])?.pop())
+}
+
+fn current_row(conn: &rusqlite::Connection) -> Result<Option<EpochRow>, FleetError> {
+    Ok(rows_where(conn, "WHERE state = 'current'", [])?.pop())
+}
+
+fn rows_where<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    filter: &str,
+    params: P,
+) -> Result<Vec<EpochRow>, FleetError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT epoch, key, minter, members_json, mint_id, state FROM fleet_epochs {filter} ORDER BY epoch"
+    ))?;
     let raw = stmt
-        .query_map([], |r| {
+        .query_map(params, |r| {
             Ok((
                 r.get::<_, u32>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
@@ -33,6 +51,8 @@ fn rows(conn: &rusqlite::Connection) -> Result<Vec<EpochRow>, FleetError> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    EPOCH_ROWS_READ.with(|count| count.set(count.get() + raw.len()));
     raw.into_iter()
         .map(|(epoch, blob, minter, members, mint_id, state)| {
             let members = serde_json::from_str::<Vec<String>>(&members)
@@ -69,10 +89,25 @@ fn self_member(conn: &rusqlite::Connection) -> Result<String, FleetError> {
 fn removals(conn: &rusqlite::Connection) -> Result<BTreeSet<String>, FleetError> {
     let mut stmt =
         conn.prepare("SELECT DISTINCT member_id FROM fleet_removals ORDER BY member_id")?;
-    let result = stmt
+    let result: BTreeSet<String> = stmt
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    #[cfg(test)]
+    REMOVAL_SCANS.with(|count| count.set(count.get() + 1));
     Ok(result)
+}
+
+/// Whether any of `members` has a recorded removal, probed per member so the
+/// cost follows the holder list rather than the append-only removal history.
+fn any_removed(conn: &rusqlite::Connection, members: &[String]) -> Result<bool, FleetError> {
+    let mut stmt =
+        conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM fleet_removals WHERE member_id = ?1)")?;
+    for member in members {
+        if stmt.query_row([member], |r| r.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn peers_map(peers: &[FleetPeer]) -> Result<BTreeMap<&str, &[u8; 32]>, FleetError> {
@@ -120,18 +155,19 @@ fn open_epoch(key: &MasterKey, row: &EpochRow) -> Result<Zeroizing<Vec<u8>>, Fle
 #[cfg(test)]
 thread_local! {
     static EPOCH_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EPOCH_ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static REMOVAL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn open_record_key(
     master_key: &MasterKey,
-    rows: &[EpochRow],
+    conn: &rusqlite::Connection,
     epoch: u32,
 ) -> Result<Zeroizing<Vec<u8>>, FleetError> {
-    let row = rows
-        .iter()
-        .find(|r| r.epoch == epoch && r.state != "pending")
+    let row = epoch_row(conn, epoch)?
+        .filter(|r| r.state != "pending")
         .ok_or(FleetError::EpochUnavailable)?;
-    open_epoch(master_key, row)
+    open_epoch(master_key, &row)
 }
 
 fn open_record(key: &[u8], sealer: FleetSealer, item: &FleetOpenInput<'_>) -> FleetOpenResult {
@@ -316,10 +352,13 @@ impl EncryptedStore {
         validate_batch(items.len(), items.iter().map(FleetSealInput::validate))?;
         self.fleet_read(|conn| {
             let myself = self_member(conn)?;
-            let removed = removals(conn)?;
-            let rows = rows(conn)?;
-            let row = usable_current(&rows, &myself, &removed)?;
-            let key = open_epoch(&self.key, row)?;
+            let row = current_row(conn)?
+                .filter(|r| r.members.contains(&myself))
+                .ok_or(FleetError::EpochUnavailable)?;
+            if any_removed(conn, &row.members)? {
+                return Err(FleetError::EpochUnavailable);
+            }
+            let key = open_epoch(&self.key, &row)?;
             let cipher =
                 XChaCha20Poly1305::new_from_slice(&key).map_err(|_| FleetError::StoreError)?;
             items
@@ -363,8 +402,7 @@ impl EncryptedStore {
         item.validate()?;
         self.fleet_read(|conn| {
             self_member(conn)?;
-            let rows = rows(conn)?;
-            let key = open_record_key(&self.key, &rows, item.epoch)?;
+            let key = open_record_key(&self.key, conn, item.epoch)?;
             open_record(&key, sealer, &item)
         })
     }
@@ -377,14 +415,13 @@ impl EncryptedStore {
         validate_batch(items.len(), items.iter().map(FleetOpenInput::validate))?;
         self.fleet_read(|conn| {
             self_member(conn)?;
-            let rows = rows(conn)?;
             let mut keys = BTreeMap::new();
             items
                 .iter()
                 .map(|item| {
                     let result = keys
                         .entry(item.epoch)
-                        .or_insert_with(|| open_record_key(&self.key, &rows, item.epoch))
+                        .or_insert_with(|| open_record_key(&self.key, conn, item.epoch))
                         .as_ref()
                         .map_err(|error| *error)
                         .and_then(|key| open_record(key, sealer, item));
@@ -555,8 +592,23 @@ impl EncryptedStore {
         }) {
             return Err(FleetError::InvalidParams);
         }
+        // An exact replay is answered from a read: a commit, even an empty one,
+        // would wake every store write subscriber.
+        let all_recorded = self.fleet_read(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM fleet_removals WHERE member_id = ?1 AND removal_id = ?2)",
+            )?;
+            for item in observations {
+                if !stmt.query_row([&item.member_id, &item.removal_id], |r| r.get::<_, bool>(0))? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if all_recorded {
+            return Ok(0);
+        }
         self.fleet_write(|tx| {
-            removals(tx)?;
             let mut count = 0;
             for item in observations {
                 let changed = tx.execute("INSERT OR IGNORE INTO fleet_removals (member_id, removal_id, observed_at_ms) VALUES (?1, ?2, ?3)", rusqlite::params![item.member_id, item.removal_id, observed_at_ms])?;
@@ -975,6 +1027,63 @@ mod tests {
         assert!(store
             .fenced_write(|tx| tx.execute("UPDATE fleet_epochs SET state = 'held'", []))
             .is_err());
+    }
+
+    #[test]
+    fn fleet_hot_reads_select_one_epoch_and_removal_replays_write_nothing() {
+        let (_root, store) = rig("fleet-hot-reads", 1);
+        seed(&store, 200, &[id(1), id(2)]);
+        let history: Vec<_> = (0..200)
+            .map(|n| FleetRemoval {
+                member_id: id(100 + n),
+                removal_id: format!("removal-{n}"),
+            })
+            .collect();
+        assert_eq!(store.fleet_record_removals(&history, 1).unwrap(), 200);
+        let rows_read = || EPOCH_ROWS_READ.with(|count| count.get());
+        let scans = || REMOVAL_SCANS.with(|count| count.get());
+        let (rows_before, scans_before) = (rows_read(), scans());
+        let sealed = store
+            .fleet_epoch_seal(FleetSealer::Entorhinal, b"context", b"record")
+            .unwrap();
+        assert_eq!(rows_read() - rows_before, 1);
+        let rows_before = rows_read();
+        assert_eq!(opened(&store, &sealed).unwrap().expose(), b"record");
+        assert_eq!(rows_read() - rows_before, 1);
+        assert_eq!(scans(), scans_before);
+
+        // Replaying recorded removals neither commits nor wakes subscribers.
+        let mut writes = store.subscribe_writes();
+        writes.borrow_and_update();
+        let audit = audit_len(&store);
+        assert_eq!(store.fleet_record_removals(&history, 2).unwrap(), 0);
+        assert!(!writes.has_changed().unwrap());
+        assert_eq!(scans(), scans_before);
+        assert_eq!(audit_len(&store), audit);
+
+        // Removing a current holder still blocks sealing; opening still works.
+        store
+            .fleet_record_removals(
+                &[FleetRemoval {
+                    member_id: id(2),
+                    removal_id: "removal-holder".into(),
+                }],
+                3,
+            )
+            .unwrap();
+        assert!(writes.has_changed().unwrap());
+        assert_eq!(audit_len(&store), audit + 1);
+        assert_eq!(
+            store
+                .fleet_epoch_seal(FleetSealer::Entorhinal, b"", b"x")
+                .unwrap_err(),
+            FleetError::EpochUnavailable
+        );
+        assert_eq!(opened(&store, &sealed).unwrap().expose(), b"record");
+        assert_eq!(
+            store.fleet_epoch_status().unwrap().sealing_blocked_by,
+            vec![id(2)]
+        );
     }
 
     #[test]

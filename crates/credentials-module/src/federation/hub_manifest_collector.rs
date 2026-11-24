@@ -198,6 +198,34 @@ impl Member {
         }
     }
 
+    /// Queue a watch value. Only the newest one is kept: an older revision loses to
+    /// it anyway, and a member whose store writes keep failing must not grow a
+    /// backlog of reports it will never apply.
+    fn enqueue_watch(&mut self, entry: HubEntry) {
+        if let Some(queued) = self.queue.iter_mut().find(|queued| queued.from_watch) {
+            if entry.revision >= queued.entry.revision {
+                queued.entry = entry;
+            }
+            return;
+        }
+        self.queue.push_back(Queued {
+            entry,
+            from_watch: true,
+        });
+    }
+
+    /// Queue a point read's value ahead of any watch value, replacing an earlier
+    /// point read: a member holds at most one of each.
+    fn enqueue_read(&mut self, entry: HubEntry) {
+        if self.queue.front().is_some_and(|queued| !queued.from_watch) {
+            self.queue.pop_front();
+        }
+        self.queue.push_front(Queued {
+            entry,
+            from_watch: false,
+        });
+    }
+
     fn next_at(&self) -> Option<Instant> {
         if !self.queue.is_empty() && self.reading.is_none() {
             Some(self.store_retry.at.unwrap_or_else(Instant::now))
@@ -389,10 +417,7 @@ impl Collector {
         let joined = self.bindings.borrow();
         if let Some(binding) = joined.as_ref().and_then(|j| j.by_box(&entry.key)) {
             if let Some(member) = self.members.get_mut(&binding.member_id) {
-                member.queue.push_back(Queued {
-                    entry,
-                    from_watch: true,
-                });
+                member.enqueue_watch(entry);
             }
         }
     }
@@ -415,10 +440,7 @@ impl Collector {
             Ok(entry) => {
                 member.reread = Retry::default();
                 if let Some(entry) = entry {
-                    member.queue.push_front(Queued {
-                        entry,
-                        from_watch: false,
-                    });
+                    member.enqueue_read(entry);
                 }
             }
             Err(_) => member.reread.later(),
@@ -548,6 +570,59 @@ fn apply(
         },
     )? {
         warn_on_downgrade(&binding.member_id, outcome);
+    } else if current {
+        // An authenticated report below the recorded high-water is dropped. A
+        // restored peer starts below it, so say so rather than drop it silently.
+        let behind = store
+            .list_hub_manifest_high_waters()?
+            .into_iter()
+            .any(|mark| {
+                mark.member_id == binding.member_id
+                    && mark.box_id == binding.box_id
+                    && mark.pairing_id == binding.pairing_id
+                    && body.seq < mark.seq
+            });
+        if behind {
+            tracing::warn!(target: "federation", member = %binding.member_id, seq = body.seq.get(), "hub manifest report older than the one already recorded; dropped");
+        }
     }
     Ok(current)
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn entry(revision: u64) -> HubEntry {
+        HubEntry {
+            key: "00000000000000000000000000000002".into(),
+            value: revision.to_string().into_bytes(),
+            revision,
+            operation: HubOperation::Put,
+        }
+    }
+
+    #[test]
+    fn a_member_keeps_only_its_newest_watch_value_and_point_read() {
+        let mut member = Member::new(HubBinding {
+            member_id: "fed-computer:00000000000000000000000000000009".into(),
+            box_id: "00000000000000000000000000000002".into(),
+            pairing_id: "pair:1".into(),
+            vault_transfer_x25519: None,
+            fleet_record_ed25519: None,
+        });
+        for revision in 1..=1_000 {
+            member.enqueue_watch(entry(revision));
+        }
+        member.enqueue_read(entry(5));
+        member.enqueue_read(entry(6));
+        // A late, older watch delivery never replaces a newer one.
+        member.enqueue_watch(entry(999));
+        let queued: Vec<_> = member
+            .queue
+            .iter()
+            .map(|queued| (queued.from_watch, queued.entry.revision))
+            .collect();
+        assert_eq!(queued, [(false, 6), (true, 1_000)]);
+    }
 }

@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
 use credentials_core::{
     federation::{MemberGrantOperation, RemoteWatchRow},
+    hub_counters::HubGeneration,
     kem::MAX_HUB_LOGINS_PLAINTEXT,
     signing::key_id_for_public,
     store::{EncryptedStore, HubLoginKind, HubLoginRecipient, HubLoginTarget, StoreOpError},
@@ -76,6 +77,7 @@ async fn supervise(
         }
     };
     let mut started = BTreeSet::new();
+    let mut members = std::collections::HashMap::new();
     let mut tasks = JoinSet::new();
     loop {
         if let Some(current) = bindings.borrow_and_update().as_ref() {
@@ -83,9 +85,9 @@ async fn supervise(
         }
         for member_id in stored.drain(..) {
             if started.insert(member_id.clone()) {
-                tasks.spawn(
+                let task = tasks.spawn(
                     MemberTask {
-                        member_id,
+                        member_id: member_id.clone(),
                         hub: Arc::clone(hub),
                         writes: store.subscribe_writes(),
                         store: Arc::clone(&store),
@@ -96,12 +98,25 @@ async fn supervise(
                     }
                     .run(),
                 );
+                members.insert(task.id(), member_id);
             }
         }
         tokio::select! {
             change = bindings.changed() => if change.is_err() { return; },
-            // Closing the task group avoids silently leaving a recipient without a writer.
-            _ = tasks.join_next(), if !tasks.is_empty() => return,
+            // A recipient is never left without a writer: one that ends for any
+            // reason is logged and started again.
+            ended = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let id = match &ended {
+                    Some(Ok((id, ()))) => *id,
+                    Some(Err(error)) => error.id(),
+                    None => continue,
+                };
+                if let Some(member) = members.remove(&id) {
+                    tracing::error!(target: "federation", %member, "hub login writer for a recipient stopped; restarting it");
+                    started.remove(&member);
+                    stored.push(member);
+                }
+            }
         }
     }
 }
@@ -160,6 +175,10 @@ struct TestHooks {
     project: Option<super::ingress::IssueAuditGate>,
     decided: Option<Arc<tokio::sync::Notify>>,
     failed: Option<Arc<tokio::sync::Notify>>,
+    /// Makes the next member task end at once, as an unexpected exit would.
+    exit_once: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Counts refusal warnings this writer logs.
+    refusals: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 struct Recipient {
@@ -282,6 +301,11 @@ struct MemberState {
     last_kind: Option<HubLoginKind>,
     last_rows: Vec<RemoteWatchRow>,
     resumed: bool,
+    /// The refusal last logged for this recipient. A refusal repeats on every
+    /// store write until its cause changes, so it is logged once per change.
+    refused: Option<&'static str>,
+    #[cfg(test)]
+    refusals: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl Default for MemberState {
@@ -291,17 +315,32 @@ impl Default for MemberState {
             last_kind: None,
             last_rows: Vec::new(),
             resumed: true,
+            refused: None,
+            #[cfg(test)]
+            refusals: None,
         }
     }
 }
 
 impl MemberState {
+    fn refuse(&mut self, reason: &'static str, member: &str, at_max: bool) {
+        if self.refused != Some(reason) {
+            tracing::warn!(target: "federation", member, at_max, "{reason}");
+            #[cfg(test)]
+            if let Some(count) = &self.refusals {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.refused = Some(reason);
+    }
+
     fn commit(
         &mut self,
         store: &EncryptedStore,
         member: &str,
         home_box: &str,
         decision: Decision,
+        floor: Option<HubGeneration>,
     ) -> Result<Option<HubLoginTarget>, StoreOpError> {
         let (target, recipient, sender, inventory) = match decision {
             Decision::Unknown => {
@@ -321,20 +360,26 @@ impl MemberState {
             } => (target, recipient, sender, inventory),
         };
         let kind = inventory.kind();
-        let seal = target.as_ref().is_none_or(|row| {
-            row.kind != kind
-                || row.box_id != recipient.box_id
-                || row.pairing_id != recipient.pairing_id
-                || row.transfer_public_key != recipient.key
-                || !matches_sender(row, &sender, home_box)
-        }) || match &inventory {
-            Inventory::Eligible(rows) => {
-                self.starting
-                    || target.as_ref().is_some_and(|row| row.stale)
-                    || !remote_watch_lists_equal(&self.last_rows, rows)
-            }
-            Inventory::Ended => self.last_kind == Some(HubLoginKind::Snapshot),
-        };
+        // The hub holds a value this home published at or above the local row's
+        // generation (a restored backup): only a new, higher generation can replace it.
+        let behind =
+            floor.is_some_and(|floor| target.as_ref().is_none_or(|row| row.generation <= floor));
+        let seal = behind
+            || target.as_ref().is_none_or(|row| {
+                row.kind != kind
+                    || row.box_id != recipient.box_id
+                    || row.pairing_id != recipient.pairing_id
+                    || row.transfer_public_key != recipient.key
+                    || !matches_sender(row, &sender, home_box)
+            })
+            || match &inventory {
+                Inventory::Eligible(rows) => {
+                    self.starting
+                        || target.as_ref().is_some_and(|row| row.stale)
+                        || !remote_watch_lists_equal(&self.last_rows, rows)
+                }
+                Inventory::Ended => self.last_kind == Some(HubLoginKind::Snapshot),
+            };
         let mut current = target;
         if seal {
             let plaintext = match &inventory {
@@ -355,12 +400,16 @@ impl MemberState {
                 if let Some(row) = current.as_ref().filter(|row| !row.stale) {
                     store.mark_hub_login_target_stale(member, row.generation)?;
                 }
-                tracing::warn!(target: "federation", member, at_max, "hub login value exceeds size or generation limit");
+                self.refuse(
+                    "hub login value exceeds size or generation limit",
+                    member,
+                    at_max,
+                );
                 current = None;
             } else {
                 let recipient_id = key_id_for_public(&recipient.key);
                 let mut bytes = Vec::new();
-                let generation = store.commit_hub_login_target(
+                let generation = store.commit_hub_login_target_above(
                     &HubLoginRecipient {
                         member_id: member,
                         box_id: &recipient.box_id,
@@ -368,6 +417,7 @@ impl MemberState {
                         pairing_id: &recipient.pairing_id,
                     },
                     kind,
+                    floor,
                     |generation| {
                         bytes = hub_logins::seal(
                             &LoginAad {
@@ -379,7 +429,7 @@ impl MemberState {
                                 sender_key_id: sender.key_id,
                                 recipient_key_id: recipient_id,
                             },
-                            &sender.pem,
+                            sender.pem.expose(),
                             &recipient.key,
                             &plaintext,
                         )?;
@@ -394,12 +444,13 @@ impl MemberState {
                         if let Some(row) = current.as_ref().filter(|row| !row.stale) {
                             store.mark_hub_login_target_stale(member, row.generation)?;
                         }
-                        tracing::warn!(target: "federation", member, "cannot seal hub login value");
+                        self.refuse("cannot seal hub login value", member, false);
                         self.resumed = true;
                         return Ok(None);
                     }
                     Err(error) => return Err(error),
                 };
+                self.refused = None;
                 current = Some(HubLoginTarget {
                     member_id: member.into(),
                     box_id: recipient.box_id,
@@ -434,27 +485,54 @@ fn matches_sender(row: &HubLoginTarget, sender: &OwnKey, home_box: &str) -> bool
     })
 }
 
-type HubAttempt = Pin<Box<dyn Future<Output = Result<(), HubError>> + Send>>;
+/// `Ok(Some(generation))` when the hub already holds a value from this home at a
+/// higher generation, so writing the local row would move it backwards. A different
+/// value at the same generation is a damaged copy and is repaired with the same bytes.
+type HubAttempt = Pin<Box<dyn Future<Output = Result<Option<HubGeneration>, HubError>> + Send>>;
 
 fn attempt(hub: Arc<dyn Hub>, row: Arc<HubLoginTarget>, at: Instant) -> HubAttempt {
     Box::pin(async move {
         sleep_until(at).await;
         let Some(bytes) = &row.sealed_bytes else {
-            return Ok(());
+            return Ok(None);
         };
         let key = format!("{}.{}", hub.box_id(), row.box_id);
         match hub.entry(SHARED_LOGINS, &key).await? {
-            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => Ok(()),
+            Some(entry) if entry.operation == HubOperation::Put && entry.value == *bytes => {
+                Ok(None)
+            }
+            Some(entry)
+                if published_generation(&entry, hub.box_id(), &row.box_id)
+                    .is_some_and(|published| published > row.generation) =>
+            {
+                Ok(published_generation(&entry, hub.box_id(), &row.box_id))
+            }
             Some(entry) => hub
                 .update(SHARED_LOGINS, &key, bytes.clone(), entry.revision)
                 .await
-                .map(|_| ()),
+                .map(|_| None),
             None => hub
                 .create(SHARED_LOGINS, &key, bytes.clone())
                 .await
-                .map(|_| ()),
+                .map(|_| None),
         }
     })
+}
+
+/// The generation in a hub value's readable header, when it names this home's box
+/// and the recipient's box.
+fn published_generation(
+    entry: &HubEntry,
+    home_box: &str,
+    member_box: &str,
+) -> Option<HubGeneration> {
+    if entry.operation != HubOperation::Put {
+        return None;
+    }
+    let envelope: LoginEnvelope = serde_json::from_slice(&entry.value).ok()?;
+    let aad: LoginAad = serde_json::from_str(&envelope.aad).ok()?;
+    (envelope.v == 1 && aad.home_box == home_box && aad.member_box == member_box)
+        .then_some(aad.generation)
 }
 
 async fn repair_needed(
@@ -483,6 +561,7 @@ impl MemberTask {
     async fn evaluate(
         &mut self,
         mut state: MemberState,
+        floor: Option<HubGeneration>,
     ) -> (
         MemberState,
         Option<Result<Option<HubLoginTarget>, StoreOpError>>,
@@ -508,8 +587,8 @@ impl MemberTask {
             {
                 return (state, None);
             }
-            let next =
-                decision.and_then(|decision| state.commit(&store, &member, &home_box, decision));
+            let next = decision
+                .and_then(|decision| state.commit(&store, &member, &home_box, decision, floor));
             (state, Some(next))
         })
         .await
@@ -524,13 +603,30 @@ impl MemberTask {
     }
 
     async fn run(mut self) {
+        #[cfg(test)]
+        if self
+            .hooks
+            .exit_once
+            .as_ref()
+            .is_some_and(|exit| exit.swap(false, std::sync::atomic::Ordering::SeqCst))
+        {
+            return;
+        }
         let mut state = MemberState::default();
+        #[cfg(test)]
+        {
+            state.refusals = self.hooks.refusals.clone();
+        }
         let mut local_backoff = Backoff::default();
         let mut hub_backoff = Backoff::default();
         let mut decide_at = Some(Instant::now());
         let mut current: Option<Arc<HubLoginTarget>> = None;
         let mut publishing: Option<HubAttempt> = None;
         let mut repair_again = false;
+        // The highest generation found on the hub for this recipient that the local
+        // row had not reached. Kept for the task's life; the store row passes it once
+        // the next value is sealed.
+        let mut floor: Option<HubGeneration> = None;
         loop {
             tokio::select! {
                 biased;
@@ -543,7 +639,7 @@ impl MemberTask {
                     decide_at = Some(Instant::now());
                 }
                 _ = async { sleep_until(decide_at.expect("a decision is queued")).await }, if decide_at.is_some() => {
-                    let (new_state, next) = self.evaluate(state).await;
+                    let (new_state, next) = self.evaluate(state, floor).await;
                     state = new_state;
                     let Some(next) = next else { continue };
                     #[cfg(test)]
@@ -581,6 +677,16 @@ impl MemberTask {
                     }
                 }
                 result = async { publishing.as_mut().expect("an attempt is queued").await }, if publishing.is_some() && decide_at.is_none() => {
+                    if let Ok(Some(published)) = result {
+                        // Never overwrite a newer value: seal again above it.
+                        tracing::warn!(target: "federation", member = %self.member_id, published = published.get(), "hub holds a newer login list from this home than the local store; sealing above it");
+                        floor = floor.max(Some(published));
+                        current = None;
+                        publishing = None;
+                        state.resumed = true;
+                        decide_at = Some(Instant::now());
+                        continue;
+                    }
                     let row = current.as_ref().expect("attempt has a committed target");
                     let delivered = result.is_ok() && (row.delivered || self.store.mark_hub_login_target_delivered(
                         &self.member_id, row.generation, row.sealed_bytes.as_deref().expect("attempt has bytes"),

@@ -51,10 +51,11 @@ use credentials_core::agent_secret::{validate_name, SecretError, SecretSender};
 use credentials_core::audit::{AuthEventKind, ReporterSource};
 use credentials_core::federation::{
     valid_member_id, NewRemoteRecord, RemoteHomeState, RemoteHomeSuccess, RemoteRecord,
-    RemoteRecordWrite, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
+    RemoteRecordWrite, MEMBER_ID_PREFIX,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity};
+use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
+use credentials_core::secret::Secret;
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, SecretHomeRole,
     StoreOpError, SECRET_RELEASE_RECEIPT_LIFETIME_MS,
@@ -645,9 +646,17 @@ struct IdState {
     /// applied while it waited wins over the result it was waiting for.
     verdicts: u64,
     last_verdict: Option<RemoteRefusal>,
+    /// Callers still to read this state after their flight. While any remain, or a
+    /// flight or cache does, the state is kept; otherwise it is dropped, so the map
+    /// holds only ids in use rather than every id ever fetched.
+    waiters: usize,
 }
 
 impl IdState {
+    fn idle(&self) -> bool {
+        self.cache.is_none() && self.flights.is_empty() && self.waiters == 0
+    }
+
     fn new(incarnation: &str) -> Self {
         Self {
             incarnation: incarnation.to_string(),
@@ -659,6 +668,30 @@ impl IdState {
             flights: Vec::new(),
             verdicts: 0,
             last_verdict: None,
+            waiters: 0,
+        }
+    }
+}
+
+/// Counts one caller as waiting on an id's state until it has read it, including
+/// when the caller is dropped mid-wait.
+struct Waiting<'a> {
+    reader: &'a RemoteReader,
+    credential_id: &'a str,
+    incarnation: &'a str,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut ids = self.reader.lock();
+        if let Some(state) = ids
+            .get_mut(self.credential_id)
+            .filter(|state| state.incarnation == self.incarnation)
+        {
+            state.waiters = state.waiters.saturating_sub(1);
+            if state.idle() {
+                ids.remove(self.credential_id);
+            }
         }
     }
 }
@@ -792,6 +825,12 @@ impl RemoteReader {
         self.store.remote_record(credential_id)
     }
 
+    /// How many remote ids this reader holds state for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tracked_ids_for_test(&self) -> usize {
+        self.lock().len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, IdState>> {
         self.ids
             .lock()
@@ -830,8 +869,9 @@ impl RemoteReader {
         let (mut done, joined_at) = {
             let mut ids = self.lock();
             let now = (self.mono)();
-            // Do not retain token bytes that no consumer can use. Keep the per-id
-            // ordering state so the sweep cannot invalidate an in-flight verdict.
+            // Do not retain token bytes that no consumer can use. Ordering state is
+            // kept while a flight or a waiting caller may still read it, so the sweep
+            // cannot invalidate an in-flight verdict; anything else idle is dropped.
             for state in ids.values_mut() {
                 if state.cache.as_ref().is_some_and(|entry| {
                     !entry.resident(now) || !lifetime_ok(&entry.reply, entry.t0_mono, now, 0)
@@ -839,6 +879,7 @@ impl RemoteReader {
                     state.cache = None;
                 }
             }
+            ids.retain(|_, state| !state.idle());
             let state = Self::state_for(&mut ids, record);
             if let Some(entry) = state.cache.as_ref() {
                 if lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
@@ -876,7 +917,13 @@ impl RemoteReader {
                     done
                 }
             };
+            state.waiters += 1;
             (done, state.verdicts)
+        };
+        let _waiting = Waiting {
+            reader: self,
+            credential_id: &record.credential_id,
+            incarnation: &record.incarnation,
         };
 
         let result = match tokio::time::timeout_at(budget, done.wait_for(Option::is_some)).await {
@@ -902,6 +949,20 @@ impl RemoteReader {
             // The record was removed (and perhaps added again) while this call waited.
             return RemoteAnswer::Refused(RemoteRefusal::new("not_found", "permanent"));
         };
+        let answer = Self::answer_from(state, joined_at, &result, (self.mono)(), min_ttl);
+        drop(ids);
+        answer
+    }
+
+    /// The answer for a caller that joined at `joined_at` verdicts, from its flight's
+    /// `result` and the id's state after it.
+    fn answer_from(
+        state: &IdState,
+        joined_at: u64,
+        result: &FlightResult,
+        now: u64,
+        min_ttl: i64,
+    ) -> RemoteAnswer {
         if state.verdicts > joined_at {
             if let Some(verdict) = state.last_verdict.clone() {
                 return RemoteAnswer::Refused(verdict);
@@ -909,7 +970,7 @@ impl RemoteReader {
         }
         match &result.fetched {
             Fetched::Token(reply) => {
-                if lifetime_ok(reply, result.t0_mono, (self.mono)(), min_ttl) {
+                if lifetime_ok(reply, result.t0_mono, now, min_ttl) {
                     RemoteAnswer::Served(served(reply, result.t0_wall))
                 } else {
                     // A fresh reply from this call's own fetch still misses the
@@ -969,6 +1030,9 @@ impl RemoteReader {
         {
             self.apply(state, &record, seq, generation, &result);
             state.flights.retain(|flight| flight.seq != seq);
+            if state.idle() {
+                ids.remove(&record.credential_id);
+            }
         }
         drop(ids);
         publish.send_replace(Some(result));
@@ -1069,34 +1133,17 @@ impl RemoteReader {
 
     /// This vault's own requester setup: its self id and its transfer key's private
     /// half and key id.
-    fn own_setup(&self) -> Result<(String, String, String), Failure> {
+    fn own_setup(&self) -> Result<(String, Secret<String>, String), Failure> {
         let self_id = match self.store.federation_self_member() {
             Ok(Some(self_id)) => self_id,
             Ok(None) => return Err(Failure::transfer_key_missing(None)),
             Err(_) => return Err(Failure::store_error()),
         };
-        let pem = match self.store.get(VAULT_TRANSFER_ID) {
-            Ok(record) if record.kind == CredentialKind::KemKey => {
-                match std::str::from_utf8(record.payload.expose()) {
-                    Ok(pem) => pem.to_string(),
-                    Err(_) => return Err(Failure::transfer_key_missing(Some(self_id))),
-                }
-            }
-            Ok(_)
-            | Err(StoreOpError::NotFound)
-            | Err(StoreOpError::NeedsReauth)
-            | Err(StoreOpError::Quarantined)
-            | Err(StoreOpError::Corrupt(_))
-            | Err(StoreOpError::Decrypt(_)) => {
-                return Err(Failure::transfer_key_missing(Some(self_id)))
-            }
-            Err(_) => return Err(Failure::store_error()),
-        };
-        let key_id = match credentials_core::kem::public_half(&pem) {
-            Ok((_, key_id)) => key_id,
-            Err(_) => return Err(Failure::transfer_key_missing(Some(self_id))),
-        };
-        Ok((self_id, pem, key_id))
+        match super::transfer::transfer_key(&self.store) {
+            Ok(Some(key)) => Ok((self_id, key.pem, key.key_id)),
+            Ok(None) => Err(Failure::transfer_key_missing(Some(self_id))),
+            Err(_) => Err(Failure::store_error()),
+        }
     }
 
     /// The time left before `budget`, or `None` when it is spent.
@@ -1212,7 +1259,7 @@ impl RemoteReader {
             )
             .await
             .map_err(map_outbound_error)?;
-        self.classify_reply(&reply, &aad, &pem, &home_key.public, home, &self_id)
+        self.classify_reply(&reply, &aad, pem.expose(), &home_key.public, home, &self_id)
     }
 
     /// Turn the home's answer into a validated reply or a consumer-table row.
@@ -1883,9 +1930,9 @@ impl RemoteReader {
         match reply.get("status").and_then(Value::as_str) {
             Some("sealed") => {
                 let released = if ssh {
-                    open_release_for(&reply, &aad, &pem, &home_key.public, true)?
+                    open_release_for(&reply, &aad, pem.expose(), &home_key.public, true)?
                 } else {
-                    open_release(&reply, &aad, &pem, &home_key.public)?
+                    open_release(&reply, &aad, pem.expose(), &home_key.public)?
                 };
                 Ok((released, if ssh { "signed" } else { "released" }))
             }
@@ -2161,13 +2208,20 @@ mod tests {
         {
             let mut ids = reader.lock();
             RemoteReader::state_for(&mut ids, &active).cache = Some(make_entry(None, None));
-            for (id, entry) in [
-                ("oauth:short-recheck", make_entry(None, Some(1))),
-                ("oauth:expires", make_entry(Some(EXPIRY_SKEW_MS + 1), None)),
+            // A caller still waiting on the first id keeps its ordering state; the
+            // second has no flight, cache or waiter left once its reply is released.
+            for (id, entry, waiters) in [
+                ("oauth:short-recheck", make_entry(None, Some(1)), 1),
+                (
+                    "oauth:expires",
+                    make_entry(Some(EXPIRY_SKEW_MS + 1), None),
+                    0,
+                ),
             ] {
                 expired_replies.push(Arc::downgrade(&entry.reply));
                 let mut state = IdState::new("test-incarnation");
                 state.verdicts = 7;
+                state.waiters = waiters;
                 state.cache = Some(entry);
                 ids.insert(id.into(), state);
             }
@@ -2183,6 +2237,7 @@ mod tests {
             .all(|reply| reply.upgrade().is_none()));
         let ids = reader.lock();
         assert_eq!(ids["oauth:short-recheck"].verdicts, 7);
+        assert!(!ids.contains_key("oauth:expires"));
         assert!(ids[&active.credential_id].cache.is_some());
     }
 

@@ -160,6 +160,9 @@ pub(crate) async fn run_binding_feed(
         };
         if let Ok(mut subscription) = subscription {
             let mut peer_keys = None;
+            // A watch that is accepted but never starts would otherwise hold the
+            // feed for ever, so its first notice has the setup budget.
+            let first_notice_by = tokio::time::Instant::now() + ADMIN_OP_BUDGET;
             loop {
                 let current = pairings
                     .borrow_and_update()
@@ -179,6 +182,7 @@ pub(crate) async fn run_binding_feed(
                         Ok(Some(value)) => peer_keys = Some(value),
                         _ => break,
                     },
+                    _ = tokio::time::sleep_until(first_notice_by), if peer_keys.is_none() => break,
                 }
             }
         }

@@ -58,6 +58,29 @@ pub async fn observe_hub_bindings_for_test(
     }
 }
 
+/// Run the sharing loop and log the device fingerprints of every roster it
+/// publishes to the hub workers (`None` while it has no valid roster).
+#[cfg(feature = "test-support")]
+pub async fn record_pairing_snapshots_for_test(
+    store: std::sync::Arc<credentials_core::store::EncryptedStore>,
+    client: federation::OutboundClient,
+    log: std::sync::Arc<std::sync::Mutex<Vec<Option<Vec<String>>>>>,
+) {
+    use federation::sharing::run_with_pairing_snapshots;
+    let (paired_tx, mut paired_rx) = tokio::sync::watch::channel(None);
+    tokio::select! {
+        _ = run_with_pairing_snapshots(store, client, None, Some(paired_tx)) => {},
+        _ = async {
+            while paired_rx.changed().await.is_ok() {
+                let devices = paired_rx.borrow_and_update().as_ref().map(|snapshot| {
+                    snapshot.devices.iter().map(|(fingerprint, _)| fingerprint.clone()).collect()
+                });
+                log.lock().unwrap().push(devices);
+            }
+        } => {},
+    }
+}
+
 #[cfg(feature = "test-support")]
 pub mod hub_test_support {
     use std::{future::ready, sync::Arc};
@@ -105,6 +128,28 @@ pub mod hub_test_support {
                 client,
                 _guards: guards,
             }
+        }
+
+        /// Start a vault whose hub connection stays pending until the returned
+        /// sender fires, the shape of a restart while the hub is unreachable.
+        pub fn start_vault_pending(
+            &self,
+            store: Arc<EncryptedStore>,
+            outbound: OutboundClient,
+            box_id: &str,
+        ) -> (RunningVault, tokio::sync::oneshot::Sender<()>) {
+            let client = self.0.client(box_id);
+            let hub: Arc<dyn Hub> = Arc::new(client.clone());
+            let (release, released) = tokio::sync::oneshot::channel();
+            let connected = async move { released.await.ok().map(|()| hub) };
+            let guards = hub_tasks::start(store, outbound, connected, None);
+            (
+                RunningVault {
+                    client,
+                    _guards: guards,
+                },
+                release,
+            )
         }
 
         pub fn set_online(&self, online: bool) {

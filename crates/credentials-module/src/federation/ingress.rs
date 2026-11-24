@@ -39,11 +39,12 @@ use credentials_core::audit::{AuditCtx, AuditOp, AuthEventKind, ReporterSource};
 use credentials_core::engine::{EngineError, GetWithRefreshStatus, RefreshEngine};
 use credentials_core::federation::{
     is_vault_transfer_id, valid_member_id, MemberGrant, MemberGrantOperation, MemberGrantSelector,
-    RemoteHomeState, RemoteWatchRow, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
+    RemoteHomeState, RemoteWatchRow, MEMBER_ID_PREFIX,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity, RecordState, VaultRecord};
+use credentials_core::record::{RecordIdentity, RecordState, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
+use credentials_core::secret::Secret;
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
     ReleaseRequest, SealedRelease, SecretHomeRole, StoreOpError,
@@ -1406,7 +1407,7 @@ impl HomeVault {
         }
         // 12. Seal to the requester's announced key, over the received aad bytes.
         let (enc, ciphertext) = credentials_core::kem::seal_auth(
-            &sender_pem,
+            sender_pem.expose(),
             &peer.public,
             &plaintext,
             REMOTE_TOKEN_INFO,
@@ -1659,7 +1660,7 @@ impl HomeVault {
         let seal = |released: &Value| -> Result<SealedRelease, Refusal> {
             let plaintext = serde_json::to_vec(released).map_err(|_| CORRUPT)?;
             let (enc, ciphertext) = credentials_core::kem::seal_auth(
-                &sender_pem,
+                sender_pem.expose(),
                 &peer.public,
                 &plaintext,
                 if ssh {
@@ -1891,19 +1892,10 @@ impl HomeVault {
 
     /// Step 5's transfer key: the stored `kem:vault-transfer:1`, readable (so `Active`)
     /// and a KEM key. Anything else is a setup fault of this home.
-    fn active_transfer_key(&self, self_id: &str) -> Result<String, Refusal> {
-        match self.engine.store().get(VAULT_TRANSFER_ID) {
-            Ok(record) if record.kind == CredentialKind::KemKey => {
-                std::str::from_utf8(record.payload.expose())
-                    .map(str::to_string)
-                    .map_err(|_| Refusal::SetupIncomplete(self_id.to_string()))
-            }
-            Ok(_)
-            | Err(StoreOpError::NotFound)
-            | Err(StoreOpError::NeedsReauth)
-            | Err(StoreOpError::Quarantined)
-            | Err(StoreOpError::Corrupt(_))
-            | Err(StoreOpError::Decrypt(_)) => Err(Refusal::SetupIncomplete(self_id.to_string())),
+    fn active_transfer_key(&self, self_id: &str) -> Result<Secret<String>, Refusal> {
+        match super::transfer::transfer_key(self.engine.store()) {
+            Ok(Some(key)) => Ok(key.pem),
+            Ok(None) => Err(Refusal::SetupIncomplete(self_id.to_string())),
             Err(_) => Err(STORE_ERROR),
         }
     }

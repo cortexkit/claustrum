@@ -1293,7 +1293,15 @@ fn seed_login_key(fixture: &Fixture, id: &str) {
     // The value follows its flag directly: a global flag may not sit between them.
     let path = path.to_str().expect("a UTF-8 temp path");
     let output = fixture
-        .command(&["put", "--kind", "api_key", "--id", id, "--payload-file", path])
+        .command(&[
+            "put",
+            "--kind",
+            "api_key",
+            "--id",
+            id,
+            "--payload-file",
+            path,
+        ])
         .output()
         .unwrap();
     assert!(

@@ -54,7 +54,7 @@ use credentials_core::federation::{
     RemoteRecordWrite, MEMBER_ID_PREFIX,
 };
 use credentials_core::plan_detection::DetectedPlan;
-use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
+use credentials_core::record::{CredentialKind, RecordIdentity};
 use credentials_core::secret::Secret;
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, SecretHomeRole,

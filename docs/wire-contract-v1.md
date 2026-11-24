@@ -689,7 +689,7 @@ set to `settings`; it does not add rows to plain `ck auth grants`.
 
 On stamped installs, the supervisor includes `settings_credentials: {generation,
 refs}` in the `caller` attestation of `route.bind`. `generation` is the approved
-configuration revision (an unsigned 64-bit integer). `refs` contains the sorted,
+configuration revision (0 to 2^53−1, like the other attestation integers). `refs` contains the sorted,
 deduplicated credential ids from the calling module's approved user settings. An
 empty list replaces the last list with no keys. An absent member conveys no settings
 authority and leaves the last-seen inventory alone.

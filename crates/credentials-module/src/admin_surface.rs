@@ -157,11 +157,6 @@ fn declaration_warn_once(module: &str, digest: Option<&str>, reasons: &impl std:
     }
 }
 
-pub(crate) struct SettingsCredentials {
-    pub generation: u64,
-    pub refs: Vec<String>,
-}
-
 fn settings_refs_warn_once(module: &str, generation: u64) {
     type WarningKeys = Mutex<HashSet<(String, u64)>>;
     static WARNED: OnceLock<WarningKeys> = OnceLock::new();
@@ -327,41 +322,9 @@ impl AdminSurface {
         caller: Option<&subc_protocol::peer::CallerAttestation>,
         peer_build: Option<String>,
     ) {
-        self.record_connector_bind_with_settings(
-            channel,
-            epoch,
-            principal,
-            harness,
-            operator_app,
-            scope,
-            caller,
-            peer_build,
-            None,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_connector_bind_with_settings(
-        &self,
-        channel: u16,
-        epoch: u32,
-        principal: Principal,
-        harness: &str,
-        operator_app: Option<String>,
-        scope: Option<&subc_protocol::scope::ScopeStamp>,
-        caller: Option<&subc_protocol::peer::CallerAttestation>,
-        peer_build: Option<String>,
-        settings_credentials: Option<&SettingsCredentials>,
-    ) {
         let declared = Arc::new(
             self.admit_declaration(&principal, harness, caller)
-                .with_settings_refs(self.admit_settings_refs(
-                    &principal,
-                    harness,
-                    scope,
-                    caller,
-                    settings_credentials,
-                )),
+                .with_settings_refs(self.admit_settings_refs(&principal, harness, scope, caller)),
         );
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
@@ -394,15 +357,15 @@ impl AdminSurface {
         harness: &str,
         scope: Option<&subc_protocol::scope::ScopeStamp>,
         caller: Option<&subc_protocol::peer::CallerAttestation>,
-        member: Option<&SettingsCredentials>,
     ) -> Option<SettingsRefSet> {
         use crate::federation::RouteCaller;
         use subc_protocol::{peer::CallerClaim, scope::ScopeKind};
         let Principal::Reserved { module_id } = principal else {
             return None;
         };
-        let member = member?;
-        if !caller.is_some_and(|caller| caller.claim == CallerClaim::Own)
+        let caller = caller?;
+        let member = caller.settings_credentials.as_ref()?;
+        if caller.claim != CallerClaim::Own
             || harness.starts_with("fed-")
             || scope.is_some_and(|scope| scope.kind == ScopeKind::Federated)
             || !matches!(self.map_caller(principal, harness), RouteCaller::Principal(ref mapped) if mapped.as_ref() == Some(principal))

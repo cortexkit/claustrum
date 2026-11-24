@@ -115,6 +115,18 @@ fn settings_grants_are_opt_in_and_revoke_points_to_the_setting() {
     assert_ok(&vault.run(&args("grant")));
     assert_ok(&vault.run(&args("revoke-grant")));
     assert!(!vault.run(&args("revoke-grant")).status.success());
+
+    let peer = ProviderRoutePeer::start(&vault);
+    let opted_in = online(&vault, &peer, &["grants", "--declared"]);
+    assert_ok(&opted_in);
+    assert_eq!(opted_in.stdout, displayed.as_bytes());
+    let plain = online(&vault, &peer, &["grants"]);
+    assert_ok(&plain);
+    assert_eq!(plain.stdout, plain_before.stdout);
+    assert_eq!(plain.stderr, plain_before.stderr);
+    let refused = online(&vault, &peer, &args("revoke-grant"));
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("settings-module's approved setting"));
 }
 
 fn assert_ok(output: &std::process::Output) {

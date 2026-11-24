@@ -682,6 +682,26 @@ pub struct ScopedListSnapshot {
     pub grants: Vec<ReadGrant>,
 }
 
+pub enum ScopedInventoryCaller<'a> {
+    Principal { kind: &'a str, id: &'a str },
+    EnrollmentToken(&'a str),
+}
+
+pub struct ScopedInventoryCondition {
+    pub incarnation: String,
+    pub reason: String,
+    pub since_ms: u64,
+}
+
+pub struct ScopedInventorySnapshot {
+    pub principal_id: String,
+    pub list: ScopedListSnapshot,
+    pub key_versions: Vec<(String, u64)>,
+    pub providers: Vec<RegisteredProvider>,
+    pub gateways: std::collections::HashMap<String, StoredGatewaySettings>,
+    pub conditions: BTreeMap<String, ScopedInventoryCondition>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SetCategoryMode {

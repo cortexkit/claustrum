@@ -1,17 +1,10 @@
 //! Per-connection fetch caps and rate-anomaly detection for the read surface.
 //!
-//! The vault cannot authenticate callers in v1 (trusted-unscoped), so the only
-//! access-scoping signal it has is the TCP `connection_id` plus the requested
-//! handle. This tracks, per connection, how many distinct credentials it has
-//! fetched and how fast, and flags a connection that sweeps many credentials or
-//! fetches at an anomalous rate — a statistically obvious enumeration attempt.
+//! Fetch counters are keyed by the route's channel and epoch, not its principal.
+//! They track the rate and number of distinct handles probed on that binding.
 //!
-//! This is an ANOMALY DETECTOR, not the access boundary (capability handles are):
-//! it is evadable by reconnecting (a new connection_id resets the in-memory
-//! counters), which is acceptable for v1 because (a) the hard boundary is the
-//! future caller-identity work and (b) every anomaly raises a DURABLE audit-log
-//! alarm that persists across connections, so a reconnect-churning sweep is still
-//! recorded for cross-connection analysis.
+//! The limiter detects anomalies; it does not grant access. Rebinding resets the
+//! counters, but an anomaly alarm persists in the audit log.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -161,6 +154,11 @@ impl FetchLimiter {
     /// Forget a connection's state (called when the connection closes).
     pub fn drop_connection(&mut self, connection_id: u64) {
         self.conns.remove(&connection_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_connection(&self, connection_id: u64) -> bool {
+        self.conns.contains_key(&connection_id)
     }
 }
 

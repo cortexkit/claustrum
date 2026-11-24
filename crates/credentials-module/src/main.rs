@@ -301,7 +301,11 @@ struct RouteEpochs(
     /// `(channel, epoch)` pairs already reported as dropped, so a repeat is bounded by
     /// its absence from the log rather than adding another line.
     std::sync::Mutex<std::collections::HashSet<(u16, u32)>>,
+    std::sync::Mutex<Option<WatchDrainTask>>,
 );
+
+type WatchDrainTask = tokio::task::JoinHandle<Result<(), ModuleError>>;
+const SHUTDOWN_EGRESS_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl RouteEpochs {
     fn install(&self, channel: u16, epoch: u32) {
@@ -371,6 +375,35 @@ impl RouteEpochs {
             .unwrap_or_else(|p| p.into_inner())
             .retain(|(ch, _)| *ch != channel);
     }
+
+    fn start_watch_drain(&self, surface: &ReadSurface, admin: &Arc<admin_surface::AdminSurface>) {
+        let mut drain = self.2.lock().unwrap_or_else(|p| p.into_inner());
+        drain.get_or_insert_with(|| {
+            let local_endings = surface.watches.begin_finish();
+            admin.home().manifest_watches.begin_drain();
+            let admin = Arc::clone(admin);
+            tokio::spawn(async move {
+                let (remote, ()) =
+                    tokio::join!(admin.home().manifest_watches.finish_all(), local_endings);
+                remote.map_err(ModuleError::Message)
+            })
+        });
+    }
+
+    async fn finish_watch_drain(&self) -> Result<(), ModuleError> {
+        let drain = self.2.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let Some(mut drain) = drain else {
+            return Ok(());
+        };
+        match tokio::time::timeout(SHUTDOWN_EGRESS_GRACE, &mut drain).await {
+            Ok(result) => result.map_err(|error| ModuleError::Message(error.to_string()))?,
+            Err(_) => {
+                drain.abort();
+                let _ = drain.await;
+                Ok(())
+            }
+        }
+    }
 }
 
 async fn run(mut config: ModuleConfig) -> Result<(), ModuleError> {
@@ -407,7 +440,7 @@ async fn run(mut config: ModuleConfig) -> Result<(), ModuleError> {
 async fn finish_writer(
     mut writer: tokio::task::JoinHandle<Result<(), ModuleError>>,
 ) -> Result<Result<(), ModuleError>, ModuleError> {
-    match tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer).await {
+    match tokio::time::timeout(SHUTDOWN_EGRESS_GRACE, &mut writer).await {
         Ok(result) => result.map_err(|e| ModuleError::Message(e.to_string())),
         Err(_) => {
             writer.abort();
@@ -521,6 +554,7 @@ where
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
     let routes = Arc::new(RouteEpochs::default());
+    surface.set_live_routes(Arc::clone(&routes));
     let mut deferred = std::collections::VecDeque::new();
     let (gate, login_sharing_task) = if ack
         .subc_capabilities
@@ -1247,13 +1281,8 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Goodbye if frame.header.channel == 0 => {
-            admin
-                .home()
-                .manifest_watches
-                .finish_all()
-                .await
-                .map_err(ModuleError::Message)?;
-            surface.watches.finish_all().await?;
+            routes.start_watch_drain(surface, admin);
+            routes.finish_watch_drain().await?;
             Ok(false)
         }
         FrameType::Push if frame.header.channel == 0 => {
@@ -1261,13 +1290,7 @@ async fn handle_frame(
                 serde_json::from_slice::<subc_protocol::session::ModuleControlCommand>(&frame.body),
                 Ok(subc_protocol::session::ModuleControlCommand::Draining { .. })
             ) {
-                admin
-                    .home()
-                    .manifest_watches
-                    .finish_all()
-                    .await
-                    .map_err(ModuleError::Message)?;
-                surface.watches.finish_all().await?;
+                routes.start_watch_drain(surface, admin);
             }
             Ok(true)
         }
@@ -1432,13 +1455,12 @@ async fn handle_control_request(
                 )
                 .await;
             }
-            // Wire v2: install the (channel → epoch) binding in the local route map.
-            // Installed here — when the accepted ack is being queued — so no route
-            // traffic can pass layer-2 validation before the bind is acknowledged
-            // (§3.2: module traffic legally begins only after the RouteBind ack).
+            // Retire the old epoch before clearing route state so pending requests
+            // cannot restore the old counters during cleanup.
+            routes.remove(route_channel);
             surface.drop_channel(route_channel).await;
             surface.watches.close(route_channel);
-            routes.install(route_channel, epoch);
+            admin.home().manifest_watches.close(route_channel);
             // Record the bind's daemon-stamped principal (Gate 1 provenance) against
             // the route channel, under the newly installed wire epoch. An absent principal stamp
             // records as `Unverified` — never `direct` — so admin ops fail closed on
@@ -1447,18 +1469,34 @@ async fn handle_control_request(
             // `fed-` harness marks a call forwarded from another computer, which the bind
             // registry then serves with no principal (see `AdminSurface::principal`).
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            let mut peer_body: serde_json::Value =
-                serde_json::from_slice(&frame.body).map_err(ModuleError::Json)?;
-            // Normalize before typed decoding so even null or a non-string mark
-            // fails closed without preventing the rest of the bind from working.
-            if let Some(build) = peer_body.get("peer_build") {
-                if build.as_str() != Some("production") {
-                    tracing::warn!(target: "routes", route_channel, "ignored invalid peer_build on route bind");
-                    peer_body.as_object_mut().unwrap().remove("peer_build");
+            let peer = serde_json::from_slice::<serde_json::Value>(&frame.body).and_then(|mut body| {
+                // An invalid build mark grants no authority, but does not refuse the bind.
+                if let Some(build) = body.get("peer_build") {
+                    if build.as_str() != Some("production") {
+                        tracing::warn!(target: "routes", route_channel, "ignored invalid peer_build on route bind");
+                        body.as_object_mut().unwrap().remove("peer_build");
+                    }
                 }
-            }
-            let peer: subc_protocol::peer::RouteBindPeer =
-                serde_json::from_value(peer_body).map_err(ModuleError::Json)?;
+                serde_json::from_value::<subc_protocol::peer::RouteBindPeer>(body)
+            });
+            let peer = match peer {
+                Ok(peer) => peer,
+                Err(_) => {
+                    admin.drop_bind(route_channel);
+                    return send_route_error(
+                        writer,
+                        frame.header.ver,
+                        0,
+                        0,
+                        frame.header.corr,
+                        "invalid_control_body",
+                        "this vault build cannot decode the control request",
+                    )
+                    .await;
+                }
+            };
+            // Make the epoch live only after both parts of the bind have decoded.
+            routes.install(route_channel, epoch);
             if identity.harness.starts_with("fed-phone:") {
                 tracing::info!(target: "routes", route_channel, production_build = peer.peer_build.as_deref() == Some("production"), "phone route bound");
             }
@@ -1527,7 +1565,7 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         affected.extend(health.corrupt_ids.iter().map(String::as_str));
         Some(format!(
             "{} of {} credentials need operator action ({} needs_reauth, {} corrupt); \
-             {} serving [{}]",
+             {} serving; affected: [{}]",
             health.needs_reauth + health.corrupt,
             health.credentials_total,
             health.needs_reauth,
@@ -13182,6 +13220,142 @@ mod tests {
         assert!(
             admin.principal(7).is_none(),
             "no route may be bound for a request that was refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_bind_peer_sidecar_refuses_only_that_bind() {
+        let (surface, _surface_root) = tmp_surface(171);
+        let (admin, _admin_store, _admin_root) = tmp_admin(171);
+        let routes = Arc::new(RouteEpochs::default());
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        let request = ModuleControlRequest::RouteBind {
+            route_channel: 7,
+            epoch: 1,
+            target: subc_protocol::RouteTarget::ManagementSurface {
+                module_id: "claustrum".into(),
+            },
+            identity: subc_protocol::BindIdentity::new("h", "s"),
+            principal: Some(subc_protocol::Principal::Direct),
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: None,
+            call_mode: None,
+        };
+        let mut bad = serde_json::to_value(&request).unwrap();
+        bad["caller"] = json!({"spawn": 9_007_199_254_740_992_u64});
+        assert!(serde_json::from_value::<ModuleControlRequest>(bad.clone()).is_ok());
+        assert!(serde_json::from_value::<subc_protocol::peer::RouteBindPeer>(bad.clone()).is_err());
+        let frame = |corr, body| {
+            Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                control_flags(),
+                0,
+                0,
+                corr,
+                body,
+            )
+            .unwrap()
+        };
+        handle_control_request(
+            frame(1, serde_json::to_vec(&bad).unwrap()),
+            &tx,
+            &surface,
+            &admin,
+            &routes,
+        )
+        .await
+        .unwrap();
+        let refusal = rx.try_recv().unwrap();
+        assert_eq!(refusal.header.ty, FrameType::Error);
+        assert_eq!(refusal.header.corr, 1);
+        assert_eq!(
+            serde_json::from_slice::<ErrorBody>(&refusal.body)
+                .unwrap()
+                .code,
+            "invalid_control_body"
+        );
+        assert_eq!(routes.expected(7), None);
+        assert!(admin.principal(7).is_none());
+        handle_control_request(
+            frame(2, serde_json::to_vec(&request).unwrap()),
+            &tx,
+            &surface,
+            &admin,
+            &routes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap().header.ty, FrameType::Response);
+        assert_eq!(routes.expected(7), Some(1));
+    }
+
+    #[tokio::test]
+    async fn rebinding_a_channel_cancels_its_pending_manifest_watch() {
+        let (surface, _surface_root) = tmp_surface(171);
+        let (admin, _admin_store, _admin_root) = tmp_admin(171);
+        let routes = Arc::new(RouteEpochs::default());
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        let watch = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            7,
+            1,
+            42,
+            Vec::new(),
+        )
+        .unwrap();
+        routes.install(7, 1);
+        let pending = admin.home().manifest_watches.register(watch.header);
+        let request = ModuleControlRequest::RouteBind {
+            route_channel: 7,
+            epoch: 2,
+            target: subc_protocol::RouteTarget::ManagementSurface {
+                module_id: "claustrum".into(),
+            },
+            identity: subc_protocol::BindIdentity::new("h", "s"),
+            principal: Some(subc_protocol::Principal::Direct),
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: None,
+            call_mode: None,
+        };
+        let bind = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            0,
+            1,
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        handle_control_request(bind, &tx, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap().header.ty, FrameType::Response);
+        assert_eq!(routes.expected(7), Some(2));
+
+        admin
+            .home()
+            .manifest_watches
+            .open(
+                admin.home(),
+                pending,
+                &tx,
+                watch.header,
+                "old-member",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "old watch emitted a frame after rebind"
         );
     }
 

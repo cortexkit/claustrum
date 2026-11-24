@@ -242,8 +242,14 @@ pub(super) fn permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<V
             }
             let reach = if grant.selector_kind == SelectorKind::Category {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM credential_categories cc JOIN credentials c \
-                     ON c.credential_id=cc.credential_id WHERE cc.category=?1",
+                    "SELECT COUNT(*) FROM (\
+                         SELECT cc.credential_id FROM credential_categories cc JOIN credentials c \
+                         ON c.credential_id=cc.credential_id WHERE cc.category=?1 \
+                         UNION ALL \
+                         SELECT rc.credential_id FROM remote_record_categories rc JOIN remote_records r \
+                         ON r.credential_id=rc.credential_id WHERE rc.category=?1 \
+                         AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.credential_id=rc.credential_id)\
+                     )",
                     [&grant.selector],
                     |row| row.get::<_, usize>(0),
                 )?

@@ -162,6 +162,30 @@ async fn module_secret_validation_refuses_without_store_or_audit_writes() {
 }
 
 #[tokio::test]
+async fn module_secret_null_version_never_overwrites_or_deletes() {
+    let (surface, admin, store) = deposit_cookie_rig(203);
+    let put = json!({"name":"key", "value":"AQ=="});
+    let name = json!({"name":"key"});
+    call(&surface, &admin, "version", wire::PUT, put).await;
+    let original = call(&surface, &admin, "version", wire::GET, name.clone()).await;
+    let tip = store.audit_tip().unwrap();
+    for (method, params) in [
+        (wire::PUT, json!({"name":"key", "value":"Ag==", "expected_version":null})),
+        (wire::DELETE, json!({"name":"key", "expected_version":null})),
+    ] {
+        assert_eq!(call(&surface, &admin, "version", method, params).await,
+            refusal(ModuleSecretError::InvalidParams), "{method}");
+        let after = call(&surface, &admin, "version", wire::GET, name.clone()).await;
+        assert!(after == original, "{method} changed the item");
+        assert_eq!(store.audit_tip().unwrap(), tip);
+    }
+    let replaced = call(&surface, &admin, "version", wire::PUT, json!({"name":"key", "value":"Ag=="})).await;
+    assert_eq!(replaced["result"]["version"], 2);
+    let deleted = call(&surface, &admin, "version", wire::DELETE, name).await;
+    assert_eq!(deleted["result"]["deleted"], true);
+}
+
+#[tokio::test]
 async fn module_secret_wire_boundaries_accept_at_and_refuse_past() {
     let (surface, admin, _store) = deposit_cookie_rig(204);
     let owner = "m".repeat(64);

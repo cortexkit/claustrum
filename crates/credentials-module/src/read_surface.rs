@@ -38,7 +38,7 @@
 //! rate-sensitive paths the limiter watches.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -56,8 +56,8 @@ use credentials_core::enrollment::{
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, GrantOperation, ScopedCoverage, ScopedListRow, ScopedListSnapshot,
-    ScopedReadRefusal, StoreOpError,
+    AuthEventPrincipal, GrantOperation, ScopedCoverage, ScopedInventoryCaller,
+    ScopedInventorySnapshot, ScopedListRow, ScopedListSnapshot, ScopedReadRefusal, StoreOpError,
 };
 use subc_protocol::Principal;
 
@@ -238,9 +238,8 @@ pub struct GetParams {
 #[derive(Debug, Deserialize)]
 pub struct GetScopedParams {
     /// Present for a host-launched consumer; absent for a supervised module, which is
-    /// identified by its bus principal instead. See `scoped_principal` for why a
-    /// presented token wins over the ambient identity and why a bad one does not fall
-    /// back to it.
+    /// identified by its bus principal instead. A presented token takes precedence
+    /// and a bad token never falls back to the ambient identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment_token: Option<String>,
     /// The caller's guaranteed-life demand, identical in meaning to `credential.get`'s.
@@ -2245,6 +2244,7 @@ pub struct ReadSurface {
     remote: Arc<crate::federation::RemoteReader>,
     limiter: Mutex<FetchLimiter>,
     open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
+    live_routes: OnceLock<Arc<crate::RouteEpochs>>,
     // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
     // the daemon's health refresher). The subc health.check reply MUST be cheap and
     // in-memory (spec §2): a live store read on the probe path can queue behind a
@@ -2440,6 +2440,31 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
     project_list_scoped_with_providers(snapshot, &[], &HashMap::new(), HashMap::new())
 }
 
+fn project_scoped_inventory(snapshot: ScopedInventorySnapshot) -> ListScopedResult {
+    let conditions = snapshot
+        .conditions
+        .into_iter()
+        .map(|(id, condition)| {
+            (
+                id,
+                (
+                    condition.incarnation,
+                    ScopedCondition {
+                        reason: condition.reason,
+                        since_ms: condition.since_ms,
+                    },
+                ),
+            )
+        })
+        .collect();
+    project_list_scoped_with_providers(
+        snapshot.list,
+        &snapshot.providers,
+        &snapshot.gateways,
+        conditions,
+    )
+}
+
 fn project_list_scoped_with_providers(
     snapshot: ScopedListSnapshot,
     providers: &[credentials_core::store::RegisteredProvider],
@@ -2463,7 +2488,9 @@ fn project_list_scoped_with_providers(
         .rows
         .into_iter()
         .map(|row| {
-            let gateway = gateways.get(&row.id);
+            let gateway = gateways
+                .get(&row.id)
+                .filter(|settings| settings.incarnation == row.incarnation);
             let login_adapter = match row.auth_method {
                 Some(
                     ListAuthMethod::Oauth | ListAuthMethod::Chatgpt | ListAuthMethod::Antigravity,
@@ -2800,6 +2827,7 @@ impl ReadSurface {
             remote,
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),
+            live_routes: OnceLock::new(),
             health: std::sync::Mutex::new(initial),
             last_refresh: std::sync::Mutex::new(Instant::now()),
             #[cfg(test)]
@@ -2961,7 +2989,7 @@ impl ReadSurface {
             let actor = resolved
                 .principal
                 .clone()
-                .or_else(|| self.scoped_principal(principal, None))
+                .or_else(|| Self::reserved_scoped_principal(principal))
                 .map(|(kind, id)| format!("{kind}:{id}"))
                 .unwrap_or_else(|| format!("conn-{}", connection_id as u16));
             let write_audit = || {
@@ -3070,11 +3098,7 @@ impl ReadSurface {
         {
             Ok(resolved) => resolved,
             Err(ReadError::NotFound) => {
-                let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
-                if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
-                    *entry = (Instant::now(), 0);
-                }
-                entry.1 += 1;
+                self.count_open_refusal(&mut counters, connection_id);
                 return Err(ReadError::NotFound);
             }
             Err(error) => return Err(error),
@@ -3196,11 +3220,7 @@ impl ReadSurface {
             }
         }
         let refuse = |counters: &mut HashMap<u64, (Instant, usize)>| {
-            let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
-            if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
-                *entry = (Instant::now(), 0);
-            }
-            entry.1 += 1;
+            self.count_open_refusal(counters, connection_id);
             ReadError::NotFound
         };
         let incarnation = self
@@ -3613,11 +3633,9 @@ impl ReadSurface {
                 DepositCookieError::InvalidPayload,
             ));
         }
-        self.authorize_scoped_as(caller, None, &params.id, GrantOperation::Deposit)
-            .map_err(|_| DepositCookieError::NotFound)?;
         let (kind, id) = self
-            .scoped_principal(principal, None)
-            .expect("authorized principal");
+            .authorize_scoped_as(caller, None, &params.id, GrantOperation::Deposit)
+            .map_err(|_| DepositCookieError::NotFound)?;
         let result = self
             .engine
             .store()
@@ -3777,6 +3795,7 @@ impl ReadSurface {
                     credential_id,
                     operation,
                     usage,
+                    false,
                 )?;
                 Ok(ResolvedKeyAddress {
                     credential_id: credential_id.to_string(),
@@ -3787,41 +3806,7 @@ impl ReadSurface {
         }
     }
 
-    /// Resolve who is asking: a supervised module, or a consumer holding an enrollment
-    /// token.
-    ///
-    /// TWO PRINCIPAL SOURCES, AND THEY ARE NOT EQUIVALENT. `Principal::Reserved` is the
-    /// supervisor's attestation, delivered as a launch nonce in the module's environment
-    /// — the vault trusts it because the daemon stamps it at route-bind. An enrollment
-    /// token is the vault's OWN attestation: it minted it, hashed it, and can revoke it.
-    /// Neither derives from the other, which is the point — a host-launched plugin has no
-    /// launch nonce and can never have one, so without this arm it could hold a category
-    /// grant and still be refused for not being a supervised module.
-    ///
-    /// THE TOKEN IS CHECKED BEFORE THE BUS PRINCIPAL, and deliberately. Presenting a
-    /// token is an explicit claim about identity; the bus principal is ambient. A
-    /// supervised module that also presents a token means it, and honouring the ambient
-    /// identity instead would silently route the operation to different grants than the
-    /// caller named.
-    ///
-    /// A BAD TOKEN IS NOT A FALLBACK TO THE BUS PRINCIPAL. If a token is presented and
-    /// does not resolve, the call refuses. Falling back would mean a consumer whose token
-    /// was revoked keeps working from whatever ambient identity it happens to have, which
-    /// makes revocation conditional on the caller's transport rather than on the vault.
-    fn scoped_principal(
-        &self,
-        principal: Option<&Principal>,
-        enrollment_token: Option<&str>,
-    ) -> Option<(&'static str, String)> {
-        if let Some(token) = enrollment_token {
-            return match self.engine.store().resolve_enrollment_token(token) {
-                Ok(Some((name, _generation))) => Some(("enrolled", name)),
-                // An unresolvable token and a store failure are the same answer to the
-                // caller. They differ in `auth_events`, which is where the operator can
-                // tell a revoked consumer from a broken store.
-                Ok(None) | Err(_) => None,
-            };
-        }
+    fn reserved_scoped_principal(principal: Option<&Principal>) -> Option<(&'static str, String)> {
         match principal {
             Some(Principal::Reserved { module_id }) => Some(("reserved", module_id.clone())),
             Some(Principal::Direct) | Some(Principal::Unverified) | None => None,
@@ -3851,6 +3836,7 @@ impl ReadSurface {
             credential_id,
             operation,
             TransferKeyUse::Ordinary,
+            false,
         )
     }
 
@@ -3864,45 +3850,35 @@ impl ReadSurface {
         credential_id: &str,
         operation: GrantOperation,
         usage: TransferKeyUse,
+        require_record: bool,
     ) -> Result<(&'static str, String), ReadError> {
         if credentials_core::store::is_github_app_companion_id(credential_id) {
             return Err(ReadError::NotFound);
         }
         let principal = caller.as_ref();
-        let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
-            self.record_scoped_refusal(
-                principal,
-                if operation == GrantOperation::Deposit {
-                    "credential.deposit_cookie"
-                } else {
-                    credential_id
-                },
-                ScopedReadRefusal::NoGrant,
-            );
-            return Err(ReadError::NotFound);
+        let fence = |kind, id: &str| {
+            transfer_key_fenced(credential_id, TransferKeyAccess::Scoped { kind, id, usage })
         };
-        // The fence runs on the RESOLVED principal, before any grant is consulted, so
-        // a grant row that reaches the transfer key (exact, or through a category the
-        // key was put in) authorizes nothing, and an enrollment token cannot pass as
-        // callosum.
-        if transfer_key_fenced(
-            credential_id,
-            TransferKeyAccess::Scoped {
-                kind,
-                id: &id,
-                usage,
-            },
-        ) {
-            self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
-            return Err(ReadError::NotFound);
-        }
-        let coverage = self.engine.store().evaluate_scoped_coverage(
-            kind,
-            &id,
-            credential_id,
-            operation,
-            &caller.declared,
-        );
+        let store = self.engine.store();
+        let coverage = if let Some(token) = enrollment_token {
+            #[cfg(test)]
+            self.run_incarnation_hook("before-enrollment-admission");
+            store
+                .evaluate_enrolled_scoped_coverage(token, credential_id, operation)
+                .map(|evaluated| {
+                    evaluated
+                        .filter(|(id, _)| !fence("enrolled", id))
+                        .map(|(id, coverage)| ("enrolled", id, coverage))
+                })
+        } else if let Some((kind, id)) =
+            Self::reserved_scoped_principal(principal).filter(|(kind, id)| !fence(kind, id))
+        {
+            store
+                .evaluate_scoped_coverage(kind, &id, credential_id, operation, &caller.declared)
+                .map(|coverage| Some((kind, id, coverage)))
+        } else {
+            Ok(None)
+        };
         #[cfg(test)]
         let coverage = if self
             .scoped_grant_lookup_error_for_test
@@ -3915,11 +3891,7 @@ impl ReadSurface {
             coverage
         };
 
-        let refusal = match coverage {
-            Err(_) => Some(ScopedReadRefusal::StoreError),
-            Ok(coverage) => classify_scoped_coverage(coverage),
-        };
-        if let Some(refusal) = refusal {
+        let record_refusal = |refusal| {
             self.record_scoped_refusal(
                 principal,
                 if operation == GrantOperation::Deposit {
@@ -3929,7 +3901,21 @@ impl ReadSurface {
                 },
                 refusal,
             );
-            return Err(ReadError::NotFound);
+            ReadError::NotFound
+        };
+        let (kind, id, coverage) = coverage
+            .map_err(|_| record_refusal(ScopedReadRefusal::StoreError))?
+            .ok_or_else(|| record_refusal(ScopedReadRefusal::NoGrant))?;
+        if operation == GrantOperation::AccountToken
+            && !account_token::audience_admits(credential_id, kind, &id)
+        {
+            return Err(record_refusal(ScopedReadRefusal::NoGrant));
+        }
+        if require_record && coverage.covered && !coverage.id_exists {
+            return Err(record_refusal(ScopedReadRefusal::NotFound));
+        }
+        if let Some(refusal) = classify_scoped_coverage(coverage) {
+            return Err(record_refusal(refusal));
         }
         // Record first use at shared scoped authorization, except for deposit and sign,
         // which can still reject caller input after authorization and record success
@@ -3983,41 +3969,20 @@ impl ReadSurface {
         caller: &crate::federation::ingress::ScopedCaller,
         params: &ListScopedParams,
     ) -> Result<ListScopedResult, ReadError> {
-        let principal = caller.as_ref();
-        let Some((principal_kind, principal_id)) =
-            self.scoped_principal(principal, params.enrollment_token.as_deref())
-        else {
-            self.record_scoped_refusal(
-                principal,
-                "credential.list_scoped",
-                ScopedReadRefusal::NoGrant,
-            );
-            return Err(ReadError::NotFound);
+        let (principal_kind, mut snapshot) = match self.scoped_inventory(caller, params, false) {
+            Ok(admitted) => admitted,
+            Err(ReadError::NotFound) => {
+                self.record_scoped_refusal(
+                    caller.as_ref(),
+                    "credential.list_scoped",
+                    ScopedReadRefusal::NoGrant,
+                );
+                return Err(ReadError::NotFound);
+            }
+            Err(error) => return Err(error),
         };
-        // PASS THE RESOLVED KIND, NOT A LITERAL. This read `list_scoped_snapshot("reserved",
-        // ...)` with `let _ = principal_kind;` one line above -- the resolved kind computed
-        // and then explicitly discarded. An enrollment token resolves to `enrolled`, so an
-        // enrolled consumer's grants were looked up under a principal kind it does not
-        // have: every row filtered out, an empty inventory, and NO REFUSAL EVENT, because
-        // authorization succeeded and the query simply matched nothing.
-        //
-        // That is the worst available shape. An empty list is a legitimate answer for a
-        // caller whose grants cover nothing, so the consumer sees "you have access to
-        // nothing" and the vault sees a successful call. Nothing on either side is wrong.
-        //
-        // It survived because the token path was tested on `get_scoped` and not on
-        // `list_scoped`, and the two resolve their principal through the same helper --
-        // so reading either one in isolation shows correct code. Found by the consumer
-        // that would have hit it, before they wrote a line against it.
-        let mut snapshot = self
-            .engine
-            .store()
-            .list_scoped_snapshot(principal_kind, &principal_id, &caller.declared)
-            .map_err(|_| ReadError::StoreError)?;
-        let conditions = self.add_remote_rows_and_read_conditions(&mut snapshot)?;
-        // A grant that reaches the transfer key (through a category it was put in)
-        // lists nothing for it.
-        snapshot.rows.retain(|row| {
+        let principal_id = snapshot.principal_id.clone();
+        snapshot.list.rows.retain(|row| {
             !transfer_key_fenced(
                 &row.id,
                 TransferKeyAccess::Scoped {
@@ -4027,15 +3992,8 @@ impl ReadSurface {
                 },
             )
         });
-        let gateways = self.scoped_gateway_settings(&mut snapshot)?;
-        let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
-        let providers = self
-            .engine
-            .store()
-            .registered_providers()
-            .map_err(|_| ReadError::StoreError)?;
-        let result =
-            project_list_scoped_with_providers(snapshot, &providers, &gateways, conditions);
+        let first_use_operations = list_scoped_first_use_operations(&snapshot.list.rows);
+        let result = project_scoped_inventory(snapshot);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -4070,43 +4028,26 @@ impl ReadSurface {
         caller: &crate::federation::ingress::ScopedCaller,
         params: &ListScopedParams,
     ) -> Result<(String, String), ReadError> {
-        let principal = caller.as_ref();
-        let Some((kind, id)) = self.scoped_principal(principal, params.enrollment_token.as_deref())
-        else {
-            return Err(ReadError::NotFound);
-        };
-        let (mut snapshot, mut keys) = self
-            .engine
-            .store()
-            .watch_scoped_snapshot(kind, &id, &caller.declared)
-            .map_err(|_| ReadError::StoreError)?;
-        let conditions = self.add_remote_rows_and_read_conditions(&mut snapshot)?;
-        // The rows take the same fence as `list_scoped`, so no watcher's view shows the
-        // transfer key. The held-key digest admits it for callosum alone, so a new or
-        // rotated transfer key moves callosum's digest and it re-reads the key to announce
-        // it; every other watcher's digest stays blind to it.
+        let (kind, mut snapshot) = self.scoped_inventory(caller, params, true)?;
         let rows_access = TransferKeyAccess::Scoped {
             kind,
-            id: &id,
+            id: &snapshot.principal_id,
             usage: TransferKeyUse::Ordinary,
         };
         let keys_access = TransferKeyAccess::Scoped {
             kind,
-            id: &id,
+            id: &snapshot.principal_id,
             usage: TransferKeyUse::AnnounceVersion,
         };
+        // The transfer key stays out of the view, but callosum watches its version
+        // so it can publish the replacement public key.
         snapshot
+            .list
             .rows
             .retain(|row| !transfer_key_fenced(&row.id, rows_access));
-        keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, keys_access));
-        let providers = self
-            .engine
-            .store()
-            .registered_providers()
-            .map_err(|_| ReadError::StoreError)?;
-        let gateways = self.scoped_gateway_settings(&mut snapshot)?;
-        let view =
-            project_list_scoped_with_providers(snapshot, &providers, &gateways, conditions).view;
+        let mut keys = std::mem::take(&mut snapshot.key_versions);
+        keys.retain(|(id, _)| !transfer_key_fenced(id, keys_access));
+        let view = project_scoped_inventory(snapshot).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
         input.push(1);
@@ -4126,85 +4067,36 @@ impl ReadSurface {
         self.engine.store().subscribe_writes()
     }
 
-    fn scoped_gateway_settings(
+    fn scoped_inventory(
         &self,
-        snapshot: &mut ScopedListSnapshot,
-    ) -> Result<HashMap<String, credentials_core::StoredGatewaySettings>, ReadError> {
-        let mut gateways = HashMap::new();
-        let mut rows = Vec::with_capacity(snapshot.rows.len());
-        for row in std::mem::take(&mut snapshot.rows) {
-            if row.auth_method == Some(credentials_core::ListAuthMethod::Gateway) {
-                let gateway = self
-                    .engine
-                    .store()
-                    .gateway_settings(&row.id)
-                    .map_err(|error| map_store_error(&error))?;
-                // A snapshot row must not borrow settings from a replacement record.
-                let Some(gateway) =
-                    gateway.filter(|gateway| gateway.incarnation == row.incarnation)
-                else {
-                    continue;
-                };
-                gateways.insert(row.id.clone(), gateway);
-            }
-            rows.push(row);
-        }
-        snapshot.rows = rows;
-        Ok(gateways)
-    }
-
-    /// Add the rows for every remote record the snapshot's grants reach, read from this
-    /// vault's own storage (no home call). Like identity, conditions are disclosed
-    /// only on rows covered by read or list, and must belong to the listed lifetime.
-    fn add_remote_rows_and_read_conditions(
-        &self,
-        snapshot: &mut ScopedListSnapshot,
-    ) -> Result<ScopedConditions, ReadError> {
-        let remote = self
-            .remote
-            .scoped_rows(&snapshot.grants)
-            .map_err(|_| ReadError::StoreError)?;
-        let store = self.engine.store();
-        let mut conditions = HashMap::new();
-        for (row, is_remote) in snapshot
-            .rows
-            .iter()
-            .map(|row| (row, false))
-            .chain(remote.iter().map(|row| (row, true)))
-        {
-            if !row
-                .operations
-                .iter()
-                .any(|op| matches!(op, GrantOperation::Read | GrantOperation::List))
-            {
-                continue;
-            }
-            let condition = if is_remote {
-                store.remote_record_condition(&row.id, &row.incarnation)
-            } else {
-                store.credential_condition(&row.id, &row.incarnation)
-            }
-            .map_err(|_| ReadError::StoreError)?;
-            if let Some(condition) = condition {
-                conditions.insert(
-                    row.id.clone(),
-                    (
-                        row.incarnation.clone(),
-                        ScopedCondition {
-                            reason: condition.reason,
-                            since_ms: condition.since_ms,
-                        },
-                    ),
-                );
-            }
-        }
-        if !remote.is_empty() {
-            snapshot.rows.extend(remote);
-            snapshot
-                .rows
-                .sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
-        }
-        Ok(conditions)
+        caller: &crate::federation::ingress::ScopedCaller,
+        params: &ListScopedParams,
+        include_keys: bool,
+    ) -> Result<(&'static str, ScopedInventorySnapshot), ReadError> {
+        let (kind, subject) = if let Some(token) = params.enrollment_token.as_deref() {
+            #[cfg(test)]
+            self.run_incarnation_hook("before-enrollment-admission");
+            ("enrolled", ScopedInventoryCaller::EnrollmentToken(token))
+        } else if let Some(Principal::Reserved { module_id }) = caller.as_ref() {
+            (
+                "reserved",
+                ScopedInventoryCaller::Principal {
+                    kind: "reserved",
+                    id: module_id,
+                },
+            )
+        } else {
+            return Err(ReadError::NotFound);
+        };
+        let snapshot = self
+            .engine
+            .store()
+            .scoped_inventory_snapshot(subject, &caller.declared, include_keys)
+            .map_err(|_| ReadError::StoreError)?
+            .ok_or(ReadError::NotFound)?;
+        #[cfg(test)]
+        self.run_incarnation_hook("inventory-projection");
+        Ok((kind, snapshot))
     }
 
     /// The remote record a principal-scoped `credential_id` address names, if it is one.
@@ -4287,17 +4179,17 @@ impl ReadSurface {
                     .await,
             );
         };
-        if let Err(code) = self.authorize_scoped_as(
+        let resolved = match self.authorize_scoped_as(
             caller,
             params.enrollment_token.as_deref(),
             &record.credential_id,
             GrantOperation::Read,
         ) {
-            return local(Err(code));
-        }
-        let resolved = self.scoped_principal(principal, params.enrollment_token.as_deref());
-        let reporter = match resolved.as_ref() {
-            Some((kind, name)) if *kind == "enrolled" => Some(AuthEventPrincipal::Enrolled(name)),
+            Ok(resolved) => resolved,
+            Err(code) => return local(Err(code)),
+        };
+        let reporter = match &resolved {
+            ("enrolled", name) => Some(AuthEventPrincipal::Enrolled(name)),
             _ => Self::observed_principal(principal),
         };
         match self
@@ -4321,11 +4213,13 @@ impl ReadSurface {
         caller: &crate::federation::ingress::ScopedCaller,
         params: &UsageReportScopedParams,
     ) -> Result<(), ReadError> {
-        let (kind, id) = self.authorize_scoped_as(
+        let (kind, id) = self.authorize_scoped_for(
             caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
             GrantOperation::Read,
+            TransferKeyUse::Ordinary,
+            true,
         )?;
         // The dispatcher validates before authorization, so neither caller-supplied
         // attribution nor an oversized reading can reach the queue.
@@ -4343,8 +4237,8 @@ impl ReadSurface {
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.
-    /// An uncovered principal is rejected before the credential lookup, so it cannot
-    /// turn this operation into a vault inventory oracle.
+    /// Credential identity is sampled before authorization. No lookup result is
+    /// disclosed to an uncovered principal.
     pub async fn get_scoped(
         &self,
         caller: &crate::federation::ingress::ScopedCaller,
@@ -4540,44 +4434,45 @@ impl ReadSurface {
         // decides the audit actor: a handle holder is anonymous and the channel number is
         // all there is, while a scoped caller has a principal that is KNOWN HERE and must
         // not be discarded.
-        let (credential_id, incarnation, scoped) = match (&params.handle, &params.credential_id) {
-            (Some(handle), None) => {
-                // Rate-limit on the presented handle (before resolution), like get — a
-                // flood of report_auth_failure (malicious invalidation DoS) is itself an
-                // anomaly.
-                self.check_limiter(connection_id, handle).await;
-                match self.engine.store().resolve_handle_with_incarnation(handle) {
-                    Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
-                        return Err(ReadError::NotFound)
+        let (credential_id, incarnation, resolved_principal) =
+            match (&params.handle, &params.credential_id) {
+                (Some(handle), None) => {
+                    // Rate-limit on the presented handle (before resolution), like get — a
+                    // flood of report_auth_failure (malicious invalidation DoS) is itself an
+                    // anomaly.
+                    self.check_limiter(connection_id, handle).await;
+                    match self.engine.store().resolve_handle_with_incarnation(handle) {
+                        Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                            return Err(ReadError::NotFound)
+                        }
+                        Ok((id, incarnation)) => (id, incarnation, None),
+                        Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+                        Err(e) => return Err(map_store_error(&e)),
                     }
-                    Ok((id, incarnation)) => (id, incarnation, false),
-                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-                    Err(e) => return Err(map_store_error(&e)),
                 }
-            }
-            (None, Some(credential_id)) => {
-                let incarnation = self.engine.store().credential_incarnation(credential_id);
-                // An unknown id and an ungranted id must be INDISTINGUISHABLE here, for
-                // the same reason they are on `get_scoped` and `status`: telling them
-                // apart turns this into an inventory oracle. `authorize_scoped` records
-                // the discriminated reason in `auth_events` locally and returns one code.
-                self.authorize_scoped_as(
-                    caller,
-                    params.enrollment_token.as_deref(),
-                    credential_id,
-                    GrantOperation::Read,
-                )?;
-                (
-                    credential_id.clone(),
-                    incarnation.map_err(|e| map_store_error(&e))?,
-                    true,
-                )
-            }
-            // Both or neither is a malformed request, not an addressing question. It
-            // answers as `NotFound` rather than a distinct code so that a caller cannot
-            // use the difference to probe which of two ids exists by pairing them.
-            (Some(_), Some(_)) | (None, None) => return Err(ReadError::NotFound),
-        };
+                (None, Some(credential_id)) => {
+                    let incarnation = self.engine.store().credential_incarnation(credential_id);
+                    // An unknown id and an ungranted id must be INDISTINGUISHABLE here, for
+                    // the same reason they are on `get_scoped` and `status`: telling them
+                    // apart turns this into an inventory oracle. `authorize_scoped` records
+                    // the discriminated reason in `auth_events` locally and returns one code.
+                    let resolved = self.authorize_scoped_as(
+                        caller,
+                        params.enrollment_token.as_deref(),
+                        credential_id,
+                        GrantOperation::Read,
+                    )?;
+                    (
+                        credential_id.clone(),
+                        incarnation.map_err(|e| map_store_error(&e))?,
+                        Some(resolved),
+                    )
+                }
+                // Both or neither is a malformed request, not an addressing question. It
+                // answers as `NotFound` rather than a distinct code so that a caller cannot
+                // use the difference to probe which of two ids exists by pairing them.
+                (Some(_), Some(_)) | (None, None) => return Err(ReadError::NotFound),
+            };
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
 
@@ -4687,12 +4582,10 @@ impl ReadSurface {
             // record (`mint_handle` naming a credential but not which handle, a peer's
             // limiter holding a principal and writing `conn-N`, a slot pin recording the
             // slot rather than its occupant) and is not adding a fourth.
-            let resolved_principal =
-                self.scoped_principal(principal, params.enrollment_token.as_deref());
-            let actor = match (scoped, resolved_principal.as_ref()) {
-                (true, Some((kind, name))) if *kind == "enrolled" => format!("enrolled:{name}"),
-                (true, Some((_, name))) => name.clone(),
-                _ => format!("conn-{}", connection_id as u16),
+            let actor = match &resolved_principal {
+                Some(("enrolled", name)) => format!("enrolled:{name}"),
+                Some((_, name)) => name.clone(),
+                None => format!("conn-{}", connection_id as u16),
             };
             let parsed = parse_credential_id(&credential_id);
             let refreshable = default_refresh_adapter(parsed.method, &parsed.provider).is_some();
@@ -4771,7 +4664,7 @@ impl ReadSurface {
     /// on the SAME HANDLE at the same instant refuses:
     ///
     ///   status -> {"ready":true,"last_error_code":null,"record_version":1}
-    ///   get    -> {"class":"permanent","code":"not_found"}
+    ///   get    -> {"class":"permanent","code":"kind_not_gettable"}
     ///
     /// `ready` is computed from `meta.state` alone. The kind fence that makes `get`
     /// refuse a signing key lives on the DECRYPTED record, and `kind` is not a plaintext
@@ -4815,7 +4708,7 @@ impl ReadSurface {
             stale_pending: None,
         };
 
-        let (credential_id, scoped) = match (&params.handle, &params.credential_id) {
+        let (credential_id, incarnation, scoped) = match (&params.handle, &params.credential_id) {
             // Overall readiness: ready iff we still hold write authority. No address to
             // authorize or rate-limit, and nothing to enumerate, so no lookup runs here.
             (None, None) => {
@@ -4834,15 +4727,19 @@ impl ReadSurface {
             (Some(handle), None) => {
                 // Rate-limit the handle probe before resolution (enumeration-sweep guard).
                 self.check_limiter(connection_id, handle).await;
-                let resolved = self.engine.store().resolve_handle(handle).and_then(|id| {
-                    if transfer_key_fenced(&id, TransferKeyAccess::Handle) {
-                        Err(StoreOpError::NotFound)
-                    } else {
-                        Ok(id)
-                    }
-                });
-                let credential_id = match resolved {
-                    Ok(id) => id,
+                let resolved = self
+                    .engine
+                    .store()
+                    .resolve_handle_with_incarnation(handle)
+                    .and_then(|(id, incarnation)| {
+                        if transfer_key_fenced(&id, TransferKeyAccess::Handle) {
+                            Err(StoreOpError::NotFound)
+                        } else {
+                            Ok((id, incarnation))
+                        }
+                    });
+                let (credential_id, incarnation) = match resolved {
+                    Ok(resolved) => resolved,
                     Err(error) => {
                         return StatusResult {
                             last_error_code: Some(map_store_error(&error)),
@@ -4850,9 +4747,10 @@ impl ReadSurface {
                         }
                     }
                 };
-                (credential_id, false)
+                (credential_id, incarnation, false)
             }
             (None, Some(credential_id)) => {
+                let incarnation = self.engine.store().credential_incarnation(credential_id);
                 // `_as` rather than the token-less helper: an enrolled consumer presents a
                 // bearer token and no principal the bus can vouch for, so without this it
                 // resolves to `Direct`, fails coverage, and gets the same `unavailable`
@@ -4865,19 +4763,31 @@ impl ReadSurface {
                         credential_id,
                         GrantOperation::Read,
                         TransferKeyUse::AnnounceVersion,
+                        false,
                     )
                     .is_err()
                 {
                     return unavailable(None);
                 }
-                (credential_id.clone(), true)
+                let Ok(incarnation) = incarnation else {
+                    return unavailable(None);
+                };
+                (credential_id.clone(), incarnation, true)
             }
             // The route rejects a request with both addressing forms as `invalid_params`.
             // Preserve the non-enumerating status shape for direct callers of this surface.
             (Some(_), Some(_)) => return unavailable(None),
         };
 
-        match self.engine.store().meta(&credential_id) {
+        #[cfg(test)]
+        self.run_incarnation_hook("status-admitted");
+        match self.engine.store().meta(&credential_id).and_then(|meta| {
+            if meta.incarnation.as_deref() == Some(&incarnation) {
+                Ok(meta)
+            } else {
+                Err(StoreOpError::NotFound)
+            }
+        }) {
             Ok(meta) => {
                 // The field is a LATENCY PREDICTOR for the next get, and the prediction
                 // only has meaning when the next get will actually run. None of the seven
@@ -4931,7 +4841,9 @@ impl ReadSurface {
                 // failure may safely include its id. For scoped lookups, omit the id on
                 // failure so callers cannot distinguish a nonexistent credential from one
                 // that exists but is outside their authorization scope.
-                let mut status = unavailable((!scoped).then_some(credential_id));
+                let mut status = unavailable(
+                    (!scoped && !matches!(error, StoreOpError::NotFound)).then_some(credential_id),
+                );
                 if !scoped {
                     status.last_error_code = Some(map_store_error(&error));
                 }
@@ -5042,6 +4954,9 @@ impl ReadSurface {
     async fn check_limiter(&self, connection_id: u64, probe_key: &str) {
         let admission = {
             let mut limiter = self.limiter.lock().await;
+            if !self.route_counters_live(connection_id) {
+                return;
+            }
             limiter.admit(connection_id, probe_key, Instant::now())
         };
         // This writes an EVENT to the audit chain, not a state transition, and it is
@@ -5091,6 +5006,39 @@ impl ReadSurface {
                 alarm: Some(AlarmReason::FetchRateAnomaly),
             });
         }
+    }
+
+    pub(crate) fn set_live_routes(&self, routes: Arc<crate::RouteEpochs>) {
+        assert!(self.live_routes.set(routes).is_ok());
+    }
+
+    /// Check while holding the counter lock. Teardown removes the epoch before it
+    /// takes that lock to erase counters, so late work cannot bring them back.
+    fn route_counters_live(&self, connection_id: u64) -> bool {
+        self.live_routes
+            .get()
+            .is_none_or(|routes| routes.matches(connection_id as u16, (connection_id >> 16) as u32))
+    }
+
+    fn count_open_refusal(
+        &self,
+        counters: &mut HashMap<u64, (Instant, usize)>,
+        connection_id: u64,
+    ) {
+        if self.route_counters_live(connection_id) {
+            let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
+            if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
+                *entry = (Instant::now(), 0);
+            }
+            entry.1 += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn route_counter_presence(&self, connection_id: u64) -> (bool, bool) {
+        let has_open = self.open_refusals.lock().await.contains_key(&connection_id);
+        let has_fetch = self.limiter.lock().await.has_connection(connection_id);
+        (has_fetch, has_open)
     }
 
     #[cfg(test)]
@@ -5156,6 +5104,17 @@ fn remote_get_outcome(
     }
 }
 
+/// Map a refused seal to its wire code. An unusable key or encryption failure is a
+/// vault-side fault: `corrupt`, the same code `sign` uses for an unusable signing key.
+fn map_seal_error(error: credentials_core::kem::SealError) -> ReadError {
+    use credentials_core::kem::SealError;
+    match error {
+        SealError::TooLarge => ReadError::SealInputTooLarge,
+        SealError::InvalidRecipient => ReadError::InvalidRecipientKey,
+        SealError::UnusableKey | SealError::Failed => ReadError::Corrupt,
+    }
+}
+
 /// Map a store error to a non-secret read code (fail-closed; never leaks detail).
 ///
 /// WIDENING WHAT MAPS TO `NotFound` DELETES LIVE CONSUMER CONFIGURATION. A
@@ -5170,18 +5129,6 @@ fn remote_get_outcome(
 /// not found" is a reasonable simplification that silently inverts a cross-repo
 /// promise. It is pinned by `an_unmapped_store_error_is_never_permanent`, which
 /// exists because that mutation once left the entire workspace green.
-/// Map a refused seal to its wire code. A key that will not parse, and the AEAD failure
-/// a fresh context cannot actually hit, are vault-side faults: `corrupt`, as `sign`
-/// reports an unusable signing key.
-fn map_seal_error(error: credentials_core::kem::SealError) -> ReadError {
-    use credentials_core::kem::SealError;
-    match error {
-        SealError::TooLarge => ReadError::SealInputTooLarge,
-        SealError::InvalidRecipient => ReadError::InvalidRecipientKey,
-        SealError::UnusableKey | SealError::Failed => ReadError::Corrupt,
-    }
-}
-
 fn map_store_error(e: &StoreOpError) -> ReadError {
     use credentials_core::envelope::EnvelopeError;
     match e {

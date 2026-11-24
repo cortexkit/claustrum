@@ -227,18 +227,23 @@ pub(crate) fn worker_transcript(
 ) -> Result<String, AccountTokenError> {
     let (payload, mac) = challenge
         .split_once('.')
-        .ok_or_else(AccountTokenError::invalid)?;
-    if decode(mac)?.len() != 32 {
-        return Err(AccountTokenError::invalid());
+        .ok_or_else(AccountTokenError::network)?;
+    let decode_reply = |part| decode(part).map_err(|_| AccountTokenError::network());
+    if decode_reply(mac)?.len() != 32 {
+        return Err(AccountTokenError::network());
     }
-    let p: Value =
-        serde_json::from_slice(&decode(payload)?).map_err(|_| AccountTokenError::invalid())?;
+    let p: Value = serde_json::from_slice(&decode_reply(payload)?)
+        .map_err(|_| AccountTokenError::network())?;
+    let fields = ["purpose", "account", "key_id", "aud"].map(|field| p[field].as_str());
+    let [Some(purpose), Some(bound_account), Some(bound_key), Some(bound_audience)] = fields else {
+        return Err(AccountTokenError::network());
+    };
     // Check before preparing a signature; the full sealed string, not the decoded
     // payload, is embedded verbatim in the proof the account service verifies.
-    if p["purpose"] != "worker_token"
-        || p["account"] != account
-        || p["key_id"] != key_id
-        || p["aud"] != audience
+    if purpose != "worker_token"
+        || bound_account != account
+        || bound_key != key_id
+        || bound_audience != audience
     {
         return Err(AccountTokenError::invalid());
     }
@@ -286,7 +291,8 @@ async fn post(
     http: &dyn HttpTransport,
     url: &str,
     body: Value,
-) -> Result<Value, (u16, AccountTokenError)> {
+    success_field: &str,
+) -> Result<String, (u16, AccountTokenError)> {
     let reply = http
         .post(
             url,
@@ -296,14 +302,14 @@ async fn post(
         )
         .await
         .map_err(|_| (0, AccountTokenError::network()))?;
-    let body = serde_json::from_slice(&reply.body);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
     if reply.status != 200 {
-        return Err((
-            reply.status,
-            refusal(reply.status, &body.unwrap_or(Value::Null)),
-        ));
+        return Err((reply.status, refusal(reply.status, &body)));
     }
-    body.map_err(|_| (reply.status, AccountTokenError::network()))
+    body.get(success_field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| (reply.status, AccountTokenError::network()))
 }
 
 pub(crate) async fn mint(
@@ -317,10 +323,9 @@ pub(crate) async fn mint(
     for attempt in 0..2 {
         let exchange = async {
             let body = json!({"key_id":signer.key_id,"aud":audience});
-            let reply = post(http, CHALLENGE_URL, body).await?;
-            let challenge = reply["challenge"].as_str().ok_or_else(|| (0, AccountTokenError::invalid()))?;
-            let transcript = worker_transcript(&signer.machine.account, &signer.key_id, challenge, audience)
-                .map_err(|e| (0, e))?;
+            let challenge = post(http, CHALLENGE_URL, body, "challenge").await?;
+            let transcript = worker_transcript(&signer.machine.account, &signer.key_id, &challenge, audience)
+                .map_err(|e| (200, e))?;
             let pem = std::str::from_utf8(signer.pem.expose()).map_err(|_| (0, AccountTokenError::login()))?;
             credentials_core::signing::validate_signing_input(&signer.credential_id, transcript.as_bytes())
                 .map_err(|_| (0, AccountTokenError::new("invalid_params", ErrorClass::Permanent)))?;
@@ -329,19 +334,22 @@ pub(crate) async fn mint(
             let raw = base64::engine::general_purpose::STANDARD.decode(sig.signature_b64)
                 .map_err(|_| (0, AccountTokenError::invalid()))?;
             let sig_hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            let token = post(http, TOKEN_URL, json!({"key_id":signer.key_id,"aud":audience,"challenge":challenge,"sig_hex":sig_hex})).await?;
-            let jwt = token["jwt"].as_str().ok_or_else(|| (0, AccountTokenError::invalid()))?;
+            let jwt = post(http, TOKEN_URL, json!({"key_id":signer.key_id,"aud":audience,"challenge":challenge,"sig_hex":sig_hex}), "jwt").await?;
+            let malformed = || (200, AccountTokenError::network());
             let parts: Vec<_> = jwt.split('.').collect();
-            if parts.len() != 3 { return Err((0, AccountTokenError::invalid())); }
-            let claims: Value = serde_json::from_slice(&decode(parts[1]).map_err(|e| (0,e))?).map_err(|_| (0, AccountTokenError::invalid()))?;
-            let iat = claims["iat"].as_i64().ok_or_else(|| (0, AccountTokenError::invalid()))?;
-            let exp = claims["exp"].as_i64().ok_or_else(|| (0, AccountTokenError::invalid()))?;
-            if iat.checked_add(900) != Some(exp) || claims["account"] != signer.machine.account || claims["device"] != signer.key_id || claims["aud"] != audience {
-                return Err((0, AccountTokenError::invalid()));
+            if parts.len() != 3 { return Err(malformed()); }
+            let claims: Value = serde_json::from_slice(&decode(parts[1]).map_err(|_| malformed())?).map_err(|_| malformed())?;
+            let iat = claims["iat"].as_i64().ok_or_else(malformed)?;
+            let exp = claims["exp"].as_i64().ok_or_else(malformed)?;
+            let [Some(account), Some(device), Some(bound_audience)] = ["account", "device", "aud"].map(|field| claims[field].as_str()) else {
+                return Err(malformed());
+            };
+            if iat.checked_add(900) != Some(exp) || account != signer.machine.account || device != signer.key_id || bound_audience != audience {
+                return Err((200, AccountTokenError::invalid()));
             }
             let expires_at_ms = exp.checked_mul(1000).ok_or_else(|| (0, AccountTokenError::invalid()))?;
             if expires_at_ms <= clock.unwrap_or_else(wall_now_ms) { return Err((0, AccountTokenError::network())); }
-            Ok(AccountTokenResult { jwt: credentials_core::secret::Secret::new(jwt.into()), expires_at_ms, audience: audience.into(), account: signer.machine.account.clone() })
+            Ok(AccountTokenResult { jwt: credentials_core::secret::Secret::new(jwt), expires_at_ms, audience: audience.into(), account: signer.machine.account.clone() })
         }.await;
         if let Err((status, error)) = &exchange {
             if error.class == ErrorClass::Permanent {

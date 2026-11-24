@@ -1,5 +1,4 @@
 import { readdirSync, statSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -109,25 +108,6 @@ function listSubcConnectionFiles(dir: string): string[] {
   return matches
 }
 
-// The transport's typed reader validates `wire_version` against PROTOCOL_VERSION but does
-// not currently surface the value. Read it from the raw JSON so detection reports what the
-// daemon actually advertised, with the PROTOCOL_VERSION fallback for legacy files that
-// omitted the additive field.
-async function readAdvertisedWireVersion(path: string): Promise<number | undefined> {
-  let raw: string
-  try {
-    raw = await readFile(path, 'utf8')
-  } catch {
-    return undefined
-  }
-  try {
-    const parsed = JSON.parse(raw) as { wire_version?: unknown }
-    return typeof parsed.wire_version === 'number' ? parsed.wire_version : undefined
-  } catch {
-    return undefined
-  }
-}
-
 export async function detectClaustrumConnection(
   explicitPath?: string,
 ): Promise<ClaustrumDetection> {
@@ -146,11 +126,11 @@ export async function detectClaustrumConnection(
     }
   }
 
-  const advertised = await readAdvertisedWireVersion(path)
   return {
     status: 'available',
     schema: value.schema,
-    wireVersion: advertised ?? PROTOCOL_VERSION,
+    // The SDK accepts only its own version, or a legacy file without this field.
+    wireVersion: PROTOCOL_VERSION,
     endpoints: value.endpoints,
   }
 }

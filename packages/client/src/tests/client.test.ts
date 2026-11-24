@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { readFileSync } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { PROTOCOL_VERSION, SubcCallError } from '@cortexkit/subc-client'
+import { PROTOCOL_VERSION, SubcCallError, SubcError } from '@cortexkit/subc-client'
 import {
   ClaustrumClient,
   ClaustrumCredentialError,
@@ -200,7 +200,7 @@ describe('ClaustrumClient', () => {
   test('late failure from replaced client retries without reconnect backoff', async () => {
     const late = Promise.withResolvers<unknown>()
     let calls = 0
-    const first = { call: () => ++calls === 1 ? Promise.reject(terminal('route_wedged')) : late.promise, close: () => {} }
+    const first = { call: () => ++calls === 1 ? Promise.reject(terminal('module_timeout')) : late.promise, close: () => {} }
     const second = new FakeDaemon([
       { result: { payload: [111, 107], record_version: 1 } },
       { result: { payload: [111, 107], record_version: 1 } },
@@ -211,7 +211,7 @@ describe('ClaustrumClient', () => {
       const a = client.getCredential('a')
       const b = client.getCredential('b')
       await a
-      late.reject(terminal('route_wedged'))
+      late.reject(terminal('module_timeout'))
       expect(await b).toMatchObject({ material: 'ok' })
       expect(connects).toBe(2)
       expect(second.calls).toHaveLength(2)
@@ -303,6 +303,43 @@ describe('ClaustrumClient', () => {
       schema: 1,
       endpoints: [{ host: '127.0.0.1', port: 8765 }],
     })
+  })
+
+  test('reports the endpoints and wire version from a single file generation', async () => {
+    const path = await tempPath('generation-connection.json')
+    const generation = {
+      schema: 1,
+      wire_version: PROTOCOL_VERSION,
+      endpoints: [{ host: '127.0.0.1', port: 8765 }],
+      key: Array.from({ length: 32 }, () => 1),
+      daemon_id: Array.from({ length: 16 }, () => 2),
+      pid: 1,
+      daemon_ver: 'test',
+    }
+    await writeFile(path, JSON.stringify(generation))
+    await chmod(path, 0o600)
+    const open = fs.open
+    const opens = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args)
+      if (args[0] !== path) return handle
+      const readFile = handle.readFile.bind(handle)
+      Object.defineProperty(handle, 'readFile', {
+        value: async (options: { encoding: 'utf8' }) => {
+          const value = await readFile(options)
+          await writeFile(path, JSON.stringify({ ...generation, wire_version: PROTOCOL_VERSION + 1 }))
+          return value
+        },
+      })
+      return handle
+    })
+    try {
+      expect(await detectClaustrumConnection(path)).toMatchObject({
+        status: 'available', schema: generation.schema,
+        endpoints: generation.endpoints, wireVersion: PROTOCOL_VERSION,
+      })
+    } finally {
+      opens.mockRestore()
+    }
   })
 
   test('never echoes connection-file key material from a JSON parse failure', async () => {
@@ -486,7 +523,7 @@ describe('ClaustrumClient', () => {
   })
 
   test('reconnects once after terminal route failure but not missing_identity or invalid_control_body', async () => {
-    const first = new FakeDaemon([], terminal('route_wedged'))
+    const first = new FakeDaemon([], terminal('module_timeout'))
     const second = new FakeDaemon([
       { result: { payload: [111, 107], record_version: 9 } },
       { result: { payload: [111, 107], record_version: 9 } },
@@ -528,6 +565,43 @@ describe('ClaustrumClient', () => {
     expect(await rejectionOf(client.getCredential('a'))).toMatchObject({ code: 'unknown_module' })
     expect(connects).toBe(1)
     client.close()
+  })
+
+  test('does not reconnect on a route refusal that says the target will not return', async () => {
+    let connects = 0
+    const refusal = new SubcError('target unavailable', 'target_unavailable', { expected_back: false })
+    const failure = new SubcCallError('terminal', refusal.message, refusal.code, refusal)
+    const client = await ClaustrumClient.connect({
+      connector: async () => {
+        connects += 1
+        return new FakeDaemon([], failure) as never
+      },
+    })
+    try {
+      expect(await rejectionOf(client.getCredential('a'))).toMatchObject({
+        code: 'target_unavailable', class: 'permanent', action: 'gone',
+      })
+      expect(connects).toBe(1)
+    } finally {
+      client.close()
+    }
+  })
+
+  test('does not resend usage after losing the acknowledgement', async () => {
+    let connects = 0
+    const lost = new FakeDaemon([], terminal('module_timeout'))
+    const recovered = new FakeDaemon([{ result: { accepted: true } }])
+    const client = await ClaustrumClient.connect({
+      connector: async () => (++connects === 1 ? lost : recovered) as never,
+    })
+    try {
+      expect(await rejectionOf(client.reportUsageScoped({ credentialId: 'key', reading: {} })))
+        .toMatchObject({ code: 'module_timeout' })
+      expect(lost.calls).toHaveLength(1)
+      expect(recovered.calls).toHaveLength(0)
+    } finally {
+      client.close()
+    }
   })
 
   test('decodes nested error classes and maps them to actions', async () => {

@@ -12,7 +12,7 @@ test('plan start decodes optional non-negative integers from a producer inventor
   for (const malformed of [null, '1', true, [], {}, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     const reply = producerReply()
     reply.result.credentials[0].plan_tier_since_ms = malformed
-    expect(() => decodeScopedInventory(reply, () => {})).toThrow()
+    expectBadInventoryRow(reply)
   }
 })
 
@@ -21,6 +21,12 @@ function producerReply(caseName = 'catalog_and_lifecycle'): any {
   const entry = vector.cases.find((row: { case: string }) => row.case === caseName)
   if (!entry) throw new Error(`producer list vector has no ${caseName}`)
   return entry.reply
+}
+
+function expectBadInventoryRow(reply: ReturnType<typeof producerReply>): void {
+  const inventory = decodeScopedInventory(reply, () => {})
+  expect(inventory.rows).toHaveLength(reply.result.credentials.length - 1)
+  expect(inventory.undecodableRows).toEqual([`${reply.result.credentials[0].id}: invalid_response`])
 }
 
 test('provider catalog decodes real vault rows with service, incarnation and tier time', () => {
@@ -55,7 +61,7 @@ test('provider catalog rejects malformed additive metadata', () => {
   for (const [field, value] of [['provider', 1], ['incarnation', []], ['plan_tier_observed_at_ms', 'yesterday'], ['plan_tier_observed_at_ms', 1.5]] as const) {
     const reply = producerReply()
     reply.result.credentials[0][field] = value
-    expect(() => decodeScopedInventory(reply, () => {})).toThrow()
+    expectBadInventoryRow(reply)
   }
 })
 
@@ -125,7 +131,7 @@ test('provider catalog rejects malformed Fusiform ids and hosts', () => {
   ] as const) {
     const reply = producerReply('descriptor_presence')
     reply.result.credentials[0][field] = value
-    expect(() => decodeScopedInventory(reply, () => {})).toThrow()
+    expectBadInventoryRow(reply)
   }
 })
 

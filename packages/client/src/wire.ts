@@ -1,4 +1,5 @@
 import {
+  isRetryableRouteOpenRefusal,
   SubcCallError,
   SubcClient,
   type BindIdentity,
@@ -18,37 +19,6 @@ import {
 const CLAUSTRUM_MODULE_ID = 'claustrum'
 const RECONNECT_BACKOFF_MS = 60_000
 
-/**
- * Transport `Error` frame codes whose answer neither a retry nor a fresh connection can
- * change. A call failing with one of these is reported as `permanent`/`gone` and is never
- * reconnected; every other transport failure stays `transient`/`retry`.
- *
- * This is the ONLY list of such codes: the error classification and the reconnect
- * decision both read it, so the two cannot disagree about a code.
- *
- * - `unknown_method`: the vault does not implement the operation. From a released vault
- *   this means the vault predates the operation, and the remedy is to update the vault.
- * - `invalid_params`, `invalid_request`: the vault could not decode the request body or
- *   its params. The same bytes are refused the same way on any connection.
- * - `flow_scopes_unsupported`: the vault refuses routes opened under a flow scope.
- * - `invalid_control_body`: the vault build cannot decode the daemon's route bind.
- * - `unknown_module`: the daemon has no module with this id registered or supervised at
- *   all. A vault that is restarting or warming up is reported as `module_warming` or
- *   `target_unavailable` instead, which the SDK already retries in place. A fresh
- *   connection to the same daemon gets the same answer, and the wasted reconnect would
- *   also start the reconnect backoff, leaving a genuinely wedged connection unable to
- *   recover for a minute.
- * - `missing_identity`: the SDK refused before sending because no bind identity was set.
- */
-const DEFINITIVE_TRANSPORT_CODES: ReadonlySet<string> = new Set([
-  'unknown_method',
-  'invalid_params',
-  'invalid_request',
-  'flow_scopes_unsupported',
-  'invalid_control_body',
-  'unknown_module',
-  'missing_identity',
-])
 
 type ClaustrumTransport = Pick<SubcClient, 'call' | 'close' | 'routeOpen' | 'subscribe' | 'closeRoute'>
 
@@ -629,7 +599,7 @@ export class ClaustrumClient {
     reading: Record<string, unknown>
     enrollmentToken?: string
   }): Promise<void> {
-    const response = await this.#call('usage.report_scoped', {
+    const response = await this.#callOnce('usage.report_scoped', {
       credential_id: input.credentialId,
       reading: input.reading,
       enrollment_token: input.enrollmentToken,
@@ -778,7 +748,8 @@ export class ClaustrumClient {
   #asTransportError(error: unknown): ClaustrumCredentialError {
     if (error instanceof ClaustrumCredentialError) return error
     const code = this.#transportErrorCode(error)
-    if (code !== undefined && DEFINITIVE_TRANSPORT_CODES.has(code)) {
+    if (code !== undefined && error instanceof SubcCallError &&
+      error.kind === 'terminal' && !isRetryableRouteOpenRefusal(error)) {
       return new ClaustrumCredentialError(code, 'permanent', 'gone')
     }
     return new ClaustrumCredentialError(code ?? 'transport_error', 'transient', 'retry')
@@ -789,7 +760,7 @@ export class ClaustrumClient {
       !this.#closed &&
       error instanceof SubcCallError &&
       error.kind === 'terminal' &&
-      !DEFINITIVE_TRANSPORT_CODES.has(error.code ?? '')
+      (error.code === undefined || isRetryableRouteOpenRefusal(error))
     )
   }
 
@@ -927,6 +898,8 @@ export interface ScopedInventoryRow {
  */
 export interface ScopedInventory {
   readonly rows: readonly ScopedInventoryRow[]
+  /** Credential rows omitted from `rows`, identified by id or their zero-based index. */
+  readonly undecodableRows?: readonly string[]
   readonly view: string
   readonly grants: number | undefined
   readonly grantTuples: readonly ScopedGrantTuple[] | undefined
@@ -964,7 +937,7 @@ export function decodeScopedInventory(
   if (typeof view !== 'string' || view.length === 0) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
-  const decoded = rows.map<ScopedInventoryRow>((row) => {
+  const decodeRow = (row: unknown): ScopedInventoryRow => {
     if (!isRecord(row)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
     const recordVersion = asRecordVersion(row.record_version)
     if (recordVersion === undefined) {
@@ -1096,7 +1069,18 @@ export function decodeScopedInventory(
       orgName: row.org_name,
       ...(orgId === undefined ? {} : { orgId }),
     }
-  })
+  }
+  const decoded: ScopedInventoryRow[] = []
+  const undecodableRows: string[] = []
+  for (const [index, row] of rows.entries()) {
+    try {
+      decoded.push(decodeRow(row))
+    } catch (error) {
+      if (!(error instanceof ClaustrumCredentialError)) throw error
+      const id = isRecord(row) && typeof row.id === 'string' ? row.id : `row ${index}`
+      undecodableRows.push(`${id}: ${error.code}`)
+    }
+  }
   // ABSENT IS UNKNOWN, PRESENT MUST BE WELL-FORMED. A vault from before these fields
   // omits both, and refusing that would fail every listing against a still-supported
   // vault. A present but malformed value is a broken reply, and decoding it leniently
@@ -1129,7 +1113,10 @@ export function decodeScopedInventory(
       }
     })
   }
-  return { rows: decoded, view, grants, grantTuples }
+  return {
+    rows: decoded, view, grants, grantTuples,
+    ...(undecodableRows.length === 0 ? {} : { undecodableRows }),
+  }
 }
 
 /** What a poll found. `pending` is not an error: the operator has not decided yet. */

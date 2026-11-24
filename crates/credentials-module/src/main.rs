@@ -20806,8 +20806,9 @@ mod tests {
     ///   error!    hub login writer for a recipient stopped and restarted: fixed text
     ///             and member id only
     ///   info!     login-sharing config apply recovered: path and fixed text only
-    ///   debug!    manifest watch projection timed out or failed: fixed text and
-    ///             member id only, never the projection or its error
+    ///   debug!    building a paired computer's GitHub-manifest change notice timed
+    ///             out or failed: fixed text and member id only, never the notice or
+    ///             its error
     ///
     /// `policy.request_action` and `credential.policy_token` have no log sites. Phone
     /// approvals have no operation-specific logs; `policy.approve_action` uses the

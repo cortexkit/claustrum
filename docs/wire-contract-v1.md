@@ -916,9 +916,10 @@ Local current-value detection times are sealed beside the existing detection
 metadata. No old time is backfilled: existing records stay unknown until their
 tier next changes. Reasserting an unchanged operator value is still a no-op.
 Both clients decode these three fields as optional; omission by an older vault and
-explicit `null` both mean absent. The Rust client applies the same rule to
-`plan_tier_since_ms`, `org_id` and `github_app`. The TypeScript names are `provider`, `incarnation`
-and `planTierObservedAtMs`; Rust uses the wire spellings on `ListedCredential`.
+explicit `null` both mean absent. The TypeScript names for them are `provider`,
+`incarnation` and `planTierObservedAtMs`; Rust uses the wire spellings on
+`ListedCredential`. The Rust client applies the same null-is-absent rule to
+`plan_tier_since_ms`, `org_id` and `github_app`.
 `ck auth list --json` includes the same fields (and nulls), including
 `plan_tier_since_ms`, in each ordinary row.
 Gateway rows additionally carry `base_url` and `headers`.
@@ -4660,7 +4661,7 @@ names ASCII-case-insensitively:
 Build N+1 from the newest stored version N by incrementing `manifest_version`,
 setting `issued_at_unix_secs` to now and appending `"<full_name>": "<agent_id>"`
 as the last key in `bindings`, using the same serialization. No other manifest
-content changes. The write transaction rechecks that this is still the home.
+content changes. The write transaction rechecks that this vault is still the home.
 It refuses `stale_base` without writing if N is no longer newest or an activation
 is ahead of N. Return an unexpired pending proposal for the same `(agent_id, repo)`
 if the App id, slug and installation permissions are unchanged. If those inputs
@@ -4720,8 +4721,8 @@ accepts the other's envelope even when a signature would otherwise verify.
 
 Approval runs inside the phone pipeline's single serializing write transaction.
 Pairing admission, the home-role refusal and the phone-registration check come
-first. Once the phone pipeline records the observation, it keeps that observation
-even for an exact replay or a refusal. A replay or refusal does not write proposals,
+first. Once the phone pipeline records when it last saw this phone, it keeps that
+record even for an exact replay or a refusal. A replay or refusal does not write proposals,
 manifests, policies or audit rows. Next comes `manifest_setup_incomplete`, then
 these checks in order:
 
@@ -6203,7 +6204,7 @@ frame so the caller can distinguish whether the App was saved:
 | `relay_registration_failed` | `slug`, `app_id`, `install_url`, `cause` | `relay_unavailable` (mint, deadline, transport, redirect, `429` or server failure), `relay_unavailable_for_account` (missing machine key, `401` or `403`), `relay_slot_expired` (`404`), `relay_app_mismatch` (`409`), `relay_request_refused` (other client error), or `relay_reply_invalid` (unexpected or oversized success reply) |
 
 Once GitHub returns the key, a daemon that acquires the App lock finishes the
-store write even if the deadline passes. With a slot, it keeps the lock through the
+store write even if the App lock's deadline passes. With a slot, it keeps the lock through the
 initial relay `PUT`. Only a `200` reply within the 8 KiB reply limit confirms
 registration. A failed `PUT` does not roll back the App. Only the cause
 `relay_unavailable` offers a same-slot retry.

@@ -23,6 +23,9 @@ async fn send(writer: &mpsc::Sender<Frame>, frame: Frame) -> Result<(), String> 
 }
 
 pub(crate) const MAX_MANIFEST_WATCHES_PER_MEMBER: usize = 4;
+/// How many manifest-watch projections run at once across all members. One
+/// pool is shared by every member's watches, so it is not a per-member limit.
+const CONCURRENT_MANIFEST_PROJECTIONS: usize = 4;
 type Key = (u16, u64);
 
 pub(crate) struct PreparedWatch {
@@ -101,7 +104,7 @@ impl Default for ManifestWatchHub {
             registry: Arc::default(),
             publication: Arc::default(),
             pairings: watch::channel(Arc::new(Pairings::default())).0,
-            snapshots: Arc::new(Semaphore::new(MAX_MANIFEST_WATCHES_PER_MEMBER)),
+            snapshots: Arc::new(Semaphore::new(CONCURRENT_MANIFEST_PROJECTIONS)),
             #[cfg(test)]
             before_checks: OnceLock::new(),
             #[cfg(test)]
@@ -583,8 +586,12 @@ impl Subscription {
                         seq += 1;
                         Ok(())
                     }
+                    Ok(Some(_)) => Ok(()),
                     // A projection failure must never look like revocation.
-                    _ => Ok(()),
+                    Err(()) => {
+                        tracing::debug!(target: "federation", member = %self.watch.member, "manifest watch projection timed out or failed; skipped until the next change");
+                        Ok(())
+                    }
                 }
             };
             tokio::select! {

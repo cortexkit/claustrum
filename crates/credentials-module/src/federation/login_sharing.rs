@@ -14,6 +14,8 @@ pub struct ConfigPoll {
     resolution: Resolution,
     applied: Option<bool>,
     warned: HashSet<[u8; 32]>,
+    /// The apply failure last logged, until a poll succeeds.
+    failure: Option<String>,
 }
 
 impl ConfigPoll {
@@ -25,6 +27,7 @@ impl ConfigPoll {
             resolution: Resolution::Default,
             applied: None,
             warned: HashSet::new(),
+            failure: None,
         }
     }
 
@@ -73,9 +76,28 @@ impl ConfigPoll {
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             timer.tick().await;
-            if self.poll().await.is_err() {
-                tracing::warn!(target: "federation", path = %self.path.display(), "login sharing configuration apply failed; retrying");
+            let _ = self.poll_logged().await;
+        }
+    }
+
+    /// One poll that logs a failure once per distinct error and its recovery once,
+    /// so a lasting store fault does not log on every tick.
+    pub async fn poll_logged(&mut self) -> Result<(), StoreOpError> {
+        let result = self.poll().await;
+        match &result {
+            Err(error) => {
+                let error = error.to_string();
+                if self.failure.as_deref() != Some(error.as_str()) {
+                    tracing::warn!(target: "federation", path = %self.path.display(), %error, "login sharing configuration apply failed; retrying");
+                    self.failure = Some(error);
+                }
+            }
+            Ok(()) => {
+                if self.failure.take().is_some() {
+                    tracing::info!(target: "federation", path = %self.path.display(), "login sharing configuration apply recovered");
+                }
             }
         }
+        result
     }
 }

@@ -1038,3 +1038,34 @@ async fn a_roster_reaches_hub_workers_only_after_it_validates_and_its_grants_com
     wait_until(|| published.lock().unwrap().contains(&Some(Vec::new()))).await;
     task.abort();
 }
+
+#[tokio::test]
+async fn login_sharing_apply_failures_warn_once_per_error_and_recover() {
+    use claustrum_module_probe::federation::login_sharing::ConfigPoll;
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(WarnCapture {
+        logs: Arc::clone(&warnings),
+        module: "federation::login_sharing",
+    });
+    let rig = Rig::new("login-sharing-apply-failure", snapshot("empty")).await;
+    rig.home
+        .store
+        .set_login_sharing_audited(false, "test")
+        .unwrap();
+    let path = rig._root.join("claustrum.jsonc");
+    std::fs::write(&path, r#"{"login_sharing":true}"#).unwrap();
+    let conn = rusqlite::Connection::open(rig.vault.store_path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'store unavailable'); END;").unwrap();
+    let mut poll = ConfigPoll::new(path, Arc::clone(&rig.home.store));
+    for _ in 0..3 {
+        assert!(poll.poll_logged().await.is_err());
+    }
+    {
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+    conn.execute_batch("DROP TRIGGER fail_audit").unwrap();
+    poll.poll_logged().await.unwrap();
+    assert!(rig.home.store.login_sharing().unwrap());
+    assert_eq!(warnings.lock().unwrap().len(), 1);
+}

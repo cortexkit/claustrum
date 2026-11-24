@@ -346,7 +346,8 @@ impl Local {
             }
             accepted.insert(home.home_member.clone(), home);
         }
-        // Copies from the Callosum login stream have no hub generation to scan.
+        // Automatic copies carry no generation of their own; a pairing scan reads
+        // each copy's home and pairing to find those a roster proves lost.
         let copies = if scan_records {
             store
                 .list_remote_records()?

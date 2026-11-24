@@ -296,6 +296,7 @@ impl RemoteWatchDiff<'_> {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn is_empty(&self) -> bool {
         self.inserts.is_empty() && self.updates.is_empty() && self.removals.is_empty()
     }
@@ -944,6 +945,10 @@ impl EncryptedStore {
     ///
     /// A read-only preflight avoids a fenced commit (and its write signal) for an
     /// empty diff. A non-empty diff is recomputed inside one fenced transaction.
+    ///
+    /// Test fixtures only: production writes home-watch rows through the hub path
+    /// (`apply_hub_login_audited` and `remove_hub_login_home_audited`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn remote_watch_apply_audited(
         &self,
         home_member: &str,
@@ -1137,6 +1142,8 @@ impl EncryptedStore {
 
     /// Remove a home's home-watch rows except those under `keep_pairing`, or all
     /// of them for `None`. Empty removals do not open a transaction or signal a write.
+    /// Test fixtures only, like [`Self::remote_watch_apply_audited`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn remote_watch_remove_audited(
         &self,
         home_member: &str,

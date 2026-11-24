@@ -7,7 +7,9 @@
 
 use async_trait::async_trait;
 
-use crate::refresh_adapters::{HttpProbeResponse, HttpResponse, HttpTransport, RefreshError};
+use crate::refresh_adapters::{
+    BoundedHttpResponse, HttpProbeResponse, HttpResponse, HttpTransport, RefreshError,
+};
 
 // Token/profile replies are small JSON objects; GitHub installation discovery is
 // the larger, list-shaped reply. One MiB leaves headroom for token strings and
@@ -62,7 +64,7 @@ impl ReqwestTransport {
         headers: &[(&str, &str)],
         content_type: &str,
         body: Vec<u8>,
-    ) -> Result<HttpResponse, RefreshError> {
+    ) -> Result<reqwest::Response, RefreshError> {
         let mut req = self
             .client
             .request(method, url)
@@ -71,11 +73,9 @@ impl ReqwestTransport {
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
-        let resp = req
-            .send()
+        req.send()
             .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?;
-        read_response(resp).await
+            .map_err(|e| RefreshError::Transport(e.to_string()))
     }
 
     async fn send_get(
@@ -102,8 +102,27 @@ impl HttpTransport for ReqwestTransport {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError> {
-        self.send_body(reqwest::Method::POST, url, headers, content_type, body)
-            .await
+        read_response(
+            self.send_body(reqwest::Method::POST, url, headers, content_type, body)
+                .await?,
+        )
+        .await
+    }
+
+    async fn post_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        read_bounded_response(
+            self.send_body(reqwest::Method::POST, url, headers, content_type, body)
+                .await?,
+            max,
+        )
+        .await
     }
 
     async fn put(
@@ -113,8 +132,27 @@ impl HttpTransport for ReqwestTransport {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError> {
-        self.send_body(reqwest::Method::PUT, url, headers, content_type, body)
-            .await
+        read_response(
+            self.send_body(reqwest::Method::PUT, url, headers, content_type, body)
+                .await?,
+        )
+        .await
+    }
+
+    async fn put_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        read_bounded_response(
+            self.send_body(reqwest::Method::PUT, url, headers, content_type, body)
+                .await?,
+            max,
+        )
+        .await
     }
 
     async fn patch(
@@ -124,8 +162,11 @@ impl HttpTransport for ReqwestTransport {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError> {
-        self.send_body(reqwest::Method::PATCH, url, headers, content_type, body)
-            .await
+        read_response(
+            self.send_body(reqwest::Method::PATCH, url, headers, content_type, body)
+                .await?,
+        )
+        .await
     }
 
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
@@ -164,22 +205,48 @@ impl HttpTransport for ReqwestTransport {
     }
 }
 
-async fn read_response(mut response: reqwest::Response) -> Result<HttpResponse, RefreshError> {
+async fn read_response(response: reqwest::Response) -> Result<HttpResponse, RefreshError> {
+    let reply = read_bounded_response(response, MAX_RESPONSE_BODY_BYTES).await?;
+    let body = reply
+        .body
+        .ok_or_else(|| RefreshError::Transport("provider response body exceeds one MiB".into()))?;
+    Ok(HttpResponse {
+        status: reply.status,
+        body,
+    })
+}
+
+async fn read_bounded_response(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<BoundedHttpResponse, RefreshError> {
     let status = response.status().as_u16();
+    let forbidden_rate_limited = status == 403
+        && (response
+            .headers()
+            .contains_key(reqwest::header::RETRY_AFTER)
+            || response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .is_some_and(|value| value == "0"));
+    let reply = |body| BoundedHttpResponse {
+        status,
+        body,
+        forbidden_rate_limited,
+    };
+    let max = max.min(MAX_RESPONSE_BODY_BYTES);
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|e| RefreshError::Transport(e.to_string()))?
     {
-        if chunk.len() > MAX_RESPONSE_BODY_BYTES - body.len() {
-            return Err(RefreshError::Transport(
-                "provider response body exceeds one MiB".into(),
-            ));
+        if chunk.len() > max - body.len() {
+            return Ok(reply(None));
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(HttpResponse { status, body })
+    Ok(reply(Some(body)))
 }
 
 #[cfg(test)]

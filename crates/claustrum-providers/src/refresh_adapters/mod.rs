@@ -169,6 +169,20 @@ pub trait HttpTransport: Send + Sync {
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
 
+    /// POST once, preserving the status even if the response body is too large.
+    async fn post_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        self.post(url, headers, content_type, body)
+            .await
+            .map(|response| BoundedHttpResponse::from_response(response, max))
+    }
+
     /// PUT an encoded body. Transports that do not support PUT refuse it.
     async fn put(
         &self,
@@ -180,6 +194,20 @@ pub trait HttpTransport: Send + Sync {
         Err(RefreshError::Transport(
             "HTTP PUT is unsupported by this transport".into(),
         ))
+    }
+
+    /// PUT once, preserving the status even if the response body is too large.
+    async fn put_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+        max: usize,
+    ) -> Result<BoundedHttpResponse, RefreshError> {
+        self.put(url, headers, content_type, body)
+            .await
+            .map(|response| BoundedHttpResponse::from_response(response, max))
     }
 
     /// PATCH an encoded body. Transports that do not support PATCH refuse it.
@@ -230,6 +258,24 @@ pub trait HttpTransport: Send + Sync {
 pub struct HttpProbeResponse {
     pub status: u16,
     pub header: Option<Vec<u8>>,
+}
+
+pub struct BoundedHttpResponse {
+    pub status: u16,
+    /// Missing only when the body exceeded the caller's limit.
+    pub body: Option<Vec<u8>>,
+    /// A forbidden response carried a positive rate-limit signal.
+    pub forbidden_rate_limited: bool,
+}
+
+impl BoundedHttpResponse {
+    pub fn from_response(response: HttpResponse, max: usize) -> Self {
+        Self {
+            status: response.status,
+            body: (response.body.len() <= max).then_some(response.body),
+            forbidden_rate_limited: false,
+        }
+    }
 }
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a

@@ -77,23 +77,24 @@ function decodeWithCondition(condition: unknown) {
   const { result } = CONDITION_SURFACES.listing_condition
   return decodeScopedInventory({ result: {
     ...result, credentials: [{ ...result.credentials[0], condition }],
-  } }, () => {}).rows[0]!
+  } }, () => {})
 }
 
 test('scoped login conditions accept an unknown reason and both safe since_ms endpoints', () => {
   const reason = 'future_provider_condition'
   for (const sinceMs of [0, 2 ** 53 - 1]) {
-    expect(decodeWithCondition({ reason, since_ms: sinceMs }).condition).toEqual({ reason, sinceMs })
+    expect(decodeWithCondition({ reason, since_ms: sinceMs }).rows[0]?.condition).toEqual({ reason, sinceMs })
   }
 })
 
 test('scoped login conditions refuse malformed fields and out-of-range since_ms', () => {
   const reason = 'provider_verification_required'
+  const rejected = { rows: [], undecodableRows: ['oauth:antigravity:condition-fixture: invalid_response'] }
   for (const since_ms of [-1, 2 ** 53, 0.5, '7', undefined]) {
-    expect(() => decodeWithCondition({ reason, since_ms })).toThrow('invalid_response')
+    expect(decodeWithCondition({ reason, since_ms })).toMatchObject(rejected)
   }
   for (const condition of [null, [], { reason: 5, since_ms: 7 }]) {
-    expect(() => decodeWithCondition(condition)).toThrow('invalid_response')
+    expect(decodeWithCondition(condition)).toMatchObject(rejected)
   }
 })
 
@@ -138,7 +139,7 @@ describe('list_scoped decoding', () => {
     const { client } = await clientWith([{ result: { credentials: [withoutId], grants: 1, view: 'v1' } }])
     // A nameless row would be routed against by SOMETHING -- whichever field the consumer
     // happened to trust -- so failing closed is the only safe outcome.
-    expect(await throwerOf(client.listScoped())).toThrow()
+    expect(await client.listScoped()).toMatchObject({ rows: [], undecodableRows: ['row 0: invalid_response'] })
   })
 
   test('a non-integer record_version is refused, because it is a comparison cursor', async () => {
@@ -147,14 +148,14 @@ describe('list_scoped decoding', () => {
     ])
     // A version that decodes to NaN compares false against everything, so a consumer's
     // "has this changed" check would answer no forever.
-    expect(await throwerOf(client.listScoped())).toThrow()
+    expect(await client.listScoped()).toMatchObject({ rows: [], undecodableRows: ['oauth:anthropic: invalid_record_version'] })
   })
 
   test('a categories array holding a non-string is refused, not silently coerced', async () => {
     const { client } = await clientWith([
       { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: 1, view: 'v1' } },
     ])
-    expect(await throwerOf(client.listScoped())).toThrow()
+    expect(await client.listScoped()).toMatchObject({ rows: [], undecodableRows: ['oauth:anthropic: invalid_response'] })
   })
 })
 

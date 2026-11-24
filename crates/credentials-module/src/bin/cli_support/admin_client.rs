@@ -275,7 +275,7 @@ async fn challenge(
     if let Err(e) = write_frame(stream, &frame).await {
         return Err(RpcFail::Transport(format!("write admin.challenge: {e}")));
     }
-    let resp = route_client::read_route_response(stream, 100)
+    let resp = route_client::read_route_response(stream, route_channel, route_epoch, 100)
         .await
         .map_err(RpcFail::Transport)?;
     if resp.header.ty == FrameType::Error {
@@ -328,7 +328,7 @@ async fn admin_op(
         // Failed BEFORE the bytes left us: safe to treat as not-dispatched.
         return RouteCommit::NoLiveModule(format!("write admin.op: {e}"));
     }
-    match route_client::read_route_response(stream, 101).await {
+    match route_client::read_route_response(stream, route_channel, route_epoch, 101).await {
         Ok(resp) if resp.header.ty == FrameType::Error => {
             RouteCommit::Refused(route_client::error_reason(&resp.body))
         }

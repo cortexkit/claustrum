@@ -90,7 +90,7 @@ test('list_scoped preserves the producer App ID string and rejects malformed Git
       null,
     ]) {
       row.github_app = malformed
-      expect(await rejectionOf(client.listScoped())).toMatchObject({ code: 'invalid_response' })
+      expect(await client.listScoped()).toMatchObject({ rows: [], undecodableRows: [`${row.id}: invalid_response`] })
     }
   } finally {
     client.close()
@@ -124,7 +124,7 @@ test('list_scoped decodes the learned organization sample and refuses malformed 
     }
     for (const malformed of [null, 7, '', 'a'.repeat(129), 'a/b', 'id\n', 'id\u200b']) {
       row.org_id = malformed
-      expect(await rejectionOf(client.listScoped())).toMatchObject({ code: 'invalid_response' })
+      expect(await client.listScoped()).toMatchObject({ rows: [], undecodableRows: [`${row.id}: invalid_response`] })
     }
   } finally {
     client.close()

@@ -91,10 +91,12 @@ pub enum RefusalKind {
 impl RefusalKind {
     /// Classify from Apple's status and reason string.
     ///
-    /// Reason is checked BEFORE status, because status alone is ambiguous — 400
-    /// covers a bad device token, a disallowed topic, and a malformed payload, which
-    /// have three different remedies.
+    /// A 429 is transient unless it calls for reusing the provider token. For other
+    /// statuses, the reason distinguishes remedies that share a status code.
     pub fn classify(status: u16, reason: &str) -> Self {
+        if status == 429 && reason != "TooManyProviderTokenUpdates" {
+            return RefusalKind::Transient;
+        }
         match reason {
             "ExpiredProviderToken" | "InvalidProviderToken" | "MissingProviderToken" => {
                 RefusalKind::ProviderToken
@@ -161,29 +163,8 @@ pub const MUTABLE_CONTENT_KEY: &str = "mutable-content";
 /// Not base64url: the blob rides as a JSON string value, so the URL-safe alphabet
 /// buys nothing and would be rejected by a strict standard-alphabet decoder.
 fn base64_standard(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Compose the APNs JSON body carrying a sealed blob.
@@ -383,6 +364,19 @@ mod tests {
     /// A 200 is acceptance; anything else carries Apple's own reason through to the
     /// classifier. The unparseable-body arm is the one worth having: a body this code
     /// cannot read must not resolve to a known reason.
+    #[test]
+    fn throttle_is_transient_without_a_recognized_reason() {
+        for body in ["", "{", r#"{"reason":"UnfamiliarReason"}"#] {
+            assert!(matches!(
+                classify_response(429, None, body),
+                SubmitOutcome::Refused {
+                    detail: RefusalKind::Transient,
+                    ..
+                }
+            ));
+        }
+    }
+
     #[test]
     fn responses_classify_by_status_and_reason() {
         assert_eq!(

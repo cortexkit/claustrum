@@ -336,17 +336,10 @@ pub struct HttpResponse {
     /// `Secret` CAN REACH. *** A refresh response body IS the new access token and
     /// often a new refresh token, in the clear, in a `Vec<u8>` nothing zeroizes.
     ///
-    /// It is deliberately NOT wrapped, because wrapping it would be theatre while the
-    /// layer above stays bare. The chain on a single refresh is:
-    ///
-    ///   reqwest's internal buffer   NOT under our control at all
-    ///   `.bytes().to_vec()`         a second copy, made in http.rs
-    ///   this field                  a third
-    ///   the adapter's response struct   a fourth, per token field
-    ///
-    /// Wrapping the last two while the first two stay bare would let a reader conclude
-    /// the refresh path is scrubbed when the earliest and longest-lived copies are
-    /// untouched. Closing this properly means owning the HTTP buffer, which means not
+    /// The HTTP transport assembles reqwest's body chunks in a bounded `Vec` and
+    /// moves it here. The adapter then decodes token fields from that buffer.
+    /// Wrapping these later copies would not scrub reqwest's own buffers.
+    /// Closing this properly means owning the HTTP buffer, which means not
     /// using reqwest — a real change with its own tradeoffs, not a wrapper.
     ///
     /// WHAT IS SCRUBBED TODAY, so the boundary is legible: the credential at rest, and
@@ -597,6 +590,51 @@ mod token_response_rules {
             }
         }
     }
+    #[tokio::test]
+    async fn empty_refresh_rotation_preserves_the_old_grant() {
+        for adapter in [
+            Box::new(anthropic::AnthropicAdapter::new()) as Box<dyn RefreshAdapter>,
+            Box::new(openai::OpenAiAdapter::new()),
+            Box::new(google::GoogleAdapter::with_client("c", "s")),
+        ] {
+            let cred = credential();
+            for body in [
+                r#"{"access_token":"new","expires_in":60,"refresh_token":""}"#,
+                r#"{"access_token":"new","expires_in":60}"#,
+            ] {
+                let result = adapter
+                    .refresh(&cred, &FixtureTransport::ok(200, body))
+                    .await
+                    .unwrap();
+                assert!(
+                    result.refresh_token == cred.refresh_token,
+                    "{}",
+                    adapter.name()
+                );
+                assert!(result.access_token.expose() == "new", "{}", adapter.name());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_unauthorized_and_invalid_grant_require_sign_in() {
+        for (status, body) in [
+            (401, r#"{"error":{"message":"unauthorized"}}"#),
+            (400, r#"{"error":"invalid_grant"}"#),
+            (400, r#"{"error":{"code":"invalid_grant"}}"#),
+        ] {
+            assert!(
+                matches!(
+                    openai::OpenAiAdapter::new()
+                        .refresh(&credential(), &FixtureTransport::ok(status, body))
+                        .await,
+                    Err(RefreshError::InvalidGrant(_))
+                ),
+                "status {status}, fixture {body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn openai_dead_refresh_codes_accept_three_envelope_shapes() {
         for code in [

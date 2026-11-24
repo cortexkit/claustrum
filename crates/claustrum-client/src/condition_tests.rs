@@ -244,6 +244,38 @@ mod dispatch {
     }
 
     #[tokio::test]
+    async fn legacy_request_can_receive_a_reply_after_the_open_timeout() {
+        let (listener, resolver) = rig().await;
+        let mut call = Box::pin(resolver.get_scoped("id"));
+        let receive = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (frame, _) = request(&mut stream).await;
+            (stream, frame)
+        };
+        let (mut stream, frame) = tokio::select! {
+            pair = receive => pair,
+            _ = &mut call => panic!("credential replied before the server received the request"),
+        };
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "a reply must still be accepted after the route-open timeout"
+        );
+        reply(
+            &mut stream,
+            &frame,
+            FrameType::Response,
+            &json!({"result": {"payload": [65], "record_version": 1}}),
+        )
+        .await;
+        tokio::time::resume();
+        assert!(call.await.unwrap().expose() == b"A");
+    }
+
+    #[tokio::test]
     async fn condition_calls_forward_enrollment_and_leave_status_and_link_checks_to_the_vault() {
         const LINK: &str = "not an absolute URL?account=private-query-value";
         let (listener, resolver) = rig().await;

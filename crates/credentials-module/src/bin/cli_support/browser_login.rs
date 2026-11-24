@@ -3,7 +3,7 @@
 use std::io::{IsTerminal, Write};
 use std::process::{Command, Stdio};
 
-use credentials_core::oauth_login::{parse_callback, Callback};
+use credentials_core::oauth_login::Callback;
 
 use crate::{has_flag, login_listener, no_local_display, optional, CliError};
 
@@ -232,12 +232,11 @@ pub(super) fn pasted_lines() -> tokio::sync::mpsc::Receiver<std::io::Result<Stri
         if tx.is_closed() {
             break;
         }
-        let mut line = String::new();
-        let read = std::io::stdin().read_line(&mut line);
-        if matches!(read, Ok(0)) {
-            break;
-        }
-        let line = read.map(|_| line);
+        let line = match read_pasted_line() {
+            Ok(Some(line)) => Ok(line),
+            Ok(None) => break,
+            Err(error) => Err(error),
+        };
         let failed = line.is_err();
         if tx.blocking_send(line).is_err() || failed {
             break;
@@ -246,16 +245,78 @@ pub(super) fn pasted_lines() -> tokio::sync::mpsc::Receiver<std::io::Result<Stri
     rx
 }
 
-fn validated_callback(raw: &str, expected_state: &str) -> Result<Callback, &'static str> {
-    match parse_callback(raw) {
-        Some(callback) if callback.state == expected_state => Ok(callback),
-        Some(_) => Err("The callback state does not match this login. Paste the callback from the URL above."),
-        None => Err("Could not parse the login callback. Paste the complete callback URL or code and state."),
+/// Keep echo disabled until the browser or the paste wins. The guard lives on
+/// the caller, not the reader thread, because an idle read cannot be cancelled.
+pub(super) struct HiddenPaste {
+    #[cfg(unix)]
+    original: Option<rustix::termios::Termios>,
+}
+
+impl HiddenPaste {
+    pub(super) fn begin() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions};
+            let stdin = std::io::stdin();
+            if !stdin.is_terminal() {
+                return Ok(Self { original: None });
+            }
+            let original = tcgetattr(&stdin)?;
+            let mut hidden = original.clone();
+            hidden
+                .local_modes
+                .remove(LocalModes::ECHO | LocalModes::ECHONL);
+            tcsetattr(&stdin, OptionalActions::Now, &hidden)?;
+            Ok(Self {
+                original: Some(original),
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {})
     }
+}
+
+#[cfg(unix)]
+impl Drop for HiddenPaste {
+    fn drop(&mut self) {
+        if let Some(ref original) = self.original {
+            let _ = rustix::termios::tcsetattr(
+                std::io::stdin(),
+                rustix::termios::OptionalActions::Now,
+                original,
+            );
+        }
+    }
+}
+
+fn read_pasted_line() -> std::io::Result<Option<String>> {
+    let stdin = std::io::stdin();
+    #[cfg(not(unix))]
+    if stdin.is_terminal() {
+        let mut term = console::Term::stdout();
+        if !term.is_term() {
+            term = console::Term::stderr();
+        }
+        if !term.is_term() {
+            return Err(std::io::Error::other(
+                "hidden callback input needs a console output",
+            ));
+        }
+        return term.read_secure_line().map(Some);
+    }
+    let mut line = String::new();
+    Ok((stdin.read_line(&mut line)? != 0).then_some(line))
+}
+
+pub(super) fn read_pasted_callback(prompt: &str) -> std::io::Result<String> {
+    let _hidden = HiddenPaste::begin()?;
+    println!("{prompt}");
+    read_pasted_line().map(Option::unwrap_or_default)
 }
 
 pub async fn read_callback(
     listener: Option<login_listener::CallbackListener>,
+    redirect_uri: &str,
     prompt: &str,
     expected_state: &str,
 ) -> Result<Callback, CliError> {
@@ -274,7 +335,10 @@ pub async fn read_callback(
         prompt
     }
     .replace(" — ", ", ");
+    let _hidden =
+        HiddenPaste::begin().map_err(|e| CliError::Io(format!("hiding callback input: {e}")))?;
     println!("{prompt}");
+    let path = login_listener::callback_path(redirect_uri);
     let mut listening = listener.is_some();
     // Keep the browser future alive across rejected pastes. A bad line must not
     // cancel an HTTP callback that is still arriving in several TCP packets.
@@ -282,11 +346,10 @@ pub async fn read_callback(
         let listener = listener?;
         tokio::time::timeout(login_listener::LISTEN_TIMEOUT, async {
             loop {
-                if let Some(raw) = login_listener::receive_code(&listener).await {
-                    match validated_callback(&raw, expected_state) {
-                        Ok(callback) => return callback,
-                        Err(reason) => println!("{reason}\n{prompt}"),
-                    }
+                match login_listener::receive_code(&listener, path, expected_state).await {
+                    Ok(Some(callback)) => return callback,
+                    Ok(None) => (),
+                    Err(reason) => println!("{reason}\n{prompt}"),
                 }
             }
         })
@@ -320,7 +383,7 @@ pub async fn read_callback(
                 continue;
             }
         };
-        match validated_callback(&raw, expected_state) {
+        match login_listener::validated_callback(&raw, expected_state) {
             Ok(callback) => return Ok(callback),
             Err(reason) => println!("{reason}"),
         }

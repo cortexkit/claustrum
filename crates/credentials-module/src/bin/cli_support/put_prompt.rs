@@ -195,14 +195,18 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
     Ok(true)
 }
 
-pub(super) fn payload() -> Result<Vec<u8>, CliError> {
+pub(super) fn payload(is_cookie: bool) -> Result<Vec<u8>, CliError> {
     loop {
         let value = Password::with_theme(&ColorfulTheme::default())
             .with_prompt("Value (hidden)")
             .allow_empty_password(true)
             .interact()
             .map_err(prompt_error)?;
-        let value = value.trim();
+        let value = if is_cookie {
+            value.as_str()
+        } else {
+            value.trim()
+        };
         if !value.is_empty() {
             return Ok(value.as_bytes().to_vec());
         }

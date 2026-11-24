@@ -417,9 +417,8 @@ and name prompts and paste only the value (`--kind` still defaults to `api_key`,
 cookie ids).
 
 For scripts, keep `--id` and `--payload-file <path>` so the secret never appears in the
-process list or shell history. File input strips trailing whitespace for non-cookie
-records (including spaces and tabs, unlike shell command substitution), while cookie
-file bytes are kept exactly:
+process list or shell history. Key files lose surrounding whitespace. Cookie files
+and cookies entered in the hidden prompt keep their surrounding whitespace:
 
 ```sh
 ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key

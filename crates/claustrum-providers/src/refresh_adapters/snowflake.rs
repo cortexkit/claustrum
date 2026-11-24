@@ -57,12 +57,7 @@ pub fn default_id(account: &str) -> Result<String, String> {
 /// Require the account-bearing id before a login can mint a Snowflake record.
 pub fn validate_credential_id(account: &str, id: &str) -> Result<(), String> {
     let default = default_id(account)?;
-    let valid = id == default
-        || id
-            .strip_prefix(&default)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .is_some_and(|label| !label.is_empty() && !label.contains(':'));
-    if valid {
+    if crate::oauth_login::login_id_is_valid(&default, id) {
         Ok(())
     } else {
         Err(format!(
@@ -133,7 +128,7 @@ pub async fn exchange_authorization_code(
     Ok(LoginTokens {
         access_token: parsed.access_token,
         refresh_token,
-        expires_at_ms: Some(now_ms.saturating_add(parsed.expires_in.saturating_mul(1000))),
+        expires_at_ms: crate::oauth_login::relative_expiry_ms(now_ms, Some(parsed.expires_in)),
         id_token: None,
         account: None,
         organization: None,
@@ -169,7 +164,7 @@ impl RefreshAdapter for SnowflakeAdapter {
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
         if cred.token_url.is_empty() {
-            return Err(RefreshError::Decode(
+            return Err(RefreshError::InvalidGrant(
                 "Snowflake credential has no account-specific token URL".into(),
             ));
         }
@@ -195,8 +190,9 @@ impl RefreshAdapter for SnowflakeAdapter {
                         .refresh_token
                         .map(Into::into)
                         .unwrap_or_else(|| cred.refresh_token.clone()),
-                    expires_at_ms: Some(
-                        now_ms().saturating_add(parsed.expires_in.saturating_mul(1000)),
+                    expires_at_ms: crate::oauth_login::relative_expiry_ms(
+                        now_ms(),
+                        Some(parsed.expires_in),
                     ),
                     github_app_permissions: None,
                 })
@@ -325,6 +321,52 @@ mod tests {
             String::from_utf8(request.body.clone()).unwrap(),
             "grant_type=refresh_token&refresh_token=old-refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_without_an_account_url_requires_sign_in() {
+        let mut cred = cred();
+        cred.token_url.clear();
+        let http = FixtureTransport::new(vec![]);
+        assert!(matches!(
+            SnowflakeAdapter::new().refresh(&cred, &http).await,
+            Err(RefreshError::InvalidGrant(_))
+        ));
+        assert!(http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_ignores_a_negative_lifetime() {
+        let http = FixtureTransport::ok(200, r#"{"access_token":"new","expires_in":-1}"#);
+        let result = SnowflakeAdapter::new()
+            .refresh(&cred(), &http)
+            .await
+            .unwrap();
+        assert_eq!(result.expires_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn exchange_ignores_a_negative_lifetime() {
+        let http = FixtureTransport::ok(
+            200,
+            r#"{"access_token":"new","refresh_token":"renewal","expires_in":-1}"#,
+        );
+        let callback = Callback {
+            code: "code".into(),
+            state: "state".into(),
+        };
+        let result = exchange_authorization_code(
+            &http,
+            &token_url("acme").unwrap(),
+            "unused",
+            &callback,
+            "state",
+            "verifier",
+            5000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.expires_at_ms, None);
     }
 
     #[tokio::test]

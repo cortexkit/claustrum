@@ -119,6 +119,20 @@ describe('the client speaks the producer-pinned wire', () => {
     expect(github.authMethod).toBeUndefined()
   })
 
+  test('keeps healthy inventory rows alongside an unfamiliar row', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { reply?: string })[]
+    }
+    const reply = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!
+    const response = JSON.parse(reply)
+    response.result.credentials[1].plan_tier = 'future-tier!'
+    const inventory = decodeScopedInventory(response, () => {})
+    expect(inventory.rows.map(({ id }) => id)).toEqual([
+      'antigravity:google', 'chatgpt:openai', 'github_app:plex-alfonso', 'oauth:anthropic',
+    ])
+    expect(inventory).toMatchObject({ undecodableRows: ['apikey:openrouter: invalid_response'] })
+  })
+
   for (const [field, invalidValues] of [
     ['provider_ids', [null, 'aa', ['aa', 7]]],
     ['auth_method', [null, 7, '', 'unknown']],
@@ -134,7 +148,9 @@ describe('the client speaks the producer-pinned wire', () => {
         const response = JSON.parse(reply)
         if (invalid === undefined) delete response.result.credentials[1][field]
         else response.result.credentials[1][field] = invalid
-        expect(() => decodeScopedInventory(response, () => {})).toThrow()
+        const inventory = decodeScopedInventory(response, () => {})
+        expect(inventory.rows).toHaveLength(response.result.credentials.length - 1)
+        expect(inventory.undecodableRows).toEqual(['apikey:openrouter: invalid_response'])
       })
     }
   }

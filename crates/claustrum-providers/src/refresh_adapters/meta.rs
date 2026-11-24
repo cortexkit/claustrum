@@ -309,7 +309,7 @@ impl RefreshAdapter for MetaAdapter {
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
         let session: MetaSession = serde_json::from_str(cred.refresh_token.expose())
-            .map_err(|_| RefreshError::Decode("invalid vaulted Meta session".into()))?;
+            .map_err(|_| RefreshError::InvalidGrant("invalid vaulted Meta session".into()))?;
         let minted = mint_key(&session.identity_token, http).await?;
         Ok(RefreshedTokens {
             access_token: minted.key,

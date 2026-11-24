@@ -303,6 +303,7 @@ impl RefreshAdapter for CursorAdapter {
                     expires_at_ms: Some(access_token_expiry_ms(&parsed.access_token, now_ms())),
                     refresh_token: parsed
                         .refresh_token
+                        .filter(|token| !token.is_empty())
                         .map(Into::into)
                         .unwrap_or_else(|| cred.refresh_token.clone()),
                     access_token: parsed.access_token.into(),
@@ -619,6 +620,15 @@ mod tests {
             request.headers,
             vec![("Authorization".into(), "Bearer old-refresh".into())]
         );
+    }
+
+    #[tokio::test]
+    async fn empty_refresh_rotation_preserves_cursor_grant() {
+        let cred = cred();
+        let http = FixtureTransport::ok(200, r#"{"accessToken":"new-access","refreshToken":""}"#);
+        let tokens = CursorAdapter::new().refresh(&cred, &http).await.unwrap();
+        assert!(tokens.refresh_token == cred.refresh_token);
+        assert!(tokens.access_token.expose() == "new-access");
     }
 
     #[tokio::test]

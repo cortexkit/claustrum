@@ -370,6 +370,61 @@ fn unchecked_provider_opt_in_and_explicit_replace_skip_their_resolved_prompts() 
 }
 
 #[test]
+fn interactive_cookie_keeps_surrounding_whitespace() {
+    let fixture = Fixture::new();
+    let id = "cookie:example.com:work";
+    fixture.terminal(
+        &["put", "--id", id],
+        &[("Value (hidden)", b"  sid=fixture \r", true)],
+    );
+    assert!(fixture.store().get(id).unwrap().payload.expose() == b"  sid=fixture ");
+}
+
+#[test]
+fn non_cookie_key_file_trims_whitespace_at_both_ends() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("fixture.key");
+    std::fs::write(&path, b" \tfixture\r\n").unwrap();
+    let id = "apikey:openai";
+    let out = fixture
+        .command(&["put", "--id", id, "--payload-file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(fixture.store().get(id).unwrap().payload.expose() == b"fixture");
+}
+
+#[test]
+fn oauth_callback_paste_does_not_echo() {
+    let fixture = Fixture::new();
+    let (status, screen) = terminal_cli::run(
+        fixture.command(&[
+            "login",
+            "--provider",
+            "anthropic",
+            "--approve-on",
+            "other",
+            "--no-listener",
+            "--no-browser",
+        ]),
+        &[
+            (
+                "paste it here, then Enter:",
+                b"synthetic-paste-canary\r",
+                false,
+            ),
+            ("paste it here, then Enter:", b"\x04", false),
+        ],
+    );
+    assert!(screen.contains("Could not parse the login callback"));
+    assert!(
+        !screen.contains("synthetic-paste-canary"),
+        "pasted callback was echoed"
+    );
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
 fn cookie_picker_builds_domain_and_account_and_explicit_kinds_skip_the_picker() {
     let fixture = Fixture::new();
     let screen = fixture.terminal(

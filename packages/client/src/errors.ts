@@ -53,6 +53,9 @@ export function asCredentialError(
   logUnknownClass: UnknownClassLogger = (errorClass) => console.warn(errorClass),
 ): ClaustrumCredentialError {
   const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+  if (!result || !Object.hasOwn(result, 'error')) {
+    return new ClaustrumCredentialError(fallbackCode, 'permanent', 'gone')
+  }
   const error = result && isRecord(result.error) ? result.error : undefined
   const rawClass = error?.class
   const rawCode = error?.code
@@ -79,6 +82,6 @@ export function hasCredentialError(response: unknown): boolean {
   return (
     isRecord(response) &&
     isRecord(response.result) &&
-    isRecord(response.result.error)
+    Object.hasOwn(response.result, 'error')
   )
 }

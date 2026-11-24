@@ -746,13 +746,6 @@ impl ScopedDescriptor {
         }
         ScopedKeyDescriptor::for_id(credential_id, providers).map(Self::Key)
     }
-
-    fn into_hosts(self) -> Vec<String> {
-        match self {
-            Self::Key(descriptor) => descriptor.hosts,
-            Self::Login { hosts } => hosts.iter().map(|host| (*host).into()).collect(),
-        }
-    }
 }
 
 impl ScopedKeyDescriptor {
@@ -2501,19 +2494,56 @@ fn project_list_scoped_with_providers(
                 .identity
                 .map(|identity| (identity.account_id, identity.email, identity.org_name))
                 .unwrap_or((None, None, None));
-            ListScopedCredential {
-                fusiform_provider_id: if gateway.is_some() {
+            let (fusiform_provider_id, hosts, serves) = if let Some(gateway) = gateway {
+                (
+                    None,
+                    Some(vec![gateway.host.clone()]),
+                    vec![gateway.vendor.as_str().to_owned()],
+                )
+            } else {
+                let catalog = credentials_core::catalog::inventory_provider(&row.id, login_adapter);
+                let registered = if catalog.catalogued {
                     None
-                } else if let Some(provider) =
-                    credentials_core::catalog::api_key_provider_for_credential(&row.id)
-                {
-                    provider.fusiform_provider_id.map(str::to_owned)
                 } else {
-                    credentials_core::store::RegisteredProvider::for_id(providers, &row.id)
-                        .and_then(|provider| provider.fusiform_provider_id.clone())
-                },
-                hosts: ScopedDescriptor::for_record(&row.id, login_adapter, gateway, providers)
-                    .map(ScopedDescriptor::into_hosts),
+                    credentials_core::store::RegisteredProvider::for_uncatalogued_id(
+                        providers, &row.id,
+                    )
+                };
+                let fusiform = match catalog.api_key {
+                    Some(key) => key.fusiform_provider_id.map(str::to_owned),
+                    None => registered.and_then(|provider| provider.fusiform_provider_id.clone()),
+                };
+                let hosts = catalog
+                    .login_hosts
+                    .or_else(|| {
+                        catalog
+                            .api_key
+                            .filter(|key| key.auth.is_some() && !key.hosts.is_empty())
+                            .map(|key| key.hosts)
+                    })
+                    .map(|hosts| hosts.iter().map(|host| (*host).into()).collect())
+                    .or_else(|| {
+                        registered
+                            .filter(|key| {
+                                !key.hosts.is_empty()
+                                    && key.auth_header.is_some()
+                                    && key.auth_scheme.is_some()
+                            })
+                            .map(|key| key.hosts.clone())
+                    });
+                (
+                    fusiform,
+                    hosts,
+                    catalog
+                        .serves
+                        .iter()
+                        .map(|vendor| vendor.as_str().to_owned())
+                        .collect(),
+                )
+            };
+            ListScopedCredential {
+                fusiform_provider_id,
+                hosts,
                 provider: row.provider,
                 github_app: row.github_app,
                 condition: conditions
@@ -2524,15 +2554,7 @@ fn project_list_scoped_with_providers(
                 plan_tier_observed_at_ms: row.plan_tier_observed_at_ms,
                 plan_tier_since_ms: row.plan_tier_since_ms,
                 credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
-                serves: gateway.map_or_else(
-                    || {
-                        credentials_core::catalog::serves_for(&row.id)
-                            .iter()
-                            .map(|vendor| vendor.as_str().to_string())
-                            .collect()
-                    },
-                    |gateway| vec![gateway.vendor.as_str().to_string()],
-                ),
+                serves,
                 refresh_adapter: row.refresh_adapter.clone(),
                 id: row.id,
                 categories: row.categories,
@@ -6321,6 +6343,91 @@ mod list_scoped_tests {
                 assert!(wire.get("plan_tier_source").is_none());
             }
         }
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn inventory_projects_each_credential_with_one_catalog_lookup() {
+        use credentials_core::catalog::take_catalog_lookups;
+        let registered = credentials_core::store::RegisteredProvider {
+            service: "custom".into(),
+            categories: vec![],
+            provider_ids: vec![],
+            created_at_ms: 1,
+            hosts: vec!["localhost".into()],
+            auth_header: Some("authorization".into()),
+            auth_scheme: Some("bearer".into()),
+            fusiform_provider_id: Some("custom-card".into()),
+        };
+        for (id, card, hosts) in [
+            (
+                "apikey:openai:work",
+                Some("openai"),
+                Some(vec!["api.openai.com".into()]),
+            ),
+            (
+                "apikey:custom:work",
+                Some("custom-card"),
+                Some(vec!["localhost".into()]),
+            ),
+            ("apikey:unknown", None, None),
+        ] {
+            let snapshot = ScopedListSnapshot {
+                rows: vec![row(
+                    id,
+                    &[],
+                    RecordState::Active,
+                    &[GrantOperation::Read],
+                    None,
+                )],
+                grants: vec![],
+            };
+            take_catalog_lookups();
+            let result = project_list_scoped_with_providers(
+                snapshot,
+                std::slice::from_ref(&registered),
+                &HashMap::new(),
+                HashMap::new(),
+            );
+            let listed = &result.credentials[0];
+            assert_eq!(listed.fusiform_provider_id.as_deref(), card);
+            assert_eq!(listed.hosts, hosts);
+            assert_eq!(take_catalog_lookups(), 1, "{id}");
+        }
+        let id = "apikey:openai-gw-local";
+        let snapshot = ScopedListSnapshot {
+            rows: vec![row(
+                id,
+                &[],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                None,
+            )],
+            grants: vec![],
+        };
+        let gateways = HashMap::from([(
+            id.to_string(),
+            credentials_core::StoredGatewaySettings {
+                incarnation: snapshot.rows[0].incarnation.clone(),
+                settings: credentials_core::gateway::GatewaySettings {
+                    base_url: "http://localhost:4000".into(),
+                    auth: credentials_core::gateway::GatewayAuth {
+                        header: "authorization".into(),
+                        scheme: "bearer".into(),
+                    },
+                    headers: vec![],
+                },
+                host: "localhost".into(),
+                vendor: credentials_core::catalog::ModelVendor::OpenAI,
+            },
+        )]);
+        take_catalog_lookups();
+        let result = project_list_scoped_with_providers(snapshot, &[], &gateways, HashMap::new());
+        let listed = &result.credentials[0];
+        assert_eq!(listed.fusiform_provider_id, None);
+        assert_eq!(listed.hosts, Some(vec!["localhost".into()]));
+        assert_eq!(listed.serves, ["openai"]);
+        assert_eq!(take_catalog_lookups(), 0);
     }
 
     #[test]

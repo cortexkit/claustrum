@@ -108,6 +108,11 @@ impl RegisteredProvider {
         if crate::catalog::provider(id).is_some() {
             return None;
         }
+        Self::for_uncatalogued_id(rows, id)
+    }
+
+    /// Find a registered key after the caller has already checked the catalog.
+    pub fn for_uncatalogued_id<'a>(rows: &'a [Self], id: &str) -> Option<&'a Self> {
         let service = api_key_service(id)?;
         rows.iter().find(|row| row.service == service)
     }

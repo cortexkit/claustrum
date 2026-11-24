@@ -3,7 +3,7 @@
 
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,7 +12,9 @@ use credentials_core::{
     agent_policy::{valid_app_slug, valid_github_app_agent},
     engine::RefreshEngine,
     http::ReqwestTransport,
-    refresh_adapters::{github_app::GithubAppAdapter, HttpResponse, HttpTransport},
+    refresh_adapters::{
+        github_app::GithubAppAdapter, BoundedHttpResponse, HttpResponse, HttpTransport,
+    },
     secret::{SecretBytes, SecretString},
     store::{
         GitHubAppCreation, GitHubAppRelay, GitHubAppRelayError, SecretHomeRole, StoreOpError,
@@ -40,6 +42,7 @@ const MAX_HOOK_REPLY_BYTES: usize = 8 * 1024;
 pub(super) struct GitHubAppAdmin {
     budget: Duration,
     transport: Option<Arc<dyn HttpTransport>>,
+    live_http: OnceLock<Result<Arc<dyn HttpTransport>, RelayFailure>>,
     machine_path: Option<PathBuf>,
     clock: Option<i64>,
 }
@@ -49,6 +52,7 @@ impl Default for GitHubAppAdmin {
         Self {
             budget: crate::federation::ADMIN_OP_BUDGET,
             transport: None,
+            live_http: OnceLock::new(),
             machine_path: None,
             clock: None,
         }
@@ -61,9 +65,14 @@ impl GitHubAppAdmin {
             Some(transport) => Ok(Arc::clone(transport)),
             // The shared transport does not follow redirects or forward the code,
             // bearer or secret to another destination.
-            None => Ok(Arc::new(
-                ReqwestTransport::new().map_err(|_| RelayFailure::Unavailable)?,
-            )),
+            None => self
+                .live_http
+                .get_or_init(|| {
+                    ReqwestTransport::new()
+                        .map(|http| Arc::new(http) as Arc<dyn HttpTransport>)
+                        .map_err(|_| RelayFailure::Unavailable)
+                })
+                .clone(),
         }
     }
 
@@ -129,11 +138,12 @@ impl GitHubAppAdmin {
             .relay_authorization(engine, http.as_ref(), deadline)
             .await?;
         let reply = http
-            .post(
+            .post_bounded(
                 RELAY_OPEN_URL,
                 &[("Authorization", authorization.expose().as_str())],
                 "application/json",
                 Vec::new(),
+                MAX_RELAY_REPLY_BYTES,
             )
             .await
             .map_err(|_| RelayFailure::Unavailable)?;
@@ -212,7 +222,7 @@ impl GitHubAppAdmin {
         ));
         let response = timeout_at(
             deadline,
-            http.post(
+            http.post_bounded(
                 url.expose(),
                 &[
                     ("Accept", "application/vnd.github+json"),
@@ -220,6 +230,7 @@ impl GitHubAppAdmin {
                 ],
                 "application/json",
                 Vec::new(),
+                MAX_CONVERSION_REPLY_BYTES,
             ),
         )
         .await;
@@ -228,9 +239,11 @@ impl GitHubAppAdmin {
         let Ok(Ok(response)) = response else {
             return refusal(CONVERSION_UNKNOWN);
         };
-        let body = SecretBytes::new(response.body);
+        let body = response.body.map(SecretBytes::new);
         match response.status {
             200..=299 => {}
+            429 => return refusal(CONVERSION_UNKNOWN),
+            403 if response.forbidden_rate_limited => return refusal(CONVERSION_UNKNOWN),
             400..=499 => {
                 return refusal(
                     "github_app_code_invalid/permanent: GitHub refused the manifest code",
@@ -238,6 +251,9 @@ impl GitHubAppAdmin {
             }
             _ => return refusal(CONVERSION_UNKNOWN),
         }
+        let Some(body) = body else {
+            return unsaved(None, None, "reply_invalid");
+        };
         let app = match read_conversion(body.expose(), slot.is_some()) {
             Ok(app) => app,
             Err(outcome) => return outcome,
@@ -258,15 +274,11 @@ impl GitHubAppAdmin {
     ) -> AdminOutcome {
         let id = format!("github_app:{}", app.slug);
         let unsaved = |cause| unsaved(Some(&app.slug), Some(app.id), cause);
-        if Instant::now() >= deadline {
-            return unsaved("busy");
-        }
+        // GitHub will not return the key again. Acquire an immediately available
+        // lock even at the deadline and finish the local write once locked.
         let Ok(_lock) = timeout_at(deadline, engine.acquire_admin_lock(&id)).await else {
             return unsaved("busy");
         };
-        if Instant::now() >= deadline {
-            return unsaved("busy");
-        }
         let relay = slot.zip(app.webhook_secret.as_ref());
         let material = GitHubAppCreation {
             slug: &app.slug,
@@ -329,11 +341,12 @@ impl GitHubAppAdmin {
         })
         .expect("string fields always serialize");
         let reply = http
-            .put(
+            .put_bounded(
                 &url,
                 &[("Authorization", authorization.expose().as_str())],
                 "application/json",
                 body,
+                MAX_RELAY_REPLY_BYTES,
             )
             .await
             .map_err(|_| RelayFailure::Unavailable)?;
@@ -673,10 +686,10 @@ struct RelayPut<'a> {
     webhook_secret: &'a str,
 }
 
-fn confirmed_put(response: HttpResponse) -> Result<(), RelayFailure> {
-    let body = SecretBytes::new(response.body);
+fn confirmed_put(response: BoundedHttpResponse) -> Result<(), RelayFailure> {
+    let body = response.body.map(SecretBytes::new);
     match response.status {
-        200 if body.expose().len() <= MAX_RELAY_REPLY_BYTES => Ok(()),
+        200 if body.is_some() => Ok(()),
         200..=299 => Err(RelayFailure::ReplyInvalid),
         401 | 403 => Err(RelayFailure::UnavailableForAccount),
         404 => Err(RelayFailure::SlotExpired),
@@ -740,7 +753,7 @@ struct SlotOpenReply {
     expires_at: String,
 }
 
-fn confirmed_slot(reply: HttpResponse) -> Result<SlotOpenReply, RelayFailure> {
+fn confirmed_slot(reply: BoundedHttpResponse) -> Result<SlotOpenReply, RelayFailure> {
     match reply.status {
         201 => {}
         401 | 403 | 404 => return Err(RelayFailure::UnavailableForAccount),
@@ -749,11 +762,9 @@ fn confirmed_slot(reply: HttpResponse) -> Result<SlotOpenReply, RelayFailure> {
         400..=499 => return Err(RelayFailure::RequestRefused),
         _ => return Err(RelayFailure::ReplyInvalid),
     }
-    if reply.body.len() > MAX_RELAY_REPLY_BYTES {
-        return Err(RelayFailure::ReplyInvalid);
-    }
+    let body = reply.body.ok_or(RelayFailure::ReplyInvalid)?;
     let slot: SlotOpenReply =
-        serde_json::from_slice(&reply.body).map_err(|_| RelayFailure::ReplyInvalid)?;
+        serde_json::from_slice(&body).map_err(|_| RelayFailure::ReplyInvalid)?;
     if !valid_relay_slot(&slot.slot)
         || slot.webhook_url != format!("{RELAY_WEBHOOK_BASE}/{}/webhook", slot.slot)
         || chrono::DateTime::parse_from_rfc3339(&slot.expires_at).is_err()

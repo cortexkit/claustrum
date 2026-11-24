@@ -5,7 +5,7 @@
 //! and exchanges that assertion for the installation token a consumer may use. The PEM
 //! is never copied into an HTTP request or returned as the credential payload.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -861,7 +861,8 @@ async fn check_github_repository_inner(
     let authorization = format!("Bearer {}", token.access_token.expose());
     let headers = GithubAppAdapter::auth_headers(&authorization);
     let mut total_count = None;
-    let mut seen = 0;
+    let mut entries = 0;
+    let mut seen = HashSet::new();
     for page_number in 1..=MAX_REPOSITORY_PAGES {
         let url = format!(
             "https://api.github.com/installation/repositories?per_page=100&page={page_number}"
@@ -891,24 +892,27 @@ async fn check_github_repository_inner(
             total_count = Some(page.total_count);
         }
         if total_count != Some(page.total_count)
-            || page.repositories.len() > page.total_count.saturating_sub(seen)
+            || page.repositories.len() > page.total_count.saturating_sub(entries)
         {
             return Ok(GithubRepositoryCheck::GithubUnavailable);
         }
         let page_len = page.repositories.len();
-        seen += page_len;
-        if let Some(entry) = page
-            .repositories
-            .into_iter()
-            .find(|entry| entry.full_name.eq_ignore_ascii_case(repo))
-        {
-            return Ok(GithubRepositoryCheck::Found {
-                full_name: entry.full_name,
-                installation_permissions: token.installation_permissions,
-            });
+        entries += page_len;
+        for entry in page.repositories {
+            if entry.full_name.eq_ignore_ascii_case(repo) {
+                return Ok(GithubRepositoryCheck::Found {
+                    full_name: entry.full_name,
+                    installation_permissions: token.installation_permissions,
+                });
+            }
+            seen.insert(entry.full_name.to_ascii_lowercase());
         }
-        if seen == page.total_count {
-            return Ok(GithubRepositoryCheck::NotInstalled);
+        if entries == page.total_count {
+            return Ok(if seen.len() == page.total_count {
+                GithubRepositoryCheck::NotInstalled
+            } else {
+                GithubRepositoryCheck::GithubUnavailable
+            });
         }
         // A short page is not a completeness signal: the transport has no Link header.
         // Even a non-empty tenth page cannot establish absence below total_count.

@@ -1,12 +1,17 @@
 use std::collections::BTreeMap;
 
-use super::{github_default_rule_set, AgentPolicy, Approval, Kind, PolicyError, RuleSet};
+use super::{
+    defaults::github_rule_set_for_release, AgentPolicy, Approval, Kind, PolicyError, RuleSet,
+};
 
 /// The signer accepts only the shipped release or an explicitly permitted reduction.
 /// Model parsing alone does not consult the vault's release defaults.
 pub(crate) fn validate_signer_rule_sets(policy: &AgentPolicy) -> Result<(), PolicyError> {
     for rules in policy.rule_sets.values() {
-        validate_narrowing(rules, &github_default_rule_set()?)?;
+        validate_narrowing(
+            rules,
+            &github_rule_set_for_release(&rules.source.release, &rules.source.sha256)?,
+        )?;
     }
     Ok(())
 }
@@ -15,19 +20,13 @@ fn validate_narrowing(rules: &RuleSet, default: &RuleSet) -> Result<(), PolicyEr
     let RuleSet {
         rule_set,
         revision,
-        source,
+        source: _,
         extractor,
         hosts,
         redirect_hosts,
         kinds,
         actions,
     } = rules;
-    if source.release != default.source.release {
-        return Err(PolicyError::UnknownDefaultRelease);
-    }
-    if source.sha256 != default.source.sha256 {
-        return Err(PolicyError::UnknownDefaultDigest);
-    }
     if rule_set != &default.rule_set
         || revision != &default.revision
         || extractor != &default.extractor

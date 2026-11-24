@@ -86,7 +86,8 @@ pub struct GhManifestLatest {
 impl EncryptedStore {
     /// Replace the last report even for retired members. Only the first report of
     /// each stored (member, version, verdict) tuple appends an activation audit.
-    pub fn report_gh_manifest_active(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_gh_manifest_activation_for_tests(
         &self,
         report: &GhManifestActivationReport<'_>,
         ctx: AuditCtx<'_>,

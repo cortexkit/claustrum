@@ -1232,6 +1232,7 @@ pub struct EncryptedStore {
     writes: tokio::sync::watch::Sender<()>,
     mapping_gates: Mutex<MappingGates>,
     mapping_gate_writes: Mutex<()>,
+    policy_token_memo: policy_token::ParsedPolicyMemo,
     key: MasterKey,
     key_id: KeyId,
     // The audit-chain HMAC key, held in a zeroizing buffer so it is scrubbed from memory
@@ -1821,6 +1822,7 @@ impl EncryptedStore {
             writes: tokio::sync::watch::channel(()).0,
             mapping_gates: Mutex::new(gates),
             mapping_gate_writes: Mutex::new(()),
+            policy_token_memo: policy_token::ParsedPolicyMemo::default(),
             key,
             key_id,
             audit_key,

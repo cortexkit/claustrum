@@ -1,11 +1,15 @@
 use super::agent_policy::{head_agent_policy_conn, AgentPolicySource};
-use super::agent_policy_admin::{AgentPolicyApproval, PrepareAgentPolicyError};
+use super::agent_policy_admin::{
+    validate_binding_owners, AgentPolicyApproval, PrepareAgentPolicyError,
+};
 use super::gh_manifests::ManifestRootReadError;
 use super::{
     append_audit_tx, gh_proposals, hex32, payload_hash, EncryptedStore, GhManifestProposal,
     GhManifestSource, GhManifestVersion,
 };
-use crate::agent_policy::{manifest_projection, signed_input, AgentPolicy, Binding, PolicyError};
+use crate::agent_policy::{
+    manifest_projection, signed_input, validate_signer_rule_sets, AgentPolicy, Binding, PolicyError,
+};
 use crate::agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
 use crate::audit::{AuditCtx, AuditOp, AuditRecord, GhManifestAudit};
 #[cfg(test)]
@@ -75,11 +79,13 @@ fn one_tap_policy(
     mut head: AgentPolicy,
     p: &GhManifestProposal,
     manifest: &GhManifest,
+    now: i64,
 ) -> Result<(AgentPolicy, Vec<u8>, Vec<u8>), SecretError> {
     use SecretError::{PolicyBindingConflict, PolicyTooLarge};
 
     // A parsed head's version fits within the JSON safe integer range, below i64::MAX.
     head.version += 1;
+    head.issued_at_unix_secs = now / 1000;
     let identity = format!("github_app:{}", p.app_slug);
     let repo = p.repo.to_ascii_lowercase();
     let key = ("github", p.agent_id.as_str());
@@ -115,13 +121,15 @@ fn one_tap_policy(
             _ => PolicyBindingConflict,
         })?;
     let policy = AgentPolicy::parse_canonical(&bytes).map_err(|_| PolicyBindingConflict)?;
+    let input = signed_input(&bytes).map_err(|_| PolicyTooLarge)?;
     if identity_conflict
         || policy.github_projection()
             != manifest_projection(manifest).map_err(|_| PolicyBindingConflict)?
     {
         return Err(PolicyBindingConflict);
     }
-    let input = signed_input(&bytes).map_err(|_| PolicyTooLarge)?;
+    validate_signer_rule_sets(&policy).map_err(|_| PolicyBindingConflict)?;
+    validate_binding_owners(&policy.bindings).map_err(|_| PolicyBindingConflict)?;
     Ok((policy, bytes, input))
 }
 
@@ -190,7 +198,7 @@ impl EncryptedStore {
         // Returning Ok(Err(SecretError)) commits the transaction, so validate the
         // successor before any write.
         let policy = match head_agent_policy_conn(tx).map_err(|_| rusqlite::Error::InvalidQuery)? {
-            Some(head) => match one_tap_policy(head, &p, &manifest) {
+            Some(head) => match one_tap_policy(head, &p, &manifest, now) {
                 Ok(policy) => Some(policy),
                 Err(err) => return Ok(Err(err)),
             },

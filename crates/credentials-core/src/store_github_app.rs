@@ -8,7 +8,7 @@ use super::{
 use crate::agent_policy::{valid_app_slug, valid_github_app_agent};
 use crate::oauth::OAuthCredential;
 use crate::record::{CredentialKind, VaultRecord};
-use crate::refresh_adapters::github_app::ADAPTER_NAME;
+use crate::refresh_adapters::github_app::{GithubAppAdapter, ADAPTER_NAME};
 use crate::secret::SecretString;
 
 pub(super) const AGENT_EXISTS: &str = "github_app_agent_exists: an App already holds this agent";
@@ -98,6 +98,36 @@ pub struct GitHubAppCreation<'a> {
 }
 
 impl EncryptedStore {
+    /// Open only the material needed to sign an App JWT. A vault-created App has
+    /// no installation token yet, and a failed open must not quarantine the row.
+    pub(super) fn open_github_app_material(
+        &self,
+        id: &str,
+        version: u64,
+        blob: &[u8],
+    ) -> Result<Option<OAuthCredential>, StoreOpError> {
+        let bytes = super::envelope::open(
+            &self.key,
+            blob,
+            &super::RecordBinding {
+                credential_id: id,
+                record_version: version,
+            },
+        )
+        .map_err(StoreOpError::Decrypt)?;
+        let record = VaultRecord::decode(&bytes)
+            .map_err(|error| StoreOpError::Corrupt(error.to_string()))?;
+        if record.kind != CredentialKind::Oauth
+            || record.refresh_adapter.as_deref() != Some(ADAPTER_NAME)
+        {
+            return Ok(None);
+        }
+        Ok(record.oauth.filter(|oauth| {
+            oauth.client_id.as_ref().is_some_and(|id| !id.is_empty())
+                && GithubAppAdapter::valid_private_key_pem(oauth.refresh_token.expose())
+        }))
+    }
+
     /// Model a row deposited before the webhook companion namespace was reserved.
     #[cfg(any(test, feature = "test-support"))]
     pub fn put_legacy_github_app_companion_for_tests(

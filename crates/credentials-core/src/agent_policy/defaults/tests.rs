@@ -1,12 +1,27 @@
-use super::{github_default_rule_set, GITHUB_DEFAULT_BYTES};
+use super::{
+    github_default_rule_set, GITHUB_DEFAULT_RELEASE, GITHUB_DEFAULT_SHA256, GITHUB_RELEASES,
+};
 use crate::agent_policy::{canonical_bytes, policy_sha256, Approval, Class, Identity};
+
+const GITHUB_DEFAULT_BYTES: &[u8] = include_bytes!("../../../policy-defaults/github.json");
 
 #[test]
 fn github_release_artifact_sha256_is_pinned() {
-    assert_eq!(
-        policy_sha256(GITHUB_DEFAULT_BYTES),
-        "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7"
-    );
+    let mut keys = std::collections::BTreeSet::new();
+    for entry in GITHUB_RELEASES {
+        assert!(
+            keys.insert((entry.release, entry.sha256)),
+            "duplicate default key"
+        );
+        assert_eq!(
+            policy_sha256(entry.bytes),
+            entry.sha256,
+            "{}",
+            entry.release
+        );
+    }
+    assert_eq!(policy_sha256(GITHUB_DEFAULT_BYTES), GITHUB_DEFAULT_SHA256);
+    assert!(keys.contains(&(GITHUB_DEFAULT_RELEASE, GITHUB_DEFAULT_SHA256)));
 }
 
 #[test]

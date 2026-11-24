@@ -127,18 +127,22 @@ fn app_record(client_id: Option<&str>) -> VaultRecord {
 }
 
 fn setup_with_resources(resources: Vec<String>) -> (Rig, Arc<Github>, String) {
+    setup_for_agent(resources, "agent")
+}
+
+fn setup_for_agent(resources: Vec<String>, agent: &str) -> (Rig, Arc<Github>, String) {
     let rig = Rig::new();
     let key = root(&rig);
     rig.self_member();
     let manifest_bindings = resources
         .iter()
-        .map(|resource| (resource.clone(), json!("agent")))
+        .map(|resource| (resource.clone(), json!(agent)))
         .collect::<serde_json::Map<_, _>>();
     let digest = manifest_with_bindings(&rig, 41, Value::Object(manifest_bindings));
     let policy_text = json!({
         "schema":"ck-agent-policy/v1", "version":1, "issued_at_unix_secs":1,
         "root_key_id":key, "rule_sets":{"github":github_default_rule_set().unwrap()},
-        "bindings":[{"service":"github","agent":"agent","identity":APP,"resources":resources}],
+        "bindings":[{"service":"github","agent":agent,"identity":APP,"resources":resources}],
     })
     .to_string();
     apply(
@@ -685,6 +689,116 @@ fn replace_record(rig: &Rig, recreate: bool) {
         rig.store
             .overwrite_unconditional_audited(APP, &app_record(None), AuditCtx::admin(AuditOp::Put))
             .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn policy_token_mints_for_a_vault_created_app_before_any_ordinary_refresh() {
+    let agent = "agent_ab64ea0873bbee0c";
+    let (mut rig, github, _) = setup_for_agent(vec!["org/r".into()], agent);
+    let oauth = app_record(None).oauth.unwrap();
+    rig.store
+        .remove_audited(APP, AuditCtx::admin(AuditOp::Remove))
+        .unwrap();
+    rig.store
+        .create_github_app_audited(
+            GitHubAppCreation {
+                slug: "plex-alfonso",
+                agent,
+                app_id: 20,
+                pem: &oauth.refresh_token,
+                client_id: oauth.client_id.as_deref().unwrap(),
+                relay: None,
+            },
+            "test",
+        )
+        .unwrap();
+    let before = rig.store.get(APP).unwrap();
+    assert!(before.payload.expose().is_empty());
+    let result = rig.call("aft", OP_POLICY_TOKEN, params()).await;
+    assert!(
+        result["token"] == "fixture-token-1",
+        "first narrowed mint failed"
+    );
+    github.counts(1, 1);
+    assert_eq!(
+        github.posts.lock().unwrap()[0]["repositories"],
+        json!(["r"])
+    );
+    let after = rig.store.get(APP).unwrap();
+    assert_eq!(before.record_version, after.record_version);
+    assert!(after.payload.expose().is_empty());
+}
+
+#[tokio::test]
+async fn policy_token_retries_a_failed_mint_only_for_an_authorized_replacement() {
+    for (replaced, revoked) in [(true, false), (false, false), (true, true)] {
+        let (mut rig, github, _) = setup();
+        let ingress = Ingress::new(&rig);
+        ingress.bind(&rig, 1, "aft");
+        let (posted, release) = github.stall_next_post();
+        github
+            .exchange_faults
+            .lock()
+            .unwrap()
+            .push_back((503, json!({})));
+        ingress
+            .dispatch(&rig, request(OP_POLICY_TOKEN, params(), 1, 10))
+            .await;
+        signal(posted).await;
+        if replaced {
+            replace_record(&rig, false);
+        }
+        if revoked {
+            revoke(&rig, "aft");
+        }
+        release.send(()).unwrap();
+        let current = reply(&mut rig, 10).await;
+        if replaced && !revoked {
+            assert!(
+                current["token"] == "fixture-token-2",
+                "replacement mint failed"
+            );
+            github.counts(2, 2);
+        } else {
+            assert!(current.get("token").is_none());
+            if !replaced {
+                assert_eq!(current["error"]["code"], "github_unavailable");
+            }
+            github.counts(1, 1);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn policy_token_shared_mint_accepts_29999_ms_and_times_out_at_30000_ms() {
+    for timed_out in [false, true] {
+        let (mut rig, github, _) = setup();
+        let ingress = Ingress::new(&rig);
+        ingress.bind(&rig, 1, "aft");
+        let (posted, release) = github.stall_next_post();
+        ingress
+            .dispatch(&rig, request(OP_POLICY_TOKEN, params(), 1, 10))
+            .await;
+        posted.await.unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(if timed_out {
+            30_000
+        } else {
+            29_999
+        }))
+        .await;
+        if !timed_out {
+            release.send(()).unwrap();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), reply(&mut rig, 10))
+            .await
+            .expect("shared mint must resolve at its deadline");
+        if timed_out {
+            assert_eq!(result["error"]["code"], "github_unavailable");
+        } else {
+            assert!(result["token"] == "fixture-token-1");
+        }
+        github.counts(1, 1);
     }
 }
 

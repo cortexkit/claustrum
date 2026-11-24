@@ -133,7 +133,9 @@ fn gh_manifest_proposal_oauth_read_never_quarantines_or_writes() {
     let id = "github_app:repo-bot";
     let credential = crate::oauth::OAuthCredential {
         access_token: "test-token".to_owned().into(),
-        refresh_token: "test-key".to_owned().into(),
+        refresh_token: include_str!("../tests/fixtures/github_app/test_private_key_pkcs1.pem")
+            .to_owned()
+            .into(),
         expires_at_ms: Some(0),
         token_url: String::new(),
         client_id: Some("test-client".into()),
@@ -170,28 +172,29 @@ fn gh_manifest_proposal_oauth_read_never_quarantines_or_writes() {
     let before = all_rows();
     assert_eq!(
         store
-            .github_app_oauth_for_manifest_proposal(id)
-            .unwrap()
+            .github_app_oauth_for_manifest_proposal(id, AGENT)
             .unwrap()
             .access_token
             .expose(),
         "test-token"
     );
-    assert!(store
-        .github_app_oauth_for_manifest_proposal("github_app:missing")
-        .unwrap()
-        .is_none());
-    assert!(store
-        .github_app_oauth_for_manifest_proposal(GH_MANIFEST_ROOT_KEY_ID)
-        .unwrap()
-        .is_none());
+    for missing in ["github_app:missing", GH_MANIFEST_ROOT_KEY_ID] {
+        assert_eq!(
+            store
+                .github_app_oauth_for_manifest_proposal(missing, AGENT)
+                .err(),
+            Some(GhManifestProposalError::AppNotInstalled)
+        );
+    }
     assert_eq!(all_rows(), before);
     store.invalidate(id).unwrap();
     let before = all_rows();
-    assert!(store
-        .github_app_oauth_for_manifest_proposal(id)
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        store
+            .github_app_oauth_for_manifest_proposal(id, AGENT)
+            .err(),
+        Some(GhManifestProposalError::InstallationUnusable)
+    );
     assert_eq!(all_rows(), before);
     store
         .with_raw_conn(|conn| {
@@ -203,8 +206,8 @@ fn gh_manifest_proposal_oauth_read_never_quarantines_or_writes() {
         .unwrap();
     let before = all_rows();
     assert!(matches!(
-        store.github_app_oauth_for_manifest_proposal(id),
-        Err(StoreOpError::Decrypt(_))
+        store.github_app_oauth_for_manifest_proposal(id, AGENT),
+        Err(GhManifestProposalError::StoreError)
     ));
     assert_eq!(all_rows(), before);
     // A valid seal with an invalid record exercises record decoding separately from
@@ -228,8 +231,8 @@ fn gh_manifest_proposal_oauth_read_never_quarantines_or_writes() {
         .unwrap();
     let before = all_rows();
     assert!(matches!(
-        store.github_app_oauth_for_manifest_proposal(id),
-        Err(StoreOpError::Corrupt(_))
+        store.github_app_oauth_for_manifest_proposal(id, AGENT),
+        Err(GhManifestProposalError::StoreError)
     ));
     assert_eq!(all_rows(), before);
 }
@@ -677,20 +680,35 @@ fn gh_manifest_proposal_concurrent_proposes_return_one_unchanged_row_and_audit()
         0
     );
     assert_eq!(snapshot(&store)[1].len(), 1);
-    let mut repeated = input(REPO);
-    repeated.app_id = 99;
-    repeated
-        .installation_permissions
-        .insert("contents".into(), "read".into());
-    let prepared = store.prepare_gh_manifest_proposal(repeated).unwrap();
-    let before = snapshot(&store);
-    assert_eq!(
-        store
+}
+
+#[test]
+fn gh_manifest_proposal_replaces_pending_row_when_app_identity_changes() {
+    for new_slug in [false, true] {
+        let (_root, store) = ready("manifest-proposal-new-app");
+        let first = propose(&store, NOW);
+        let mut updated = input(REPO);
+        if new_slug {
+            updated.app_slug = "new-repo-bot".into();
+        } else {
+            updated.app_id = 99;
+        }
+        let prepared = store.prepare_gh_manifest_proposal(updated).unwrap();
+        let second = store
             .propose_gh_manifest_binding(&prepared, "reserved:plexus", || true, || NOW + 1)
-            .unwrap(),
-        replies[0]
-    );
-    assert_eq!(snapshot(&store), before);
+            .unwrap();
+        assert_ne!(second.proposal_id, first.proposal_id);
+        let old_state: String = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT state FROM gh_manifest_proposals WHERE proposal_id=?1",
+                    [&first.proposal_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(old_state, "superseded");
+    }
 }
 
 #[test]

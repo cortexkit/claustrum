@@ -92,6 +92,7 @@ struct Vault {
     home: Arc<HomeVault>,
     transfers: Transfers,
     clock_offset: Arc<AtomicI64>,
+    store_path: std::path::PathBuf,
 }
 
 impl Vault {
@@ -147,6 +148,7 @@ impl Vault {
             home: Arc::new(home),
             transfers,
             clock_offset,
+            store_path: fixture.store_path(),
         }
     }
 
@@ -551,6 +553,43 @@ async fn an_api_key_sent_a_to_b_exists_on_b_only_after_accept() {
         .is_none());
     assert!(rig.a.store().verify_audit_chain().is_ok());
     assert!(rig.b.store().verify_audit_chain().is_ok());
+}
+
+/// A terminal reply whose row the sender cannot delete is reported as still kept:
+/// the row is there, and resume can deliver it again.
+#[tokio::test]
+async fn a_failed_cleanup_after_a_terminal_reply_reports_the_row_as_kept() {
+    let rig = Rig::new("transfer-cleanup-failure").await;
+    rig.api_key_on_a(API_ID, b"sk-transfer-secret");
+    let sent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+    rig.b
+        .transfers
+        .accept(&sent.transfer_id, &rig.a.member, false)
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(&rig.a.store_path).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_cleanup BEFORE DELETE ON outgoing_transfers BEGIN SELECT RAISE(ABORT, 'cleanup failed'); END;").unwrap();
+    let resumed = rig.a.transfers.resume(&sent.transfer_id).await.unwrap();
+    assert_eq!(
+        resumed.reply,
+        DeliveryReply::State(IncomingTransferState::Accepted)
+    );
+    assert!(resumed.row_kept, "the row could not be deleted");
+    assert!(rig
+        .a
+        .store()
+        .outgoing_transfer(&sent.transfer_id)
+        .unwrap()
+        .is_some());
+    conn.execute_batch("DROP TRIGGER fail_cleanup").unwrap();
+    let resumed = rig.a.transfers.resume(&sent.transfer_id).await.unwrap();
+    assert!(!resumed.row_kept);
+    assert!(rig
+        .a
+        .store()
+        .outgoing_transfer(&sent.transfer_id)
+        .unwrap()
+        .is_none());
 }
 
 /// Dedup runs before open: an accepted envelope delivered again as a new delivery is

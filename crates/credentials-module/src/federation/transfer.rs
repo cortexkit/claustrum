@@ -1443,16 +1443,25 @@ impl Transfers {
         budget: tokio::time::Instant,
     ) -> SendReport {
         let reply = self.deliver_once(row, budget).await;
+        // Report only what the store establishes: a row that expired meanwhile is
+        // not kept, and a row whose delete failed still is.
         let row_kept = if reply.keeps_row() {
-            let _ = self.store.note_outgoing_transfer_attempt(
+            match self.store.note_outgoing_transfer_attempt(
                 &row.transfer_id,
                 safe_code(reply.code()),
                 self.now(),
-            );
-            true
+            ) {
+                Ok(present) => present,
+                Err(_) => self.row_still_stored(&row.transfer_id),
+            }
         } else {
-            let _ = self.store.delete_outgoing_transfer(&row.transfer_id);
-            false
+            match self.store.delete_outgoing_transfer(&row.transfer_id) {
+                Ok(_) => false,
+                Err(_) => {
+                    tracing::warn!(target: "federation", transfer_id = %row.transfer_id, "could not delete a finished outgoing transfer; resume can still deliver it");
+                    self.row_still_stored(&row.transfer_id)
+                }
+            }
         };
         SendReport {
             transfer_id: row.transfer_id.clone(),
@@ -1461,6 +1470,12 @@ impl Transfers {
             reply,
             row_kept,
         }
+    }
+
+    /// Whether the outgoing row is still stored. A failed read cannot show it gone,
+    /// and the row existed before this delivery, so it counts as kept.
+    fn row_still_stored(&self, transfer_id: &str) -> bool {
+        !matches!(self.store.outgoing_transfer(transfer_id), Ok(None))
     }
 
     async fn deliver_once(

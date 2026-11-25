@@ -54,6 +54,19 @@ pub struct ActiveAgentPolicy {
     pub policy_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AgentPolicyRollout {
+    pub manifest_version: u64,
+    pub policy_version: u64,
+}
+
+#[derive(Debug)]
+pub struct AgentPolicyRead<T> {
+    pub role: SecretHomeRole,
+    pub ready: Option<T>,
+    pub rollout: Option<AgentPolicyRollout>,
+}
+
 #[derive(Debug)]
 pub(crate) enum StoreAgentPolicyError {
     Policy(PolicyError),
@@ -248,19 +261,15 @@ impl EncryptedStore {
     pub fn active_agent_policy_summary(
         &self,
     ) -> Result<(SecretHomeRole, Option<AgentPolicySummary>), StoreOpError> {
+        self.active_agent_policy_summary_with_rollout()
+            .map(|state| (state.role, state.ready))
+    }
+
+    pub fn active_agent_policy_summary_with_rollout(
+        &self,
+    ) -> Result<AgentPolicyRead<AgentPolicySummary>, StoreOpError> {
         self.store
-            .with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                let role = secret_home_role_conn(&tx);
-                let summary =
-                    if matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
-                        active_agent_policy_summary_conn(&tx)?
-                    } else {
-                        None
-                    };
-                tx.commit()?;
-                Ok((role, summary))
-            })
+            .with_conn(|conn| policy_read(conn, || {}, |_, ready| Ok(ready)))
             .map_err(StoreOpError::from)
     }
 
@@ -271,6 +280,14 @@ impl EncryptedStore {
     ) -> Result<(SecretHomeRole, Option<ActiveAgentPolicy>), StoreOpError> {
         self.store
             .with_conn(|conn| active_agent_policy_read(conn, || {}))
+            .map_err(StoreOpError::from)
+    }
+
+    pub fn active_agent_policy_with_rollout(
+        &self,
+    ) -> Result<AgentPolicyRead<ActiveAgentPolicy>, StoreOpError> {
+        self.store
+            .with_conn(|conn| policy_read(conn, || {}, read_ready_policy))
             .map_err(StoreOpError::from)
     }
 
@@ -413,26 +430,59 @@ fn active_agent_policy_read(
     conn: &Connection,
     after_role: impl FnOnce(),
 ) -> rusqlite::Result<(SecretHomeRole, Option<ActiveAgentPolicy>)> {
+    policy_read(conn, after_role, read_ready_policy).map(|state| (state.role, state.ready))
+}
+
+fn policy_read<T>(
+    conn: &Connection,
+    after_role: impl FnOnce(),
+    project_ready: impl FnOnce(&Connection, Option<AgentPolicySummary>) -> rusqlite::Result<Option<T>>,
+) -> rusqlite::Result<AgentPolicyRead<T>> {
     let tx = conn.unchecked_transaction()?;
     let role = secret_home_role_conn(&tx);
     if !matches!(role, SecretHomeRole::Single | SecretHomeRole::Home { .. }) {
-        return Ok((role, None));
+        return Ok(AgentPolicyRead {
+            role,
+            ready: None,
+            rollout: None,
+        });
     }
     after_role();
-    let row = active_agent_policy_conn(&tx)?;
+    let summary = active_agent_policy_summary_conn(&tx)?;
+    let ready_version = summary
+        .as_ref()
+        .and_then(|summary| u64::try_from(summary.version).ok());
+    // A newer unpaired manifest can pause minting, but cannot be named as a pair.
+    let rollout = tx.query_row(
+        "SELECT manifest_version, version FROM agent_policies ORDER BY manifest_version DESC LIMIT 1",
+        [],
+        |row| Ok(AgentPolicyRollout { manifest_version: row.get(0)?, policy_version: row.get(1)? }),
+    ).optional()?.filter(|pair| Some(pair.policy_version) != ready_version);
+    let ready = project_ready(&tx, summary)?;
     tx.commit()?;
-    Ok((role, row))
+    Ok(AgentPolicyRead {
+        role,
+        ready,
+        rollout,
+    })
 }
 
 pub(super) fn active_agent_policy_conn(
     conn: &Connection,
 ) -> rusqlite::Result<Option<ActiveAgentPolicy>> {
-    active_agent_policy_version_conn(conn)?
-        .map(|version| {
+    read_ready_policy(conn, active_agent_policy_summary_conn(conn)?)
+}
+
+fn read_ready_policy(
+    conn: &Connection,
+    summary: Option<AgentPolicySummary>,
+) -> rusqlite::Result<Option<ActiveAgentPolicy>> {
+    summary
+        .map(|summary| {
             conn.query_row(
                 "SELECT version, policy_sha256, manifest_version, policy_bytes \
                  FROM agent_policies WHERE version = ?1",
-                [version],
+                [summary.version],
                 |row| {
                     let bytes = row.get::<_, Vec<u8>>(3)?;
                     let policy_text = String::from_utf8(bytes).map_err(|error| {

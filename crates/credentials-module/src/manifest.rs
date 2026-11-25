@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use credentials_core::store::{ActiveAgentPolicy, EncryptedStore, SecretHomeRole};
+use credentials_core::store::{AgentPolicyRollout, EncryptedStore, SecretHomeRole};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_protocol::{EnvelopeHeader, Frame, FrameType, Principal};
@@ -91,29 +91,39 @@ pub(crate) fn watch_snapshot(store: &EncryptedStore) -> Value {
     }
 }
 
-fn read_policy(store: &EncryptedStore, method: &str) -> Result<Option<ActiveAgentPolicy>, Value> {
-    let (role, policy) = store
-        .active_agent_policy()
-        .map_err(|_| refusal("store_error", "transient"))?;
-    if let Some(reply) = role_refusal(role, method) {
-        return Err(reply);
-    }
-    Ok(policy)
-}
-
-pub(crate) fn policy_watch_snapshot(store: &EncryptedStore) -> Value {
-    let Ok((role, policy)) = store.active_agent_policy_summary() else {
+fn policy_active_snapshot(store: &EncryptedStore) -> Value {
+    let Ok(state) = store.active_agent_policy_with_rollout() else {
         return refusal("store_error", "transient");
     };
-    if let Some(reply) = role_refusal(role, OP_POLICY_WATCH) {
+    if let Some(reply) = role_refusal(state.role, OP_POLICY_ACTIVE) {
         return reply;
     }
-    match policy {
+    let mut reply = match state.ready {
+        Some(policy) => json!(policy),
+        None => {
+            json!({"version": null, "policy_sha256": null, "manifest_version": null, "policy_text": null})
+        }
+    };
+    if let Some(rollout) = state.rollout {
+        reply["rollout"] = json!(rollout);
+    }
+    reply
+}
+
+pub(crate) fn policy_watch_snapshot(store: &EncryptedStore) -> (Value, Option<AgentPolicyRollout>) {
+    let Ok(state) = store.active_agent_policy_summary_with_rollout() else {
+        return (refusal("store_error", "transient"), None);
+    };
+    if let Some(reply) = role_refusal(state.role, OP_POLICY_WATCH) {
+        return (reply, None);
+    }
+    let reply = match state.ready {
         Some(policy) => {
             json!({"version": policy.version, "policy_sha256": policy.policy_sha256})
         }
         None => json!({"version": null, "policy_sha256": null}),
-    }
+    };
+    (reply, state.rollout)
 }
 
 pub(crate) async fn serve(
@@ -218,11 +228,7 @@ pub(crate) async fn serve(
     let method = method.to_owned();
     let reply = tokio::task::spawn_blocking(move || {
         if method == OP_POLICY_ACTIVE {
-            return match read_policy(&store, OP_POLICY_ACTIVE) {
-                Ok(Some(policy)) => json!(policy),
-                Ok(None) => json!({"version": null, "policy_sha256": null, "manifest_version": null, "policy_text": null}),
-                Err(reply) => reply,
-            };
+            return policy_active_snapshot(&store);
         }
         if let Some(reply) = role_refusal(store.secret_home_role(), &method) {
             return reply;

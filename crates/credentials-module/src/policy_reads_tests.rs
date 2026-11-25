@@ -315,7 +315,13 @@ async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
         pending["policy"],
         json!({"version":2,"policy_sha256":p2["policy_sha256"]})
     );
-    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p1);
+    let mut p1_during_rollout = p1.clone();
+    p1_during_rollout["rollout"] = json!({"manifest_version":42,"policy_version":2});
+    assert_eq!(
+        rig.call("aft", OP_POLICY_ACTIVE, json!({})).await,
+        p1_during_rollout
+    );
+    policy_notice(&mut rig, 11, 3, json!(1), &p1["policy_sha256"]).await;
     wait_count(&mut completed, 3).await;
     assert!(rig.rx.try_recv().is_err());
 
@@ -323,9 +329,12 @@ async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
     ready(&rig, SELF, 42, &m2);
     wait_count(&mut completed, before_report + 1).await;
     assert!(rig.rx.try_recv().is_err());
-    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p1);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_ACTIVE, json!({})).await,
+        p1_during_rollout
+    );
     ready(&rig, OTHER, 42, &m2);
-    policy_notice(&mut rig, 11, 3, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 4, json!(2), &p2["policy_sha256"]).await;
     assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p2);
 
     // Keep the old report when the grant is revoked to isolate the admission input.
@@ -341,9 +350,9 @@ async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
             &MemberGrantSelector::None,
         )
         .unwrap();
-    policy_notice(&mut rig, 11, 4, ABSENT, &ABSENT).await;
+    policy_notice(&mut rig, 11, 5, ABSENT, &ABSENT).await;
     admit_peer(&rig);
-    policy_notice(&mut rig, 11, 5, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 6, json!(2), &p2["policy_sha256"]).await;
     rig.sql("DROP TRIGGER keep_report;");
     wait_count(&mut completed, 7).await;
     let original = *completed.borrow();
@@ -360,9 +369,9 @@ async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
     rig.store
         .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
         .unwrap();
-    policy_notice(&mut rig, 11, 6, json!(1), &p1["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 7, json!(1), &p1["policy_sha256"]).await;
     ready(&rig, SELF, 42, &m2);
-    policy_notice(&mut rig, 11, 7, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 8, json!(2), &p2["policy_sha256"]).await;
     wait_count(&mut completed, original + 4).await;
     ready(&rig, SELF, 41, &m1);
     ready(&rig, SELF, 42, &m2);
@@ -382,6 +391,106 @@ async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
         refusal("not_found", "permanent")
     );
     assert!(rig.rx.try_recv().is_err());
+}
+
+async fn policy_active_reply_bytes(rig: &mut Rig, corr: u64) -> Vec<u8> {
+    rig.request(caller("aft"), OP_POLICY_ACTIVE, json!({}), 2, corr)
+        .await;
+    let reply = frame(rig).await;
+    assert_eq!(
+        (reply.header.ty, reply.header.corr),
+        (FrameType::Response, corr)
+    );
+    reply.body.as_slice().to_vec()
+}
+
+#[tokio::test]
+async fn policy_active_rollout_samples_and_watch_changes() {
+    let mut rig = Rig::new();
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "plexus");
+    let key = root(&rig);
+    rig.self_member();
+    admit_peer(&rig);
+    let m1 = manifest(&rig, 41);
+    let p1 = policy(&rig, &key, 1, 41);
+    let unready = policy_active_reply_bytes(&mut rig, 20).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&unready).unwrap(),
+        json!({"result": {
+            "version":null, "policy_sha256":null, "manifest_version":null, "policy_text":null,
+            "rollout":{"manifest_version":41,"policy_version":1},
+        }})
+    );
+    ready(&rig, SELF, 41, &m1);
+    ready(&rig, OTHER, 41, &m1);
+    ingress.open(&rig, 1, 12).await;
+    policy_notice(&mut rig, 12, 1, json!(1), &p1["policy_sha256"]).await;
+    let settled = policy_active_reply_bytes(&mut rig, 21).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&settled).unwrap(),
+        json!({"result":p1})
+    );
+
+    manifest(&rig, 42);
+    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p1);
+    policy(&rig, &key, 2, 42);
+    policy_notice(&mut rig, 12, 2, json!(1), &p1["policy_sha256"]).await;
+    let rolling = policy_active_reply_bytes(&mut rig, 22).await;
+    let mut want = p1.clone();
+    want["rollout"] = json!({"manifest_version":42,"policy_version":2});
+    assert_eq!(
+        serde_json::from_slice::<Value>(&rolling).unwrap(),
+        json!({"result":want})
+    );
+
+    let m3 = manifest(&rig, 43);
+    let p3 = policy(&rig, &key, 3, 43);
+    policy_notice(&mut rig, 12, 3, json!(1), &p1["policy_sha256"]).await;
+    want["rollout"] = json!({"manifest_version":43,"policy_version":3});
+    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, want);
+
+    ready(&rig, SELF, 43, &m3);
+    ready(&rig, OTHER, 43, &m3);
+    policy_notice(&mut rig, 12, 4, json!(3), &p3["policy_sha256"]).await;
+    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p3);
+
+    pin_policy_active_samples([
+        ("policy.active.ready.json", settled.as_slice()),
+        ("policy.active.rollout.json", rolling.as_slice()),
+        ("policy.active.rollout-unready.json", unready.as_slice()),
+    ]);
+}
+
+fn pin_policy_active_samples(samples: [(&str, &[u8]); 3]) {
+    use std::{fs, path::Path};
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/agent-policy-v1");
+    let emit = std::env::var("CK_EMIT_SECRET_VECTORS").as_deref() == Ok("1");
+    if emit {
+        fs::create_dir_all(&directory).unwrap();
+    }
+    let mut sums = String::new();
+    for (name, bytes) in samples {
+        let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+        let hash: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        sums.push_str(&format!("{hash}  {name}\n"));
+        let file = directory.join(name);
+        if emit {
+            fs::write(&file, bytes).unwrap();
+        } else {
+            assert_eq!(fs::read(&file).unwrap(), bytes, "{}", file.display());
+        }
+    }
+    let sums_file = directory.join("SHA256SUMS");
+    if emit {
+        fs::write(sums_file, sums).unwrap();
+    } else {
+        assert_eq!(fs::read_to_string(sums_file).unwrap(), sums);
+    }
 }
 
 fn assert_sample(label: &str, actual: Value) {

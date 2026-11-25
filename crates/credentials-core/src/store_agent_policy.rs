@@ -452,7 +452,9 @@ fn policy_read<T>(
     let ready_version = summary
         .as_ref()
         .and_then(|summary| u64::try_from(summary.version).ok());
-    // A newer unpaired manifest can pause minting, but cannot be named as a pair.
+    // Only signed manifest-and-policy pairs live in `agent_policies`, so a newer
+    // manifest still waiting for its policy is never named as the rollout pair. It
+    // pauses narrowed GitHub token minting instead (see `covering_policies`).
     let rollout = tx.query_row(
         "SELECT manifest_version, version FROM agent_policies ORDER BY manifest_version DESC LIMIT 1",
         [],

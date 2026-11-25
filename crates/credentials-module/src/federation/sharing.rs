@@ -86,9 +86,15 @@ pub struct VaultSharingSnapshot {
 pub(crate) type PairingSnapshots = tokio::sync::watch::Sender<Option<Arc<VaultSharingSnapshot>>>;
 
 pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
-    let snapshot: Snapshot = serde_json::from_value(body.clone()).ok()?;
+    check_snapshot(body).ok()
+}
+
+/// Decode a paired-device roster, or name the first check it failed. The reason is a
+/// fixed code, never a value from the body, so it can go into a log line.
+fn check_snapshot(body: &Value) -> Result<VaultSharingSnapshot, &'static str> {
+    let snapshot: Snapshot = serde_json::from_value(body.clone()).map_err(|_| "shape")?;
     if !is_lower_hex_sha256(&snapshot.identity.static_public_key_hex) {
-        return None;
+        return Err("identity_key");
     }
     let mut fingerprints = BTreeSet::new();
     let mut members = Vec::new();
@@ -99,16 +105,22 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     for device in snapshot.devices {
         // One pairing-id rule for the whole roster, the store's own: a roster the
         // store would refuse is never published to anyone as evidence of pairing.
-        if !is_lower_hex_16_bytes(&device.fingerprint)
-            || !valid_pairing_id(&device.pairing_id)
-            || !fingerprints.insert(device.fingerprint.clone())
-        {
-            return None;
+        if !is_lower_hex_16_bytes(&device.fingerprint) {
+            return Err("device_fingerprint");
+        }
+        if !valid_pairing_id(&device.pairing_id) {
+            return Err("device_pairing_id");
+        }
+        if !fingerprints.insert(device.fingerprint.clone()) {
+            return Err("duplicate_device");
         }
         let mut shares = BTreeSet::new();
         for share in device.shares {
-            if share.share.is_empty() || !shares.insert(share.share.clone()) {
-                return None;
+            if share.share.is_empty() {
+                return Err("share_name");
+            }
+            if !shares.insert(share.share.clone()) {
+                return Err("duplicate_share");
             }
             if share.share == "vault" && share.enabled {
                 enabled = true;
@@ -131,11 +143,14 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
     let mut tombstone_fingerprints = BTreeSet::new();
     let mut tombstones = Vec::new();
     for tombstone in snapshot.tombstones {
-        if !is_lower_hex_16_bytes(&tombstone.fingerprint)
-            || tombstone.removal_id.is_empty()
-            || !tombstone_fingerprints.insert(tombstone.fingerprint.clone())
-        {
-            return None;
+        if !is_lower_hex_16_bytes(&tombstone.fingerprint) {
+            return Err("tombstone_fingerprint");
+        }
+        if tombstone.removal_id.is_empty() {
+            return Err("tombstone_removal_id");
+        }
+        if !tombstone_fingerprints.insert(tombstone.fingerprint.clone()) {
+            return Err("duplicate_tombstone");
         }
         tombstones.push(SharingTombstone {
             member_id: format!("fed-computer:{}", tombstone.fingerprint),
@@ -143,7 +158,7 @@ pub fn decode_snapshot(body: &Value) -> Option<VaultSharingSnapshot> {
         });
     }
     tombstones.sort_by(|a, b| a.member_id.cmp(&b.member_id));
-    Some(VaultSharingSnapshot {
+    Ok(VaultSharingSnapshot {
         members,
         enabled,
         devices,
@@ -172,7 +187,8 @@ async fn apply(
     hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
     let snapshot = Arc::new(
-        decode_snapshot(&body).ok_or_else(|| "invalid paired-device snapshot".to_string())?,
+        check_snapshot(&body)
+            .map_err(|reason| format!("invalid paired-device snapshot: {reason}"))?,
     );
     let removals = Arc::clone(removals);
     let reconciled = Arc::clone(&snapshot);
@@ -493,6 +509,32 @@ pub(super) async fn next_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_invalid_roster_names_the_check_it_failed() {
+        let key = "a".repeat(64);
+        let device = |fingerprint: &str| {
+            json!({"class": "computer", "fingerprint": fingerprint, "pairing_id": "pair-1",
+                   "shares": [{"share": "vault", "enabled": true}]})
+        };
+        let roster = |key: &str, devices: Value| json!({"self": {"static_public_key_hex": key}, "devices": devices});
+        let one = "0123456789abcdef0123456789abcdef";
+        for (body, reason) in [
+            (json!({"devices": []}), "shape"),
+            (roster("", json!([])), "identity_key"),
+            (
+                roster(&key, json!([device("not-hex")])),
+                "device_fingerprint",
+            ),
+            (
+                roster(&key, json!([device(one), device(one)])),
+                "duplicate_device",
+            ),
+        ] {
+            assert_eq!(check_snapshot(&body).err(), Some(reason), "{body}");
+        }
+        assert!(check_snapshot(&roster(&key, json!([device(one)]))).is_ok());
+    }
 
     #[test]
     fn sharing_retry_delay_doubles_until_the_sixty_second_cap() {

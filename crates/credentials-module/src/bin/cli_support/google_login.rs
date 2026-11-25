@@ -115,15 +115,18 @@ pub fn cmd_login(
         super::browser_login::test_endpoint("token_url", token_endpoint),
         super::browser_login::test_endpoint("redirect_uri", redirect_uri),
     );
-    let authorize_url = build_authorize_url_google(
-        authorize_endpoint,
-        &client_id,
-        redirect_uri,
-        wire.scopes(),
-        &state,
-        google::AUTHORIZE_EXTRA_PARAMS,
-    )
-    .map_err(|error| CliError::Io(format!("building authorize url: {error}")))?;
+    let build_url = |redirect_uri: &str| {
+        build_authorize_url_google(
+            authorize_endpoint,
+            &client_id,
+            redirect_uri,
+            wire.scopes(),
+            &state,
+            google::AUTHORIZE_EXTRA_PARAMS,
+        )
+        .map_err(|error| CliError::Io(format!("building authorize url: {error}")))
+    };
+    let authorize_url = build_url(redirect_uri)?;
 
     let listener = if approve_on == super::browser_login::ApproveOn::Other
         || has_flag(args, "--no-listener")
@@ -137,6 +140,18 @@ pub fn cmd_login(
                     CliError::Io(super::login_listener::port_in_use_message(redirect_uri))
                 })?,
         )
+    };
+
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    let (redirect_uri, authorize_url) = {
+        let bound_redirect =
+            super::browser_login::test_redirect_for_listener(redirect_uri, listener.as_ref())?;
+        let authorize_url = if bound_redirect != redirect_uri {
+            build_url(bound_redirect)?
+        } else {
+            authorize_url
+        };
+        (bound_redirect, authorize_url)
     };
 
     println!("Open this URL in a browser signed into the account to custody:");

@@ -56,7 +56,7 @@ subc-jsonc = "0.1.3"
 # Fleet logging (r2): one line format, one dated segment per module per day. Pulled in
 # WITHOUT `store-paths`: the daemon is told its data directory by the supervisor at
 # HELLO and must not resolve it a second time through another copy of the resolver.
-cortexkit-log = { version = "0.3.5", default-features = false }
+cortexkit-log = { version = "0.3.7", default-features = false }
 tracing = "0.1"
 
 # The same rusqlite (bundled) cortexkit-store uses, so the Connection/Transaction

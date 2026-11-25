@@ -758,9 +758,53 @@ fn init_fleet_log(module_id: &str, data_dir: &std::path::Path) {
     if let Some(mb) = env_u32("CK_LOG_ALARM_SEGMENT_MB") {
         config.retention.alarm_segment_mb = mb;
     }
-    if let Err(error) = cortexkit_log::init(config) {
+    if let Err(error) = cortexkit_log::init_with_crates(config, vault_log_crates()) {
         eprintln!("claustrum: fleet logger not installed: {error}");
     }
+}
+
+/// Crates whose events are the vault's own lines, in Rust spelling. Under a crate
+/// policy every other crate counts as a dependency: it is labelled
+/// `claustrum.dep.<crate>` and capped at WARN. A vault crate missing here would
+/// therefore lose its INFO lines without any error, which is why a test compares
+/// this list with the workspace on disk. The two bus crates are listed so they keep
+/// logging as before the policy, including the INFO line the bus client writes when
+/// a hub outage ends.
+const VAULT_LOG_CRATES: &[&str] = &[
+    "ck_claustrum",
+    "claustrum_module_probe",
+    "credentials_core",
+    "claustrum_providers",
+    "claustrum_model",
+    "cortexkit_claustrum_client",
+    "cortexkit_bus_client",
+    "cortexkit_bus_nats",
+];
+
+/// The vault's crate policy plus the bus client's level ceilings for async-nats.
+/// The bus client logs each hub outage once, as a WARN when the link drops and an
+/// INFO when it is back. async-nats's connector would otherwise add one ERROR per
+/// reconnect attempt, about ten in the one second of a planned bus restart. The
+/// ceilings come from the bus client's own constant, so they follow its releases.
+fn vault_log_crates() -> cortexkit_log::Crates {
+    async_nats_ceilings().into_iter().fold(
+        cortexkit_log::Crates::new().own(VAULT_LOG_CRATES.iter().copied()),
+        |crates, (module, level)| crates.ceiling(module, level),
+    )
+}
+
+/// Parse `cortexkit_bus_client::ASYNC_NATS_LOG_DIRECTIVE` (`path=level` pairs,
+/// comma-separated) into ceilings. A piece that doesn't parse is skipped rather
+/// than failing startup, since the logger isn't installed yet to report it; a test
+/// pins that every piece of the shipped constant parses.
+fn async_nats_ceilings() -> Vec<(&'static str, cortexkit_log::LevelFilter)> {
+    cortexkit_bus_client::ASYNC_NATS_LOG_DIRECTIVE
+        .split(',')
+        .filter_map(|piece| {
+            let (module, level) = piece.trim().split_once('=')?;
+            Some((module, level.parse().ok()?))
+        })
+        .collect()
 }
 
 /// The backup descriptor for this module, written to `<data_dir>/engram-catalog.json`.
@@ -3506,6 +3550,9 @@ mod tests {
     }
     mod module_secret_tests {
         include!("module_secret_tests.rs");
+    }
+    mod log_policy_tests {
+        include!("log_policy_tests.rs");
     }
     include!("watch_scoped_tests.rs");
     include!("connectors_tests.rs");

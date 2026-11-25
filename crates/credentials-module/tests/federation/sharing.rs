@@ -1024,7 +1024,14 @@ async fn a_roster_reaches_hub_workers_only_after_it_validates_and_its_grants_com
     let mut malformed = snapshot("empty");
     malformed["devices"] = json!([{"class": "computer", "fingerprint": OTHER,
         "pairing_id": "bad pairing", "shares": [{"share": "vault", "enabled": true}]}]);
-    rig.callosum.watch_snapshot(Some(malformed)).await;
+    // The initial read can publish before the watch opens. The stand-in handles
+    // the watch request before it can process the next snapshot command.
+    wait_until(|| rig.callosum.saw_method(WATCH)).await;
+    assert_eq!(
+        rig.callosum.watch_snapshot(Some(malformed)).await,
+        1,
+        "deliver the malformed roster to the active watch"
+    );
     wait_until(|| withdrawn() == 1).await;
     tokio::time::advance(Duration::from_secs(1)).await;
     reread.arrived().await;

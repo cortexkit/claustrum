@@ -1243,6 +1243,8 @@ pub fn payload_hash(payload: &[u8]) -> [u8; 32] {
 /// the single-writer lease and carries the fence epoch.
 pub struct EncryptedStore {
     store: SqliteStore,
+    #[cfg(feature = "test-support")]
+    fixture_root: std::sync::OnceLock<crate::test_support::TestTempDir>,
     writes: tokio::sync::watch::Sender<()>,
     mapping_gates: Mutex<MappingGates>,
     mapping_gate_writes: Mutex<()>,
@@ -1846,6 +1848,8 @@ impl EncryptedStore {
         let encrypted = EncryptedStore {
             store,
             writes: tokio::sync::watch::channel(()).0,
+            #[cfg(feature = "test-support")]
+            fixture_root: std::sync::OnceLock::new(),
             mapping_gates: Mutex::new(gates),
             mapping_gate_writes: Mutex::new(()),
             policy_token_memo: policy_token::ParsedPolicyMemo::default(),
@@ -1867,6 +1871,15 @@ impl EncryptedStore {
     /// rises). The health probe reads it to report a precise fenced-out state.
     pub fn is_fenced_out(&self) -> bool {
         self.fenced_out.load(Ordering::Relaxed)
+    }
+
+    /// Let a fixture's store own its directory when a test helper returns only store handles.
+    /// Pooled readers may open the database long after the writer first opens it.
+    #[cfg(feature = "test-support")]
+    pub fn retain_fixture_root(&self, root: crate::test_support::TestTempDir) {
+        self.fixture_root
+            .set(root)
+            .expect("one directory per store fixture");
     }
 
     /// Run a fenced write, latching [`Self::is_fenced_out`] if it is rejected by a

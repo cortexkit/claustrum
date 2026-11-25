@@ -751,9 +751,11 @@ async fn collector_start_clears_only_local_admission_losses_while_hub_and_callos
         )
         .unwrap()
     };
-    let mut initialized = rig.home.store.subscribe_writes();
     let task = rig.collect();
-    bounded(initialized.changed()).await.unwrap();
+    // With Callosum down the startup reconcile changes no rows, so the store sends no
+    // write signal to wait on. The clock is paused: this sleep returns only after every
+    // ready task, the collector's first pass included, has run and the runtime is idle.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     assert_eq!(
         raw_version(PEER),
         Some(28),

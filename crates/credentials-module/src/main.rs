@@ -4164,7 +4164,8 @@ mod tests {
         Arc<std::sync::atomic::AtomicUsize>,
         Arc<RefreshEngine>,
     ) {
-        let (_unused_surface, store, _db_path, _root) = tmp_surface_with_store(seed);
+        let (_unused_surface, store, _db_path, root) = tmp_surface_with_store(seed);
+        store.retain_fixture_root(root);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let adapter = TtlFixtureAdapter {
             calls: Arc::clone(&calls),
@@ -4467,7 +4468,8 @@ mod tests {
         Arc<admin_surface::AdminSurface>,
         Arc<EncryptedStore>,
     ) {
-        let (surface, admin, store, _, _root) = scoped_rig_with_db(seed);
+        let (surface, admin, store, _, root) = scoped_rig_with_db(seed);
+        store.retain_fixture_root(root);
         (surface, admin, store)
     }
 

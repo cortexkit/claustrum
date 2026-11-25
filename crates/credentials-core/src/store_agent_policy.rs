@@ -137,8 +137,6 @@ pub(super) fn head_agent_policy_conn(
         .transpose()
 }
 
-/// A ready manifest needs unanimous reports, so the first expected computer's
-/// reported version is the only candidate. Use the caller's read snapshot.
 pub(super) fn active_agent_policy_version_conn(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<Option<i64>> {
@@ -148,31 +146,101 @@ pub(super) fn active_agent_policy_version_conn(
 pub(super) fn active_agent_policy_summary_conn(
     conn: &Connection,
 ) -> rusqlite::Result<Option<AgentPolicySummary>> {
-    use super::gh_activations::{gh_manifest_expected_computers_conn, gh_manifest_reports_ready};
+    Ok(agent_policy_fleet_conn(conn)?.ready)
+}
 
+#[derive(Default)]
+pub(super) struct AgentPolicyFleet {
+    pub ready: Option<AgentPolicySummary>,
+    // A valid manifest report can precede the corresponding policy ceremony.
+    reported: BTreeMap<i64, Option<AgentPolicySummary>>,
+}
+
+impl AgentPolicyFleet {
+    /// Every reported version and the newest stored manifest must be paired
+    /// before a token can be scoped. A manual sign can leave an unpaired manifest.
+    pub fn covering_policies(
+        &self,
+        conn: &Connection,
+    ) -> rusqlite::Result<Option<Vec<AgentPolicySummary>>> {
+        let Some(mut policies) = self.reported.values().cloned().collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let Some(newest) = newest_manifest_policy_conn(conn)? else {
+            return Ok(None);
+        };
+        if !policies.contains(&newest) {
+            policies.push(newest);
+        }
+        Ok(Some(policies))
+    }
+}
+
+fn newest_manifest_policy_conn(conn: &Connection) -> rusqlite::Result<Option<AgentPolicySummary>> {
+    conn.query_row(
+        "SELECT version, policy_sha256 FROM agent_policies \
+         WHERE manifest_version = (SELECT MAX(version) FROM gh_manifests)",
+        [],
+        |row| {
+            Ok(AgentPolicySummary {
+                version: row.get(0)?,
+                policy_sha256: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Verify each computer's latest report before treating the lowest version as
+/// the fleet floor. A missing, invalid or mismatched report establishes no floor.
+pub(super) fn agent_policy_fleet_conn(conn: &Connection) -> rusqlite::Result<AgentPolicyFleet> {
+    use super::gh_activations::{gh_manifest_expected_computers_conn, GhManifestVerdict};
+
+    let mut digests = BTreeMap::new();
+    let mut reported = BTreeMap::new();
     let computers = gh_manifest_expected_computers_conn(conn)?;
-    let Some(manifest_version) = computers.first().and_then(|computer| computer.version) else {
-        return Ok(None);
+    let mut manifest_digest =
+        conn.prepare_cached("SELECT manifest_sha256 FROM gh_manifests WHERE version = ?1")?;
+    for computer in computers {
+        let (Some(version), Some(digest), Some(GhManifestVerdict::Valid)) =
+            (computer.version, computer.payload_sha256, computer.verdict)
+        else {
+            return Ok(AgentPolicyFleet::default());
+        };
+        if let std::collections::btree_map::Entry::Vacant(entry) = digests.entry(version) {
+            let stored: Option<String> = manifest_digest
+                .query_row([version], |row| row.get(0))
+                .optional()?;
+            let Some(stored) = stored else {
+                return Ok(AgentPolicyFleet::default());
+            };
+            entry.insert(stored);
+            reported.insert(version, paired_agent_policy_conn(conn, version)?);
+        }
+        if digests[&version] != digest {
+            return Ok(AgentPolicyFleet::default());
+        }
+    }
+    let Some((&floor, pair)) = reported.first_key_value() else {
+        return Ok(AgentPolicyFleet::default());
     };
-    let candidate: Option<(AgentPolicySummary, String)> = conn
-        .query_row(
-            "SELECT p.version, p.policy_sha256, m.manifest_sha256 FROM agent_policies p \
-         JOIN gh_manifests m ON m.version = p.manifest_version WHERE m.version = ?1",
-            [manifest_version],
-            |row| {
-                Ok((
-                    AgentPolicySummary {
+    let ready = match pair {
+        Some(pair) => Some(pair.clone()),
+        None => conn
+            .query_row(
+                "SELECT version, policy_sha256 FROM agent_policies WHERE manifest_version < ?1 \
+             ORDER BY manifest_version DESC LIMIT 1",
+                [floor],
+                |row| {
+                    Ok(AgentPolicySummary {
                         version: row.get(0)?,
                         policy_sha256: row.get(1)?,
-                    },
-                    row.get(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    Ok(candidate.and_then(|(policy, digest)| {
-        gh_manifest_reports_ready(&computers, manifest_version, &digest).then_some(policy)
-    }))
+                    })
+                },
+            )
+            .optional()?,
+    };
+    Ok(AgentPolicyFleet { ready, reported })
 }
 
 impl EncryptedStore {

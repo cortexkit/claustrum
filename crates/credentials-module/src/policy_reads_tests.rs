@@ -255,7 +255,7 @@ async fn policy_watch_projects_ready_metadata_without_decoding_the_document() {
 }
 
 #[tokio::test]
-async fn policy_reads_follow_unanimity_and_pin_the_public_samples() {
+async fn policy_reads_follow_the_fleet_floor_and_pin_the_public_samples() {
     let mut rig = Rig::new();
     let ingress = Ingress::new(&rig);
     ingress.bind(&rig, 1, "plexus");
@@ -319,11 +319,13 @@ async fn policy_reads_follow_unanimity_and_pin_the_public_samples() {
     wait_count(&mut completed, 3).await;
     assert!(rig.rx.try_recv().is_err());
 
+    let before_report = *completed.borrow();
     ready(&rig, SELF, 42, &m2);
-    policy_notice(&mut rig, 11, 3, ABSENT, &ABSENT).await;
-    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, absent);
+    wait_count(&mut completed, before_report + 1).await;
+    assert!(rig.rx.try_recv().is_err());
+    assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p1);
     ready(&rig, OTHER, 42, &m2);
-    policy_notice(&mut rig, 11, 4, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 3, json!(2), &p2["policy_sha256"]).await;
     assert_eq!(rig.call("aft", OP_POLICY_ACTIVE, json!({})).await, p2);
 
     // Keep the old report when the grant is revoked to isolate the admission input.
@@ -339,9 +341,9 @@ async fn policy_reads_follow_unanimity_and_pin_the_public_samples() {
             &MemberGrantSelector::None,
         )
         .unwrap();
-    policy_notice(&mut rig, 11, 5, ABSENT, &ABSENT).await;
+    policy_notice(&mut rig, 11, 4, ABSENT, &ABSENT).await;
     admit_peer(&rig);
-    policy_notice(&mut rig, 11, 6, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 5, json!(2), &p2["policy_sha256"]).await;
     rig.sql("DROP TRIGGER keep_report;");
     wait_count(&mut completed, 7).await;
     let original = *completed.borrow();
@@ -358,9 +360,9 @@ async fn policy_reads_follow_unanimity_and_pin_the_public_samples() {
     rig.store
         .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
         .unwrap();
-    policy_notice(&mut rig, 11, 7, ABSENT, &ABSENT).await;
+    policy_notice(&mut rig, 11, 6, json!(1), &p1["policy_sha256"]).await;
     ready(&rig, SELF, 42, &m2);
-    policy_notice(&mut rig, 11, 8, json!(2), &p2["policy_sha256"]).await;
+    policy_notice(&mut rig, 11, 7, json!(2), &p2["policy_sha256"]).await;
     wait_count(&mut completed, original + 4).await;
     ready(&rig, SELF, 41, &m1);
     ready(&rig, SELF, 42, &m2);

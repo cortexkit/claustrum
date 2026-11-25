@@ -406,6 +406,7 @@ fn run_args(args: Vec<String>) -> Result<(), CliError> {
             Some(verb) if verb == "federation" && args.get(1).is_some_and(|a| a == "sharing") => {
                 println!("{}", help_verb("federation sharing status"))
             }
+            Some(verb) if verb == "github" => println!("{}", help_verb(&args.join(" "))),
             Some(verb)
                 if (verb == "provider"
                     && args
@@ -428,7 +429,12 @@ fn run_args(args: Vec<String>) -> Result<(), CliError> {
             println!("{}", help_verb("federation sharing status"));
             return Ok(());
         }
-        let page = if (command == "provider"
+        let page = if command == "github" {
+            std::iter::once(command.as_str())
+                .chain(args.iter().take(2).map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else if (command == "provider"
             && args
                 .first()
                 .is_some_and(|arg| matches!(arg.as_str(), "list" | "set" | "remove")))
@@ -486,6 +492,7 @@ fn run_args(args: Vec<String>) -> Result<(), CliError> {
         "verify-audit" => cmd_verify_audit(&global),
         "verify-github-apps" => github_apps::cmd_verify(&global),
         "github-app" => github_app_cli::cmd(&global, &args),
+        "github" => cli_support::github_bindings_cli::cmd_github(&global, &args),
         "transfer" => cli_support::federation_cli::cmd_transfer(&global, &args),
         "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
@@ -584,6 +591,7 @@ fn verb_flags(command: &str, subcommand: &str) -> FlagSpec {
             "--auth-scheme",
             "--fusiform-id",
         ],
+        "github" => &["--repo", "--to", "--agent", "--app"],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
         "import" => &[
@@ -725,6 +733,7 @@ fn scan_verb_args(
     let delegated = matches!(
         command.as_str(),
         "github-app"
+            | "github"
             | "module-secret"
             | "ssh-key"
             | "manifest"
@@ -807,6 +816,7 @@ fn scan_verb_args(
                 parse_ssh_key_op(&args)?;
             }
             "manifest" => cli_support::manifest_cli::guard_args(&args)?,
+            "github" => cli_support::github_bindings_cli::guard_args(&args)?,
             "policy" => cli_support::policy_cli::guard_args(&args)?,
             "policy-root" => keys_cli::guard_policy_root_args(&args)?,
             "secret" => cli_support::secret_cli::guard_args(&args)?,
@@ -882,6 +892,7 @@ fn usage_short() -> String {
        verify-audit        verify the audit-chain integrity\n\
        verify-github-apps  check GitHub App record ids against GitHub's slugs\n\
        github-app          create Apps or manage their webhook relay\n\
+       github              change and sign GitHub repository and App bindings\n\
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
@@ -917,6 +928,9 @@ fn usage_short() -> String {
 /// overrides — so they stay discoverable without dumping on every invocation.
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
+    if verb == "github" || verb.starts_with("github ") {
+        return cli_support::github_bindings_cli::help_text(verb.strip_prefix("github bindings "));
+    }
     if verb == "github-app" || verb.starts_with("github-app ") {
         return github_app_cli::help(verb).into();
     }

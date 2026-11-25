@@ -201,6 +201,12 @@ pub struct GhManifest {
     value: ManifestValue,
 }
 
+pub(crate) enum RepositoryBindingEdit<'a> {
+    Remove(&'a str),
+    Move { repo: &'a str, agent: &'a str },
+    Keep,
+}
+
 impl GhManifest {
     pub fn parse_reproducible(bytes: &[u8]) -> Result<Self, ManifestError> {
         let value = serde_json::from_slice(bytes).map_err(ManifestError::InvalidJson)?;
@@ -316,6 +322,44 @@ impl GhManifest {
 
     pub fn manifest_sha256(&self) -> String {
         sha256_hex(&self.to_bytes())
+    }
+
+    pub(crate) fn operator_successor(
+        &self,
+        edit: RepositoryBindingEdit<'_>,
+        now_unix_secs: i64,
+    ) -> Result<Self, ManifestError> {
+        let version = self
+            .version()
+            .checked_add(1)
+            .ok_or(ManifestError::InvalidManifest("manifest_version overflow"))?;
+        let mut next = self.clone();
+        *next
+            .value
+            .get_mut("manifest_version")
+            .expect("validated version") = ManifestValue::Number(version.into());
+        *next
+            .value
+            .get_mut("issued_at_unix_secs")
+            .expect("validated issue time") = ManifestValue::Number(now_unix_secs.into());
+        let Some(ManifestValue::Object(bindings)) = next.value.get_mut("bindings") else {
+            unreachable!("validated bindings");
+        };
+        let (repo, to) = match edit {
+            RepositoryBindingEdit::Remove(repo) => (repo, None),
+            RepositoryBindingEdit::Move { repo, agent } => (repo, Some(agent)),
+            RepositoryBindingEdit::Keep => return Ok(next),
+        };
+        let index = bindings
+            .iter()
+            .position(|(stored, _)| stored.eq_ignore_ascii_case(repo))
+            .ok_or(ManifestError::InvalidManifest("repository is not bound"))?;
+        if let Some(agent) = to {
+            bindings[index].1 = ManifestValue::String(agent.to_owned());
+        } else {
+            bindings.remove(index);
+        }
+        Ok(next)
     }
 }
 

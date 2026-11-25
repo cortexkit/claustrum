@@ -469,6 +469,39 @@ instead of relay retry: it resumes with the same candidate. The old secret's
 10-minute grace period starts when the relay first accepts the candidate. A
 repeated `PUT` is not guaranteed to preserve that grace period.
 
+### Change signed GitHub bindings
+
+On the vault computer, run one of:
+
+```text
+ck auth github bindings remove --repo <owner/name>
+ck auth github bindings move   --repo <owner/name> --to <agent>
+ck auth github bindings app    --agent <agent> --app <slug>
+```
+
+Review the complete old and new bindings, then confirm. The default is No.
+A move destination must already have a GitHub binding; give it its first
+repository through the usual one-tap approval, then move. Removing or moving an
+agent's last repository drops that binding. For an App change, install and
+store the replacement under `github_app:<slug>` first. It must not be bound or
+attested to another agent. Moves cannot make a binding span GitHub owners.
+
+The CLI signs the next manifest and policy using the signing root and commits
+both, or neither, through the running vault or under the offline lease. If the
+preview becomes stale, start again and review the new preview. If the newest
+manifest is unpaired, finish it with `ck auth policy sign` first. The CLI writes
+the derived envelope files after commit; recover missing files using
+`ck auth manifest export --version <N>` and `ck auth policy export --version <P>`.
+
+During a rollout, unchanged bindings can still obtain narrowed tokens while an
+expected computer is offline with a valid older report. Tokens cover only the
+repositories and permissions allowed by the ready pair, every currently reported
+pair, and the newest pair. A removal stops further token issues immediately; a
+new binding must wait for all computers to report. An unpaired newest or
+reported manifest pauses minting: pair the newest with `ck auth policy sign`
+and have computers report the paired version. Use `ck auth manifest list` to
+check computer reports and `ck auth policy list` to see ready and stored versions.
+
 ### Agent secrets: keys an agent uses without seeing them
 
 Agent secrets are a separate record kind that no credential id, handle, credential grant
@@ -1219,6 +1252,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `github_app.create_complete` | Record a committed GitHub App creation, including its attestation and any webhook companion; the payload holds a keyed digest. The initial relay PUT adds no row. |
 | `github_app.relay_retry` | Record a confirmed retry of the existing relay slot; the payload holds a keyed digest. |
 | `github_app.webhook_rotate` | Record a committed rotation step (stage the candidate, record relay confirmation, or promote after the GitHub update); the payload holds a keyed digest. |
+| `gh_binding_change` | Record the operator's atomic GitHub binding change after the two usual signing ceremonies. The subject is `gh-binding\|remove\|<repo>`, `gh-binding\|move\|<repo>`, or `gh-binding\|app\|<agent>`; `payload_hash` is SHA-256 of the serialized preview. |
 | `report_auth_failure` | Record a consumer report that changes credential state. |
 | `report_condition` | Set or replace a provider login condition without changing credential state. |
 | `clear_condition` | Remove a provider login condition on consumer or operator request. |

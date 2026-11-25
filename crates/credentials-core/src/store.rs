@@ -1719,6 +1719,8 @@ pub use hub_entries::*;
 
 #[path = "store_gh_admin.rs"]
 mod gh_admin;
+#[path = "store_gh_binding_admin.rs"]
+mod gh_binding_admin;
 
 #[path = "store_gh_approval.rs"]
 mod gh_approval;
@@ -1761,8 +1763,8 @@ pub use declared_grants::{
 
 pub use agent_policy::{ActiveAgentPolicy, AgentPolicySummary};
 pub use policy_token::{
-    PolicyTokenError, PolicyTokenHandoff, PolicyTokenPlan, PolicyTokenRecord, PolicyTokenRecordKey,
-    PolicyTokenRequest,
+    PolicyTokenCandidate, PolicyTokenError, PolicyTokenHandoff, PolicyTokenPlan, PolicyTokenRecord,
+    PolicyTokenRecordKey, PolicyTokenRequest,
 };
 
 pub use gh_activations::{

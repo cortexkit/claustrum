@@ -1060,3 +1060,317 @@ fn policy_admin_derive_normalizes_and_refuses_identity_and_pairing_changes() {
         "policy_binding_conflict",
     );
 }
+
+fn binding_preview(store: &EncryptedStore, change: crate::admin_ops::GitHubBindingChange) -> Value {
+    run(
+        store,
+        AdminOpBody::GitHubBindingPreview {
+            v: ADMIN_OP_SCHEMA_V2,
+            change,
+        },
+    )
+    .unwrap()
+}
+
+fn binding_commit(change: crate::admin_ops::GitHubBindingChange, preview: &Value) -> AdminOpBody {
+    AdminOpBody::GitHubBindingCommit {
+        v: ADMIN_OP_SCHEMA_V2,
+        change,
+        base: serde_json::from_value(preview["base"].clone()).unwrap(),
+    }
+}
+
+fn binding_pair(store: &EncryptedStore) {
+    run(
+        store,
+        sign(&manifest(
+            42,
+            &[
+                ("Org/R", "worker"),
+                ("Org/S", "writer"),
+                ("Else/Z", "elsewhere"),
+            ],
+        )),
+    )
+    .unwrap();
+    let mut policy =
+        crate::agent_policy::AgentPolicy::parse_canonical(POLICY_ONE.as_bytes()).unwrap();
+    for (agent, repo) in [("writer", "org/s"), ("elsewhere", "else/z")] {
+        policy.bindings.push(crate::agent_policy::Binding {
+            service: "github".into(),
+            agent: agent.into(),
+            identity: format!("github_app:{agent}"),
+            resources: vec![repo.into()],
+        });
+    }
+    policy.bindings.sort_by(|a, b| a.agent.cmp(&b.agent));
+    let text = String::from_utf8(policy.canonical_bytes().unwrap()).unwrap();
+    run(store, policy_sign(42, &text)).unwrap();
+}
+
+fn assert_binding_signatures(result: &Value, pair: &Ed25519KeyPair) {
+    let m: GhManifestHandoffEnvelope =
+        serde_json::from_value(result["manifest"]["envelope"].clone()).unwrap();
+    let p: crate::agent_policy::AgentPolicyEnvelope =
+        serde_json::from_value(result["policy"]["envelope"].clone()).unwrap();
+    let key_id = crate::signing::key_id_for_public(pair.public_key().as_ref());
+    assert_eq!(m.key_id, key_id);
+    assert_eq!(p.key_id, key_id);
+    assert_eq!(
+        m.signature,
+        STANDARD.encode(pair.sign(m.manifest_bytes.as_bytes()).as_ref())
+    );
+    let input = crate::agent_policy::signed_input(p.policy.as_bytes()).unwrap();
+    assert_eq!(p.signature_b64, STANDARD.encode(pair.sign(&input).as_ref()));
+}
+
+#[test]
+fn operator_binding_move_commits_both_signatures_and_drops_only_the_emptied_binding() {
+    use crate::admin_ops::GitHubBindingChange::Move;
+    let (_dir, store, pair) = rig("binding-move");
+    binding_pair(&store);
+    let change = Move {
+        repo: "ORG/R".into(),
+        to: "writer".into(),
+    };
+    let before = snapshot(&store);
+    let preview = binding_preview(&store, change.clone());
+    assert_eq!(snapshot(&store), before);
+    assert_eq!(
+        preview,
+        json!({"base": {"manifest_version":42, "policy_version":1},
+        "old": [
+            {"agent":"worker","identity":"github_app:worker","resources":["org/r"],"service":"github"},
+            {"agent":"writer","identity":"github_app:writer","resources":["org/s"],"service":"github"}
+        ], "new": [
+            {"agent":"writer","identity":"github_app:writer","resources":["org/r","org/s"],"service":"github"}
+        ]})
+    );
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER binding_move_rollback BEFORE INSERT ON agent_policies
+         BEGIN SELECT RAISE(ABORT, 'fixture policy write failed'); END;",
+            )
+        })
+        .unwrap();
+    refuses(
+        &store,
+        binding_commit(change.clone(), &preview),
+        "fixture policy write failed",
+    );
+    store
+        .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER binding_move_rollback"))
+        .unwrap();
+
+    let seq = store.audit_tip().unwrap().unwrap().0;
+    let result = run(&store, binding_commit(change.clone(), &preview)).unwrap();
+    assert_eq!(result["change"], preview);
+    assert_eq!(result["manifest"]["version"], 43);
+    assert_eq!(result["policy"]["version"], 2);
+    assert_binding_signatures(&result, &pair);
+    let manifest = GhManifest::parse_reproducible(
+        result["manifest"]["envelope"]["manifest_bytes"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.bindings().collect::<Vec<_>>(),
+        [
+            ("Else/Z", "elsewhere"),
+            ("Org/R", "writer"),
+            ("Org/S", "writer")
+        ]
+    );
+    let policy = crate::agent_policy::AgentPolicy::parse_canonical(
+        result["policy"]["envelope"]["policy"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        policy.github_projection(),
+        manifest_projection(&manifest).unwrap()
+    );
+    assert_eq!(policy.bindings.len(), 2);
+    let entries = store
+        .with_raw_conn(|conn| {
+            conn.prepare("SELECT op, credential_id FROM audit_log WHERE seq > ?1 ORDER BY seq")?
+                .query_map([seq], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(
+        entries.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        [
+            "approval",
+            "gh_manifest_sign",
+            "gh_manifest_store",
+            "approval",
+            "agent_policy_sign",
+            "agent_policy_store",
+            "gh_binding_change",
+        ]
+    );
+    assert_eq!(entries.last().unwrap().1, "gh-binding|move|org/r");
+    refuses(&store, binding_commit(change, &preview), "stale_base");
+    store.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn operator_binding_app_commits_both_signatures_or_leaves_no_rows() {
+    use crate::admin_ops::GitHubBindingChange::App;
+    let (_dir, store, pair) = rig("binding-app");
+    binding_pair(&store);
+    let change = |slug: &str| App {
+        agent: "worker".into(),
+        slug: slug.into(),
+    };
+    let preview_op = |slug| AdminOpBody::GitHubBindingPreview {
+        v: ADMIN_OP_SCHEMA_V2,
+        change: change(slug),
+    };
+    refuses(&store, preview_op("writer"), "policy_binding_conflict");
+    store
+        .create(
+            "github_app:wrong-kind",
+            &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"fixture".to_vec(), None),
+        )
+        .unwrap();
+    refuses(
+        &store,
+        preview_op("wrong-kind"),
+        "policy_identity_not_active_github_app",
+    );
+    let pem = include_str!("../tests/fixtures/github_app/test_private_key_pkcs1.pem")
+        .to_owned()
+        .into();
+    store
+        .create_github_app_audited(
+            crate::store::GitHubAppCreation {
+                slug: "attested",
+                agent: "agent_5555555555555555",
+                app_id: 12,
+                pem: &pem,
+                client_id: "fixture-client",
+                relay: None,
+            },
+            "test",
+        )
+        .unwrap();
+    refuses(
+        &store,
+        preview_op("attested"),
+        "policy_identity_agent_mismatch",
+    );
+    store
+        .create(
+            "github_app:replacement",
+            &VaultRecord::new_oauth(
+                "operator",
+                "github_app",
+                crate::oauth::OAuthCredential {
+                    access_token: "fixture-access".to_owned().into(),
+                    refresh_token: pem,
+                    expires_at_ms: None,
+                    token_url: String::new(),
+                    client_id: Some("fixture-client".into()),
+                    client_secret: None,
+                    scopes: Vec::new(),
+                },
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let preview = binding_preview(&store, change("replacement"));
+    assert_eq!(preview["old"][0]["identity"], "github_app:worker");
+    assert_eq!(preview["new"][0]["identity"], "github_app:replacement");
+    store.with_raw_conn(|conn| conn.execute_batch(
+        "CREATE TRIGGER binding_app_rollback BEFORE INSERT ON audit_log WHEN NEW.op = 'gh_binding_change'
+         BEGIN SELECT RAISE(ABORT, 'fixture binding audit failed'); END;"
+    )).unwrap();
+    refuses(
+        &store,
+        binding_commit(change("replacement"), &preview),
+        "fixture binding audit failed",
+    );
+    store
+        .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER binding_app_rollback"))
+        .unwrap();
+    let result = run(&store, binding_commit(change("replacement"), &preview)).unwrap();
+    assert_binding_signatures(&result, &pair);
+    let manifest = GhManifest::parse_reproducible(
+        result["manifest"]["envelope"]["manifest_bytes"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(manifest.version(), 43);
+    assert_eq!(
+        manifest.bindings().collect::<Vec<_>>(),
+        [
+            ("Else/Z", "elsewhere"),
+            ("Org/R", "worker"),
+            ("Org/S", "writer")
+        ]
+    );
+    assert_eq!(result["policy"]["version"], 2);
+    assert!(result["policy"]["envelope"]["policy"]
+        .as_str()
+        .unwrap()
+        .contains("github_app:replacement"));
+    store.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn operator_binding_preview_refuses_unbound_destination_noop_cross_owner_and_unpaired_head() {
+    use crate::admin_ops::GitHubBindingChange::{Move, Remove};
+    let (_dir, store, _) = rig("binding-preview");
+    binding_pair(&store);
+    let preview = |change| AdminOpBody::GitHubBindingPreview {
+        v: ADMIN_OP_SCHEMA_V2,
+        change,
+    };
+    for (to, reason) in [
+        ("absent", "first repository through one-tap approval"),
+        ("worker", "already bound"),
+        ("elsewhere", "share one GitHub owner"),
+    ] {
+        refuses(
+            &store,
+            preview(Move {
+                repo: "org/r".into(),
+                to: to.into(),
+            }),
+            reason,
+        );
+    }
+    let remove = Remove {
+        repo: "org/r".into(),
+    };
+    let base = binding_preview(&store, remove.clone());
+    run(
+        &store,
+        sign(&manifest(
+            43,
+            &[
+                ("Org/R", "worker"),
+                ("Org/S", "writer"),
+                ("Else/Z", "elsewhere"),
+            ],
+        )),
+    )
+    .unwrap();
+    refuses(
+        &store,
+        preview(remove.clone()),
+        "finish it with ck auth policy sign first",
+    );
+    refuses(&store, binding_commit(remove, &base), "stale_base");
+}

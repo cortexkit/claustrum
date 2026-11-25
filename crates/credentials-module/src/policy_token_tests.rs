@@ -2,6 +2,7 @@ use super::*;
 use crate::policy_token::OP_POLICY_TOKEN;
 use async_trait::async_trait;
 use credentials_core::{
+    admin_ops::GitHubBindingChange,
     agent_policy::{github_default_rule_set, AgentPolicy, Approval, Class, Identity, Kind},
     federation::NewRemoteRecord,
     oauth::OAuthCredential,
@@ -131,6 +132,14 @@ fn setup_with_resources(resources: Vec<String>) -> (Rig, Arc<Github>, String) {
 }
 
 fn setup_for_agent(resources: Vec<String>, agent: &str) -> (Rig, Arc<Github>, String) {
+    setup_with_rules(resources, agent, |_| {})
+}
+
+fn setup_with_rules(
+    resources: Vec<String>,
+    agent: &str,
+    edit_rules: impl FnOnce(&mut credentials_core::agent_policy::RuleSet),
+) -> (Rig, Arc<Github>, String) {
     let rig = Rig::new();
     let key = root(&rig);
     rig.self_member();
@@ -139,9 +148,11 @@ fn setup_for_agent(resources: Vec<String>, agent: &str) -> (Rig, Arc<Github>, St
         .map(|resource| (resource.clone(), json!(agent)))
         .collect::<serde_json::Map<_, _>>();
     let digest = manifest_with_bindings(&rig, 41, Value::Object(manifest_bindings));
+    let mut rules = github_default_rule_set().unwrap();
+    edit_rules(&mut rules);
     let policy_text = json!({
         "schema":"ck-agent-policy/v1", "version":1, "issued_at_unix_secs":1,
-        "root_key_id":key, "rule_sets":{"github":github_default_rule_set().unwrap()},
+        "root_key_id":key, "rule_sets":{"github":rules},
         "bindings":[{"service":"github","agent":agent,"identity":APP,"resources":resources}],
     })
     .to_string();
@@ -1009,5 +1020,386 @@ async fn policy_token_oversized_binding_refuses_before_github() {
         refusal("policy_token_scope_unavailable", "permanent")
     );
     assert!(first_uses(&rig).is_empty());
+    github.counts(0, 0);
+}
+
+fn sign_rollout(rig: &Rig, manifest_version: i64, policy: &AgentPolicy) {
+    apply(
+        &rig.store,
+        AdminOpBody::AgentPolicySign {
+            v: ADMIN_OP_SCHEMA_V2,
+            policy_bytes: String::from_utf8(policy.canonical_bytes().unwrap()).unwrap(),
+            manifest_version,
+            approver: "operator".into(),
+        },
+        "test",
+    )
+    .unwrap();
+}
+
+fn rollout_policy(rig: &Rig) -> AgentPolicy {
+    let ready = rig.store.active_agent_policy().unwrap().1.unwrap();
+    let mut policy = AgentPolicy::parse_canonical(ready.policy_text.as_bytes()).unwrap();
+    policy.version += 1;
+    policy
+}
+
+fn change_comment_permissions(
+    rules: &mut credentials_core::agent_policy::RuleSet,
+    values: &[(&str, &str)],
+) {
+    rules
+        .kinds
+        .iter_mut()
+        .find(|entry| entry.kind == "add_issue_comment")
+        .unwrap()
+        .credential
+        .as_mut()
+        .unwrap()
+        .github_permissions = values
+        .iter()
+        .map(|(key, value)| ((*key).into(), (*value).into()))
+        .collect();
+}
+
+fn remove_rollout_binding(rig: &Rig, repo: &str) -> (i64, String) {
+    commit_rollout_binding(rig, GitHubBindingChange::Remove { repo: repo.into() })
+}
+
+fn commit_rollout_binding(rig: &Rig, change: GitHubBindingChange) -> (i64, String) {
+    let v = ADMIN_OP_SCHEMA_V2;
+    let preview = apply(
+        &rig.store,
+        AdminOpBody::GitHubBindingPreview {
+            v,
+            change: change.clone(),
+        },
+        "test",
+    )
+    .unwrap();
+    let result = apply(
+        &rig.store,
+        AdminOpBody::GitHubBindingCommit {
+            v,
+            change,
+            base: serde_json::from_value(preview["base"].clone()).unwrap(),
+        },
+        "test",
+    )
+    .unwrap();
+    (
+        result["manifest"]["version"].as_i64().unwrap(),
+        result["manifest"]["manifest_sha256"]
+            .as_str()
+            .unwrap()
+            .into(),
+    )
+}
+
+const ROLLOUT_AGENT: &str = "agent_1b2869a7c0239401";
+
+fn approve_added_rollout_binding(rig: &Rig, repo: &str) -> (i64, String) {
+    use credentials_core::{
+        gh_manifest::{ManifestBindingEnvelope, MANIFEST_BINDING_ENVELOPE_V1_TAG},
+        store::GhManifestProposalInput,
+    };
+    rig.store
+        .set_manifest_one_tap_audited(true, AuditCtx::admin(AuditOp::GhManifestOneTapSet))
+        .unwrap();
+    rig.store
+        .set_secret_dev_desktop_approvals_audited(
+            true,
+            AuditCtx::admin(AuditOp::SecretDevDesktopApprovalsSet),
+        )
+        .unwrap();
+    let prepared = rig
+        .store
+        .prepare_gh_manifest_proposal(GhManifestProposalInput {
+            agent_id: ROLLOUT_AGENT.into(),
+            app_id: 42,
+            app_slug: APP.strip_prefix("github_app:").unwrap().into(),
+            repo: repo.into(),
+            installation_permissions: [("issues".into(), "write".into())].into(),
+        })
+        .unwrap();
+    let now = crate::read_surface::now_ms();
+    let proposal = rig
+        .store
+        .propose_gh_manifest_binding(&prepared, "reserved:plexus", || true, || now)
+        .unwrap();
+    let envelope = ManifestBindingEnvelope {
+        v: String::from_utf8(MANIFEST_BINDING_ENVELOPE_V1_TAG.to_vec()).unwrap(),
+        proposal_id: proposal.proposal_id,
+        statement_sha256: proposal.statement_sha256,
+        decision: "allow".into(),
+        device_fingerprint: "00000000000000000000000000000000".into(),
+        issued_at_ms: now as u64,
+    }
+    .canonical_bytes()
+    .unwrap();
+    let approved = rig
+        .store
+        .secret_dev_desktop_approval(&envelope, None, true, || now)
+        .unwrap();
+    (
+        approved["version"].as_i64().unwrap(),
+        approved["manifest_sha256"].as_str().unwrap().into(),
+    )
+}
+
+#[tokio::test]
+async fn policy_token_rollout_allows_unchanged_and_delays_one_tap_addition_until_every_report() {
+    let (mut rig, github, old) =
+        setup_for_agent(vec!["org/r".into(), "org/s".into()], ROLLOUT_AGENT);
+    admit_peer(&rig);
+    ready(&rig, OTHER, 41, &old);
+    rig.request(caller("aft"), OP_POLICY_TOKEN, params(), 1, 1)
+        .await;
+    let original = frame(&mut rig).await.body;
+    let (next, digest) = approve_added_rollout_binding(&rig, "Org/New");
+    ready(&rig, SELF, next, &digest);
+    rig.request(caller("aft"), OP_POLICY_TOKEN, params(), 1, 2)
+        .await;
+    assert_eq!(
+        frame(&mut rig).await.body,
+        original,
+        "an offline computer cannot block an unchanged binding"
+    );
+    let mut new = params();
+    new["resource"] = json!("org/new");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, new.clone()).await,
+        refusal("not_found", "permanent")
+    );
+    new["policy_version"] = json!(2);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, new.clone()).await,
+        refusal("policy_version_not_active", "permanent")
+    );
+    github.counts(1, 1);
+    ready(&rig, OTHER, next, &digest);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, new).await["repositories"],
+        json!(["org/new"])
+    );
+    github.counts(2, 2);
+}
+
+#[tokio::test]
+async fn policy_token_rollout_removal_stops_cached_tokens_and_intermediate_removal_blocks_readdition(
+) {
+    let (mut rig, github, old) =
+        setup_for_agent(vec!["org/r".into(), "org/s".into()], ROLLOUT_AGENT);
+    admit_peer(&rig);
+    ready(&rig, OTHER, 41, &old);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await["token"],
+        "fixture-token-1"
+    );
+    let (removed, removal_digest) = remove_rollout_binding(&rig, "Org/R");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("not_found", "permanent")
+    );
+    ready(&rig, SELF, removed, &removal_digest);
+    let (new, newest_digest) = approve_added_rollout_binding(&rig, "Org/R");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("not_found", "permanent")
+    );
+    github.counts(1, 1);
+    let mut whole = params();
+    whole["kind"] = json!("node_repository");
+    whole["resource"] = json!("binding");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, whole).await["repositories"],
+        json!(["org/s"])
+    );
+    ready(&rig, SELF, new, &newest_digest);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await["token"],
+        "fixture-token-1"
+    );
+    github.counts(2, 2);
+}
+
+#[tokio::test]
+async fn policy_token_rollout_refuses_unpaired_newest_or_reported_manifest() {
+    let (mut rig, github, old) = setup();
+    admit_peer(&rig);
+    ready(&rig, OTHER, 41, &old);
+    let policy = rollout_policy(&rig);
+    let manifest =
+        |rig: &Rig, v| manifest_with_bindings(rig, v, json!({"org/r":"agent", "org/s":"agent"}));
+    let unpaired = manifest(&rig, 42);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("policy_version_not_active", "permanent")
+    );
+    let paired = manifest(&rig, 43);
+    sign_rollout(&rig, 43, &policy);
+    ready(&rig, SELF, 42, &unpaired);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("policy_version_not_active", "permanent")
+    );
+    github.counts(0, 0);
+    ready(&rig, SELF, 43, &paired);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await["token"],
+        "fixture-token-1"
+    );
+}
+
+async fn check_rollout_permissions(
+    from: &[(&str, &str)],
+    to: &[(&str, &str)],
+    want: Option<Value>,
+) {
+    let (mut rig, github, old) = setup_with_rules(vec!["org/r".into()], "agent", |rules| {
+        change_comment_permissions(rules, from)
+    });
+    admit_peer(&rig);
+    ready(&rig, OTHER, 41, &old);
+    let mut policy = rollout_policy(&rig);
+    change_comment_permissions(policy.rule_sets.get_mut("github").unwrap(), to);
+    let next = manifest(&rig, 42);
+    sign_rollout(&rig, 42, &policy);
+    ready(&rig, SELF, 42, &next);
+    let result = rig.call("aft", OP_POLICY_TOKEN, params()).await;
+    if let Some(want) = want {
+        assert_eq!(result["permissions"], want);
+        assert_eq!(github.posts.lock().unwrap()[0]["permissions"], want);
+    } else {
+        assert_eq!(
+            result,
+            refusal("policy_token_scope_unavailable", "permanent")
+        );
+        github.counts(0, 0);
+    }
+}
+
+#[tokio::test]
+async fn policy_token_rollout_widening_keeps_the_ready_permission() {
+    check_rollout_permissions(
+        &[("issues", "read")],
+        &[("issues", "write")],
+        Some(json!({"issues":"read"})),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn policy_token_rollout_narrowing_uses_the_newer_lower_permission() {
+    check_rollout_permissions(
+        &[("issues", "write")],
+        &[("issues", "read")],
+        Some(json!({"issues":"read"})),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn policy_token_rollout_refuses_an_empty_permission_intersection() {
+    check_rollout_permissions(&[("issues", "write")], &[("pull_requests", "write")], None).await;
+}
+
+#[tokio::test]
+async fn policy_token_rollout_refuses_an_empty_whole_binding_intersection() {
+    let (mut rig, github, _) = setup_for_agent(vec!["org/r".into()], ROLLOUT_AGENT);
+    remove_rollout_binding(&rig, "Org/R");
+    approve_added_rollout_binding(&rig, "Org/S");
+    let mut whole = params();
+    whole["kind"] = json!("node_repository");
+    whole["resource"] = json!("binding");
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, whole).await,
+        refusal("policy_token_scope_unavailable", "permanent")
+    );
+    github.counts(0, 0);
+}
+
+#[tokio::test]
+async fn policy_token_rollout_requires_the_same_app_in_both_pairs() {
+    let (mut rig, github, _) = setup();
+    let alternate = "github_app:replacement";
+    rig.store.create(alternate, &app_record(None)).unwrap();
+    grant(&rig, "aft", alternate, GrantOperation::PolicyToken);
+    let (version, digest) = commit_rollout_binding(
+        &rig,
+        GitHubBindingChange::App {
+            agent: "agent".into(),
+            slug: "replacement".into(),
+        },
+    );
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("not_found", "permanent")
+    );
+    let mut request = params();
+    request["identity"] = json!(alternate);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, request.clone()).await,
+        refusal("not_found", "permanent")
+    );
+    github.counts(0, 0);
+    ready(&rig, SELF, version, &digest);
+    request["policy_version"] = json!(2);
+    let request = serde_json::from_value(request).unwrap();
+    let plan = rig
+        .store
+        .prepare_policy_token("aft", Some(&request), crate::read_surface::now_ms)
+        .unwrap();
+    assert_eq!(plan.repositories, ["org/r"]);
+}
+
+#[tokio::test]
+async fn policy_token_rollout_rechecks_provider_and_cached_scope_at_the_writer_fence() {
+    let (mut rig, github, _) = setup();
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (arrived, release) = github.stall_next_post();
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params(), 1, 1))
+        .await;
+    signal(arrived).await;
+    let mut policy = rollout_policy(&rig);
+    change_comment_permissions(
+        policy.rule_sets.get_mut("github").unwrap(),
+        &[("issues", "read")],
+    );
+    manifest_with_bindings(&rig, 42, json!({"org/r":"agent","org/s":"agent"}));
+    sign_rollout(&rig, 42, &policy);
+    release.send(()).unwrap();
+    assert_eq!(
+        reply(&mut rig, 1).await,
+        refusal("policy_token_scope_unavailable", "permanent")
+    );
+    assert!(first_uses(&rig).is_empty());
+    let narrow = rig.call("aft", OP_POLICY_TOKEN, params()).await;
+    assert_eq!(narrow["permissions"], json!({"issues":"read"}));
+    assert_eq!(rig.call("aft", OP_POLICY_TOKEN, params()).await, narrow);
+    github.counts(2, 2);
+}
+
+#[tokio::test]
+async fn policy_token_rollout_requires_newer_approval_even_before_it_is_ready() {
+    let (mut rig, github, _) = setup();
+    let mut policy = rollout_policy(&rig);
+    policy
+        .rule_sets
+        .get_mut("github")
+        .unwrap()
+        .kinds
+        .iter_mut()
+        .find(|kind| kind.kind == "add_issue_comment")
+        .unwrap()
+        .approval = Approval::Once;
+    manifest_with_bindings(&rig, 42, json!({"org/r":"agent","org/s":"agent"}));
+    sign_rollout(&rig, 42, &policy);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params()).await,
+        refusal("approval_required", "permanent")
+    );
     github.counts(0, 0);
 }

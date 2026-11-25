@@ -146,7 +146,11 @@ pub fn cmd_manifest(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     Ok(())
 }
 
-fn write_envelope(global: &GlobalArgs, version: i64, value: &Value) -> std::io::Result<()> {
+pub(super) fn write_envelope(
+    global: &GlobalArgs,
+    version: i64,
+    value: &Value,
+) -> std::io::Result<()> {
     let envelope: GhManifestHandoffEnvelope = serde_json::from_value(value.clone())?;
     publish_envelope(
         &global.data_dir.join("signed-envelopes"),

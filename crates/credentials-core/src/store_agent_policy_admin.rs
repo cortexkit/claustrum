@@ -266,39 +266,57 @@ impl EncryptedStore {
             }
             require_head_bindings(&policy.bindings, head.as_ref())?;
 
-            let prepared =
-                self.prepare_agent_policy_in_tx(tx, &policy, policy_bytes.as_bytes(), &input)?;
-            let hash = prepared.hash.clone();
-            let actor = format!("{actor}/approver:{approver}");
-            let approval = append_audit_tx(
+            self.sign_agent_policy_ceremony_in_tx(
                 tx,
-                &self.audit_key,
-                &AuditRecord {
-                    op: AuditOp::Approval,
-                    credential_id: Some(prepared.credential_id.clone()),
-                    payload_hash: Some(hash.clone()),
-                    actor: actor.clone(),
-                    alarm: None,
-                },
+                &policy,
+                policy_bytes,
+                &input,
+                manifest_version,
+                &format!("{actor}/approver:{approver}"),
             )
-            .map_err(sql)?;
-            let (key_id, signature) = self.sign_and_store_agent_policy_in_tx(
-                tx,
-                prepared,
-                AgentPolicyApproval {
-                    seq: approval.seq,
-                    source: AgentPolicySource::Ceremony,
-                    manifest_version,
-                    actor: &actor,
-                },
-                now_ms,
-            )?;
-            Ok(json!({
-                "version": policy.version,
-                "policy_sha256": hash,
-                "envelope": AgentPolicyEnvelope::new(policy_bytes.into(), key_id, &signature),
-            }))
         })
+    }
+
+    pub(super) fn sign_agent_policy_ceremony_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        policy: &AgentPolicy,
+        policy_bytes: &str,
+        input: &[u8],
+        manifest_version: i64,
+        actor: &str,
+    ) -> Result<Value, StoreOpError> {
+        let prepared =
+            self.prepare_agent_policy_in_tx(tx, policy, policy_bytes.as_bytes(), input)?;
+        let hash = prepared.hash.clone();
+        let approval = append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AuditRecord {
+                op: AuditOp::Approval,
+                credential_id: Some(prepared.credential_id.clone()),
+                payload_hash: Some(hash.clone()),
+                actor: actor.to_owned(),
+                alarm: None,
+            },
+        )
+        .map_err(sql)?;
+        let (key_id, signature) = self.sign_and_store_agent_policy_in_tx(
+            tx,
+            prepared,
+            AgentPolicyApproval {
+                seq: approval.seq,
+                source: AgentPolicySource::Ceremony,
+                manifest_version,
+                actor,
+            },
+            now_ms,
+        )?;
+        Ok(json!({
+            "version": policy.version,
+            "policy_sha256": hash,
+            "envelope": AgentPolicyEnvelope::new(policy_bytes.into(), key_id, &signature),
+        }))
     }
 
     pub(crate) fn list_agent_policies_admin(&self) -> Result<Value, StoreOpError> {
@@ -411,7 +429,11 @@ impl EncryptedStore {
         })?
     }
 
-    fn require_active_github_app(&self, conn: &Connection, id: &str) -> Result<(), StoreOpError> {
+    pub(super) fn require_active_github_app(
+        &self,
+        conn: &Connection,
+        id: &str,
+    ) -> Result<(), StoreOpError> {
         let invalid = || refusal("policy_identity_not_active_github_app");
         if !id
             .strip_prefix("github_app:")

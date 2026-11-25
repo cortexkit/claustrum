@@ -818,21 +818,72 @@ async fn broker_action_token_two_prepared_calls_cannot_spend_the_same_leg() {
     github.counts(1, 1);
 }
 
-fn activate_policy_without_approval(rig: &Rig) {
-    let active = rig.store.active_agent_policy().unwrap().1.unwrap();
-    let mut policy = AgentPolicy::parse_canonical(active.policy_text.as_bytes()).unwrap();
-    policy.version = 2;
-    policy
-        .rule_sets
-        .insert("github".into(), github_default_rule_set().unwrap());
-    let bytes = policy.canonical_bytes().unwrap();
+fn store_policy_without_approval(
+    rig: &Rig,
+    edit: impl FnOnce(&mut credentials_core::agent_policy::RuleSet),
+) -> String {
+    let mut policy = rollout_policy(rig);
+    let mut rules = github_default_rule_set().unwrap();
+    edit(&mut rules);
+    policy.rule_sets.insert("github".into(), rules);
     let digest = manifest_with_bindings(rig, 42, json!({"org/r":"agent", "org/s":"agent"}));
-    Connection::open(&rig.path).unwrap().execute(
-        "INSERT INTO agent_policies (version, policy_bytes, policy_sha256, key_id, signature, signed_at_ms, source, approval_seq, manifest_version)
-         SELECT 2, ?1, ?2, key_id, signature, signed_at_ms, source, approval_seq, 42 FROM agent_policies WHERE version = 1",
-        rusqlite::params![bytes, policy_sha256(&bytes)],
-    ).unwrap();
+    sign_rollout(rig, 42, &policy);
+    digest
+}
+
+fn activate_policy_without_approval(rig: &Rig) {
+    let digest = store_policy_without_approval(rig, |_| {});
     ready(rig, SELF, 42, &digest);
+}
+
+#[tokio::test]
+async fn broker_action_token_rollout_keeps_approval_bound_to_ready_policy_when_newer_requires_less()
+{
+    let (mut rig, github, old) = setup_actions();
+    admit_peer(&rig);
+    ready(&rig, OTHER, 41, &old);
+    let next = store_policy_without_approval(&rig, |_| {});
+    ready(&rig, SELF, 42, &next);
+    token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let params = issue_params(&approval);
+    assert_eq!(params["policy_version"], 1);
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params).await["token"],
+        "fixture-token-1"
+    );
+    assert_eq!(issued_legs(&rig, &approval), 1);
+    github.counts(1, 1);
+}
+
+#[tokio::test]
+async fn broker_action_token_rollout_fences_an_approved_leg_removed_during_mint() {
+    let (mut rig, github, _) = setup_actions();
+    token_gate_clock(&rig);
+    let approval = mint_at(&rig, NOW).unwrap();
+    approve_for_issue(&rig, &approval);
+    let ingress = Ingress::new(&rig);
+    ingress.bind(&rig, 1, "aft");
+    let (posted, release) = github.stall_next_post();
+    let params = issue_params(&approval);
+    ingress
+        .dispatch(&rig, request(OP_POLICY_TOKEN, params.clone(), 1, 10))
+        .await;
+    signal(posted).await;
+    store_policy_without_approval(&rig, |rules| {
+        rules.kinds.retain(|kind| kind.kind != COMMENT);
+        rules.actions.clear();
+    });
+    release.send(()).unwrap();
+    assert_eq!(reply(&mut rig, 10).await, refusal("not_found", "permanent"));
+    assert_eq!(
+        rig.call("aft", OP_POLICY_TOKEN, params).await,
+        refusal("not_found", "permanent")
+    );
+    assert_eq!(issued_legs(&rig, &approval), 0);
+    assert!(first_uses(&rig).is_empty());
+    github.counts(1, 1);
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::agent_policy::Binding;
 use crate::agent_secret::SecretPut;
 use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
@@ -43,6 +44,29 @@ where
     D: serde::Deserializer<'de>,
 {
     serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GitHubBindingChange {
+    Remove { repo: String },
+    Move { repo: String, to: String },
+    App { agent: String, slug: String },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubBindingBase {
+    pub manifest_version: i64,
+    pub policy_version: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubBindingPreview {
+    pub base: GitHubBindingBase,
+    pub old: Vec<Binding>,
+    pub new: Vec<Binding>,
 }
 
 /// One authenticated admin operation. `#[serde(tag = "op")]` so the discriminator
@@ -119,6 +143,14 @@ pub enum AdminOpBody {
     ManifestOneTapSet { v: u32, enabled: bool },
     #[serde(rename = "admin.manifest_one_tap_status")]
     ManifestOneTapStatus { v: u32 },
+    #[serde(rename = "admin.github_binding_preview")]
+    GitHubBindingPreview { v: u32, change: GitHubBindingChange },
+    #[serde(rename = "admin.github_binding_commit")]
+    GitHubBindingCommit {
+        v: u32,
+        change: GitHubBindingChange,
+        base: GitHubBindingBase,
+    },
     #[serde(rename = "admin.policy_root_init")]
     PolicyRootInit { v: u32 },
     #[serde(rename = "admin.policy_root_show")]
@@ -640,6 +672,8 @@ impl std::fmt::Debug for AdminOpBody {
                 f.debug_struct(self.op_name()).field("v", v).finish()
             }
             AdminOpBody::GitHubAppManifestPrepare { v, .. }
+            | AdminOpBody::GitHubBindingPreview { v, .. }
+            | AdminOpBody::GitHubBindingCommit { v, .. }
             | AdminOpBody::GitHubAppRelayRetry { v, .. }
             | AdminOpBody::GitHubAppWebhookRotate { v, .. }
             | AdminOpBody::GitHubAppCreateComplete { v, .. } => f
@@ -1152,6 +1186,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { v, .. }
             | AdminOpBody::ManifestOneTapSet { v, .. }
             | AdminOpBody::ManifestOneTapStatus { v }
+            | AdminOpBody::GitHubBindingPreview { v, .. }
+            | AdminOpBody::GitHubBindingCommit { v, .. }
             | AdminOpBody::PolicyRootInit { v }
             | AdminOpBody::PolicyRootShow { v }
             | AdminOpBody::GitHubAppManifestPrepare { v, .. }
@@ -1245,6 +1281,8 @@ impl AdminOpBody {
             }
             AdminOpBody::ManifestImport { .. }
             | AdminOpBody::ManifestSign { .. }
+            | AdminOpBody::GitHubBindingPreview { .. }
+            | AdminOpBody::GitHubBindingCommit { .. }
             | AdminOpBody::ManifestExport { .. }
             | AdminOpBody::ManifestList { .. }
             | AdminOpBody::ManifestRetireMachine { .. }
@@ -1377,7 +1415,8 @@ impl AdminOpBody {
                 Some(crate::federation::VAULT_TRANSFER_ID)
             }
             AdminOpBody::ManifestSign { .. } | AdminOpBody::ManifestImport { .. }
-            | AdminOpBody::AgentPolicySign { .. } | AdminOpBody::PolicyRootInit { .. } => {
+            | AdminOpBody::AgentPolicySign { .. } | AdminOpBody::PolicyRootInit { .. }
+            | AdminOpBody::GitHubBindingCommit { .. } => {
                 Some(crate::store::GH_MANIFEST_ROOT_KEY_ID)
             }
             AdminOpBody::RevokeHandle { .. }
@@ -1388,6 +1427,7 @@ impl AdminOpBody {
             | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::GitHubAppManifestPrepare { .. }
+            | AdminOpBody::GitHubBindingPreview { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
             | AdminOpBody::GitHubAppCreateComplete { .. }
             | AdminOpBody::GitHubAppRelayRetry { .. }
@@ -1470,6 +1510,8 @@ impl AdminOpBody {
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
             AdminOpBody::ManifestImport { .. } => "admin.manifest_import",
             AdminOpBody::ManifestSign { .. } => "admin.manifest_sign",
+            AdminOpBody::GitHubBindingPreview { .. } => "admin.github_binding_preview",
+            AdminOpBody::GitHubBindingCommit { .. } => "admin.github_binding_commit",
             AdminOpBody::ManifestExport { .. } => "admin.manifest_export",
             AdminOpBody::ManifestList { .. } => "admin.manifest_list",
             AdminOpBody::ManifestRetireMachine { .. } => "admin.manifest_retire_machine",
@@ -1571,6 +1613,8 @@ impl AdminOpBody {
             | AdminOpBody::ManifestRetireMachine { .. }
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
+            | AdminOpBody::GitHubBindingPreview { .. }
+            | AdminOpBody::GitHubBindingCommit { .. }
             | AdminOpBody::PolicyRootInit { .. }
             | AdminOpBody::PolicyRootShow { .. }
             | AdminOpBody::GitHubAppManifestPrepare { .. }
@@ -1767,6 +1811,12 @@ pub fn apply(
             approver,
             ..
         } => store.sign_gh_manifest_admin(&manifest_bytes, &approver, actor),
+        AdminOpBody::GitHubBindingPreview { change, .. } => {
+            store.preview_github_binding_admin(&change)
+        }
+        AdminOpBody::GitHubBindingCommit { change, base, .. } => {
+            store.commit_github_binding_admin(&change, base, actor)
+        }
         AdminOpBody::ManifestExport { version, .. } => {
             let envelope = store.export_gh_manifest_admin(version)?;
             serde_json::to_value(envelope).map_err(|e| StoreOpError::Encode(e.to_string()))
@@ -3367,6 +3417,32 @@ mod admin_schema_v2_tests {
                     v: v2,
                     manifest_bytes: "{}".into(),
                     approver: "operator".into(),
+                },
+                v2,
+                Some(crate::store::GH_MANIFEST_ROOT_KEY_ID),
+            ),
+            (
+                "GitHubBindingPreview",
+                AdminOpBody::GitHubBindingPreview {
+                    v: v2,
+                    change: GitHubBindingChange::Remove {
+                        repo: "org/r".into(),
+                    },
+                },
+                v2,
+                None,
+            ),
+            (
+                "GitHubBindingCommit",
+                AdminOpBody::GitHubBindingCommit {
+                    v: v2,
+                    change: GitHubBindingChange::Remove {
+                        repo: "org/r".into(),
+                    },
+                    base: GitHubBindingBase {
+                        manifest_version: 42,
+                        policy_version: 7,
+                    },
                 },
                 v2,
                 Some(crate::store::GH_MANIFEST_ROOT_KEY_ID),

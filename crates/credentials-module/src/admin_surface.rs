@@ -1329,6 +1329,10 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             "agent_invalid",
             "github_app_agent_exists",
             "policy_identity_agent_mismatch",
+            "policy_identity_not_active_github_app",
+            "policy_binding_conflict",
+            "not_found",
+            "stale_base",
             "policy_unavailable",
         ] {
             if let Some(why) = message.strip_prefix(code).and_then(|m| m.strip_prefix(':')) {
@@ -2936,6 +2940,99 @@ mod tests {
             "a body one byte over the cap must be refused for its size"
         );
         assert!(r.store.get("apikey:over-cap").is_err());
+    }
+
+    #[tokio::test]
+    async fn github_binding_admin_authenticates_preview_and_fences_the_confirmed_base() {
+        use credentials_core::admin_ops::{
+            apply, GitHubBindingBase, GitHubBindingChange, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+        };
+        use serde_json::json;
+
+        let r = rig(49);
+        r.admin.record_bind(5, Principal::Direct);
+        let v = ADMIN_OP_SCHEMA_V2;
+        let root = apply(
+            &r.store,
+            AdminOpBody::PolicyRootInit {
+                v: ADMIN_OP_SCHEMA_V1,
+            },
+            "test",
+        )
+        .unwrap();
+        let manifest_bytes = serde_json::to_string_pretty(&json!({
+            "manifest_version":41,"issued_at_unix_secs":1,"bindings":{"Org/R":"worker"}
+        }))
+        .unwrap()
+            + "\n";
+        apply(
+            &r.store,
+            AdminOpBody::ManifestSign {
+                v,
+                manifest_bytes,
+                approver: "tester".into(),
+            },
+            "test",
+        )
+        .unwrap();
+        let policy_bytes = json!({
+            "bindings":[{"agent":"worker","identity":"github_app:worker","resources":["org/r"],"service":"github"}],
+            "issued_at_unix_secs":1,"root_key_id":root["key_id"],"rule_sets":{},"schema":"ck-agent-policy/v1","version":1
+        }).to_string();
+        apply(
+            &r.store,
+            AdminOpBody::AgentPolicySign {
+                v,
+                policy_bytes,
+                manifest_version: 41,
+                approver: "tester".into(),
+            },
+            "test",
+        )
+        .unwrap();
+
+        let invoke = |op: AdminOpBody| {
+            let r = &r;
+            async move {
+                let bytes = String::from_utf8(op.to_bytes().unwrap()).unwrap();
+                let (tag, _) = challenge_and_sign(r, 5, &bytes);
+                r.admin.execute(5, bytes.as_bytes(), &tag).await
+            }
+        };
+        let change = GitHubBindingChange::Remove {
+            repo: "org/r".into(),
+        };
+        let preview = AdminOpBody::GitHubBindingPreview {
+            v,
+            change: change.clone(),
+        };
+        let bytes = preview.to_bytes().unwrap();
+        let _ = r.admin.challenge(5);
+        assert!(matches!(r.admin.execute(5, &bytes, &"00".repeat(32)).await,
+            AdminOutcome::Refused(reason) if reason == "auth failed"));
+        let before = r.store.audit_tip().unwrap();
+        let AdminOutcome::Ok(preview) = invoke(preview).await else {
+            panic!("authenticated preview refused")
+        };
+        assert_eq!(r.store.audit_tip().unwrap(), before);
+        let base: GitHubBindingBase = serde_json::from_value(preview["base"].clone()).unwrap();
+        let wrong = GitHubBindingBase {
+            policy_version: 100,
+            ..base
+        };
+        assert!(
+            matches!(invoke(AdminOpBody::GitHubBindingCommit { v, change: change.clone(), base: wrong }).await,
+            AdminOutcome::Refused(reason) if reason.starts_with("stale_base/permanent:"))
+        );
+        assert_eq!(r.store.audit_tip().unwrap(), before);
+        let AdminOutcome::Ok(result) =
+            invoke(AdminOpBody::GitHubBindingCommit { v, change, base }).await
+        else {
+            panic!("authenticated commit refused")
+        };
+        assert_eq!(result["change"], preview);
+        assert_eq!(result["manifest"]["version"], 42);
+        assert_eq!(result["policy"]["version"], 2);
     }
 
     #[tokio::test]

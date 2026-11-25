@@ -5630,11 +5630,15 @@ callers, and admitted callers on Remote or RemoteSetupIncomplete vaults, receive
 for an admitted caller. Parameters must be an empty object.
 
 `policy.active` returns `{version, policy_sha256, manifest_version, policy_text}`.
-The active policy is the highest stored policy version whose paired manifest is
-ready under the `manifest.active_status` rule. Selection and the serving role are
-read from one snapshot. `manifest_version` is the paired GitHub manifest version;
-`policy_text` is the exact UTF-8 JSON string from the signed policy envelope. If no
-policy is active, including during a split rollout, all four members are null.
+The vault checks every non-retired expected computer's current report for a valid
+verdict and the exact digest of its stored manifest. The lowest such reported
+manifest version is the fleet floor. The active (ready) policy is the one paired
+with the newest stored manifest at or below that floor. No reports, a missing or
+invalid report, or a mismatched digest establishes no floor. The serving role and
+selection are read in one snapshot. `manifest_version` is the paired manifest
+version; `policy_text` is the exact UTF-8 JSON string from the signed policy
+envelope. When there is no ready pair, all four members are null. This selection
+does not change what `manifest.active_status` reports for each specific version.
 
 `policy.watch` uses WATCH delivery and the shared local inventory watch contract:
 one subscription per route, a shared maximum of 64, `STREAM_END` on replacement or
@@ -5734,22 +5738,38 @@ Before using the cache or making any GitHub request, the vault checks, in order:
    names no daemon-attested agent and scope. The vault checked the agent when it
    minted the approval request, and it binds the issue to the minting module and
    identity under the same policy.
-5. `policy_version` equals the active version from `policy.active`.
-6. The active policy has a binding for that service and identity.
-7. The rule set contains `kind`, with identity `agent`, a credential, and a
-   class other than `denied`.
-8. `resource` exactly matches a canonical lowercase repository in the binding.
-   Only `node_repository` may instead use `"binding"` to name the entire binding,
-   which must contain at most 500 repositories.
+5. `policy_version` equals the ready policy version from `policy.active`. If the
+   newest stored manifest or any currently reported manifest has no paired policy,
+   minting refuses with `policy_version_not_active`, even with a ready pair.
+6. The ready policy, every distinct currently reported pair, and the newest stored
+   pair bind that service and App identity to the same agent.
+7. Each pair's rule set contains `kind`, with identity `agent`, a credential, and a
+   class other than `denied`. The permission map keeps only names that all pairs
+   allow, at the lowest allowed level (`read`, `write`, `admin`); an empty map
+   refuses with `policy_token_scope_unavailable`.
+8. `resource` exactly matches a canonical lowercase repository in every binding.
+   Only `node_repository` may instead use `"binding"`. It selects the intersection
+   of the bindings' repository sets, which must contain 1–500 repositories.
 9. The local App credential exists and is active, and any attested agent matches
    the binding. A remote copy does not count.
-10. If the kind requires `approval: once` and neither member was supplied, the
-    vault returns `approval_required`.
+10. If any pair requires `approval: once` and neither member was supplied, the
+     vault returns `approval_required`. Proofs remain bound to the ready policy:
+     a newly gated kind cannot release a token until the ready policy also
+     requires approval. An approval from the ready pair still works if a newer
+     pair allows the same step without approval.
+
+An offline computer with a valid older report delays new bindings, not tokens
+for unchanged ones. A removal, move or App identity change stops issuing tokens
+for the old binding immediately; the new binding waits for reports. An
+intermediate report that removed a repository still excludes it even if the
+newest pair adds it back. A manual manifest ceremony pauses token issuance if
+it stores a manifest without a policy; complete it with `ck auth policy sign`.
 
 Success is `{token, expires_at_ms, repositories, permissions}`. `token` is a
 GitHub installation bearer token, `expires_at_ms` is a Unix timestamp in
 milliseconds, `repositories` is the sorted lowercase selected set, and
-`permissions` is the kind's `credential.github_permissions` map. The vault
+`permissions` is the intersection of the kind's `credential.github_permissions`
+maps, or the same map unchanged if all pairs agree. The vault
 checks the exchange reply against the requested repositories and permissions;
 unrequested `metadata: read` is allowed and omitted from the returned map. The
 token does not enforce the kind's individual request matcher; the caller does.
@@ -5763,9 +5783,11 @@ and can reuse the result until five minutes before expiry.
 The shared mint has 30 seconds for installation discovery and token exchange
 together. It returns `github_unavailable` if the deadline passes.
 Before handing out any token, the vault rechecks its role, the accepted caller's
-exact grant, any approval for the prepared leg, the active policy version, the
-credential row and token expiry. In that same transaction it records the
-caller's first use of the credential, the same scoped first-use row a
+exact grant, any approval for the prepared leg, the ready policy version, the
+current intersection of repository and permission scopes, the credential row and
+token expiry. A candidate whose scope no longer matches is not released. The
+token-release transaction records the caller's first use of the credential, the
+same scoped first-use row a
 `credential.get_scoped` read writes. For an approved leg it also advances the issue count
 and appends one `broker_action_issue` audit row with the leg digest. Cached
 tokens go through the same checks. No refusal spends a leg. The write
@@ -5780,14 +5802,14 @@ the new row once; an unusable row or a failed authorization is not retried.
 | `permanent` | `approval_required` | An otherwise eligible local request names a `once` kind but carries no approval; request one with `policy.request_action` and have the person approve it on an approving device |
 | `permanent` | `approval_invalid` | No live approved request matches this caller, identity, and next leg; check the approval status and leg order, and file a new card if the approval expired or was spent |
 | `permanent` | `approval_policy_changed` | The approval's policy is no longer active; request a new approval under the active policy |
-| `permanent` | `policy_version_not_active` | No policy is active, or the supplied version is not active |
+| `permanent` | `policy_version_not_active` | No policy is ready, the supplied version is not ready, or a reported/newest manifest is unpaired |
 | `permanent` | `not_installed` | No local App credential |
 | `auth_required` | `needs_reauth` | Credential needs reauthentication or is retired |
 | `permanent` | `corrupt` | Credential is corrupt or its material cannot be decoded |
 | `transient` | `vault_locked` | Credential was sealed under a different master key |
 | `permanent` | `installation_unusable` | App material or the installation does not support the mint |
 | `permanent` | `installation_suspended` | GitHub marks the installation as suspended |
-| `permanent` | `policy_token_scope_unavailable` | Selected set exceeds the binding limit, or GitHub cannot issue the requested scope |
+| `permanent` | `policy_token_scope_unavailable` | Empty intersection, selected set exceeds the binding limit, the prepared scope no longer matches, or GitHub cannot issue the requested scope |
 | `permanent` | `policy_token_scope_mismatch` | The GitHub reply does not confirm the exact scope |
 | `transient` | `github_unavailable` | GitHub is unavailable, the reply is unusable or expired, or the row changed again |
 | `transient` | `store_error` | A store check or release commit failed |
@@ -6160,6 +6182,40 @@ The master-key admin surface provides four operations with `v: 2`:
 | `admin.agent_policy_list` | None | `{policies, head, active}` from one store snapshot |
 | `admin.agent_policy_export` | `version` | Retained envelope for that version, or `not_found` |
 | `admin.agent_policy_derive` | `manifest_version`, `identities` | Canonical policy text (unsigned) |
+
+Only the operator's `ck auth github bindings` ceremony can remove or move a
+repository or change an agent's App identity. It uses the same master-key admin
+challenge and MAC, or the same offline lease, as manifest and policy signing:
+
+| Operation (`v: 2`) | Parameters besides `v` | Result |
+|---|---|---|
+| `admin.github_binding_preview` | `change` | `{base, old, new}`; no writes |
+| `admin.github_binding_commit` | `change`, `base` | `{change, manifest, policy}` |
+
+`change` is one of `{action:"remove", repo}`, `{action:"move", repo, to}` or
+`{action:"app", agent, slug}`. `repo` names `owner/name` (case-insensitive), `to`
+and `agent` name agents with existing GitHub bindings, and `slug` names an active
+`github_app:<slug>` record. Preview returns the full changed bindings in `old`
+and `new` (arrays of policy bindings) and the exact signed base pair as
+`base: {manifest_version, policy_version}`. An emptied binding is dropped.
+
+The CLI shows the preview and sends the commit only after confirmation. The
+commit recomputes the exact change under the store's writer transaction and
+refuses `stale_base` if either base version changed. It signs and stores the
+manifest and policy successors together with both ceremonies' approval, sign
+and store audit rows and one `gh_binding_change` row. The result's `change`
+is the committed preview. `manifest` and `policy` have the same result shapes
+as their respective sign operations. Neither document nor any audit row from
+the change is retained on refusal. The CLI writes both derived envelope files
+only after commit.
+
+These operations use `admin_refused` messages in `<code>/permanent: <why>` form:
+`not_found` for a missing pair, repo or agent, `stale_base` for a concurrent
+change, `policy_binding_conflict` for a no-op, duplicate App, cross-owner move
+or unpaired newest manifest, `policy_identity_not_active_github_app` for an
+unusable App record, and `policy_identity_agent_mismatch` for an App attested to
+a different agent. The ordinary signing paths still require unchanged
+bindings. One-tap approval can only add a repository.
 
 Two master-key operations with `v: 1` manage the install's signing root:
 

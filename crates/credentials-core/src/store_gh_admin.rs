@@ -130,58 +130,72 @@ impl EncryptedStore {
                     return Err(StoreOpError::Encode("policy_binding_conflict".into()));
                 }
             }
-            let root = self
-                .gh_manifest_root_in_tx(tx)
-                .map_err(manifest_root_error)?;
-            let hash = manifest.manifest_sha256();
-            let actor = format!("{actor}/approver:{approver}");
-            let approval = append_audit_tx(
+            self.sign_gh_manifest_ceremony_in_tx(
                 tx,
-                &self.audit_key,
-                &AuditRecord {
-                    op: AuditOp::Approval,
-                    credential_id: Some(root.credential_id),
-                    payload_hash: Some(hash.clone()),
-                    actor: actor.clone(),
-                    alarm: None,
-                },
-            )
-            .map_err(sql)?;
-            let signed = self.sign_gh_manifest(
-                tx,
-                manifest_bytes.as_bytes(),
-                AuditCtx::route_admin(AuditOp::GhManifestSign, &actor),
-            )?;
-            let raw: [u8; 64] = STANDARD
-                .decode(&signed.signature_b64)
-                .ok()
-                .and_then(|raw| raw.try_into().ok())
-                .ok_or_else(|| StoreOpError::Corrupt("unusable manifest signature".into()))?;
-            self.store_gh_manifest_in_tx(
-                tx,
-                &GhManifestVersion {
-                    version: manifest.version(),
-                    manifest_bytes: manifest_bytes.as_bytes(),
-                    manifest_sha256: &hash,
-                    key_id: &signed.key_id,
-                    signature: &raw,
-                    signed_at_ms: now_ms(),
-                    source: GhManifestSource::Ceremony,
-                    approval_audit_seq: Some(approval.seq),
-                },
-                AuditCtx::route_admin(AuditOp::GhManifestStore, &actor),
-            )
-            .map_err(sql)?;
-            // The fenced transaction publishes this envelope only after COMMIT.
-            Ok(
-                json!({"version": manifest.version(), "manifest_sha256": hash,
-                "envelope": GhManifestHandoffEnvelope {
-                    key_id: signed.key_id,
-                    manifest_bytes: manifest_bytes.into(),
-                    signature: signed.signature_b64,
-                }}),
+                &manifest,
+                manifest_bytes,
+                &format!("{actor}/approver:{approver}"),
             )
         })
+    }
+
+    pub(super) fn sign_gh_manifest_ceremony_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        manifest: &GhManifest,
+        manifest_bytes: &str,
+        actor: &str,
+    ) -> Result<Value, StoreOpError> {
+        let root = self
+            .gh_manifest_root_in_tx(tx)
+            .map_err(manifest_root_error)?;
+        let hash = manifest.manifest_sha256();
+        let approval = append_audit_tx(
+            tx,
+            &self.audit_key,
+            &AuditRecord {
+                op: AuditOp::Approval,
+                credential_id: Some(root.credential_id),
+                payload_hash: Some(hash.clone()),
+                actor: actor.to_owned(),
+                alarm: None,
+            },
+        )
+        .map_err(sql)?;
+        let signed = self.sign_gh_manifest(
+            tx,
+            manifest_bytes.as_bytes(),
+            AuditCtx::route_admin(AuditOp::GhManifestSign, actor),
+        )?;
+        let raw: [u8; 64] = STANDARD
+            .decode(&signed.signature_b64)
+            .ok()
+            .and_then(|raw| raw.try_into().ok())
+            .ok_or_else(|| StoreOpError::Corrupt("unusable manifest signature".into()))?;
+        self.store_gh_manifest_in_tx(
+            tx,
+            &GhManifestVersion {
+                version: manifest.version(),
+                manifest_bytes: manifest_bytes.as_bytes(),
+                manifest_sha256: &hash,
+                key_id: &signed.key_id,
+                signature: &raw,
+                signed_at_ms: now_ms(),
+                source: GhManifestSource::Ceremony,
+                approval_audit_seq: Some(approval.seq),
+            },
+            AuditCtx::route_admin(AuditOp::GhManifestStore, actor),
+        )
+        .map_err(sql)?;
+        // The caller publishes this envelope only after the transaction commits.
+        Ok(
+            json!({"version": manifest.version(), "manifest_sha256": hash,
+            "envelope": GhManifestHandoffEnvelope {
+                key_id: signed.key_id,
+                manifest_bytes: manifest_bytes.into(),
+                signature: signed.signature_b64,
+            }}),
+        )
     }
 }
 

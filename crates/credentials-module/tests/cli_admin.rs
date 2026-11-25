@@ -6280,11 +6280,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
     // additions include sign, the four federation verbs (transfer, remote, member,
     // federation), secret, ssh-key, provider-report, module-secret and
-    // clear-condition, policy, policy-root and github-app.
+    // clear-condition, policy, policy-root, github-app and github.
     assert_eq!(
         verbs.len(),
-        47,
-        "the rendered verb-table scan must include the github-app command family"
+        48,
+        "the rendered verb-table scan must include the GitHub binding commands"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
@@ -10795,4 +10795,146 @@ fn login_sharing_status_help_and_verb_table_explain_file_only_live_setting() {
         assert!(page.contains("claustrum.jsonc"));
         assert!(page.lines().all(|line| line.chars().count() <= 80));
     }
+}
+
+#[test]
+fn github_bindings_cli_help_and_bad_flags_do_not_open_the_vault() {
+    let vault = GrantCliVault::new("github-binding-help");
+    for (action, flags) in [
+        ("remove", &["--repo"][..]),
+        ("move", &["--repo", "--to"]),
+        ("app", &["--agent", "--app"]),
+    ] {
+        let output = vault.run(&["help", "github", "bindings", action]);
+        assert!(output.status.success());
+        let page = String::from_utf8(output.stdout).unwrap();
+        assert!(page.starts_with(&format!("ck auth github bindings {action}")));
+        assert!(page.lines().all(|line| line.chars().count() <= 80));
+        for flag in flags {
+            assert!(page
+                .lines()
+                .any(|line| line.starts_with(&format!("  {flag} "))));
+        }
+        let direct = vault.run(&["github", "bindings", action, "--help"]);
+        assert!(direct.status.success());
+        assert_eq!(direct.stdout, page.as_bytes());
+    }
+    for args in [
+        &[
+            "github", "bindings", "remove", "--repo", "org/r", "--repo", "org/s",
+        ][..],
+        &["github", "bindings", "move", "--repo", "org/r"],
+        &[
+            "github",
+            "bindings",
+            "app",
+            "--to",
+            "worker",
+            "--app",
+            "replacement",
+        ],
+    ] {
+        assert!(!vault.run(args).status.success());
+        assert!(!vault.data_dir.join("store.db").exists());
+    }
+}
+
+#[cfg(unix)]
+#[path = "support/terminal_cli.rs"]
+mod terminal_cli;
+
+#[cfg(unix)]
+#[test]
+fn github_bindings_cli_previews_and_confirms_before_writing_offline() {
+    use serde_json::json;
+    let vault = GrantCliVault::new("github-binding-offline");
+    vault.bootstrap();
+    let run = |args: &[&str]| {
+        let output = vault.run(args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let root = run(&["policy-root", "init"]);
+    let key_id = root
+        .lines()
+        .find_map(|line| line.strip_prefix("key_id "))
+        .unwrap();
+    let manifest = vault.root.join("manifest.json");
+    let draft = vault.root.join("policy.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_string_pretty(&json!({
+            "manifest_version":41,"issued_at_unix_secs":1,"bindings":{"Org/R":"worker"}
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    std::fs::write(&draft, json!({
+        "bindings":[{"agent":"worker","identity":"github_app:worker","resources":["org/r"],"service":"github"}],
+        "issued_at_unix_secs":1,"root_key_id":key_id,"rule_sets":{},"schema":"ck-agent-policy/v1","version":1
+    }).to_string()).unwrap();
+    run(&[
+        "manifest",
+        "sign",
+        "--file",
+        manifest.to_str().unwrap(),
+        "--approver",
+        "tester",
+    ]);
+    run(&[
+        "policy",
+        "sign",
+        "--file",
+        draft.to_str().unwrap(),
+        "--manifest-version",
+        "41",
+        "--approver",
+        "tester",
+    ]);
+    let manifest_out = vault.data_dir.join("signed-envelopes/v42-envelope.json");
+    let policy_out = vault.data_dir.join("signed-policies/v2-envelope.json");
+    let confirm = |answer: &[u8]| {
+        let mut command = cli();
+        command
+            .args([
+                "github",
+                "bindings",
+                "remove",
+                "--repo",
+                "org/r",
+                "--data-dir",
+            ])
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path);
+        let (status, screen) = terminal_cli::run(
+            command,
+            &[("Sign and store both documents?", answer, false)],
+        );
+        assert!(status.success(), "{screen}");
+        assert!(
+            screen.contains("\"identity\": \"github_app:worker\""),
+            "{screen}"
+        );
+        assert!(screen.contains("\"new\": []"), "{screen}");
+    };
+    let before = run(&["audit"]);
+    confirm(b"n\n");
+    assert_eq!(run(&["audit"]), before);
+    assert!(!manifest_out.exists());
+    assert!(!policy_out.exists());
+    confirm(b"y\n");
+    use std::os::unix::fs::PermissionsExt as _;
+    for file in [manifest_out, policy_out] {
+        assert_eq!(
+            std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(run(&["audit"]).contains("gh_binding_change"));
 }

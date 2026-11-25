@@ -1002,6 +1002,16 @@ fn typed_policy_store_requires_the_one_tap_manifests_own_approval() {
         .unwrap();
 }
 
+fn token_candidate(plan: &super::super::PolicyTokenPlan) -> super::super::PolicyTokenCandidate<'_> {
+    super::super::PolicyTokenCandidate {
+        record_key: &plan.record.key,
+        expires_at_ms: 100,
+        approval_leg: plan.approval_leg,
+        repositories: &plan.repositories,
+        permissions: &plan.permissions,
+    }
+}
+
 #[test]
 fn policy_token_reuses_parsed_policy_but_rechecks_authorization() {
     use crate::store::policy_token::POLICY_TOKEN_POLICY_PARSES;
@@ -1068,7 +1078,7 @@ fn policy_token_reuses_parsed_policy_but_rechecks_authorization() {
             .prepare_policy_token("aft", Some(&request), || 1)
             .unwrap();
         assert!(matches!(
-            store.handoff_policy_token("aft", &request, &plan.record.key, 100, None, || 1),
+            store.handoff_policy_token("aft", &request, token_candidate(&plan), || 1),
             Ok(PolicyTokenHandoff::Released)
         ));
     }
@@ -1085,7 +1095,7 @@ fn policy_token_reuses_parsed_policy_but_rechecks_authorization() {
         })
         .unwrap();
     assert!(matches!(
-        store.handoff_policy_token("aft", &request, &plan.record.key, 100, None, || 1),
+        store.handoff_policy_token("aft", &request, token_candidate(&plan), || 1),
         Err(PolicyTokenError::NotFound)
     ));
 }
@@ -1159,7 +1169,7 @@ fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
     let response = store.handoff_policy_token_with_probe(
         "aft",
         &request,
-        (&plan.record.key, 100, plan.approval_leg),
+        token_candidate(&plan),
         || 1,
         || {
             // A competing writer would revoke the grant and reactivate the policy.
@@ -1186,14 +1196,7 @@ fn policy_token_handoff_cannot_mix_a_grant_and_policy_from_different_commits() {
     .unwrap();
     tx.commit().unwrap();
     assert!(matches!(
-        store.handoff_policy_token(
-            "aft",
-            &request,
-            &plan.record.key,
-            100,
-            plan.approval_leg,
-            || 1
-        ),
+        store.handoff_policy_token("aft", &request, token_candidate(&plan), || 1),
         Err(PolicyTokenError::NotFound)
     ));
     let releases: i64 = writer.query_row("SELECT count(*) FROM auth_events WHERE kind = 'scoped_first_use' AND detail = 'policy_token'", [], |r| r.get(0)).unwrap();

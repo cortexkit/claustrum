@@ -13,8 +13,8 @@ use credentials_core::{
     },
     secret::SecretString,
     store::{
-        EncryptedStore, PolicyTokenError, PolicyTokenHandoff, PolicyTokenPlan, PolicyTokenRecord,
-        PolicyTokenRecordKey, PolicyTokenRequest,
+        EncryptedStore, PolicyTokenCandidate, PolicyTokenError, PolicyTokenHandoff,
+        PolicyTokenPlan, PolicyTokenRecord, PolicyTokenRecordKey, PolicyTokenRequest,
     },
     ReqwestTransport,
 };
@@ -297,7 +297,9 @@ impl PolicyTokens {
                     match current {
                         Ok(Ok(current))
                             if current.record.key != key.record
-                                && current.approval_leg == approval_leg =>
+                                && current.approval_leg == approval_leg
+                                && current.repositories == key.repositories
+                                && current.permissions == key.permissions =>
                         {
                             record = current.record;
                             continue;
@@ -318,9 +320,13 @@ impl PolicyTokens {
                     store.handoff_policy_token(
                         &module_id,
                         &request,
-                        &key.record,
-                        expires_at_ms,
-                        approval_leg,
+                        PolicyTokenCandidate {
+                            record_key: &key.record,
+                            expires_at_ms,
+                            approval_leg,
+                            repositories: &key.repositories,
+                            permissions: &key.permissions,
+                        },
                         || cache.now(),
                     )
                 })

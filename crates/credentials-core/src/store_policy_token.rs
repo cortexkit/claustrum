@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::{
-    agent_policy::{AgentPolicy, Approval, Class, Identity},
+    agent_policy::{AgentPolicy, Approval, Binding, Class, Identity, Kind},
     audit::{AuditOp, AuditRecord},
     broker_action::{valid_ulid, BrokerActionLeg},
     envelope::EnvelopeError,
@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    agent_policy::{active_agent_policy_summary_conn, AgentPolicySummary},
+    agent_policy::{agent_policy_fleet_conn, AgentPolicyFleet, AgentPolicySummary},
     append_audit_tx,
     audit_store::record_scoped_first_use_tx,
     sha256_hex_of_bytes,
@@ -30,10 +30,10 @@ use super::{
 
 const MAX_POLICY_TOKEN_REPOSITORIES: usize = 500;
 
-// Only one policy is active in a snapshot. Keep its parsed document, not any
-// caller's binding, grants or approval result.
+// Keep the common case of a ready document and one rollout document warm. A
+// snapshot with more reported versions can parse the others on demand.
 #[derive(Default)]
-pub(super) struct ParsedPolicyMemo(Mutex<Option<ParsedPolicy>>);
+pub(super) struct ParsedPolicyMemo(Mutex<[Option<ParsedPolicy>; 2]>);
 
 struct ParsedPolicy {
     version: i64,
@@ -126,6 +126,15 @@ pub struct PolicyTokenPlan {
     pub approval_leg: Option<i64>,
 }
 
+/// The exact scope of a cached or newly minted token pending release.
+pub struct PolicyTokenCandidate<'a> {
+    pub record_key: &'a PolicyTokenRecordKey,
+    pub expires_at_ms: i64,
+    pub approval_leg: Option<i64>,
+    pub repositories: &'a [String],
+    pub permissions: &'a BTreeMap<String, String>,
+}
+
 pub enum PolicyTokenHandoff {
     Released,
     RecordChanged(PolicyTokenRecord),
@@ -173,25 +182,17 @@ impl EncryptedStore {
         &self,
         module_id: &str,
         request: &PolicyTokenRequest,
-        key: &PolicyTokenRecordKey,
-        expires_at_ms: i64,
-        approval_leg: Option<i64>,
+        candidate: PolicyTokenCandidate<'_>,
         clock: impl Fn() -> i64,
     ) -> Result<PolicyTokenHandoff, PolicyTokenError> {
-        self.handoff_policy_token_with_probe(
-            module_id,
-            request,
-            (key, expires_at_ms, approval_leg),
-            clock,
-            || {},
-        )
+        self.handoff_policy_token_with_probe(module_id, request, candidate, clock, || {})
     }
 
     pub(super) fn handoff_policy_token_with_probe(
         &self,
         module_id: &str,
         request: &PolicyTokenRequest,
-        candidate: (&PolicyTokenRecordKey, i64, Option<i64>),
+        candidate: PolicyTokenCandidate<'_>,
         clock: impl Fn() -> i64,
         after_grant: impl FnOnce(),
     ) -> Result<PolicyTokenHandoff, PolicyTokenError> {
@@ -203,22 +204,13 @@ impl EncryptedStore {
 #[cfg(test)]
 #[test]
 fn policy_token_binding_accepts_500_and_refuses_501() {
-    let request = PolicyTokenRequest {
-        identity: "github_app:agent".into(),
-        service: "github".into(),
-        kind: "node_repository".into(),
-        resource: "binding".into(),
-        policy_version: 1,
-        approval_request_id: None,
-        request_sha256: None,
-    };
     let resources: Vec<_> = (0..501).map(|i| format!("org/r{i:03}")).collect();
     assert_eq!(
-        select_repositories(&request, &resources[..500]).unwrap(),
+        checked_repositories(resources[..500].to_vec()).unwrap(),
         resources[..500]
     );
     assert_eq!(
-        select_repositories(&request, &resources),
+        checked_repositories(resources),
         Err(PolicyTokenError::ScopeUnavailable)
     );
 }
@@ -268,7 +260,8 @@ fn prepare(
         Ok(proof) => proof,
         Err(error) => return Ok(Err(error)),
     };
-    let active = active_agent_policy_summary_conn(conn)?;
+    let fleet = agent_policy_fleet_conn(conn)?;
+    let active = fleet.ready.clone();
     let active_version = active.as_ref().map(|policy| policy.version);
     let policy =
         if let Some(summary) = active.filter(|policy| policy.version == request.policy_version) {
@@ -279,14 +272,9 @@ fn prepare(
         } else {
             None
         };
-    let kind = policy.as_ref().and_then(|policy| {
-        policy
-            .rule_sets
-            .get(&request.service)?
-            .kinds
-            .iter()
-            .find(|kind| kind.kind == request.kind)
-    });
+    let kind = policy
+        .as_ref()
+        .and_then(|policy| request_kind(policy, request));
     let approval_leg = if let Some(proof) = proof {
         if kind.is_some_and(|kind| kind.approval != Approval::Once) {
             return Ok(Err(Error::InvalidParams));
@@ -301,21 +289,8 @@ fn prepare(
     let Some(policy) = policy.as_ref() else {
         return Ok(Err(Error::VersionNotActive));
     };
-    let Some(binding) = policy
-        .bindings
-        .iter()
-        .find(|binding| binding.service == request.service && binding.identity == request.identity)
-    else {
-        return Ok(Err(Error::NotFound));
-    };
-    let Some((kind, credential)) = kind
-        .filter(|kind| kind.class != Class::Denied && kind.identity == Identity::Agent)
-        .and_then(|kind| Some((kind, kind.credential.as_ref()?)))
-    else {
-        return Ok(Err(Error::NotFound));
-    };
-    let repositories = match select_repositories(request, &binding.resources) {
-        Ok(repositories) => repositories,
+    let scope = match authorized_scope(conn, memo, &fleet, request, policy)? {
+        Ok(scope) => scope,
         Err(error) => return Ok(Err(error)),
     };
     let record = match read_record(conn, &request.identity)? {
@@ -325,17 +300,17 @@ fn prepare(
     if record
         .attested_agent
         .as_ref()
-        .is_some_and(|agent| agent != &binding.agent)
+        .is_some_and(|agent| agent != scope.agent)
     {
         return Ok(Err(Error::NotFound));
     }
-    if kind.approval == Approval::Once && approval_leg.is_none() {
+    if scope.approval == Approval::Once && approval_leg.is_none() {
         return Ok(Err(Error::ApprovalRequired));
     }
     Ok(Ok(PolicyTokenPlan {
         record,
-        repositories,
-        permissions: credential.github_permissions.clone(),
+        repositories: scope.repositories,
+        permissions: scope.permissions,
         approval_leg,
     }))
 }
@@ -349,14 +324,16 @@ fn read_policy(
         version,
         policy_sha256: sha256,
     } = summary;
-    if let Some(cached) = memo
-        .0
-        .lock()
-        .unwrap()
-        .as_ref()
-        .filter(|cached| cached.version == version && cached.sha256 == sha256)
     {
-        return Ok(Some(Arc::clone(&cached.policy)));
+        let mut entries = memo.0.lock().unwrap();
+        if let Some(index) = entries.iter().position(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|cached| cached.version == version && cached.sha256 == sha256)
+        }) {
+            entries.swap(0, index);
+            return Ok(Some(Arc::clone(&entries[0].as_ref().unwrap().policy)));
+        }
     }
     let bytes: Vec<u8> = conn.query_row(
         "SELECT policy_bytes FROM agent_policies WHERE version = ?1",
@@ -369,7 +346,9 @@ fn read_policy(
         return Ok(None);
     };
     let policy = Arc::new(policy);
-    *memo.0.lock().unwrap() = Some(ParsedPolicy {
+    let mut entries = memo.0.lock().unwrap();
+    entries.swap(0, 1);
+    entries[0] = Some(ParsedPolicy {
         version,
         sha256,
         policy: Arc::clone(&policy),
@@ -377,20 +356,129 @@ fn read_policy(
     Ok(Some(policy))
 }
 
-fn select_repositories(
+fn request_kind<'a>(policy: &'a AgentPolicy, request: &PolicyTokenRequest) -> Option<&'a Kind> {
+    policy
+        .rule_sets
+        .get(&request.service)?
+        .kinds
+        .iter()
+        .find(|kind| kind.kind == request.kind)
+}
+
+fn request_binding<'a>(
+    policy: &'a AgentPolicy,
     request: &PolicyTokenRequest,
-    resources: &[String],
-) -> Result<Vec<String>, PolicyTokenError> {
-    if request.resource == "binding" && request.kind == "node_repository" {
-        if resources.len() > MAX_POLICY_TOKEN_REPOSITORIES {
-            return Err(PolicyTokenError::ScopeUnavailable);
-        }
-        // The canonical policy already orders the binding's repositories.
-        Ok(resources.to_vec())
-    } else if resources.binary_search(&request.resource).is_ok() {
-        Ok(vec![request.resource.clone()])
+) -> Option<&'a Binding> {
+    policy
+        .bindings
+        .iter()
+        .find(|binding| binding.service == request.service && binding.identity == request.identity)
+}
+
+fn kind_permissions(kind: &Kind) -> Option<&BTreeMap<String, String>> {
+    if kind.class == Class::Denied || kind.identity != Identity::Agent {
+        return None;
+    }
+    Some(&kind.credential.as_ref()?.github_permissions)
+}
+
+struct AuthorizedScope<'a> {
+    agent: &'a str,
+    approval: Approval,
+    repositories: Vec<String>,
+    permissions: BTreeMap<String, String>,
+}
+
+fn authorized_scope<'a>(
+    conn: &Connection,
+    memo: &ParsedPolicyMemo,
+    fleet: &AgentPolicyFleet,
+    request: &PolicyTokenRequest,
+    ready: &'a AgentPolicy,
+) -> rusqlite::Result<Result<AuthorizedScope<'a>, PolicyTokenError>> {
+    use PolicyTokenError as Error;
+    let Some(covering) = fleet.covering_policies(conn)? else {
+        return Ok(Err(Error::VersionNotActive));
+    };
+    let Some(binding) = request_binding(ready, request) else {
+        return Ok(Err(Error::NotFound));
+    };
+    let Some((kind, permissions)) =
+        request_kind(ready, request).and_then(|kind| Some((kind, kind_permissions(kind)?)))
+    else {
+        return Ok(Err(Error::NotFound));
+    };
+    let whole_binding = request.resource == "binding" && request.kind == "node_repository";
+    let mut repositories = if whole_binding {
+        binding.resources.clone()
+    } else if binding.resources.binary_search(&request.resource).is_ok() {
+        vec![request.resource.clone()]
     } else {
-        Err(PolicyTokenError::NotFound)
+        return Ok(Err(Error::NotFound));
+    };
+    let mut permissions = permissions.clone();
+    let mut approval = kind.approval;
+    for summary in covering
+        .into_iter()
+        .filter(|summary| summary.version != ready.version)
+    {
+        let Some(policy) = read_policy(conn, memo, summary)? else {
+            return Ok(Err(Error::StoreError));
+        };
+        let Some(other) =
+            request_binding(&policy, request).filter(|other| other.agent == binding.agent)
+        else {
+            return Ok(Err(Error::NotFound));
+        };
+        let Some((kind, other_permissions)) =
+            request_kind(&policy, request).and_then(|kind| Some((kind, kind_permissions(kind)?)))
+        else {
+            return Ok(Err(Error::NotFound));
+        };
+        repositories.retain(|repo| other.resources.binary_search(repo).is_ok());
+        if !whole_binding && repositories.is_empty() {
+            return Ok(Err(Error::NotFound));
+        }
+        permissions.retain(|name, level| {
+            let Some(other_level) = other_permissions.get(name) else {
+                return false;
+            };
+            if permission_rank(other_level) < permission_rank(level) {
+                level.clone_from(other_level);
+            }
+            true
+        });
+        approval = approval.max(kind.approval);
+    }
+    let repositories = match checked_repositories(repositories) {
+        Ok(repositories) => repositories,
+        Err(error) => return Ok(Err(error)),
+    };
+    if permissions.is_empty() {
+        return Ok(Err(Error::ScopeUnavailable));
+    }
+    Ok(Ok(AuthorizedScope {
+        agent: &binding.agent,
+        approval,
+        repositories,
+        permissions,
+    }))
+}
+
+fn permission_rank(level: &str) -> u8 {
+    match level {
+        "read" => 0,
+        "write" => 1,
+        "admin" => 2,
+        _ => unreachable!("policy parser validates permission levels"),
+    }
+}
+
+fn checked_repositories(repositories: Vec<String>) -> Result<Vec<String>, PolicyTokenError> {
+    if (1..=MAX_POLICY_TOKEN_REPOSITORIES).contains(&repositories.len()) {
+        Ok(repositories)
+    } else {
+        Err(PolicyTokenError::ScopeUnavailable)
     }
 }
 
@@ -479,7 +567,7 @@ fn handoff(
     store: &EncryptedStore,
     module_id: &str,
     request: &PolicyTokenRequest,
-    (key, expires_at_ms, prepared_leg): (&PolicyTokenRecordKey, i64, Option<i64>),
+    candidate: PolicyTokenCandidate<'_>,
     clock: impl Fn() -> i64,
     after_grant: impl FnOnce(),
 ) -> rusqlite::Result<Result<PolicyTokenHandoff, PolicyTokenError>> {
@@ -491,7 +579,8 @@ fn handoff(
         return Ok(Err(Error::NotFound));
     }
     after_grant();
-    let active = active_agent_policy_summary_conn(tx)?;
+    let fleet = agent_policy_fleet_conn(tx)?;
+    let active = fleet.ready.clone();
     let active_version = active.as_ref().map(|policy| policy.version);
     let proof = match request.approval_proof() {
         Ok(proof) => proof,
@@ -500,7 +589,7 @@ fn handoff(
     if let Some(proof) = &proof {
         match check_approval(tx, module_id, request, proof, active_version, clock())? {
             // A second waiter cannot spend the next leg just because it has identical facts.
-            Ok(leg) if Some(leg) == prepared_leg => {}
+            Ok(leg) if Some(leg) == candidate.approval_leg => {}
             Ok(_) => return Ok(Err(Error::ApprovalInvalid)),
             Err(error) => return Ok(Err(error)),
         }
@@ -512,28 +601,34 @@ fn handoff(
         Ok(record) => record,
         Err(error) => return Ok(Err(error)),
     };
-    let same_record = record.key == *key;
-    if same_record && expires_at_ms <= clock() {
+    let same_record = record.key == *candidate.record_key;
+    if same_record && candidate.expires_at_ms <= clock() {
         return Ok(Err(Error::Expired));
     }
-    if let Some(agent) = &record.attested_agent {
-        // A changed record is a candidate for a second mint. Never pass it back
-        // to the route without checking that it still belongs to this binding.
-        let Some(policy) = read_policy(tx, &store.policy_token_memo, active)? else {
-            return Ok(Err(Error::StoreError));
-        };
-        if !policy.bindings.iter().any(|binding| {
-            binding.service == request.service
-                && binding.identity == request.identity
-                && &binding.agent == agent
-        }) {
-            return Ok(Err(Error::NotFound));
-        }
+    let Some(policy) = read_policy(tx, &store.policy_token_memo, active)? else {
+        return Ok(Err(Error::StoreError));
+    };
+    let scope = match authorized_scope(tx, &store.policy_token_memo, &fleet, request, &policy)? {
+        Ok(scope) => scope,
+        Err(error) => return Ok(Err(error)),
+    };
+    if record
+        .attested_agent
+        .as_deref()
+        .is_some_and(|agent| agent != scope.agent)
+    {
+        return Ok(Err(Error::NotFound));
+    }
+    if scope.approval == Approval::Once && proof.is_none() {
+        return Ok(Err(Error::ApprovalRequired));
+    }
+    if scope.repositories != candidate.repositories || scope.permissions != *candidate.permissions {
+        return Ok(Err(Error::ScopeUnavailable));
     }
     if !same_record {
         return Ok(Ok(PolicyTokenHandoff::RecordChanged(record)));
     }
-    if let (Some(proof), Some(leg)) = (proof, prepared_leg) {
+    if let (Some(proof), Some(leg)) = (proof, candidate.approval_leg) {
         let advanced = tx.execute(
             "UPDATE broker_action_requests SET issued_legs = issued_legs + 1
              WHERE request_id = ?1 AND issued_legs = ?2",

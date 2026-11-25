@@ -1,9 +1,5 @@
 use super::*;
 
-#[cfg(unix)]
-#[path = "terminal_cli.rs"]
-mod terminal_cli;
-
 const ID: &str = "apikey:anthropic-gw-acme";
 const PROVIDER: &str = "anthropic-gw-acme";
 

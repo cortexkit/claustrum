@@ -1,4 +1,5 @@
-// The vault's fleet-log crate policy (`vault_log_crates` in main.rs).
+// Which crates the vault's log treats as its own, and the level ceilings it applies
+// to async-nats (`vault_log_crates` in main.rs).
 
 use super::super::{async_nats_ceilings, VAULT_LOG_CRATES};
 

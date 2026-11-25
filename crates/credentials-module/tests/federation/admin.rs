@@ -1524,6 +1524,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
     ];
     let may_not_send = [
         "main.rs",
+        "log_policy_tests.rs",
         "fleet_ops.rs",
         "fleet_ops_tests.rs",
         "module_secret.rs",

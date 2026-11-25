@@ -53,6 +53,35 @@ pub fn test_wire(
     }
 }
 
+#[cfg(all(debug_assertions, feature = "test-support"))]
+pub(super) fn test_wire_for_listener(
+    wire: &credentials_core::catalog::LoginProvider,
+    listener: Option<&login_listener::CallbackListener>,
+) -> Result<credentials_core::catalog::LoginProvider, CliError> {
+    Ok(credentials_core::catalog::LoginProvider {
+        redirect_uri: test_redirect_for_listener(wire.redirect_uri, listener)?,
+        ..*wire
+    })
+}
+
+#[cfg(all(debug_assertions, feature = "test-support"))]
+pub(super) fn test_redirect_for_listener(
+    redirect_uri: &'static str,
+    listener: Option<&login_listener::CallbackListener>,
+) -> Result<&'static str, CliError> {
+    // A fake redirect can ask the kernel to choose a port rather than release a
+    // reservation and race to rebind it. Use that same port in both OAuth requests.
+    match (redirect_uri.strip_prefix("http://127.0.0.1:0/"), listener) {
+        (Some(path), Some(listener)) => {
+            let addr = listener
+                .local_addr()
+                .map_err(|e| CliError::Io(format!("reading test callback address: {e}")))?;
+            Ok(Box::leak(format!("http://{addr}/{path}").into_boxed_str()))
+        }
+        _ => Ok(redirect_uri),
+    }
+}
+
 fn pick(prompt: &str, items: &[&str], default: usize) -> Result<usize, CliError> {
     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
         .with_prompt(prompt)

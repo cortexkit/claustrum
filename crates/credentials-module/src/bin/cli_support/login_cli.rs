@@ -1160,6 +1160,8 @@ pub(super) fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
             login_listener::loopback_bind_addr(wire.redirect_uri)
                 .and_then(|addr| login_listener::capture_callback(&addr))
         };
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    let wire = &browser_login::test_wire_for_listener(wire, listener.as_ref())?;
 
     // ONE redirect for the whole flow. The token exchange replays the redirect, and
     // the provider refuses the exchange unless it byte-matches the one in the

@@ -42,7 +42,8 @@ impl EncryptedStore {
         let Ok(mut health) = snapshot else {
             return VaultHealth::unreadable();
         };
-        // An unreadable audit tip must not be replaced with a stale witness value.
+        // If the audit tip can't be read, leave its sequence and MAC unset rather
+        // than reporting an older value an outside checker would trust.
         if let Ok(Some((seq, entry_mac))) = self.audit_tip() {
             health.audit_seq = Some(seq);
             health.audit_tip_mac = Some(entry_mac);

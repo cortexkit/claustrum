@@ -156,7 +156,7 @@ the code:
   reported as `module_warming`, `module_reloading`, `target_unavailable` or
   `module_timeout` instead. These codes can be retryable.
 
-Both clients use SUBC's route-open retry rule for coded terminal refusals. Unknown
+Both clients use the subc daemon's shared route-open retry rule for coded terminal refusals. Unknown
 codes and `missing_identity` are terminal. A normally retryable code is terminal
 when `detail.expected_back` is `false`. This does not change how clients handle
 connection loss without an error reply. The TypeScript client reports a terminal

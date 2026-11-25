@@ -359,8 +359,9 @@ impl EncryptedStore {
         };
         if self.store.with_read(|conn| {
             // Skip the writer only when this store's epoch matches the persisted fence.
-            // A fence mismatch goes through the writer to claim the epoch or latch
-            // a newer holder exactly as a changed declaration would.
+            // On a fence mismatch, take the normal fenced write: it either claims the
+            // epoch for this store or records that another process now holds the
+            // writer lease and refuses, exactly as for a changed declaration.
             let has_fence: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'cortexkit_fence')",
                 [],

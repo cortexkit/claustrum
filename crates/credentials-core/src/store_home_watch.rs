@@ -4,7 +4,8 @@ use super::{conditions::local_condition_conn, EncryptedStore, HomeWatchCandidate
 use crate::{envelope, envelope::RecordBinding, record::RecordState, record::VaultRecord};
 
 /// Non-secret decoded fields from the last scan of this store. State and conditions
-/// are read anew even when the envelope's incarnation and version are unchanged.
+/// are read anew even when the record's incarnation (the random id that changes when
+/// a login is removed and re-created under the same name) and version are unchanged.
 #[derive(Default)]
 pub struct HomeWatchCache {
     rows: HashMap<String, Cached>,
@@ -41,8 +42,9 @@ impl EncryptedStore {
                     _ => {
                         #[cfg(test)]
                         { cache.opens += 1; }
-                        // Match home_watch_candidates_from_conn: skip unreadable envelopes and
-                        // records without the quarantine side effect of a credential read.
+                        // Match home_watch_candidates_from_conn: skip records that fail to
+                        // decrypt or decode, without marking them corrupt the way a
+                        // credential read does.
                         let decoded = envelope::open(
                             &self.key,
                             &row.get::<_, Vec<u8>>(3)?,

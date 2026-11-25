@@ -2760,7 +2760,9 @@ pub fn attach_declared_grants(
     }
 }
 
-/// Show the last approved refs seen at bind, not the authority of a live route.
+/// Show the keys each module's approved settings named the last time it
+/// connected. This is a record for the operator; what a connected module may
+/// read comes from its current connection's approved settings, not this list.
 pub fn attach_settings_grants(
     result: &mut serde_json::Value,
     listing: Result<crate::store::SettingsRefListing, String>,

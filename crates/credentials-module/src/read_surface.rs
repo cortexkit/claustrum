@@ -4332,7 +4332,8 @@ impl ReadSurface {
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
 
-        // Scoped callers cannot force a refresh, which would spend an upstream mint.
+        // Scoped callers cannot force a refresh, which would ask the provider for a
+        // new token on every call.
         let result = if let Some(pin) = authorization.settings_read.as_ref() {
             if pin.incarnation != incarnation {
                 return err(ReadError::NotFound);

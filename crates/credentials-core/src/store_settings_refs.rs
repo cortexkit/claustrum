@@ -1,4 +1,6 @@
-//! An approved settings snapshot stays with its bind. The persisted list is inventory only.
+//! The keys a module's approved settings name are read from the daemon's stamp on each
+//! connection the module opens, and authorize only that connection. The stored list
+//! records what was last seen, for `ck auth grants --declared`; it grants nothing.
 
 use super::*;
 
@@ -108,7 +110,8 @@ impl EncryptedStore {
         )
     }
 
-    /// Persist a change and its audit row before making the admitted bind usable.
+    /// Save a changed list with its audit row before the module's connection is
+    /// acknowledged and may use the keys it names.
     pub fn record_settings_refs_seen(&self, set: &SettingsRefSet) -> Result<bool, StoreOpError> {
         // SQLite INTEGER is signed; decimal text preserves the full storage u64.
         let generation = set.generation.to_string();

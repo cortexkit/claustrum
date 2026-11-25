@@ -43,6 +43,26 @@ const PAIR: &str = "pair:1";
 const REPAIR: &str = "pair:2";
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn repeated_manifest_report_reads_only_open_the_signing_key_once() {
+    let vault = Vault::new(PEER, HOME);
+    vault.record(PEER, 28, None);
+    let mut keys = hub_manifest_reporter::SigningKeyCache::default();
+    assert!(hub_manifest_reporter::Input::read(&vault.store, &mut keys)
+        .unwrap()
+        .is_some());
+    assert_eq!(keys.opens, 1);
+
+    vault.record(PEER, 29, None);
+    assert!(hub_manifest_reporter::Input::read(&vault.store, &mut keys)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        keys.opens, 1,
+        "a new report does not change the signing key"
+    );
+}
+
 struct Vault {
     store: Arc<EncryptedStore>,
     path: PathBuf,

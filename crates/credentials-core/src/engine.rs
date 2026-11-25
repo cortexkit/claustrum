@@ -391,7 +391,7 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        self.get_for_incarnation(credential_id, None, min_ttl_ms, force_refresh)
+        self.get_for_incarnation(credential_id, None, None, min_ttl_ms, force_refresh)
             .await
     }
 
@@ -403,14 +403,37 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        self.get_for_incarnation(credential_id, Some(incarnation), min_ttl_ms, force_refresh)
-            .await
+        self.get_for_incarnation(
+            credential_id,
+            Some(incarnation),
+            None,
+            min_ttl_ms,
+            force_refresh,
+        )
+        .await
+    }
+
+    pub async fn get_in_settings_record(
+        &self,
+        credential_id: &str,
+        pin: &crate::store::SettingsReadPin,
+        min_ttl_ms: Option<i64>,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
+        self.get_for_incarnation(
+            credential_id,
+            Some(&pin.incarnation),
+            Some(pin),
+            min_ttl_ms,
+            false,
+        )
+        .await
     }
 
     async fn get_for_incarnation(
         &self,
         credential_id: &str,
         expected_incarnation: Option<&str>,
+        settings_read: Option<&crate::store::SettingsReadPin>,
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
@@ -419,13 +442,15 @@ impl RefreshEngine {
         let lock = self.inflight_lock(credential_id);
         let id = credential_id.to_owned();
         let expected = expected_incarnation.map(str::to_owned);
+        let initial_pin = settings_read.cloned();
         #[cfg(test)]
         let after_snapshot = Arc::clone(&self.after_snapshot);
         let initial = self
             .blocking_store(move |store| {
-                let snapshot = match expected {
-                    Some(incarnation) => store.get_snapshot(&id, &incarnation)?,
-                    None => store.get_with_stale_pending_and_digest(&id)?,
+                let snapshot = match (initial_pin, expected) {
+                    (Some(pin), _) => store.get_pinned_snapshot(&id, &pin)?,
+                    (None, Some(incarnation)) => store.get_snapshot(&id, &incarnation)?,
+                    (None, None) => store.get_with_stale_pending_and_digest(&id)?,
                 };
                 #[cfg(test)]
                 {
@@ -473,12 +498,20 @@ impl RefreshEngine {
         let guard = waiting.await;
         let engine = self.clone();
         let id = credential_id.to_owned();
+        let settings_read = settings_read.cloned();
         // An admitted exchange owns the lock through the intent, provider call,
         // commit and version stamp. Dropping the reader must not drop that flight.
         tokio::spawn(async move {
             let _guard = guard;
             engine
-                .get_locked(&id, incarnation, initial_version, min_ttl_ms, force_refresh)
+                .get_locked(
+                    &id,
+                    incarnation,
+                    settings_read,
+                    initial_version,
+                    min_ttl_ms,
+                    force_refresh,
+                )
                 .await
         })
         .await
@@ -489,14 +522,19 @@ impl RefreshEngine {
         &self,
         credential_id: &str,
         incarnation: String,
+        settings_read: Option<crate::store::SettingsReadPin>,
         initial_version: u64,
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
         let id = credential_id.to_owned();
         let admitted = incarnation.clone();
+        let locked_pin = settings_read.clone();
         let initial = self
-            .blocking_store(move |store| store.get_snapshot(&id, &admitted))
+            .blocking_store(move |store| match locked_pin {
+                Some(pin) => store.get_pinned_snapshot(&id, &pin),
+                None => store.get_snapshot(&id, &admitted),
+            })
             .await?;
         // An intent surviving the prior holder is unresolved just as it would be
         // at boot; a fresh access token cannot prove its refresh token survived.
@@ -541,7 +579,10 @@ impl RefreshEngine {
                         }),
                     )?;
                     // If a concurrent write moved the version, return the replacement.
-                    store.get_snapshot(&id, &admitted)
+                    match settings_read {
+                        Some(pin) => store.get_pinned_snapshot(&id, &pin),
+                        None => store.get_snapshot(&id, &admitted),
+                    }
                 })
                 .await?;
             return Ok(GetWithRefreshStatus {
@@ -953,7 +994,7 @@ impl RefreshEngine {
         self.blocking_store(move |store| {
             let id = intent.credential_id.as_str();
             match check {
-                    // Without a non-mutating check, treat the result as indeterminate and fail safe.
+                // Without a non-mutating check, treat the result as indeterminate and fail safe.
                 None => {
                     store.invalidate(id)?;
                     Ok(Reconciliation::NeedsReauth {

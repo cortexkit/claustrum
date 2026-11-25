@@ -94,8 +94,11 @@ mod handles;
 #[path = "store_audit.rs"]
 mod audit_store;
 
+#[path = "store_home_watch.rs"]
+mod home_watch;
 #[path = "store_metadata.rs"]
 mod metadata;
+pub use home_watch::HomeWatchCache;
 #[path = "store_orgs.rs"]
 mod orgs;
 pub use orgs::OrgProbeTarget;
@@ -172,6 +175,7 @@ pub const POLICY_ROOT_SCHEMA_VERSION: u32 = 52;
 /// Broker action requests, their approvals, and ordered issuance progress.
 const BROKER_ACTION_SCHEMA_VERSION: u32 = 53;
 const CREDENTIAL_ORG_SCHEMA_VERSION: u32 = 54;
+const SETTINGS_REFS_SCHEMA_VERSION: u32 = 55;
 
 /// Operator defaults for API-key services absent from the fixed catalog.
 pub const REGISTERED_PROVIDERS_SCHEMA_VERSION: u32 = 37;
@@ -649,6 +653,7 @@ struct Migration10State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedCoverage {
     pub covered: bool,
+    pub settings_read: Option<SettingsReadPin>,
     pub caller_active_grants: u32,
     pub holds_category_selector: bool,
     pub id_exists: bool,
@@ -839,6 +844,9 @@ pub enum StoreOpError {
     InvalidPrincipal,
     /// This tuple appears in the module's approved declaration; no manually managed grant was revoked.
     DeclaredGrant {
+        module_id: String,
+    },
+    SettingsGrant {
         module_id: String,
     },
     /// Approval would hand existing name-bound grants to a new consumer without consent.
@@ -1087,6 +1095,10 @@ impl std::fmt::Display for StoreOpError {
                 f,
                 "declared_grant/permanent: change module {module_id}'s approved declaration in the daemon's configuration; the approval change reaches live routes only when the module re-binds (restart the module), and the stored row is replaced at that bind"
             ),
+            StoreOpError::SettingsGrant { module_id } => write!(
+                f,
+                "declared_grant/permanent: change module {module_id}'s approved setting to remove this credential reference; the change takes effect when the module re-binds"
+            ),
             StoreOpError::MemberGrantSharingSwitch { member_id } => write!(
                 f,
                 "Turn the vault-sharing switch off with `ck callosum share {} claustrum/vault off`; otherwise the vault would recreate this grant.",
@@ -1150,7 +1162,9 @@ impl StoreOpError {
             StoreOpError::InvalidGatewaySettings { .. } => Some("invalid_gateway_settings"),
             StoreOpError::GatewayFixed { .. } => Some("gateway_fixed"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
-            StoreOpError::DeclaredGrant { .. } => Some("declared_grant"),
+            StoreOpError::DeclaredGrant { .. } | StoreOpError::SettingsGrant { .. } => {
+                Some("declared_grant")
+            }
             StoreOpError::EnrollmentNameHasGrants { .. } => Some("enrollment_name_has_grants"),
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
@@ -1685,6 +1699,11 @@ mod fleet_store;
 
 #[path = "store_declared_grants.rs"]
 mod declared_grants;
+#[path = "store_settings_refs.rs"]
+mod settings_refs;
+pub use settings_refs::{
+    settings_ref_sets_read_only, SettingsReadPin, SettingsRefListing, SettingsRefSet,
+};
 
 #[cfg(test)]
 #[path = "declared_grants_tests.rs"]
@@ -1882,25 +1901,50 @@ impl EncryptedStore {
         f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
         after_commit: impl FnOnce(&T),
     ) -> Result<T, StoreError> {
-        let out = self.store.with_conn_fenced(f);
-        if let Ok(value) = &out {
-            after_commit(value);
-        }
+        let out = self.store.with_conn_fenced(|tx| {
+            // Count the operation's row changes, including triggers, but not the
+            // lease claim the store may have written before calling this closure.
+            let before = tx.total_changes();
+            let value = f(tx)?;
+            Ok((value, tx.total_changes() != before))
+        });
         if matches!(out, Err(StoreError::Fenced { .. })) {
             self.fenced_out.store(true, Ordering::Relaxed);
         }
-        self.signal_commit(&out);
-        out
+        out.map(|(value, changed)| {
+            after_commit(&value);
+            self.signal_commit(changed);
+            value
+        })
     }
 
-    // with_conn_fenced returns only after commit. Runtime mutations pass through
-    // fenced_write, except deliberately unfenced diagnostic observations. Permission
-    // observations also call this hook; held plans are not reader-visible until the
-    // next token commit. Migrations, audit-key bootstrap and the
-    // enrollment sweep precede serving. Failed transactions never wake readers;
-    // successful no-ops may wake them and are filtered by their projected digests.
-    fn signal_commit<T>(&self, result: &Result<T, StoreError>) {
-        if result.is_ok() {
+    /// Abort on a domain refusal as well as on a SQLite error. Use only when a
+    /// refusal must not persist anything; some other operations record a diagnostic
+    /// event and commit it before returning their refusal.
+    fn fenced_write_or_rollback<T, E>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<Result<T, E>>,
+    ) -> Result<Result<T, E>, StoreError> {
+        let mut refusal = None;
+        let result = self.fenced_write(|tx| match f(tx)? {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                // The store wraps SQLite errors. Keep the typed refusal separately
+                // while using a SQLite error to trigger rollback.
+                refusal = Some(error);
+                Err(rusqlite::Error::InvalidQuery)
+            }
+        });
+        match refusal {
+            Some(error) => Ok(Err(error)),
+            None => result.map(Ok),
+        }
+    }
+
+    // Call only after commit. The unfenced GitHub App permission update also
+    // wakes inventory readers so they see new permissions without another refresh.
+    fn signal_commit(&self, changed: bool) {
+        if changed {
             self.writes.send_replace(());
         }
     }

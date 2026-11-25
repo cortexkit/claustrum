@@ -659,6 +659,233 @@ fn store_at(db: &std::path::Path, seed: u8) -> EncryptedStore {
     EncryptedStore::open(store, key).expect("open vault")
 }
 
+// An authorizer belongs to one SQLite connection. Statements prepared on a
+// pooled reader therefore cannot increment this writer-only count.
+fn writer_selects(store: &EncryptedStore) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&count);
+    store
+        .with_raw_conn(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Select) {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+                Authorization::Allow
+            }));
+            Ok(())
+        })
+        .unwrap();
+    count
+}
+
+#[test]
+fn public_read_snapshots_issue_no_selects_on_the_writer() {
+    let (_root, store) = tmp_store(0x79);
+    let id = "apikey:read-pool";
+    let record = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None);
+    store.create(id, &record).unwrap();
+    let handle = mint_handle().unwrap();
+    store
+        .put_handle_hash(&handle.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+        .unwrap();
+    store
+        .create_read_grant_audited(
+            "reserved",
+            "consumer",
+            SelectorKind::Exact,
+            id,
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .unwrap();
+    let selects = writer_selects(&store);
+    let declared = DeclaredGrantSet::empty();
+
+    assert_eq!(store.get(id).unwrap().payload.expose(), b"key");
+    assert_eq!(store.resolve_handle(&handle.raw).unwrap(), id);
+    assert_eq!(
+        store
+            .resolve_handle_with_incarnation(&handle.raw)
+            .unwrap()
+            .0,
+        id
+    );
+    assert_eq!(store.meta(id).unwrap().record_version, 1);
+    assert_eq!(store.list_meta().unwrap()[0].0, id);
+    assert!(store
+        .read_grant_covers("reserved", "consumer", id, GrantOperation::Read, &declared)
+        .unwrap());
+    assert_eq!(
+        store
+            .list_scoped_snapshot("reserved", "consumer", &declared)
+            .unwrap()
+            .rows[0]
+            .id,
+        id
+    );
+    assert_eq!(
+        store
+            .watch_scoped_snapshot("reserved", "consumer", &declared)
+            .unwrap()
+            .0
+            .rows[0]
+            .id,
+        id
+    );
+    store.connector_inventory().unwrap();
+    assert_eq!(selects.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn only_a_committed_row_change_wakes_write_subscribers() {
+    let (_root, store) = tmp_store(0x79);
+    let mut writes = store.subscribe_writes();
+    let handle = mint_handle().unwrap();
+    let revoke = || store.revoke_handle(&handle.raw, AuditCtx::admin(AuditOp::RevokeHandle));
+    assert_eq!(revoke().unwrap(), None);
+    assert!(
+        !writes.has_changed().unwrap(),
+        "revoking an unknown handle changed no rows"
+    );
+
+    store.create("id", &oauth_record()).unwrap();
+    assert!(
+        writes.has_changed().unwrap(),
+        "a committed insert wakes subscribers"
+    );
+    writes.borrow_and_update();
+    let rolled_back = store.fenced_write(|tx| {
+        tx.execute("DELETE FROM credentials WHERE credential_id = 'id'", [])?;
+        Err::<(), _>(rusqlite::Error::InvalidQuery)
+    });
+    assert!(rolled_back.is_err());
+    assert!(store.meta("id").is_ok());
+    assert!(
+        !writes.has_changed().unwrap(),
+        "rolled-back changes do not wake subscribers"
+    );
+}
+
+#[test]
+fn unchanged_github_app_permission_observations_do_not_wake_readers() {
+    let (_root, store) = tmp_store(0x79);
+    let id = "id";
+    store.create(id, &oauth_record()).unwrap();
+    let mut writes = store.subscribe_writes();
+    let permissions = BTreeMap::from([("contents".to_owned(), "read".to_owned())]);
+
+    store.observe_github_app_permissions(id, 2, &permissions);
+    assert!(
+        !writes.has_changed().unwrap(),
+        "a superseded mint changes no row"
+    );
+    store.observe_github_app_permissions(id, 1, &permissions);
+    assert!(
+        writes.has_changed().unwrap(),
+        "a new observation wakes inventory readers"
+    );
+    writes.borrow_and_update();
+    store.observe_github_app_permissions(id, 1, &permissions);
+    assert!(
+        !writes.has_changed().unwrap(),
+        "repeating the same observation changes no row"
+    );
+}
+
+#[test]
+fn pending_enrollment_poll_issues_no_selects_on_the_writer() {
+    let (_root, store) = tmp_store(0x79);
+    let secret = "a".repeat(64);
+    let now = 1_000_000;
+    let hash = enrollment_secret_hash(&secret).unwrap();
+    let request = store
+        .propose_enrollment_at("pending-probe", &hash, now)
+        .unwrap();
+    let writes = store.subscribe_writes();
+    let selects = writer_selects(&store);
+    assert!(matches!(
+        store.poll_enrollment_at(&request.request_id, &secret, now),
+        Ok(EnrollmentPoll::Pending)
+    ));
+    assert_eq!(selects.load(Ordering::Relaxed), 0);
+    assert!(!writes.has_changed().unwrap());
+
+    assert!(matches!(
+        store.poll_enrollment_at(&request.request_id, &"b".repeat(64), now),
+        Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+    ));
+    assert!(
+        selects.load(Ordering::Relaxed) > 0,
+        "documented diagnostic event still uses the writer"
+    );
+    assert!(writes.has_changed().unwrap());
+}
+
+#[test]
+fn pending_enrollment_poll_still_refuses_after_a_fence_handover() {
+    let (_root, store) = tmp_store(0x79);
+    let secret = "a".repeat(64);
+    let now = 1_000_000;
+    let hash = enrollment_secret_hash(&secret).unwrap();
+    let request = store
+        .propose_enrollment_at("pending-probe", &hash, now)
+        .unwrap();
+    store
+        .with_raw_conn(|conn| conn.execute("UPDATE cortexkit_fence SET epoch = epoch + 1", []))
+        .unwrap();
+    let writes = store.subscribe_writes();
+    assert!(matches!(
+        store.poll_enrollment_at(&request.request_id, &secret, now),
+        Err(EnrollmentError::Store(StoreOpError::Fenced { .. }))
+    ));
+    assert!(store.is_fenced_out());
+    assert!(!writes.has_changed().unwrap());
+}
+
+#[test]
+fn unadmitted_broker_action_and_unknown_rotation_roll_back_without_waking() {
+    let (_root, store) = tmp_store(0x79);
+    assert!(store.store.epoch() > 0);
+    let fence = || {
+        store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT epoch FROM cortexkit_fence WHERE id = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    // Both calls tentatively claim the epoch before reaching their refusal.
+    // A commit would persist that claim even though the domain rows did not change.
+    store
+        .with_raw_conn(|conn| conn.execute("UPDATE cortexkit_fence SET epoch = 0", []))
+        .unwrap();
+    let writes = store.subscribe_writes();
+    assert!(matches!(
+        store.request_broker_action(
+            None,
+            serde_json::Value::Null,
+            |_| unreachable!(),
+            || unreachable!()
+        ),
+        Err(BrokerActionRequestError::NotFound)
+    ));
+    assert_eq!(fence(), 0);
+    assert!(!writes.has_changed().unwrap());
+    assert!(matches!(
+        store.rotate_enrollment(&"a".repeat(64), 1),
+        Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+    ));
+    assert_eq!(fence(), 0);
+    assert!(!writes.has_changed().unwrap());
+}
+
 #[test]
 fn migration_enables_full_sync_for_commits_and_checkpoints() {
     let (_dir, store) = tmp_store(0x57);
@@ -4865,7 +5092,7 @@ fn exact_selectors_are_literal_not_like_patterns() {
 fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
     assert_eq!(
         newest_migration_version(),
-        54,
+        55,
         "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

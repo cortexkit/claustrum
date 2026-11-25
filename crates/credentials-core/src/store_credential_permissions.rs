@@ -70,7 +70,7 @@ impl EncryptedStore {
     /// Newest existing diagnostic reason, without imposing a global event limit.
     pub fn connector_auth_reason(&self, id: &str) -> Result<Option<String>, StoreOpError> {
         self.store
-            .with_conn(|conn| connector_auth_reason(conn, id))
+            .with_read(|conn| connector_auth_reason(conn, id))
             .map_err(StoreOpError::from)
     }
 
@@ -78,12 +78,7 @@ impl EncryptedStore {
     /// categories and incarnation, must come from the same snapshot as its envelope.
     pub fn connector_inventory(&self) -> Result<ConnectorInventory, StoreOpError> {
         self.store
-            .with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                let inventory = self.connector_inventory_in_snapshot(&tx)?;
-                tx.commit()?;
-                Ok(inventory)
-            })
+            .with_read(|conn| self.connector_inventory_in_snapshot(conn))
             .map_err(StoreOpError::from)
     }
 

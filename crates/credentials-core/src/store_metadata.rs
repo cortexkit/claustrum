@@ -726,7 +726,7 @@ impl EncryptedStore {
     /// Read non-secret metadata for an id WITHOUT decrypting.
     pub fn meta(&self, credential_id: &str) -> Result<RecordMeta, StoreOpError> {
         self.store
-            .with_conn(|conn| {
+            .with_read(|conn| {
                 let meta = conn.query_row(
                     &format!("SELECT record_version, key_id, state, stale_pending, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
@@ -777,7 +777,7 @@ impl EncryptedStore {
     /// List every record's id and non-secret metadata without decrypting.
     pub fn list_meta(&self) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
         self.store
-            .with_conn(|conn| list_meta_from_conn(conn, read_schema_version(conn)?))
+            .with_read(|conn| list_meta_from_conn(conn, read_schema_version(conn)?))
             .map_err(StoreOpError::from)
     }
 }

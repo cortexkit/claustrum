@@ -112,6 +112,7 @@ fn scoped_remote_rows(
 }
 
 fn scoped_coverage_conn(
+    store: &EncryptedStore,
     conn: &rusqlite::Connection,
     principal_kind: &str,
     principal_id: &str,
@@ -139,6 +140,7 @@ fn scoped_coverage_conn(
             covered: grants.iter().any(|(kind, selector)| {
                 kind == SelectorKind::Audience.as_str() && credential_id == selector
             }),
+            settings_read: None,
             caller_active_grants,
             holds_category_selector: false,
             id_exists: false,
@@ -151,6 +153,7 @@ fn scoped_coverage_conn(
             covered: grants.iter().any(|(kind, selector)| {
                 kind == SelectorKind::Category.as_str() && categories.contains(selector)
             }),
+            settings_read: None,
             caller_active_grants,
             holds_category_selector: grants
                 .iter()
@@ -195,9 +198,26 @@ fn scoped_coverage_conn(
         None
     };
 
+    // Inspect the envelope in the same snapshot as grants and categories.
+    let settings_read = if !covered
+        && operation == GrantOperation::Read
+        && principal_kind == "reserved"
+        && tables == Some(MetadataTables::Local)
+        && declared.settings_refs.as_ref().is_some_and(|set| {
+            set.module_id() == principal_id
+                && set
+                    .refs()
+                    .binary_search_by(|id| id.as_str().cmp(credential_id))
+                    .is_ok()
+        }) {
+        store.settings_read_pin(conn, credential_id)?
+    } else {
+        None
+    };
     Ok(ScopedCoverage {
-        covered,
-        caller_active_grants,
+        covered: covered || settings_read.is_some(),
+        caller_active_grants: caller_active_grants + u32::from(settings_read.is_some()),
+        settings_read,
         holds_category_selector,
         id_exists,
         id_category_count,
@@ -675,18 +695,16 @@ impl EncryptedStore {
             return Err(StoreOpError::NotFound);
         }
         self.store
-            .with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                let coverage = scoped_coverage_conn(
-                    &tx,
+            .with_read(|conn| {
+                scoped_coverage_conn(
+                    self,
+                    conn,
                     principal_kind,
                     principal_id,
                     credential_id,
                     operation,
                     declared,
-                )?;
-                tx.commit()?;
-                Ok(coverage)
+                )
             })
             .map_err(StoreOpError::from)
     }
@@ -705,20 +723,19 @@ impl EncryptedStore {
             return Ok(None);
         }
         self.store
-            .with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                let Some(name) = enrolled_name(&tx, token)? else {
+            .with_read(|conn| {
+                let Some(name) = enrolled_name(conn, token)? else {
                     return Ok(None);
                 };
                 let coverage = scoped_coverage_conn(
-                    &tx,
+                    self,
+                    conn,
                     "enrolled",
                     &name,
                     credential_id,
                     operation,
                     &DeclaredGrantSet::empty(),
                 )?;
-                tx.commit()?;
                 Ok(Some((name, coverage)))
             })
             .map_err(StoreOpError::from)
@@ -840,19 +857,18 @@ impl EncryptedStore {
         F: FnOnce() -> rusqlite::Result<()>,
     {
         self.store
-            .with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
+            .with_read(|conn| {
                 let (principal_kind, principal_id) = match caller {
                     ScopedInventoryCaller::Principal { kind, id } => (kind, id.to_owned()),
                     ScopedInventoryCaller::EnrollmentToken(token) => {
-                        let Some(id) = enrolled_name(&tx, token)? else { return Ok(None) };
+                        let Some(id) = enrolled_name(conn, token)? else { return Ok(None) };
                         ("enrolled", id)
                     }
                 };
-                let schema_version = read_schema_version(&tx)?;
-                let registered_providers = registered_providers::from_conn(&tx)?;
+                let schema_version = read_schema_version(conn)?;
+                let registered_providers = registered_providers::from_conn(conn)?;
                 let mut grants = read_grants_from_conn(
-                    &tx,
+                    conn,
                     Some(principal_kind),
                     Some(&principal_id),
                     schema_version,
@@ -889,7 +905,7 @@ impl EncryptedStore {
                 }
                 if !by_category.is_empty() {
                     let mut stmt =
-                        tx.prepare("SELECT credential_id, category FROM credential_categories")?;
+                        conn.prepare("SELECT credential_id, category FROM credential_categories")?;
                     let mut categories = stmt.query([])?;
                     while let Some(row) = categories.next()? {
                         let category: String = row.get(1)?;
@@ -912,10 +928,10 @@ impl EncryptedStore {
                 let gateways = if covered.is_empty() {
                     Default::default()
                 } else {
-                let gateways = gateway::scoped_settings(&tx, schema_version, |id| {
+                let gateways = gateway::scoped_settings(conn, schema_version, |id| {
                     covered.get(id).is_some_and(|ops| ops.contains(&GrantOperation::Read) || ops.contains(&GrantOperation::List))
                 })?;
-                let mut stmt = tx.prepare(&format!(
+                let mut stmt = conn.prepare(&format!(
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                           SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
@@ -1085,15 +1101,14 @@ impl EncryptedStore {
                 gateways
                 };
                 if read_remote {
-                    rows.extend(scoped_remote_rows(Self::remote_inventory_in_snapshot(&tx)?, &grants, &registered_providers));
+                    rows.extend(scoped_remote_rows(Self::remote_inventory_in_snapshot(conn)?, &grants, &registered_providers));
                     rows.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
                 }
                 let conditions = if include_remote {
-                    conditions::scoped_inventory_conditions(&tx, schema_version, &rows)?
+                    conditions::scoped_inventory_conditions(conn, schema_version, &rows)?
                 } else {
                     BTreeMap::new()
                 };
-                tx.commit()?;
                 Ok(Some(ScopedInventorySnapshot {
                     principal_id,
                     list: ScopedListSnapshot { rows, grants },

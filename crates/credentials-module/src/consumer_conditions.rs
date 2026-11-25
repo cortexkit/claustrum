@@ -94,10 +94,10 @@ impl ReadSurface {
         let caller = caller.clone();
         let credential_id = id.to_owned();
         let token = enrollment_token.map(str::to_owned);
-        let (copy, incarnation, (kind, name)) = match tokio::task::spawn_blocking(move || {
+        let (copy, incarnation, authorization) = match tokio::task::spawn_blocking(move || {
             let copy = surface.remote.remote_record(&credential_id);
             let incarnation = surface.store().credential_incarnation(&credential_id);
-            let principal = surface.authorize_scoped_as(
+            let authorization = surface.authorize_scoped_as(
                 &caller,
                 token.as_deref(),
                 &credential_id,
@@ -105,7 +105,10 @@ impl ReadSurface {
             )?;
             #[cfg(test)]
             surface.run_incarnation_hook("admitted");
-            Ok((copy, incarnation, principal))
+            if let Some(pin) = &authorization.settings_read {
+                surface.require_settings_record(&credential_id, pin)?;
+            }
+            Ok((copy, incarnation, authorization))
         })
         .await
         {
@@ -113,9 +116,17 @@ impl ReadSurface {
             Ok(Err(error)) => return condition_reply(field, Err(error)),
             Err(_) => return condition_reply(field, Err(ReadError::StoreError)),
         };
+        if let Some(pin) = &authorization.settings_read {
+            if version != pin.record_version {
+                return condition_reply(field, Ok(false));
+            }
+        }
 
         match copy {
             Ok(Some(copy)) => {
+                if authorization.settings_read.is_some() {
+                    return condition_reply(field, Err(ReadError::NotFound));
+                }
                 let report = match mutation {
                     Mutation::Report(report) => {
                         if let Err(error) = check_condition_report(
@@ -142,7 +153,16 @@ impl ReadSurface {
             Ok(incarnation) => incarnation,
             Err(error) => return condition_reply(field, Err(map_store_error(&error))),
         };
-        let store = Arc::clone(self.store());
+        if authorization
+            .settings_read
+            .as_ref()
+            .is_some_and(|pin| pin.incarnation != incarnation)
+        {
+            return condition_reply(field, Err(ReadError::NotFound));
+        }
+        let (kind, name) = authorization.principal;
+        let settings_read = authorization.settings_read;
+        let surface = Arc::clone(self);
         let id = id.to_owned();
         let report = match mutation {
             Mutation::Report(report) => Some((
@@ -153,6 +173,7 @@ impl ReadSurface {
             Mutation::Clear => None,
         };
         let result = tokio::task::spawn_blocking(move || {
+            let store = surface.store();
             let (actor, principal) = if kind == "enrolled" {
                 (
                     format!("enrolled:{name}"),
@@ -169,7 +190,7 @@ impl ReadSurface {
                 actor: &actor,
                 alarm: None,
             };
-            match report {
+            let result = match report {
                 Some((reason, provider_status, action_url)) => store
                     .report_condition_in_incarnation(
                         &id,
@@ -191,8 +212,11 @@ impl ReadSurface {
                     audit,
                     principal,
                 ),
+            };
+            if let Some(pin) = settings_read {
+                surface.require_settings_record(&id, &pin)?;
             }
-            .map_err(|error| condition_error(&error))
+            result.map_err(|error| condition_error(&error))
         })
         .await
         .unwrap_or(Err(ReadError::StoreError));

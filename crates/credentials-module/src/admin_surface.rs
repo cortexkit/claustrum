@@ -38,7 +38,7 @@ use credentials_core::federation::{
 };
 use credentials_core::key::KeyId;
 use credentials_core::store::{
-    parse_declared_grants, DeclaredGrantSet, EncryptedStore, StoreOpError,
+    parse_declared_grants, DeclaredGrantSet, EncryptedStore, SettingsRefSet, StoreOpError,
 };
 use subc_protocol::Principal;
 
@@ -154,6 +154,19 @@ fn declaration_warn_once(module: &str, digest: Option<&str>, reasons: &impl std:
         .insert((module.to_owned(), digest.map(str::to_owned)))
     {
         tracing::warn!(module, digest, ?reasons, "declaration entries skipped");
+    }
+}
+
+fn settings_refs_warn_once(module: &str, generation: u64) {
+    type WarningKeys = Mutex<HashSet<(String, u64)>>;
+    static WARNED: OnceLock<WarningKeys> = OnceLock::new();
+    if WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert((module.to_owned(), generation))
+    {
+        tracing::warn!(module, generation, "settings credential references ignored");
     }
 }
 
@@ -316,7 +329,10 @@ impl AdminSurface {
         caller: Option<&subc_protocol::peer::CallerAttestation>,
         peer_build: Option<String>,
     ) {
-        let declared = Arc::new(self.admit_declaration(&principal, harness, caller));
+        let declared = Arc::new(
+            self.admit_declaration(&principal, harness, caller)
+                .with_settings_refs(self.admit_settings_refs(&principal, harness, scope, caller)),
+        );
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
             // Draining the replaced bind's nonce keeps the global counter honest.
@@ -340,6 +356,38 @@ impl AdminSurface {
                 nonce: None,
             },
         );
+    }
+
+    fn admit_settings_refs(
+        &self,
+        principal: &Principal,
+        harness: &str,
+        scope: Option<&subc_protocol::scope::ScopeStamp>,
+        caller: Option<&subc_protocol::peer::CallerAttestation>,
+    ) -> Option<SettingsRefSet> {
+        use crate::federation::RouteCaller;
+        use subc_protocol::{peer::CallerClaim, scope::ScopeKind};
+        let Principal::Reserved { module_id } = principal else {
+            return None;
+        };
+        let caller = caller?;
+        let member = caller.settings_credentials.as_ref()?;
+        if caller.claim != CallerClaim::Own
+            || harness.starts_with("fed-")
+            || scope.is_some_and(|scope| scope.kind == ScopeKind::Federated)
+            || !matches!(self.map_caller(principal, harness), RouteCaller::Principal(ref mapped) if mapped.as_ref() == Some(principal))
+        {
+            return None;
+        }
+        let Some(set) = SettingsRefSet::new(module_id, member.generation, &member.refs) else {
+            settings_refs_warn_once(module_id, member.generation);
+            return None;
+        };
+        if self.engine.store().record_settings_refs_seen(&set).is_err() {
+            tracing::warn!(module = %module_id, generation = member.generation, "settings reference inventory unavailable; bind has no settings authority");
+            return None;
+        }
+        Some(set)
     }
 
     fn admit_declaration(
@@ -1297,6 +1345,7 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             | StoreOpError::GatewayFixed { .. }
             | StoreOpError::EnrollmentNameHasGrants { .. }
             | StoreOpError::DeclaredGrant { .. }
+            | StoreOpError::SettingsGrant { .. }
     ) {
         return AdminOutcome::Refused(e.to_string());
     }

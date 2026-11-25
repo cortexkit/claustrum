@@ -1202,7 +1202,7 @@ fn help_verb(verb: &str) -> String {
         "grants" => {
             "ck auth grants [--declared]\n\
              \n\
-             \x20 --declared  print only last-seen first-party declared grants\n\
+             \x20 --declared  show last-seen declaration and settings grants\n\
              \n\
              NOTES\n\
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
@@ -1211,8 +1211,9 @@ fn help_verb(verb: &str) -> String {
              path when the daemon is available, otherwise a lease-free, read-only\n\
              local metadata read. An empty grant table prints `no grants`.\n\
              Plain output stays hand-made only; stderr points to --declared when needed.\n\
-             --declared shows the last declaration each module presented, not live\n\
-             route authority. Empty declared inventory prints nothing. Change a module's\n\
+             --declared shows what each module last presented, not live route authority.\n\
+             Empty inventory prints nothing. For settings grants, remove the key from\n\
+             the module's approved setting. For declared grants, change the module's\n\
              approved declaration in the daemon configuration, then restart the module\n\
              so it re-binds; a route bound earlier may still hold an older set."
         }

@@ -47,7 +47,7 @@ use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::secret::Secret;
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, ConditionReport, EncryptedStore, GrantOperation,
-    ReleaseRequest, SealedRelease, SecretHomeRole, StoreOpError,
+    HomeWatchCandidate, ReleaseRequest, SealedRelease, SecretHomeRole, StoreOpError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -857,6 +857,105 @@ fn remote_read_grant_covers(
     Ok(false)
 }
 
+/// One candidate scan. Recipients apply their own current-pairing selectors while
+/// sharing the local categories and provider IDs they need from each row.
+pub(super) struct RemoteWatchProjection {
+    rows: Vec<Projectable>,
+}
+
+struct Projectable {
+    candidate: HomeWatchCandidate,
+    state: RemoteHomeState,
+    categories: Option<Vec<String>>,
+    provider_ids: Option<Vec<String>>,
+}
+
+impl RemoteWatchProjection {
+    pub(super) fn new(candidates: Vec<HomeWatchCandidate>) -> Self {
+        Self {
+            rows: candidates
+                .into_iter()
+                .filter_map(|candidate| {
+                    if is_vault_transfer_id(&candidate.credential_id) || !candidate.is_refreshable()
+                    {
+                        return None;
+                    }
+                    let state = match candidate.state {
+                        RecordState::Active => RemoteHomeState::Active,
+                        RecordState::NeedsReauth => RemoteHomeState::NeedsReauth,
+                        _ => return None,
+                    };
+                    Some(Projectable {
+                        candidate,
+                        state,
+                        categories: None,
+                        provider_ids: None,
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn for_grants(
+        &mut self,
+        store: &EncryptedStore,
+        grants: &[&MemberGrant],
+    ) -> Result<Vec<RemoteWatchRow>, StoreOpError> {
+        let mut rows = Vec::new();
+        let has_categories = grants
+            .iter()
+            .any(|grant| matches!(grant.selector, MemberGrantSelector::Category(_)));
+        for row in &mut self.rows {
+            let candidate = &row.candidate;
+            let id = &candidate.credential_id;
+            let exact = grants.iter().any(
+                |grant| matches!(&grant.selector, MemberGrantSelector::Exact(exact) if exact == id),
+            );
+            if !exact && !has_categories {
+                continue;
+            }
+            if row.categories.is_none() {
+                row.categories = Some(store.categories(id)?);
+            }
+            let categories = row.categories.as_ref().expect("categories loaded");
+            if !exact && !grants.iter().any(|grant| matches!(&grant.selector, MemberGrantSelector::Category(cat) if categories.contains(cat))) {
+                continue;
+            }
+            if row.provider_ids.is_none() {
+                row.provider_ids = Some(store.provider_ids(id)?);
+            }
+            rows.push(RemoteWatchRow {
+                credential_id: id.clone(),
+                state: row.state,
+                refresh_adapter: candidate.refresh_adapter.clone(),
+                identity: candidate.identity.clone(),
+                categories: categories.clone(),
+                provider_ids: row.provider_ids.clone(),
+                detected_plan: candidate.detected_plan.clone(),
+                home_version: candidate.record_version,
+                condition: candidate.condition.clone(),
+            });
+        }
+        rows.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
+        Ok(rows)
+    }
+}
+
+pub(super) fn current_remote_read_grants<'a>(
+    grants: &'a [MemberGrant],
+    member: &str,
+    pairing_id: &str,
+) -> Vec<&'a MemberGrant> {
+    grants
+        .iter()
+        .filter(|grant| {
+            grant.member_id == member
+                && grant.pairing_id == pairing_id
+                && grant.operation == MemberGrantOperation::RemoteRead
+        })
+        .collect()
+}
+
 /// Parse the received aad bytes strictly. Over the seal's aad cap is malformed too.
 fn parse_token_aad(bytes: &str) -> Result<TokenAad, Refusal> {
     if bytes.len() > credentials_core::kem::MAX_SEAL_AAD {
@@ -1582,7 +1681,7 @@ impl HomeVault {
         // 1. Only a home-role vault serves forwarded secret ops; nothing else falls back
         // to local state or forwards again.
         let self_id = self
-            .forwarded_secret_store(Self::secret_home_self_on)
+            .forwarded_secret_store(|store| Self::secret_home_self_on(store))
             .await?;
         // 2. The member's current pairing id, and a `secret_use` member grant under it.
         // The grant is checked before anything is parsed, as for the flow ops, so a
@@ -1759,7 +1858,7 @@ impl HomeVault {
         params: &Value,
         budget: tokio::time::Instant,
     ) -> Result<Value, Refusal> {
-        self.forwarded_secret_store(Self::secret_home_self_on)
+        self.forwarded_secret_store(|store| Self::secret_home_self_on(store))
             .await?;
         let pairing_id = self.current_pairing(member, method, budget).await?;
         let clock = Arc::clone(&self.secret_clock);
@@ -1801,7 +1900,7 @@ impl HomeVault {
 
     async fn forwarded_secret_store<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&EncryptedStore) -> Result<T, Refusal> + Send + 'static,
+        f: impl FnOnce(&Arc<EncryptedStore>) -> Result<T, Refusal> + Send + 'static,
     ) -> Result<T, Refusal> {
         let store = Arc::clone(self.engine.store());
         // No timeout wraps the worker: a release already admitted by the store
@@ -2016,41 +2115,10 @@ impl HomeVault {
         pairing_id: &str,
     ) -> Result<Vec<RemoteWatchRow>, StoreOpError> {
         let grants = store.list_member_grants()?;
-        let mut rows = Vec::new();
-        for candidate in store.home_watch_candidates()? {
-            if is_vault_transfer_id(&candidate.credential_id) || !candidate.is_refreshable() {
-                continue;
-            }
-            let state = match candidate.state {
-                RecordState::Active => RemoteHomeState::Active,
-                RecordState::NeedsReauth => RemoteHomeState::NeedsReauth,
-                _ => continue,
-            };
-            if !remote_read_grant_covers(
-                store,
-                &grants,
-                member,
-                pairing_id,
-                &candidate.credential_id,
-            )? {
-                continue;
-            }
-            let categories = store.categories(&candidate.credential_id)?;
-            let provider_ids = Some(store.provider_ids(&candidate.credential_id)?);
-            rows.push(RemoteWatchRow {
-                credential_id: candidate.credential_id,
-                state,
-                refresh_adapter: candidate.refresh_adapter,
-                identity: candidate.identity,
-                categories,
-                provider_ids,
-                detected_plan: candidate.detected_plan,
-                home_version: candidate.record_version,
-                condition: candidate.condition,
-            });
-        }
-        rows.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
-        Ok(rows)
+        RemoteWatchProjection::new(store.home_watch_candidates()?).for_grants(
+            store,
+            &current_remote_read_grants(&grants, member, pairing_id),
+        )
     }
 
     /// Step 7: a `remote_read` member grant, stored under the member's CURRENT pairing

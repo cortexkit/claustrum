@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::{
     audit::{AuditCtx, AuditOp},
-    federation::{MemberGrantSelector, VAULT_TRANSFER_ID},
+    federation::{MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID},
     kem,
     key::MasterKey,
     oauth::OAuthCredential,
@@ -34,6 +34,57 @@ const PAIR: &str = "pair:1";
 const NEW_PAIR: &str = "pair:2";
 const HOME_SCALAR: u8 = 12;
 const MEMBER_SCALAR: u8 = 13;
+
+#[test]
+fn paired_recipients_share_one_candidate_scan_per_store_wake() {
+    let rig = Rig::new();
+    rig.setup();
+    rig.grant(NEW_MEMBER, NEW_PAIR, ID);
+    let mut shared = SharedProjection::new(&rig.store);
+    for expected_scans in [1, 2] {
+        for (member, pairing) in [(MEMBER, PAIR), (NEW_MEMBER, NEW_PAIR)] {
+            let Inventory::Eligible(rows) = shared.inventory(&rig.store, member, pairing).unwrap()
+            else {
+                panic!("the granted member must receive a projection");
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].credential_id, ID);
+        }
+        assert_eq!(shared.scans, expected_scans);
+        rig.overwrite(&login());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivered_unpair_ignores_store_wakes_but_repairs_ended_after_hub_reset() {
+    let mut rig = Rig::new();
+    rig.setup();
+    rig.bind(Some(paired(PAIR, MEMBER_SCALAR)));
+    let mut observer = rig.watch().await;
+    let dormant = Arc::new(Notify::new());
+    let store_wakes = Arc::new(AtomicU64::new(0));
+    rig.start_with(TestHooks {
+        dormant: Some(Arc::clone(&dormant)),
+        store_wakes: Some(Arc::clone(&store_wakes)),
+        ..TestHooks::default()
+    });
+    put(observer.as_mut()).await;
+    rig.bind(Some(joined(&[], &[])));
+    let ended = put(observer.as_mut()).await;
+    wait(dormant.notified()).await;
+    assert_eq!(
+        open(&ended, MEMBER_SCALAR, &key(HOME_SCALAR)).1,
+        json!({"kind":"ended"})
+    );
+
+    let wakes = store_wakes.load(Ordering::SeqCst);
+    rig.overwrite(&login());
+    rig.hub.reset_bucket(SHARED_LOGINS, &[]);
+    assert_eq!(put(observer.as_mut()).await.value, ended.value);
+    // The store-write branch is polled before a repair. A dormant task must not
+    // even consume that notification, let alone scan credentials for it.
+    assert_eq!(store_wakes.load(Ordering::SeqCst), wakes);
+}
 
 fn pem(scalar: u8) -> String {
     kem::pem_from_scalar(&[scalar; 32])

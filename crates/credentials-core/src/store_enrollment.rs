@@ -2,6 +2,45 @@
 
 use super::*;
 
+struct PollRow {
+    secret_hash: String,
+    state: String,
+    final_name: Option<String>,
+    enrollment_id: Option<String>,
+    expires_at_ms: i64,
+}
+
+fn matching_poll_row(
+    conn: &rusqlite::Connection,
+    request_id: &str,
+    presented_hash: &str,
+) -> rusqlite::Result<Option<PollRow>> {
+    let row = conn
+        .query_row(
+            "SELECT request_secret_hash, state, final_name, enrollment_id, expires_at_ms \
+             FROM pending_enrollments WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok(PollRow {
+                    secret_hash: row.get(0)?,
+                    state: row.get(1)?,
+                    final_name: row.get(2)?,
+                    enrollment_id: row.get(3)?,
+                    expires_at_ms: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+
+    // Use the same fixed-size comparison for an unknown id and a wrong secret.
+    let stored_hash = row
+        .as_ref()
+        .map(|row| row.secret_hash.as_str())
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+    let secret_matches = constant_time_hash_eq(presented_hash, stored_hash);
+    Ok(row.filter(|_| secret_matches))
+}
+
 pub(super) fn find_live_enrollment_by_hash(
     conn: &rusqlite::Connection,
     hash: &str,
@@ -508,33 +547,41 @@ impl EncryptedStore {
         }
         let presented_hash = enrollment_secret_hash(request_secret)
             .ok_or(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
-        let outcome = self
-            .fenced_write(|tx| {
-                let row = tx
+
+        // Pending polls record nothing; repeated observations would evict the events
+        // that explain approvals and refusals from the bounded diagnostic history.
+        let pending = self.store.with_read(|conn| {
+            let row = matching_poll_row(conn, request_id, &presented_hash)?;
+            if !row.is_some_and(|row| row.state == "pending" && row.expires_at_ms > now) {
+                return Ok(false);
+            }
+            // Only bypass the writer when it already owns the committed epoch.
+            // On mismatch let the fenced path claim or refuse it as usual.
+            let epoch: Option<i64> = conn
                 .query_row(
-                    "SELECT request_secret_hash, state, final_name, enrollment_id, expires_at_ms \
-                     FROM pending_enrollments WHERE request_id = ?1",
-                    [request_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    },
+                    "SELECT epoch FROM cortexkit_fence WHERE id = 0",
+                    [],
+                    |row| row.get(0),
                 )
                 .optional()?;
+            Ok(epoch.is_some_and(|epoch| epoch as u64 == self.store.epoch()))
+        });
+        if pending.unwrap_or(false) {
+            return Ok(EnrollmentPoll::Pending);
+        }
 
-                // Run one fixed-size comparison even for an unknown id. The row-existence bit
-                // is applied only after it, so the two paths cannot diverge through `==`.
-                let stored_hash = row
-                    .as_ref()
-                    .map(|values| values.0.as_str())
-                    .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
-                let secret_matches = constant_time_hash_eq(&presented_hash, stored_hash);
-                if row.is_none() || !secret_matches {
+        // Re-read under the fence: the preflight snapshot never authorizes a
+        // transition, and diagnostic events still commit on the refusal paths.
+        let outcome = self
+            .fenced_write(|tx| {
+                let Some(PollRow {
+                    state,
+                    final_name,
+                    enrollment_id,
+                    expires_at_ms,
+                    ..
+                }) = matching_poll_row(tx, request_id, &presented_hash)?
+                else {
                     append_enrollment_event_tx(
                         tx,
                         ENROLL_POLL_SUBJECT,
@@ -543,10 +590,7 @@ impl EncryptedStore {
                         principal,
                     )?;
                     return Ok(Err(EnrollmentRefusal::NotFound));
-                }
-
-                let (_, state, final_name, enrollment_id, expires_at_ms) =
-                    row.expect("checked above");
+                };
                 if matches!(state.as_str(), "pending" | "approved") && expires_at_ms <= now {
                     tx.execute(
                         "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
@@ -570,21 +614,6 @@ impl EncryptedStore {
                 }
 
                 match state.as_str() {
-                    // A PENDING POLL RECORDS NOTHING, because nothing happened.
-                    //
-                    // Consumers poll on a timer while they wait for the operator, and one
-                    // was measured at ~2.2 polls a second. Every pending poll used to append
-                    // an `auth_events` row, and that table keeps only the newest
-                    // `AUTH_EVENTS_PER_CREDENTIAL` rows per subject, so the rows worth
-                    // having under `auth.enroll_poll` -- a `not_found` from a wrong secret,
-                    // a `superseded`, an `approved` -- were evicted within about half a
-                    // minute by rows saying "still waiting". The ring is for diagnosis; an
-                    // observation that nothing changed is not one.
-                    //
-                    // The pending arm changes no rows, but its successful transaction
-                    // still wakes store write subscribers.
-                    //
-                    // Every other arm here is a transition or a refusal and still records.
                     "pending" => Ok(Ok(EnrollmentPoll::Pending)),
                     "denied" => {
                         append_enrollment_event_tx(
@@ -731,7 +760,7 @@ impl EncryptedStore {
             .ok_or(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
         let audit_key = self.audit_key.clone();
         let outcome = self
-            .fenced_write(|tx| {
+            .fenced_write_or_rollback(|tx| {
                 let Some((enrollment_id, name, generation)) =
                     find_live_enrollment_by_hash(tx, &presented_hash)?
                 else {

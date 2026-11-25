@@ -2784,6 +2784,11 @@ struct ResolvedKeyAddress {
     principal: Option<(&'static str, String)>,
 }
 
+struct ScopedAuthorization {
+    principal: (&'static str, String),
+    settings_read: Option<credentials_core::store::SettingsReadPin>,
+}
+
 impl<'a> From<SignAuthorization<'a>> for KeyAddress<'a> {
     fn from(value: SignAuthorization<'a>) -> Self {
         match value {
@@ -3312,7 +3317,8 @@ impl ReadSurface {
         {
             hook();
         }
-        let actor = format!("{}:{}", resolved_principal.0, resolved_principal.1);
+        let (kind, id) = resolved_principal.principal;
+        let actor = format!("{kind}:{id}");
         let write_audit = || {
             #[cfg(test)]
             if self
@@ -3647,7 +3653,8 @@ impl ReadSurface {
         }
         let (kind, id) = self
             .authorize_scoped_as(caller, None, &params.id, GrantOperation::Deposit)
-            .map_err(|_| DepositCookieError::NotFound)?;
+            .map_err(|_| DepositCookieError::NotFound)?
+            .principal;
         let result = self
             .engine
             .store()
@@ -3809,10 +3816,14 @@ impl ReadSurface {
                     usage,
                     false,
                 )?;
+                if resolved_principal.settings_read.is_some() {
+                    // A settings-only grant covers API keys, which have no public half.
+                    return Err(ReadError::NotFound);
+                }
                 Ok(ResolvedKeyAddress {
                     credential_id: credential_id.to_string(),
                     incarnation: incarnation.map_err(|e| map_store_error(&e))?,
-                    principal: Some(resolved_principal),
+                    principal: Some(resolved_principal.principal),
                 })
             }
         }
@@ -3841,7 +3852,7 @@ impl ReadSurface {
         enrollment_token: Option<&str>,
         credential_id: &str,
         operation: GrantOperation,
-    ) -> Result<(&'static str, String), ReadError> {
+    ) -> Result<ScopedAuthorization, ReadError> {
         self.authorize_scoped_for(
             caller,
             enrollment_token,
@@ -3863,7 +3874,7 @@ impl ReadSurface {
         operation: GrantOperation,
         usage: TransferKeyUse,
         require_record: bool,
-    ) -> Result<(&'static str, String), ReadError> {
+    ) -> Result<ScopedAuthorization, ReadError> {
         if credentials_core::store::is_github_app_companion_id(credential_id) {
             return Err(ReadError::NotFound);
         }
@@ -3915,7 +3926,7 @@ impl ReadSurface {
             );
             ReadError::NotFound
         };
-        let (kind, id, coverage) = coverage
+        let (kind, id, mut coverage) = coverage
             .map_err(|_| record_refusal(ScopedReadRefusal::StoreError))?
             .ok_or_else(|| record_refusal(ScopedReadRefusal::NoGrant))?;
         if operation == GrantOperation::AccountToken
@@ -3926,6 +3937,7 @@ impl ReadSurface {
         if require_record && coverage.covered && !coverage.id_exists {
             return Err(record_refusal(ScopedReadRefusal::NotFound));
         }
+        let settings_read = coverage.settings_read.take();
         if let Some(refusal) = classify_scoped_coverage(coverage) {
             return Err(record_refusal(refusal));
         }
@@ -3951,7 +3963,10 @@ impl ReadSurface {
                 operation,
             );
         }
-        Ok((kind, id))
+        Ok(ScopedAuthorization {
+            principal: (kind, id),
+            settings_read,
+        })
     }
 
     /// Enumerate every row covered by the caller's own grants from one store snapshot.
@@ -4138,14 +4153,14 @@ impl ReadSurface {
             self.remote_address(params.handle.as_ref(), params.credential_id.as_ref())
         {
             let fenced_out = self.engine.store().is_fenced_out();
-            if self
+            if !self
                 .authorize_scoped_as(
                     caller,
                     params.enrollment_token.as_deref(),
                     &record.credential_id,
                     GrantOperation::Read,
                 )
-                .is_err()
+                .is_ok_and(|authorization| authorization.settings_read.is_none())
             {
                 return serde_json::to_value(StatusResult {
                     ready: false,
@@ -4197,7 +4212,8 @@ impl ReadSurface {
             &record.credential_id,
             GrantOperation::Read,
         ) {
-            Ok(resolved) => resolved,
+            Ok(authorization) if authorization.settings_read.is_none() => authorization.principal,
+            Ok(_) => return local(Err(ReadError::NotFound)),
             Err(code) => return local(Err(code)),
         };
         let reporter = match &resolved {
@@ -4225,7 +4241,7 @@ impl ReadSurface {
         caller: &crate::federation::ingress::ScopedCaller,
         params: &UsageReportScopedParams,
     ) -> Result<(), ReadError> {
-        let (kind, id) = self.authorize_scoped_for(
+        let authorization = self.authorize_scoped_for(
             caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
@@ -4233,6 +4249,10 @@ impl ReadSurface {
             TransferKeyUse::Ordinary,
             true,
         )?;
+        if let Some(pin) = &authorization.settings_read {
+            self.require_settings_record(&params.credential_id, pin)?;
+        }
+        let (kind, id) = authorization.principal;
         // The dispatcher validates before authorization, so neither caller-supplied
         // attribution nor an oversized reading can reach the queue.
         self.usage.enqueue(crate::usage_forwarder::vouched_row(
@@ -4246,6 +4266,22 @@ impl ReadSurface {
             &id,
         ));
         Ok(())
+    }
+
+    fn require_settings_record(
+        &self,
+        credential_id: &str,
+        pin: &credentials_core::store::SettingsReadPin,
+    ) -> Result<(), ReadError> {
+        if self.engine.store().meta(credential_id).is_ok_and(|meta| {
+            meta.incarnation
+                .as_deref()
+                .is_some_and(|incarnation| pin.matches(incarnation, meta.record_version))
+        }) {
+            Ok(())
+        } else {
+            Err(ReadError::NotFound)
+        }
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.
@@ -4262,14 +4298,15 @@ impl ReadSurface {
             .store()
             .credential_incarnation(&params.credential_id);
         let remote_record = self.remote.remote_record(&params.credential_id);
-        if let Err(code) = self.authorize_scoped_as(
+        let authorization = match self.authorize_scoped_as(
             caller,
             params.enrollment_token.as_deref(),
             &params.credential_id,
             GrantOperation::Read,
         ) {
-            return err(code);
-        }
+            Ok(authorization) => authorization,
+            Err(code) => return err(code),
+        };
         let providers = match self.engine.store().registered_providers() {
             Ok(providers) => providers,
             Err(error) => return err(map_store_error(&error)),
@@ -4278,6 +4315,9 @@ impl ReadSurface {
         // grant check above already covered it, through this vault's own categories.
         match remote_record {
             Ok(Some(record)) => {
+                if authorization.settings_read.is_some() {
+                    return err(ReadError::NotFound);
+                }
                 let answer = self.remote.get(&record, params.min_ttl_ms).await;
                 return remote_get_outcome(&params.credential_id, answer, &providers);
             }
@@ -4292,20 +4332,25 @@ impl ReadSurface {
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
 
-        match self
-            .engine
-            // `force_refresh` stays hardcoded off: no scoped caller can ask for it, and
-            // it is a lever that spends an upstream mint on demand. It is a deliberate
-            // omission rather than an oversight -- the same consumer that needs
-            // `min_ttl_ms` confirmed its own trait cannot express force_refresh at all.
-            .get_in_incarnation(
-                &params.credential_id,
-                &incarnation,
-                params.min_ttl_ms,
-                false,
-            )
-            .await
-        {
+        // Scoped callers cannot force a refresh, which would spend an upstream mint.
+        let result = if let Some(pin) = authorization.settings_read.as_ref() {
+            if pin.incarnation != incarnation {
+                return err(ReadError::NotFound);
+            }
+            self.engine
+                .get_in_settings_record(&params.credential_id, pin, params.min_ttl_ms)
+                .await
+        } else {
+            self.engine
+                .get_in_incarnation(
+                    &params.credential_id,
+                    &incarnation,
+                    params.min_ttl_ms,
+                    false,
+                )
+                .await
+        };
+        match result {
             Ok(refreshed) => {
                 crate::plan_warnings::report(refreshed.unmapped_plan.as_ref());
                 // Identical to the handle path: a refusal is sound only after THIS
@@ -4442,11 +4487,11 @@ impl ReadSurface {
     ) -> Result<(), ReadError> {
         let principal = caller.as_ref();
         // TWO ADDRESSES, EXACTLY ONE OF THEM, mirroring `status` above rather than
-        // inventing a second dispatch shape. `scoped` is carried forward because it
+        // inventing a second dispatch shape. The resolved principal is carried forward because it
         // decides the audit actor: a handle holder is anonymous and the channel number is
         // all there is, while a scoped caller has a principal that is KNOWN HERE and must
         // not be discarded.
-        let (credential_id, incarnation, resolved_principal) =
+        let (credential_id, incarnation, resolved_principal, settings_read) =
             match (&params.handle, &params.credential_id) {
                 (Some(handle), None) => {
                     // Rate-limit on the presented handle (before resolution), like get — a
@@ -4457,7 +4502,7 @@ impl ReadSurface {
                         Ok((id, _)) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
                             return Err(ReadError::NotFound)
                         }
-                        Ok((id, incarnation)) => (id, incarnation, None),
+                        Ok((id, incarnation)) => (id, incarnation, None, None),
                         Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
                         Err(e) => return Err(map_store_error(&e)),
                     }
@@ -4468,7 +4513,7 @@ impl ReadSurface {
                     // the same reason they are on `get_scoped` and `status`: telling them
                     // apart turns this into an inventory oracle. `authorize_scoped` records
                     // the discriminated reason in `auth_events` locally and returns one code.
-                    let resolved = self.authorize_scoped_as(
+                    let authorization = self.authorize_scoped_as(
                         caller,
                         params.enrollment_token.as_deref(),
                         credential_id,
@@ -4477,7 +4522,8 @@ impl ReadSurface {
                     (
                         credential_id.clone(),
                         incarnation.map_err(|e| map_store_error(&e))?,
-                        Some(resolved),
+                        Some(authorization.principal),
+                        authorization.settings_read,
                     )
                 }
                 // Both or neither is a malformed request, not an addressing question. It
@@ -4487,6 +4533,13 @@ impl ReadSurface {
             };
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
+
+        if let Some(pin) = &settings_read {
+            if pin.incarnation != incarnation {
+                return Err(ReadError::NotFound);
+            }
+            self.require_settings_record(&credential_id, pin)?;
+        }
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
         // provider hiccup, not a dead credential.
@@ -4584,8 +4637,8 @@ impl ReadSurface {
             // distinguishes a restarted process from a long-lived one without putting
             // an authentication token in a readable column.
             //
-            // AND FOR THE SCOPED ARM THAT QUESTION IS NOW SETTLED, which is why `scoped`
-            // is carried down here. A scoped report is authorized BY the principal: the
+            // AND FOR THE SCOPED ARM THAT QUESTION IS NOW SETTLED. A scoped report
+            // is authorized BY the principal: the
             // grant lookup that admitted this call already read the name, so recording it
             // discloses nothing the write did not already depend on, and it is not the
             // "should we identify anonymous reporters" question above. Writing `conn-N`
@@ -4635,7 +4688,13 @@ impl ReadSurface {
                     None => Self::observed_principal(principal),
                 },
             };
-            if refreshable {
+            if settings_read
+                .as_ref()
+                .is_some_and(|pin| pin.record_version != params.record_version)
+            {
+                return Ok(());
+            }
+            let changed = if refreshable {
                 self.engine
                     .store()
                     .mark_stale_in_incarnation(
@@ -4645,7 +4704,7 @@ impl ReadSurface {
                         audit,
                         observation,
                     )
-                    .map_err(|e| map_store_error(&e))?;
+                    .map_err(|e| map_store_error(&e))?
             } else {
                 self.engine
                     .store()
@@ -4656,7 +4715,10 @@ impl ReadSurface {
                         audit,
                         Some(observation),
                     )
-                    .map_err(|e| map_store_error(&e))?;
+                    .map_err(|e| map_store_error(&e))?
+            };
+            if let Some(pin) = settings_read.filter(|_| !changed) {
+                self.require_settings_record(&credential_id, &pin)?;
             }
         }
         Ok(())
@@ -4720,76 +4782,80 @@ impl ReadSurface {
             stale_pending: None,
         };
 
-        let (credential_id, incarnation, scoped) = match (&params.handle, &params.credential_id) {
-            // Overall readiness: ready iff we still hold write authority. No address to
-            // authorize or rate-limit, and nothing to enumerate, so no lookup runs here.
-            (None, None) => {
-                return StatusResult {
-                    ready: !fenced_out,
-                    last_error_code: None,
-                    lease_held,
-                    credential_id: None,
-                    record_version: None,
-                    // No address means no record, so there is no mark to report. Absent
-                    // rather than false: this is overall daemon readiness, not a claim
-                    // about any credential.
-                    stale_pending: None,
-                };
-            }
-            (Some(handle), None) => {
-                // Rate-limit the handle probe before resolution (enumeration-sweep guard).
-                self.check_limiter(connection_id, handle).await;
-                let resolved = self
-                    .engine
-                    .store()
-                    .resolve_handle_with_incarnation(handle)
-                    .and_then(|(id, incarnation)| {
-                        if transfer_key_fenced(&id, TransferKeyAccess::Handle) {
-                            Err(StoreOpError::NotFound)
-                        } else {
-                            Ok((id, incarnation))
+        let (credential_id, incarnation, scoped, settings_read) =
+            match (&params.handle, &params.credential_id) {
+                // Overall readiness: ready iff we still hold write authority. No address to
+                // authorize or rate-limit, and nothing to enumerate, so no lookup runs here.
+                (None, None) => {
+                    return StatusResult {
+                        ready: !fenced_out,
+                        last_error_code: None,
+                        lease_held,
+                        credential_id: None,
+                        record_version: None,
+                        // No address means no record, so there is no mark to report. Absent
+                        // rather than false: this is overall daemon readiness, not a claim
+                        // about any credential.
+                        stale_pending: None,
+                    };
+                }
+                (Some(handle), None) => {
+                    // Rate-limit the handle probe before resolution (enumeration-sweep guard).
+                    self.check_limiter(connection_id, handle).await;
+                    let resolved = self
+                        .engine
+                        .store()
+                        .resolve_handle_with_incarnation(handle)
+                        .and_then(|(id, incarnation)| {
+                            if transfer_key_fenced(&id, TransferKeyAccess::Handle) {
+                                Err(StoreOpError::NotFound)
+                            } else {
+                                Ok((id, incarnation))
+                            }
+                        });
+                    let (credential_id, incarnation) = match resolved {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            return StatusResult {
+                                last_error_code: Some(map_store_error(&error)),
+                                ..unavailable(None)
+                            }
                         }
-                    });
-                let (credential_id, incarnation) = match resolved {
-                    Ok(resolved) => resolved,
-                    Err(error) => {
-                        return StatusResult {
-                            last_error_code: Some(map_store_error(&error)),
-                            ..unavailable(None)
-                        }
-                    }
-                };
-                (credential_id, incarnation, false)
-            }
-            (None, Some(credential_id)) => {
-                let incarnation = self.engine.store().credential_incarnation(credential_id);
-                // `_as` rather than the token-less helper: an enrolled consumer presents a
-                // bearer token and no principal the bus can vouch for, so without this it
-                // resolves to `Direct`, fails coverage, and gets the same `unavailable`
-                // body as a credential that does not exist -- indistinguishable from the
-                // enumeration guard doing its job.
-                if self
-                    .authorize_scoped_for(
+                    };
+                    (credential_id, incarnation, false, None)
+                }
+                (None, Some(credential_id)) => {
+                    let incarnation = self.engine.store().credential_incarnation(credential_id);
+                    // `_as` rather than the token-less helper: an enrolled consumer presents a
+                    // bearer token and no principal the bus can vouch for, so without this it
+                    // resolves to `Direct`, fails coverage, and gets the same `unavailable`
+                    // body as a credential that does not exist -- indistinguishable from the
+                    // enumeration guard doing its job.
+                    let authorization = match self.authorize_scoped_for(
                         caller,
                         params.enrollment_token.as_deref(),
                         credential_id,
                         GrantOperation::Read,
                         TransferKeyUse::AnnounceVersion,
                         false,
+                    ) {
+                        Ok(authorization) => authorization,
+                        Err(_) => return unavailable(None),
+                    };
+                    let Ok(incarnation) = incarnation else {
+                        return unavailable(None);
+                    };
+                    (
+                        credential_id.clone(),
+                        incarnation,
+                        true,
+                        authorization.settings_read,
                     )
-                    .is_err()
-                {
-                    return unavailable(None);
                 }
-                let Ok(incarnation) = incarnation else {
-                    return unavailable(None);
-                };
-                (credential_id.clone(), incarnation, true)
-            }
-            // The route rejects a request with both addressing forms as `invalid_params`.
-            // Preserve the non-enumerating status shape for direct callers of this surface.
-            (Some(_), Some(_)) => return unavailable(None),
-        };
+                // The route rejects a request with both addressing forms as `invalid_params`.
+                // Preserve the non-enumerating status shape for direct callers of this surface.
+                (Some(_), Some(_)) => return unavailable(None),
+            };
 
         #[cfg(test)]
         self.run_incarnation_hook("status-admitted");
@@ -4801,6 +4867,10 @@ impl ReadSurface {
             }
         }) {
             Ok(meta) => {
+                if settings_read.is_some_and(|pin| !pin.matches(&incarnation, meta.record_version))
+                {
+                    return unavailable(None);
+                }
                 // The field is a LATENCY PREDICTOR for the next get, and the prediction
                 // only has meaning when the next get will actually run. None of the seven
                 // `UPDATE credentials SET state = ...` paths in the store clear
@@ -5846,6 +5916,7 @@ mod list_scoped_tests {
                    id_category_count| ScopedCoverage {
             caller_active_grants,
             covered,
+            settings_read: None,
             id_exists,
             holds_category_selector,
             id_category_count,

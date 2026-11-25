@@ -1416,6 +1416,20 @@ impl EncryptedStore {
         outcome: &str,
     ) -> Result<RemoteRecordWrite, StoreOpError> {
         check_outcome_code(outcome)?;
+        let current = self.store.with_read(|conn| {
+            conn.query_row(
+                "SELECT last_fetch_outcome IS ?3 FROM remote_records \
+                 WHERE credential_id = ?1 AND incarnation = ?2",
+                rusqlite::params![credential_id, incarnation, outcome],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+        })?;
+        match current {
+            None => return Ok(RemoteRecordWrite::StaleIncarnation),
+            Some(true) => return Ok(RemoteRecordWrite::Unchanged),
+            Some(false) => {}
+        }
         let now = now_ms();
         self.fenced_write(|tx| {
             let changed = tx.execute(

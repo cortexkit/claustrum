@@ -576,11 +576,18 @@ struct Inner {
     /// Held only for the handshake, which is bounded by its own deadline.
     connector: AsyncMutex<()>,
     bindings: Mutex<HashMap<String, Arc<Binding>>>,
+    peer_keys: Mutex<Option<WatchedPeerKeys>>,
     next_corr: std::sync::atomic::AtomicU64,
     /// Runs between a subscription taking its binding and registering its stream,
     /// so a test can close the connection at exactly that point.
     #[cfg(test)]
     subscribe_hook: Mutex<Option<SubscribeHook>>,
+}
+
+struct WatchedPeerKeys {
+    link: std::sync::Weak<Link>,
+    stream: WaiterKey,
+    body: Arc<Value>,
 }
 
 impl std::fmt::Debug for OutboundClient {
@@ -640,11 +647,49 @@ impl OutboundClient {
                 connection: AsyncMutex::new(None),
                 connector: AsyncMutex::new(()),
                 bindings: Mutex::new(HashMap::new()),
+                peer_keys: Mutex::new(None),
                 next_corr: std::sync::atomic::AtomicU64::new(1),
                 #[cfg(test)]
                 subscribe_hook: Mutex::new(None),
             }),
         }
+    }
+
+    #[allow(dead_code, reason = "fed by the daemon's hub binding task")]
+    pub(super) fn set_watched_peer_keys(
+        &self,
+        subscription: &Subscription,
+        body: Option<Arc<Value>>,
+    ) {
+        *self
+            .inner
+            .peer_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = body.map(|body| WatchedPeerKeys {
+            link: Arc::downgrade(&subscription.link),
+            stream: subscription.key,
+            body,
+        });
+    }
+
+    pub(super) fn watched_peer_keys(&self) -> Option<Arc<Value>> {
+        let keys = self
+            .inner
+            .peer_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let keys = keys.as_ref()?;
+        let link = keys.link.upgrade()?;
+        if link.is_closed()
+            || !link
+                .streams
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(&keys.stream)
+        {
+            return None;
+        }
+        Some(Arc::clone(&keys.body))
     }
 
     /// The identity this client presents on every `route.open`, for tests and for

@@ -646,15 +646,11 @@ struct IdState {
     /// applied while it waited wins over the result it was waiting for.
     verdicts: u64,
     last_verdict: Option<RemoteRefusal>,
-    /// Callers still to read this state after their flight. While any remain, or a
-    /// flight or cache does, the state is kept; otherwise it is dropped, so the map
-    /// holds only ids in use rather than every id ever fetched.
-    waiters: usize,
 }
 
 impl IdState {
     fn idle(&self) -> bool {
-        self.cache.is_none() && self.flights.is_empty() && self.waiters == 0
+        self.cache.is_none() && self.flights.is_empty()
     }
 
     fn new(incarnation: &str) -> Self {
@@ -668,31 +664,35 @@ impl IdState {
             flights: Vec::new(),
             verdicts: 0,
             last_verdict: None,
-            waiters: 0,
         }
     }
 }
 
-/// Counts one caller as waiting on an id's state until it has read it, including
-/// when the caller is dropped mid-wait.
-struct Waiting<'a> {
-    reader: &'a RemoteReader,
-    credential_id: &'a str,
-    incarnation: &'a str,
+type IdSlot = Arc<tokio::sync::Mutex<IdState>>;
+
+/// Keeps the slot in the map while a fetch, report or waiter still needs its
+/// ordering state, including while the task is suspended or being cancelled.
+#[derive(Clone)]
+struct IdLease {
+    reader: Arc<RemoteReader>,
+    credential_id: String,
+    slot: Option<IdSlot>,
 }
 
-impl Drop for Waiting<'_> {
+impl IdLease {
+    fn slot(&self) -> &IdSlot {
+        self.slot.as_ref().expect("lease has a slot until dropped")
+    }
+}
+
+impl Drop for IdLease {
     fn drop(&mut self) {
         let mut ids = self.reader.lock();
-        if let Some(state) = ids
-            .get_mut(self.credential_id)
-            .filter(|state| state.incarnation == self.incarnation)
-        {
-            state.waiters = state.waiters.saturating_sub(1);
-            if state.idle() {
-                ids.remove(self.credential_id);
-            }
+        let slot = self.slot.take().expect("lease holds one slot");
+        if Arc::strong_count(&slot) == 2 && slot.try_lock().is_ok_and(|state| state.idle()) {
+            ids.remove(&self.credential_id);
         }
+        drop(slot);
     }
 }
 
@@ -733,6 +733,9 @@ pub type RouteStub = Arc<
         + Sync,
 >;
 
+#[cfg(any(test, feature = "test-support"))]
+type BeforeRemoteApply = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// This vault in its role as requester: it serves its consumers the remote records
 /// it holds, fetching tokens from their home vaults.
 pub struct RemoteReader {
@@ -740,13 +743,15 @@ pub struct RemoteReader {
     outbound: OnceLock<OutboundClient>,
     #[cfg(any(test, feature = "test-support"))]
     route_stub: OnceLock<RouteStub>,
+    #[cfg(any(test, feature = "test-support"))]
+    before_apply: OnceLock<BeforeRemoteApply>,
     /// The refresh adapters this vault itself registers. A home reply naming any other
     /// adapter is refused: this vault would list a protocol it cannot describe.
     adapters: BTreeSet<String>,
     wall: WallClock,
     mono: MonoClock,
     deadline: Duration,
-    ids: Mutex<HashMap<String, IdState>>,
+    ids: Mutex<HashMap<String, IdSlot>>,
 }
 
 impl std::fmt::Debug for RemoteReader {
@@ -766,6 +771,8 @@ impl RemoteReader {
             outbound: OnceLock::new(),
             #[cfg(any(test, feature = "test-support"))]
             route_stub: OnceLock::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            before_apply: OnceLock::new(),
             adapters: adapters.into_iter().collect(),
             wall: real_wall(),
             mono: real_mono(),
@@ -795,6 +802,12 @@ impl RemoteReader {
     #[cfg(any(test, feature = "test-support"))]
     pub fn attach_route_stub(&self, stub: RouteStub) -> bool {
         self.route_stub.set(stub).is_ok()
+    }
+
+    /// Pause at the store boundary with the id's ordering slot held.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn before_apply_for_test(&self, hook: BeforeRemoteApply) -> bool {
+        self.before_apply.set(hook).is_ok()
     }
 
     /// One route call within `left`, through the outbound client (or the test stub),
@@ -831,25 +844,47 @@ impl RemoteReader {
         self.lock().len()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, IdState>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, IdSlot>> {
         self.ids
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The in-memory state for `record`, reset when the stored incarnation is not the
-    /// one the state was built for.
-    fn state_for<'a>(
-        ids: &'a mut HashMap<String, IdState>,
-        record: &RemoteRecord,
-    ) -> &'a mut IdState {
-        let state = ids
-            .entry(record.credential_id.clone())
-            .or_insert_with(|| IdState::new(&record.incarnation));
-        if state.incarnation != record.incarnation {
-            *state = IdState::new(&record.incarnation);
+    fn lease(self: &Arc<Self>, record: &RemoteRecord) -> IdLease {
+        let slot = Arc::clone(
+            self.lock()
+                .entry(record.credential_id.clone())
+                .or_insert_with(|| {
+                    Arc::new(tokio::sync::Mutex::new(IdState::new(&record.incarnation)))
+                }),
+        );
+        IdLease {
+            reader: Arc::clone(self),
+            credential_id: record.credential_id.clone(),
+            slot: Some(slot),
         }
-        state
+    }
+
+    fn reset_incarnation(state: &mut IdState, incarnation: &str) {
+        if state.incarnation != incarnation {
+            *state = IdState::new(incarnation);
+        }
+    }
+
+    fn expire_idle_ids(&self, now: u64) {
+        // Never wait for a slot with the map locked. A busy slot cannot make a
+        // cached read of another id wait behind its store writes.
+        self.lock().retain(|_, slot| {
+            let Ok(mut state) = slot.try_lock() else {
+                return true;
+            };
+            if state.cache.as_ref().is_some_and(|entry| {
+                !entry.resident(now) || !lifetime_ok(&entry.reply, entry.t0_mono, now, 0)
+            }) {
+                state.cache = None;
+            }
+            Arc::strong_count(slot) > 1 || !state.idle()
+        });
     }
 
     /// Serve a consumer's read of the remote record `record`, already authorized by
@@ -860,29 +895,22 @@ impl RemoteReader {
         record: &RemoteRecord,
         min_ttl_ms: Option<i64>,
     ) -> RemoteAnswer {
-        if let Err(refusal) = self.check_incarnation(record) {
+        if let Err(refusal) = self.check_incarnation(record, false).await {
             return RemoteAnswer::Refused(refusal);
         }
         let budget = tokio::time::Instant::now() + self.deadline;
         let min_ttl = min_ttl_ms.unwrap_or(0).max(0);
         let demand = home_demand(min_ttl_ms);
+        self.expire_idle_ids((self.mono)());
+        let lease = self.lease(record);
         let (mut done, joined_at) = {
-            let mut ids = self.lock();
             let now = (self.mono)();
-            // Do not retain token bytes that no consumer can use. Ordering state is
-            // kept while a flight or a waiting caller may still read it, so the sweep
-            // cannot invalidate an in-flight verdict; anything else idle is dropped.
-            for state in ids.values_mut() {
-                if state.cache.as_ref().is_some_and(|entry| {
-                    !entry.resident(now) || !lifetime_ok(&entry.reply, entry.t0_mono, now, 0)
-                }) {
-                    state.cache = None;
-                }
-            }
-            ids.retain(|_, state| !state.idle());
-            let state = Self::state_for(&mut ids, record);
+            let Ok(mut state) = tokio::time::timeout_at(budget, lease.slot().lock()).await else {
+                return RemoteAnswer::Refused(Failure::home_unreachable().refusal);
+            };
+            Self::reset_incarnation(&mut state, &record.incarnation);
             if let Some(entry) = state.cache.as_ref() {
-                if lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
+                if entry.resident(now) && lifetime_ok(&entry.reply, entry.t0_mono, now, min_ttl) {
                     return RemoteAnswer::Served(served(&entry.reply, entry.t0_wall));
                 }
             }
@@ -906,7 +934,8 @@ impl RemoteReader {
                     // The fetch runs on its own task so a caller that goes away does
                     // not cancel it for everyone who joined.
                     let flight_budget = budget.checked_sub(FLIGHT_PUBLISH_MARGIN).unwrap_or(budget);
-                    tokio::spawn(Arc::clone(self).run_flight(
+                    tokio::spawn(Self::run_flight(
+                        lease.clone(),
                         record.clone(),
                         seq,
                         generation,
@@ -917,13 +946,7 @@ impl RemoteReader {
                     done
                 }
             };
-            state.waiters += 1;
             (done, state.verdicts)
-        };
-        let _waiting = Waiting {
-            reader: self,
-            credential_id: &record.credential_id,
-            incarnation: &record.incarnation,
         };
 
         let result = match tokio::time::timeout_at(budget, done.wait_for(Option::is_some)).await {
@@ -938,20 +961,17 @@ impl RemoteReader {
 
         // A removed mapping can leave an old flight and its waiters in memory. The
         // durable incarnation, not successful cache application, decides delivery.
-        if let Err(refusal) = self.check_incarnation(record) {
+        if let Err(refusal) = self.check_incarnation(record, false).await {
             return RemoteAnswer::Refused(refusal);
         }
-        let ids = self.lock();
-        let Some(state) = ids
-            .get(&record.credential_id)
-            .filter(|state| state.incarnation == record.incarnation)
-        else {
+        let Ok(state) = tokio::time::timeout_at(budget, lease.slot().lock()).await else {
+            return RemoteAnswer::Refused(Failure::home_unreachable().refusal);
+        };
+        if state.incarnation != record.incarnation {
             // The record was removed (and perhaps added again) while this call waited.
             return RemoteAnswer::Refused(RemoteRefusal::new("not_found", "permanent"));
-        };
-        let answer = Self::answer_from(state, joined_at, &result, (self.mono)(), min_ttl);
-        drop(ids);
-        answer
+        }
+        Self::answer_from(&state, joined_at, &result, (self.mono)(), min_ttl)
     }
 
     /// The answer for a caller that joined at `joined_at` verdicts, from its flight's
@@ -985,18 +1005,31 @@ impl RemoteReader {
         }
     }
 
-    fn check_incarnation(&self, record: &RemoteRecord) -> Result<(), RemoteRefusal> {
-        match self.remote_record(&record.credential_id) {
-            Ok(Some(current)) if current.incarnation == record.incarnation => Ok(()),
+    async fn check_incarnation(
+        &self,
+        record: &RemoteRecord,
+        check_home: bool,
+    ) -> Result<(), RemoteRefusal> {
+        let store = Arc::clone(&self.store);
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || match store.remote_record(&record.credential_id) {
+            Ok(Some(current))
+                if current.incarnation == record.incarnation
+                    && (!check_home || current.home_member == record.home_member) =>
+            {
+                Ok(())
+            }
             Ok(_) => Err(RemoteRefusal::new("not_found", "permanent")),
             Err(_) => Err(Failure::store_error().refusal),
-        }
+        })
+        .await
+        .map_err(|_| Failure::store_error().refusal)?
     }
 
     /// One fetch, start to finish: fetch, write its diagnostic, apply it under the two
     /// watermarks, retire the flight, then publish to every waiter.
     async fn run_flight(
-        self: Arc<Self>,
+        lease: IdLease,
         record: RemoteRecord,
         seq: u64,
         generation: u64,
@@ -1004,38 +1037,46 @@ impl RemoteReader {
         budget: tokio::time::Instant,
         publish: watch::Sender<Option<Arc<FlightResult>>>,
     ) {
-        let t0_mono = (self.mono)();
-        let t0_wall = (self.wall)();
+        let reader = &lease.reader;
+        let t0_mono = (reader.mono)();
+        let t0_wall = (reader.wall)();
         let fetched =
-            match tokio::time::timeout_at(budget, self.fetch(&record, demand, budget)).await {
+            match tokio::time::timeout_at(budget, reader.fetch(&record, demand, budget)).await {
                 Ok(fetched) => fetched,
                 Err(_) => Fetched::Failed(Failure::home_unreachable()),
             };
-        if let Fetched::Failed(Failure {
-            diagnostic: Some(detail),
-            ..
-        }) = &fetched
-        {
-            self.note_event(&record.credential_id, &record.home_member, detail);
-        }
         let result = Arc::new(FlightResult {
             fetched,
             t0_mono,
             t0_wall,
         });
-        let mut ids = self.lock();
-        if let Some(state) = ids
-            .get_mut(&record.credential_id)
-            .filter(|state| state.incarnation == record.incarnation)
-        {
-            self.apply(state, &record, seq, generation, &result);
-            state.flights.retain(|flight| flight.seq != seq);
-            if state.idle() {
-                ids.remove(&record.credential_id);
+        let state = Arc::clone(lease.slot()).lock_owned().await;
+        let apply_result = Arc::clone(&result);
+        let applied = tokio::task::spawn_blocking(move || {
+            let mut state = state;
+            let reader = &lease.reader;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(hook) = reader.before_apply.get() {
+                hook(&record.credential_id);
             }
+            if let Fetched::Failed(Failure {
+                diagnostic: Some(detail),
+                ..
+            }) = &apply_result.fetched
+            {
+                reader.note_event(&record.credential_id, &record.home_member, detail);
+            }
+            if state.incarnation == record.incarnation {
+                reader.apply(&mut state, &record, seq, generation, &apply_result);
+                state.flights.retain(|flight| flight.seq != seq);
+            }
+            drop(state);
+            drop(lease);
+        })
+        .await;
+        if applied.is_ok() {
+            publish.send_replace(Some(result));
         }
-        drop(ids);
-        publish.send_replace(Some(result));
     }
 
     /// Apply one fetch result under the two watermarks. Called with the id's state
@@ -1133,13 +1174,13 @@ impl RemoteReader {
 
     /// This vault's own requester setup: its self id and its transfer key's private
     /// half and key id.
-    fn own_setup(&self) -> Result<(String, Secret<String>, String), Failure> {
-        let self_id = match self.store.federation_self_member() {
+    fn own_setup(store: &EncryptedStore) -> Result<(String, Secret<String>, String), Failure> {
+        let self_id = match store.federation_self_member() {
             Ok(Some(self_id)) => self_id,
             Ok(None) => return Err(Failure::transfer_key_missing(None)),
             Err(_) => return Err(Failure::store_error()),
         };
-        match super::transfer::transfer_key(&self.store) {
+        match super::transfer::transfer_key(store) {
             Ok(Some(key)) => Ok((self_id, key.pem, key.key_id)),
             Ok(None) => Err(Failure::transfer_key_missing(Some(self_id))),
             Err(_) => Err(Failure::store_error()),
@@ -1153,8 +1194,28 @@ impl RemoteReader {
             .filter(|left| !left.is_zero())
     }
 
-    /// The home's announced transfer key, looked up for the record's stored home and
-    /// never for a member named anywhere in a request or a reply.
+    /// A token fetch checks the watched view for the record's stored home, never a
+    /// member named anywhere in a request or a reply.
+    async fn home_key_for_token(
+        &self,
+        home: &str,
+        budget: tokio::time::Instant,
+    ) -> Result<super::ingress::PeerKey, Failure> {
+        Self::left(budget).ok_or_else(Failure::home_unreachable)?;
+        if let Some(body) = self
+            .outbound
+            .get()
+            .and_then(OutboundClient::watched_peer_keys)
+        {
+            match decode_peer_transfer_key(&body, home) {
+                Lookup::Found(key) => return Ok(key),
+                Lookup::Absent => return Err(Failure::home_key_missing(home)),
+                Lookup::Unavailable => {}
+            }
+        }
+        self.home_key(home, budget).await
+    }
+
     async fn home_key(
         &self,
         home: &str,
@@ -1231,9 +1292,12 @@ impl RemoteReader {
         demand: i64,
         budget: tokio::time::Instant,
     ) -> Result<TokenReply, Failure> {
-        let (self_id, pem, key_id) = self.own_setup()?;
+        let store = Arc::clone(&self.store);
+        let (self_id, pem, key_id) = tokio::task::spawn_blocking(move || Self::own_setup(&store))
+            .await
+            .map_err(|_| Failure::store_error())??;
         let client = self.outbound.get().ok_or_else(Failure::home_unreachable)?;
-        let home_key = self.home_key(home, budget).await?;
+        let home_key = self.home_key_for_token(home, budget).await?;
         let nonce = random_nonce().ok_or_else(Failure::store_error)?;
         let aad = serde_json::to_string(&TokenAad {
             credential_id,
@@ -1370,12 +1434,47 @@ fn map_condition_reply(reply: &Value, field: &str) -> Result<bool, RemoteRefusal
         .ok_or_else(|| Failure::home_unavailable().refusal)
 }
 
+enum OwnedPrincipal {
+    Direct,
+    Reserved(String),
+    Enrolled(String),
+    Member(String),
+    Phone(String),
+    Unverified,
+}
+
+impl From<AuthEventPrincipal<'_>> for OwnedPrincipal {
+    fn from(principal: AuthEventPrincipal<'_>) -> Self {
+        match principal {
+            AuthEventPrincipal::Direct => Self::Direct,
+            AuthEventPrincipal::Reserved(id) => Self::Reserved(id.into()),
+            AuthEventPrincipal::Enrolled(id) => Self::Enrolled(id.into()),
+            AuthEventPrincipal::Member(id) => Self::Member(id.into()),
+            AuthEventPrincipal::Phone(id) => Self::Phone(id.into()),
+            AuthEventPrincipal::Unverified => Self::Unverified,
+        }
+    }
+}
+
+impl OwnedPrincipal {
+    fn borrow(&self) -> AuthEventPrincipal<'_> {
+        match self {
+            Self::Direct => AuthEventPrincipal::Direct,
+            Self::Reserved(id) => AuthEventPrincipal::Reserved(id),
+            Self::Enrolled(id) => AuthEventPrincipal::Enrolled(id),
+            Self::Member(id) => AuthEventPrincipal::Member(id),
+            Self::Phone(id) => AuthEventPrincipal::Phone(id),
+            Self::Unverified => AuthEventPrincipal::Unverified,
+        }
+    }
+}
+
 impl RemoteReader {
     #[cfg(any(test, feature = "test-support"))]
     pub fn cached_generation_for_test(&self, id: &str) -> Option<(u64, bool)> {
-        self.lock()
-            .get(id)
-            .map(|state| (state.generation, state.cache.is_some()))
+        let slot = self.lock().get(id).cloned()?;
+        let state = slot.try_lock().ok()?;
+        Some((state.generation, state.cache.is_some()))
     }
 
     /// Dispatch one condition mutation for a copy whose scoped caller and report inputs
@@ -1406,12 +1505,7 @@ impl RemoteReader {
         };
         // The outgoing request is admitted against this lifetime and home. The
         // connection may wait, but it must never resolve the copy again.
-        match self.store.remote_record(id) {
-            Ok(Some(current))
-                if current.incarnation == record.incarnation && current.home_member == home => {}
-            Ok(_) => return Err(RemoteRefusal::new("not_found", "permanent")),
-            Err(_) => return Err(Failure::store_error().refusal),
-        }
+        self.check_incarnation(record, true).await?;
         let Some(client) = self.outbound.get() else {
             return Err(Failure::home_unreachable().refusal);
         };
@@ -1445,43 +1539,22 @@ impl RemoteReader {
             ));
         }
         let budget = tokio::time::Instant::now() + self.deadline;
-        {
-            let mut ids = self.lock();
-            let state = Self::state_for(&mut ids, record);
-            if state
-                .cache
-                .as_ref()
-                .is_some_and(|entry| entry.reply.record_version == record_version)
-            {
-                state.cache = None;
-            }
-            state.generation += 1;
-        }
-        let id = record.credential_id.as_str();
-        match self.store.remote_record_raise_reported_version(
-            id,
-            &record.incarnation,
+        let lease = self.lease(record);
+        let incarnation = record.incarnation.clone();
+        let source = reporter_source.map(ReporterSource::from_wire);
+        let principal = principal.map(OwnedPrincipal::from);
+        // Once admitted, the local report must finish even if the caller goes away
+        // while another fetch is still applying its outcome for this id.
+        tokio::spawn(Self::persist_report(
+            lease,
+            incarnation,
             record_version,
-        ) {
-            Ok(RemoteRecordWrite::Changed | RemoteRecordWrite::Unchanged) => {}
-            Ok(RemoteRecordWrite::StaleIncarnation) => {
-                return Err(RemoteRefusal::new("not_found", "permanent"))
-            }
-            Err(_) => return Err(Failure::store_error().refusal),
-        }
-        // This vault records its forward in its own diagnostics only; the home writes
-        // the chain row when its stale mark lands.
-        let _ = self.store.record_auth_event(
-            id,
-            AuthObservation {
-                kind: AuthEventKind::ConsumerReportStale.as_str(),
-                provider_status: Some(provider_status),
-                detail: Some("forwarded_to_home"),
-                reporter_source: reporter_source.map(ReporterSource::from_wire),
-                principal,
-            },
-            Some(record_version),
-        );
+            provider_status,
+            source,
+            principal,
+        ))
+        .await
+        .map_err(|_| Failure::store_error().refusal)??;
         let Some(client) = self.outbound.get() else {
             return Err(Failure::home_unreachable().refusal);
         };
@@ -1489,7 +1562,7 @@ impl RemoteReader {
             return Err(Failure::home_unreachable().refusal);
         };
         let mut params = json!({
-            "credential_id": id,
+            "credential_id": record.credential_id,
             "record_version": record_version,
             "provider_status": provider_status,
         });
@@ -1510,6 +1583,57 @@ impl RemoteReader {
             .await
             .map_err(|error| map_outbound_error(error).refusal)?;
         map_report_reply(&reply, home)
+    }
+
+    async fn persist_report(
+        lease: IdLease,
+        incarnation: String,
+        record_version: u64,
+        provider_status: u16,
+        source: Option<ReporterSource>,
+        principal: Option<OwnedPrincipal>,
+    ) -> Result<(), RemoteRefusal> {
+        let state = Arc::clone(lease.slot()).lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let mut state = state;
+            Self::reset_incarnation(&mut state, &incarnation);
+            if state
+                .cache
+                .as_ref()
+                .is_some_and(|entry| entry.reply.record_version == record_version)
+            {
+                state.cache = None;
+            }
+            state.generation += 1;
+            let store = &lease.reader.store;
+            let id = lease.credential_id.as_str();
+            let write =
+                store.remote_record_raise_reported_version(id, &incarnation, record_version);
+            drop(state);
+            match write {
+                Ok(RemoteRecordWrite::Changed | RemoteRecordWrite::Unchanged) => {}
+                Ok(RemoteRecordWrite::StaleIncarnation) => {
+                    return Err(RemoteRefusal::new("not_found", "permanent"))
+                }
+                Err(_) => return Err(Failure::store_error().refusal),
+            }
+            // The requester records only a diagnostic. The home appends the audit
+            // chain entry when it marks the credential stale.
+            let _ = store.record_auth_event(
+                id,
+                AuthObservation {
+                    kind: AuthEventKind::ConsumerReportStale.as_str(),
+                    provider_status: Some(provider_status),
+                    detail: Some("forwarded_to_home"),
+                    reporter_source: source,
+                    principal: principal.as_ref().map(OwnedPrincipal::borrow),
+                },
+                Some(record_version),
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|_| Failure::store_error().refusal)?
     }
 }
 
@@ -1910,7 +2034,7 @@ impl RemoteReader {
         };
         let sender = sender_wire(sender);
         let call_sha256 = secret_call_sha256(sender, call).ok_or(SecretFault::InvalidParams)?;
-        let (self_id, pem, key_id) = self.own_setup()?;
+        let (self_id, pem, key_id) = Self::own_setup(&self.store)?;
         let home_key = self.home_key(home, budget).await?;
         let nonce = random_nonce().ok_or_else(Failure::store_error)?;
         let aad = serde_json::to_string(&SecretAad {
@@ -2205,25 +2329,29 @@ mod tests {
             t0_wall: 0,
         };
         let mut expired_replies = Vec::new();
+        let waiting_record = RemoteRecord {
+            credential_id: "oauth:short-recheck".into(),
+            ..active.clone()
+        };
+        let waiting = reader.lease(&waiting_record);
+        let serving = reader.lease(&active);
+        serving.slot().try_lock().unwrap().cache = Some(make_entry(None, None));
+        drop(serving);
         {
             let mut ids = reader.lock();
-            RemoteReader::state_for(&mut ids, &active).cache = Some(make_entry(None, None));
             // A caller still waiting on the first id keeps its ordering state; the
             // second has no flight, cache or waiter left once its reply is released.
-            for (id, entry, waiters) in [
-                ("oauth:short-recheck", make_entry(None, Some(1)), 1),
-                (
-                    "oauth:expires",
-                    make_entry(Some(EXPIRY_SKEW_MS + 1), None),
-                    0,
-                ),
+            for (id, entry) in [
+                ("oauth:short-recheck", make_entry(None, Some(1))),
+                ("oauth:expires", make_entry(Some(EXPIRY_SKEW_MS + 1), None)),
             ] {
                 expired_replies.push(Arc::downgrade(&entry.reply));
-                let mut state = IdState::new("test-incarnation");
+                let slot = ids.entry(id.into()).or_insert_with(|| {
+                    Arc::new(tokio::sync::Mutex::new(IdState::new("test-incarnation")))
+                });
+                let mut state = slot.try_lock().unwrap();
                 state.verdicts = 7;
-                state.waiters = waiters;
                 state.cache = Some(entry);
-                ids.insert(id.into(), state);
             }
         }
 
@@ -2236,9 +2364,13 @@ mod tests {
             .iter()
             .all(|reply| reply.upgrade().is_none()));
         let ids = reader.lock();
-        assert_eq!(ids["oauth:short-recheck"].verdicts, 7);
+        assert_eq!(waiting.slot().try_lock().unwrap().verdicts, 7);
         assert!(!ids.contains_key("oauth:expires"));
-        assert!(ids[&active.credential_id].cache.is_some());
+        assert!(ids[&active.credential_id]
+            .try_lock()
+            .unwrap()
+            .cache
+            .is_some());
     }
 
     #[test]

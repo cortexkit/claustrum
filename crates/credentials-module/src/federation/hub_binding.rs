@@ -167,7 +167,11 @@ pub(crate) async fn run_binding_feed(
                 let current = pairings
                     .borrow_and_update()
                     .clone()
-                    .and_then(|paired| HubBindings::join(own_box, &paired, peer_keys.as_ref()?));
+                    .and_then(|paired| HubBindings::join(own_box, &paired, peer_keys.as_deref()?));
+                client.set_watched_peer_keys(
+                    &subscription,
+                    current.as_ref().and(peer_keys.as_ref()).cloned(),
+                );
                 if current.is_some() {
                     backoff.reset();
                 }
@@ -179,7 +183,7 @@ pub(crate) async fn run_binding_feed(
                         return;
                     },
                     result = subscription.next() => match result {
-                        Ok(Some(value)) => peer_keys = Some(value),
+                        Ok(Some(value)) => peer_keys = Some(Arc::new(value)),
                         _ => break,
                     },
                     _ = tokio::time::sleep_until(first_notice_by), if peer_keys.is_none() => break,

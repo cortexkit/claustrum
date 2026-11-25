@@ -94,8 +94,11 @@ mod handles;
 #[path = "store_audit.rs"]
 mod audit_store;
 
+#[path = "store_home_watch.rs"]
+mod home_watch;
 #[path = "store_metadata.rs"]
 mod metadata;
+pub use home_watch::HomeWatchCache;
 #[path = "store_orgs.rs"]
 mod orgs;
 pub use orgs::OrgProbeTarget;

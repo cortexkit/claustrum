@@ -189,24 +189,76 @@ pub(super) fn reset_hub_manifest_pairing_tx(
     Ok(changed)
 }
 
+const HUB_LOGIN_TARGET_COLUMNS: &str = "member_id, box_id, transfer_public_key, pairing_id, \
+                                        generation, kind, sealed_bytes, stale, delivered";
+
+fn hub_login_target(row: &Row<'_>) -> rusqlite::Result<HubLoginTarget> {
+    let kind = match row.get::<_, String>(5)?.as_str() {
+        "snapshot" => HubLoginKind::Snapshot,
+        "ended" => HubLoginKind::Ended,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(HubLoginTarget {
+        member_id: row.get(0)?,
+        box_id: row.get(1)?,
+        transfer_public_key: row.get(2)?,
+        pairing_id: row.get(3)?,
+        generation: generation(row, 4)?,
+        kind,
+        sealed_bytes: row.get(6)?,
+        stale: row.get(7)?,
+        delivered: row.get(8)?,
+    })
+}
+
 impl EncryptedStore {
     pub fn list_hub_login_targets(&self) -> Result<Vec<HubLoginTarget>, StoreOpError> {
         Ok(self.store.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT member_id, box_id, transfer_public_key, pairing_id, \
-                generation, kind, sealed_bytes, stale, delivered FROM hub_login_targets ORDER BY member_id")?;
-            let rows = stmt.query_map([], |row| {
-                let kind = match row.get::<_, String>(5)?.as_str() {
-                    "snapshot" => HubLoginKind::Snapshot,
-                    "ended" => HubLoginKind::Ended,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok(HubLoginTarget {
-                    member_id: row.get(0)?, box_id: row.get(1)?, transfer_public_key: row.get(2)?,
-                    pairing_id: row.get(3)?, generation: generation(row, 4)?, kind,
-                    sealed_bytes: row.get(6)?, stale: row.get(7)?, delivered: row.get(8)?,
-                })
-            })?.collect();
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {HUB_LOGIN_TARGET_COLUMNS} FROM hub_login_targets ORDER BY member_id"
+            ))?;
+            let rows = stmt.query_map([], hub_login_target)?.collect();
             rows
+        })?)
+    }
+
+    pub fn hub_login_target(
+        &self,
+        member_id: &str,
+    ) -> Result<Option<HubLoginTarget>, StoreOpError> {
+        Ok(self.store.with_read(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {HUB_LOGIN_TARGET_COLUMNS} FROM hub_login_targets WHERE member_id = ?1"
+                ),
+                [member_id],
+                hub_login_target,
+            )
+            .optional()
+        })?)
+    }
+
+    pub fn hub_login_target_members(&self) -> Result<Vec<String>, StoreOpError> {
+        Ok(self.store.with_read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT member_id FROM hub_login_targets ORDER BY member_id")?;
+            let rows = stmt.query_map([], |row| row.get(0))?.collect();
+            rows
+        })?)
+    }
+
+    pub fn hub_login_target_box_claimed_by_other(
+        &self,
+        member_id: &str,
+        box_id: &str,
+    ) -> Result<bool, StoreOpError> {
+        Ok(self.store.with_read(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hub_login_targets \
+                 WHERE member_id != ?1 AND box_id = ?2 AND sealed_bytes IS NOT NULL)",
+                params![member_id, box_id],
+                |row| row.get(0),
+            )
         })?)
     }
 

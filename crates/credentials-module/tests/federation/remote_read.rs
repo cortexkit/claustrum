@@ -1251,6 +1251,147 @@ async fn a_cached_token_is_served_through_a_partition() {
     assert_eq!(rig.served(TOKEN_ID, None).await.payload, b"access-0");
 }
 
+#[tokio::test(start_paused = true)]
+async fn remote_token_uses_the_live_peer_watch_and_reads_again_after_it_ends() {
+    const PEER_KEYS_READ: &str = "callosum.peer_keys_read";
+    const NEXT: &str = "oauth:anthropic:next";
+    let rig = Rig::new("remote-peer-watch").await;
+    for id in [TOKEN_ID, NEXT] {
+        rig.login(
+            id,
+            oauth_record("anthropic", "access", "refresh", Some(HOUR_MS)),
+        );
+    }
+    let home = rig.home_member();
+    let fingerprint = home.strip_prefix("fed-computer:").unwrap();
+    let (key, _) = credentials_core::kem::public_half(&rig.home_pem).unwrap();
+    let paired = json!({
+        "self": {"static_public_key_hex": "ab".repeat(32)},
+        "devices": [{"fingerprint": fingerprint, "class": "computer", "pairing_id": PAIRING, "shares": []}]
+    });
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        "callosum.paired_devices_read",
+        Reply::Ok(paired.clone()),
+    );
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        "callosum.paired_devices_watch",
+        Reply::Watch(paired),
+    );
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        "callosum.peer_keys_watch",
+        Reply::Watch(json!({"peers": [{
+            "fingerprint": fingerprint, "class": "computer", "pairing_id": PAIRING,
+            "machine_id": "00000000000000000000000000000002",
+            "key_record": {"keys": {"vault_transfer_x25519": {"pub": hex(&key), "version": "1"}}}
+        }]})),
+    );
+    let (observed_tx, mut observed) = tokio::sync::watch::channel(None);
+    let feed = tokio::spawn(claustrum_module_probe::observe_hub_bindings_for_test(
+        Arc::clone(&rig.b.store),
+        rig.vaults.b.outbound.clone(),
+        "00000000000000000000000000000001",
+        observed_tx,
+    ));
+    wait_for_signal(observed.changed()).await.unwrap();
+    assert_eq!(
+        observed.borrow_and_update().as_deref(),
+        Some(std::slice::from_ref(&home))
+    );
+    let answer = || Step::Token {
+        version: 1,
+        payload: "access",
+        expires_in_ms: Some(HOUR_MS),
+        recheck_in_ms: None,
+    };
+    // The scripted home token makes no lookups of its own, so this counts just B's.
+    rig.then(answer());
+    assert_eq!(rig.served(TOKEN_ID, None).await.payload, b"access");
+    assert!(
+        rig.requests(PEER_KEYS_READ).is_empty(),
+        "a live watch replaces the point read"
+    );
+
+    feed.abort();
+    assert!(wait_for_signal(feed).await.unwrap_err().is_cancelled());
+    rig.then(answer());
+    assert_eq!(rig.served(NEXT, None).await.payload, b"access");
+    assert_eq!(
+        rig.requests(PEER_KEYS_READ).len(),
+        1,
+        "the closed watch cannot supply keys"
+    );
+}
+
+#[tokio::test]
+async fn repeated_remote_fetch_outcome_does_not_signal_a_store_write() {
+    use credentials_core::federation::RemoteRecordWrite;
+
+    let rig = Rig::new("remote-outcome-preflight").await;
+    let record = rig.add_remote(TOKEN_ID, &rig.home_member());
+    let note = || {
+        rig.b
+            .store
+            .remote_record_note_fetch_outcome(TOKEN_ID, &record.incarnation, "home_unavailable")
+            .unwrap()
+    };
+    let mut writes = rig.b.store.subscribe_writes();
+    assert_eq!(note(), RemoteRecordWrite::Changed);
+    assert!(writes.has_changed().unwrap());
+    writes.borrow_and_update();
+    assert_eq!(note(), RemoteRecordWrite::Unchanged);
+    assert!(!writes.has_changed().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_remote_ids_store_apply_does_not_hold_up_another_cached_read() {
+    const WARM: &str = "oauth:anthropic:warm";
+    let rig = Rig::new("remote-per-id-store-apply").await;
+    for id in [WARM, TOKEN_ID] {
+        rig.login(
+            id,
+            oauth_record("anthropic", "access", "refresh", Some(HOUR_MS)),
+        );
+    }
+    assert_eq!(rig.served(WARM, None).await.payload, b"access");
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    assert!(rig.reader.before_apply_for_test(Arc::new({
+        let entered = Arc::clone(&entered);
+        move |id| {
+            if id == TOKEN_ID {
+                entered.notify_one();
+                let _ = released.lock().unwrap().recv();
+            }
+        }
+    })));
+    let mut writing = spawn_get(&rig, TOKEN_ID, None);
+    wait_for_signal(entered.notified()).await;
+    assert!(poll_once(&mut writing).await.is_none());
+    assert_eq!(rig.served(WARM, None).await.payload, b"access");
+    assert!(
+        poll_once(&mut writing).await.is_none(),
+        "the other read did not release the apply gate"
+    );
+    {
+        let record = rig.record(TOKEN_ID);
+        let mut report = Box::pin(rig.reader.report(&record, 1, 401, None, None));
+        assert!(poll_once(&mut report).await.is_none());
+        // Drop the caller while the admitted report is still behind the apply gate.
+    }
+    release.send(()).unwrap();
+    assert!(matches!(
+        wait_for_signal(writing).await.unwrap(),
+        RemoteAnswer::Served(_)
+    ));
+    assert_eq!(rig.fetches(), 2, "the unblocked read was a cache hit");
+    crate::support::wait_until(|| rig.record(TOKEN_ID).reported_version == Some(1)).await;
+}
+
 /// A cold read whose discovery (the home's announced-key lookup) never answers ends as a
 /// structured `transient` refusal inside the 2.5 s consumer-facing budget, below the
 /// consumer client's 3 s reply wait. The budget is checked on tokio's paused clock: the
@@ -1772,7 +1913,14 @@ async fn every_consumer_table_row_answers_and_stores_its_effect() {
         rig.vaults.b.clock.advance(300_000);
         let before = rig.record(TOKEN_ID);
         let refusal = if matches!(step, Step::Stall) {
-            rig.refused_after_deadline(TOKEN_ID, None).await
+            let refusal = rig.refused_after_deadline(TOKEN_ID, None).await;
+            // Advancing across both deadlines can end the waiter before the
+            // detached flight's store job commits. Wait for the durable effect.
+            crate::support::wait_until(|| {
+                rig.record(TOKEN_ID).last_fetch_outcome.as_deref() == Some(want_code)
+            })
+            .await;
+            refusal
         } else {
             rig.then(step);
             rig.refused(TOKEN_ID, None).await

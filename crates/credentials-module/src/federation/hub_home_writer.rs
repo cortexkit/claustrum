@@ -1,13 +1,22 @@
 //! One decision and publication task per login-list recipient.
 
-use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use credentials_core::{
-    federation::{MemberGrantOperation, RemoteWatchRow},
+    federation::{MemberGrant, RemoteWatchRow},
     hub_counters::HubGeneration,
     kem::MAX_HUB_LOGINS_PLAINTEXT,
     signing::key_id_for_public,
-    store::{EncryptedStore, HubLoginKind, HubLoginRecipient, HubLoginTarget, StoreOpError},
+    store::{
+        EncryptedStore, HomeWatchCache, HubLoginKind, HubLoginRecipient, HubLoginTarget,
+        StoreOpError,
+    },
 };
 use serde_json::json;
 use tokio::{
@@ -20,11 +29,15 @@ use super::{
     hub::{Backoff, Hub, HubEntry, HubError, HubEvent, HubOperation, SHARED_LOGINS},
     hub_binding::{HubBindings, HubMember},
     hub_logins::{self, LoginAad, LoginEnvelope},
-    ingress::{remote_watch_lists_equal, remote_watch_logins_wire, HomeVault},
+    ingress::{
+        current_remote_read_grants, remote_watch_lists_equal, remote_watch_logins_wire,
+        RemoteWatchProjection,
+    },
     transfer::{own_key, OwnKey},
 };
 
 type Bindings = watch::Receiver<Option<HubBindings>>;
+const STORE_COALESCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone)]
 enum Repair {
@@ -66,19 +79,15 @@ async fn supervise(
     let mut backoff = Backoff::default();
     let mut stored = loop {
         let store = Arc::clone(&store);
-        match tokio::task::spawn_blocking(move || store.list_hub_login_targets()).await {
-            Ok(Ok(targets)) => {
-                break targets
-                    .into_iter()
-                    .map(|row| row.member_id)
-                    .collect::<Vec<_>>()
-            }
+        match tokio::task::spawn_blocking(move || store.hub_login_target_members()).await {
+            Ok(Ok(members)) => break members,
             _ => sleep(backoff.next_delay()).await,
         }
     };
     let mut started = BTreeSet::new();
     let mut members = std::collections::HashMap::new();
     let mut tasks = JoinSet::new();
+    let projection = Arc::new(Mutex::new(SharedProjection::new(&store)));
     loop {
         if let Some(current) = bindings.borrow_and_update().as_ref() {
             stored.extend(current.bindings().map(|binding| binding.member_id.clone()));
@@ -92,6 +101,7 @@ async fn supervise(
                         writes: store.subscribe_writes(),
                         store: Arc::clone(&store),
                         bindings: bindings.clone(),
+                        projection: Arc::clone(&projection),
                         repairs: repairs.subscribe(),
                         #[cfg(test)]
                         hooks: hooks.clone(),
@@ -164,6 +174,7 @@ struct MemberTask {
     store: Arc<EncryptedStore>,
     writes: watch::Receiver<()>,
     bindings: Bindings,
+    projection: Arc<Mutex<SharedProjection>>,
     repairs: broadcast::Receiver<Repair>,
     #[cfg(test)]
     hooks: TestHooks,
@@ -179,12 +190,74 @@ struct TestHooks {
     exit_once: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Counts refusal warnings this writer logs.
     refusals: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    dormant: Option<Arc<tokio::sync::Notify>>,
+    store_wakes: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 struct Recipient {
     box_id: String,
     pairing_id: String,
     key: [u8; 32],
+}
+
+struct SharedProjection {
+    writes: watch::Receiver<()>,
+    candidates: HomeWatchCache,
+    grants: Option<Vec<MemberGrant>>,
+    projection: Option<RemoteWatchProjection>,
+    #[cfg(test)]
+    scans: usize,
+}
+
+impl SharedProjection {
+    fn new(store: &EncryptedStore) -> Self {
+        Self {
+            writes: store.subscribe_writes(),
+            candidates: HomeWatchCache::default(),
+            grants: None,
+            projection: None,
+            #[cfg(test)]
+            scans: 0,
+        }
+    }
+
+    fn inventory(
+        &mut self,
+        store: &EncryptedStore,
+        member: &str,
+        pairing: &str,
+    ) -> Result<Inventory, StoreOpError> {
+        if self.writes.has_changed().unwrap_or(true) {
+            self.writes.borrow_and_update();
+            self.grants = None;
+            self.projection = None;
+        }
+        if self.grants.is_none() {
+            self.grants = Some(store.list_member_grants()?);
+        }
+        let grants = current_remote_read_grants(
+            self.grants.as_deref().expect("grants loaded"),
+            member,
+            pairing,
+        );
+        if grants.is_empty() {
+            return Ok(Inventory::Ended);
+        }
+        if self.projection.is_none() {
+            #[cfg(test)]
+            {
+                self.scans += 1;
+            }
+            self.projection = Some(RemoteWatchProjection::new(
+                store.home_watch_candidates_cached(&mut self.candidates)?,
+            ));
+        }
+        self.projection
+            .as_mut()
+            .expect("projection loaded")
+            .for_grants(store, &grants)
+            .map(Inventory::Eligible)
+    }
 }
 
 enum Inventory {
@@ -216,14 +289,14 @@ fn decide(
     store: &EncryptedStore,
     member: &str,
     bindings: &HubBindings,
+    projection: &Mutex<SharedProjection>,
 ) -> Result<Decision, StoreOpError> {
     let Ok(sender) = own_key(store)? else {
         return Ok(Decision::Unknown);
     };
-    let targets = store.list_hub_login_targets()?;
-    let target = targets.iter().find(|row| row.member_id == member);
+    let target = store.hub_login_target(member)?;
     let binding = bindings.member(member);
-    if let Some(row) = target.filter(|row| row.sealed_bytes.is_some()) {
+    if let Some(row) = target.as_ref().filter(|row| row.sealed_bytes.is_some()) {
         let reassigned = bindings
             .by_box(&row.box_id)
             .is_some_and(|owner| owner.member_id != member);
@@ -237,15 +310,11 @@ fn decide(
         HubMember::Absent => {
             // Discarding sealed bytes preserves the generation, not box ownership.
             // Without a current binding the former owner cannot reclaim the box.
-            let Some(row) = target.filter(|row| row.sealed_bytes.is_some()) else {
+            let Some(row) = target.as_ref().filter(|row| row.sealed_bytes.is_some()) else {
                 return Ok(Decision::Unknown);
             };
             if bindings.box_is_ambiguous(&row.box_id)
-                || targets.iter().any(|other| {
-                    other.member_id != member
-                        && other.box_id == row.box_id
-                        && other.sealed_bytes.is_some()
-                })
+                || store.hub_login_target_box_claimed_by_other(member, &row.box_id)?
             {
                 return Ok(Decision::Unknown);
             }
@@ -262,19 +331,11 @@ fn decide(
             let Some(key) = binding.vault_transfer_x25519 else {
                 return Ok(Decision::Unknown);
             };
-            let eligible = store.federation_member_mapping()?
-                && store.login_sharing()?
-                && store.list_member_grants()?.iter().any(|grant| {
-                    grant.member_id == member
-                        && grant.pairing_id == binding.pairing_id
-                        && grant.operation == MemberGrantOperation::RemoteRead
-                });
-            let inventory = if eligible {
-                Inventory::Eligible(HomeVault::project_remote_watch(
-                    store,
-                    member,
-                    &binding.pairing_id,
-                )?)
+            let inventory = if store.federation_member_mapping()? && store.login_sharing()? {
+                projection
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .inventory(store, member, &binding.pairing_id)?
             } else {
                 Inventory::Ended
             };
@@ -289,7 +350,7 @@ fn decide(
         }
     };
     Ok(Decision::Known {
-        target: target.cloned(),
+        target,
         recipient,
         sender,
         inventory,
@@ -298,6 +359,7 @@ fn decide(
 
 struct MemberState {
     starting: bool,
+    absent: bool,
     last_kind: Option<HubLoginKind>,
     last_rows: Vec<RemoteWatchRow>,
     resumed: bool,
@@ -312,6 +374,7 @@ impl Default for MemberState {
     fn default() -> Self {
         Self {
             starting: true,
+            absent: false,
             last_kind: None,
             last_rows: Vec::new(),
             resumed: true,
@@ -570,13 +633,14 @@ impl MemberTask {
         let bindings = self.bindings.borrow_and_update().clone();
         let versions = (self.writes.clone(), self.bindings.clone());
         let store = Arc::clone(&self.store);
+        let projection = Arc::clone(&self.projection);
         let member = self.member_id.clone();
         let home_box = self.hub.box_id().to_owned();
         #[cfg(test)]
         let project_gate = self.hooks.project.clone();
         tokio::task::spawn_blocking(move || {
             let decision = bindings.as_ref().map_or(Ok(Decision::Unknown), |bindings| {
-                decide(&store, &member, bindings)
+                decide(&store, &member, bindings, &projection)
             });
             #[cfg(test)]
             if let Some(gate) = project_gate {
@@ -587,6 +651,9 @@ impl MemberTask {
             {
                 return (state, None);
             }
+            state.absent = bindings
+                .as_ref()
+                .is_some_and(|bindings| matches!(bindings.member(&member), HubMember::Absent));
             let next = decision
                 .and_then(|decision| state.commit(&store, &member, &home_box, decision, floor));
             (state, Some(next))
@@ -623,6 +690,7 @@ impl MemberTask {
         let mut current: Option<Arc<HubLoginTarget>> = None;
         let mut publishing: Option<HubAttempt> = None;
         let mut repair_again = false;
+        let mut dormant = false;
         // The highest generation found on the hub for this recipient that the local
         // row had not reached. Kept for the task's life; the store row passes it once
         // the next value is sealed.
@@ -632,22 +700,29 @@ impl MemberTask {
                 biased;
                 changed = self.bindings.changed() => {
                     if changed.is_err() { return; }
-                    decide_at = Some(Instant::now());
+                    dormant = false;
+                    decide_at.get_or_insert_with(Instant::now);
                 }
-                changed = self.writes.changed() => {
+                changed = self.writes.changed(), if !dormant => {
                     if changed.is_err() { return; }
-                    decide_at = Some(Instant::now());
+                    #[cfg(test)]
+                    if let Some(wakes) = &self.hooks.store_wakes { wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                    decide_at.get_or_insert_with(|| Instant::now() + STORE_COALESCE);
                 }
                 _ = async { sleep_until(decide_at.expect("a decision is queued")).await }, if decide_at.is_some() => {
                     let (new_state, next) = self.evaluate(state, floor).await;
                     state = new_state;
-                    let Some(next) = next else { continue };
+                    let Some(next) = next else {
+                        decide_at = Some(Instant::now() + local_backoff.next_delay());
+                        continue;
+                    };
                     #[cfg(test)]
                     if let Some(decided) = &self.hooks.decided { decided.notify_one(); }
                     match next {
                         Ok(next) => {
                             decide_at = None;
                             local_backoff.reset();
+                            dormant = state.absent && next.as_ref().is_some_and(|row| row.kind == HubLoginKind::Ended && row.delivered);
                             if next.as_ref() != current.as_deref() || (state.resumed && next.is_some()) {
                                 current = next.map(Arc::new);
                                 publishing = current.as_ref().map(|row| attempt(Arc::clone(&self.hub), Arc::clone(row), Instant::now()));
@@ -670,7 +745,12 @@ impl MemberTask {
                     }
                 }
                 _ = repair_needed(&mut self.repairs, self.hub.as_ref(), current.as_deref()) => {
-                    if publishing.is_some() {
+                    if dormant {
+                        // The old recipient's hub address may now belong to another member.
+                        // Recheck the binding before writing the ended row there again.
+                        state.resumed = true;
+                        decide_at.get_or_insert_with(Instant::now);
+                    } else if publishing.is_some() {
                         repair_again = true;
                     } else if let Some(row) = &current {
                         publishing = Some(attempt(Arc::clone(&self.hub), Arc::clone(row), Instant::now()));
@@ -687,15 +767,31 @@ impl MemberTask {
                         decide_at = Some(Instant::now());
                         continue;
                     }
-                    let row = current.as_ref().expect("attempt has a committed target");
-                    let delivered = result.is_ok() && (row.delivered || self.store.mark_hub_login_target_delivered(
-                        &self.member_id, row.generation, row.sealed_bytes.as_deref().expect("attempt has bytes"),
-                    ).is_ok());
+                    let row = Arc::clone(current.as_ref().expect("attempt has a committed target"));
+                    let marked = if result.is_ok() && !row.delivered {
+                        let store = Arc::clone(&self.store);
+                        let row = Arc::clone(&row);
+                        tokio::task::spawn_blocking(move || store.mark_hub_login_target_delivered(
+                            &row.member_id, row.generation, row.sealed_bytes.as_deref().expect("attempt has bytes"),
+                        )).await.ok().and_then(Result::ok)
+                    } else {
+                        None
+                    };
+                    let delivered = result.is_ok() && (row.delivered || marked.is_some());
+                    if marked == Some(true) {
+                        let updated = Arc::make_mut(current.as_mut().expect("attempt has a committed target"));
+                        updated.delivered = true;
+                        dormant = state.absent && updated.kind == HubLoginKind::Ended;
+                        #[cfg(test)]
+                        if dormant {
+                            if let Some(signal) = &self.hooks.dormant { signal.notify_one(); }
+                        }
+                    }
                     publishing = if !delivered {
-                        Some(attempt(Arc::clone(&self.hub), Arc::clone(row), Instant::now() + hub_backoff.next_delay()))
+                        Some(attempt(Arc::clone(&self.hub), Arc::clone(&row), Instant::now() + hub_backoff.next_delay()))
                     } else if std::mem::take(&mut repair_again) {
                         hub_backoff.reset();
-                        Some(attempt(Arc::clone(&self.hub), Arc::clone(row), Instant::now()))
+                        current.as_ref().map(|row| attempt(Arc::clone(&self.hub), Arc::clone(row), Instant::now()))
                     } else {
                         hub_backoff.reset();
                         None

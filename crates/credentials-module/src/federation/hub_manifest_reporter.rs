@@ -3,7 +3,7 @@
 use std::{
     future::{pending, Future},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use credentials_core::{
@@ -97,15 +97,29 @@ pub(super) async fn run_inner(
     }
 }
 
-struct Input {
+pub(super) struct Input {
     own: HubOwnReport,
     member: String,
-    key: VaultRecord,
+    key: Arc<SigningKey>,
+}
+
+struct SigningKey {
+    record: VaultRecord,
     key_id: String,
 }
 
+#[derive(Default)]
+pub(super) struct SigningKeyCache {
+    key: Option<(String, Arc<SigningKey>)>,
+    #[cfg(test)]
+    pub(super) opens: usize,
+}
+
 impl Input {
-    fn read(store: &EncryptedStore) -> Result<Option<Self>, StoreOpError> {
+    pub(super) fn read(
+        store: &EncryptedStore,
+        keys: &mut SigningKeyCache,
+    ) -> Result<Option<Self>, StoreOpError> {
         let Some(own) = store.hub_own_report()? else {
             return Ok(None);
         };
@@ -115,15 +129,44 @@ impl Input {
         else {
             return Ok(None);
         };
+        let Some(key) = keys.read(store)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self { own, member, key }))
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.own == other.own && self.member == other.member && self.key.key_id == other.key.key_id
+    }
+}
+
+impl SigningKeyCache {
+    fn read(&mut self, store: &EncryptedStore) -> Result<Option<Arc<SigningKey>>, StoreOpError> {
         let meta = match store.meta(RECORD_KEY_ID) {
             Ok(meta) if meta.state == RecordState::Active => meta,
-            Ok(_) | Err(StoreOpError::NotFound) => return Ok(None),
+            Ok(_) | Err(StoreOpError::NotFound) => {
+                self.key = None;
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         let Some(incarnation) = meta.incarnation else {
+            self.key = None;
             return Ok(None);
         };
-        let key = match store.get_snapshot(RECORD_KEY_ID, &incarnation) {
+        if let Some((cached_incarnation, key)) = &self.key {
+            if *cached_incarnation == incarnation
+                && key.record.record_version == meta.record_version
+            {
+                return Ok(Some(Arc::clone(key)));
+            }
+        }
+        self.key = None;
+        #[cfg(test)]
+        {
+            self.opens += 1;
+        }
+        let record = match store.get_snapshot(RECORD_KEY_ID, &incarnation) {
             Ok(read) if read.record.kind == CredentialKind::SigningKey => read.record,
             Ok(_)
             | Err(StoreOpError::NotFound | StoreOpError::NeedsReauth | StoreOpError::Quarantined) => {
@@ -131,19 +174,12 @@ impl Input {
             }
             Err(error) => return Err(error),
         };
-        let key_id = public_key_ed25519(pem(&key)?)
+        let key_id = public_key_ed25519(pem(&record)?)
             .map_err(|_| StoreOpError::Encode("hub manifest signing key".into()))?
             .key_id;
-        Ok(Some(Self {
-            own,
-            member,
-            key,
-            key_id,
-        }))
-    }
-
-    fn same_as(&self, other: &Self) -> bool {
-        self.own == other.own && self.member == other.member && self.key_id == other.key_id
+        let key = Arc::new(SigningKey { record, key_id });
+        self.key = Some((incarnation, Arc::clone(&key)));
+        Ok(Some(key))
     }
 }
 
@@ -170,7 +206,13 @@ async fn sign(
     store_work(move || {
         let mut state = None;
         store.commit_hub_report_bytes_above(&input.own, floor, |seq| {
-            let signed_bytes = seal(&input.own, &box_id, &input.member, seq, pem(&input.key)?)?;
+            let signed_bytes = seal(
+                &input.own,
+                &box_id,
+                &input.member,
+                seq,
+                pem(&input.key.record)?,
+            )?;
             state = Some(HubReportTaskState {
                 seq,
                 signed_bytes: signed_bytes.clone(),
@@ -185,12 +227,16 @@ async fn sign(
 
 async fn mark_sent(
     store: &Arc<EncryptedStore>,
+    keys: &Arc<Mutex<SigningKeyCache>>,
     input: &Arc<Input>,
     state: &HubReportTaskState,
 ) -> Result<bool, StoreOpError> {
     let (store, input, state) = (Arc::clone(store), Arc::clone(input), state.clone());
+    let keys = Arc::clone(keys);
     store_work(move || {
-        if !Input::read(&store)?.is_some_and(|current| current.same_as(&input)) {
+        if !Input::read(&store, &mut keys.lock().unwrap_or_else(|p| p.into_inner()))?
+            .is_some_and(|current| current.same_as(&input))
+        {
             return Ok(false);
         }
         store.mark_hub_report_sent(&input.own, state.seq, &state.signed_bytes)
@@ -238,6 +284,7 @@ async fn publish(
     #[cfg(test)] sign_failed: Option<Arc<tokio::sync::Notify>>,
 ) {
     let mut writes = store.subscribe_writes();
+    let keys = Arc::new(Mutex::new(SigningKeyCache::default()));
     let mut input: Option<Arc<Input>> = None;
     let mut state: Option<HubReportTaskState> = None;
     let mut attempt = None;
@@ -268,13 +315,17 @@ async fn publish(
                 refresh_at = None;
                 let read = {
                     let store = Arc::clone(&store);
-                    store_work(move || Ok((Input::read(&store)?, store.hub_report_task_state()?))).await
+                    let keys = Arc::clone(&keys);
+                    store_work(move || {
+                        let input = Input::read(&store, &mut keys.lock().unwrap_or_else(|p| p.into_inner()))?;
+                        Ok((input, store.hub_report_task_state()?))
+                    }).await
                 };
                 match read {
                     Ok((Some(next), saved)) => {
                         let changed = input.as_ref().is_none_or(|last| !last.same_as(&next));
                         let same_bytes = saved.as_ref().is_some_and(|saved| matches_report(
-                            &saved.signed_bytes, &next.own, hub.box_id(), &next.member, &next.key_id,
+                            &saved.signed_bytes, &next.own, hub.box_id(), &next.member, &next.key.key_id,
                         ));
                         if changed || force_sign || !same_bytes || state != saved || (attempt.is_none() && repair) {
                             if changed || force_sign {
@@ -348,7 +399,7 @@ async fn publish(
                         let published = entry
                             .as_ref()
                             .filter(|entry| entry.operation == HubOperation::Put)
-                            .and_then(|entry| published_seq(&entry.value, hub.box_id(), &input.member, &input.key_id))
+                            .and_then(|entry| published_seq(&entry.value, hub.box_id(), &input.member, &input.key.key_id))
                             .filter(|published| *published > latest.seq);
                         if let Some(published) = published {
                             // Never replace a value above the local sequence (a
@@ -365,7 +416,7 @@ async fn publish(
                             refresh_at = Some(Instant::now());
                             continue;
                         }
-                        match mark_sent(&store, input, latest).await {
+                        match mark_sent(&store, &keys, input, latest).await {
                             Ok(true) => {
                                 latest.sent = true;
                                 putting = true;

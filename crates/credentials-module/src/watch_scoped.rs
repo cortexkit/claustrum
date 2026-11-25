@@ -388,16 +388,16 @@ impl Subscription {
                     }
                     let snapshot = snapshot(snapshots, move || match inventory {
                         Inventory::Scoped { caller, params } => surface.watch_scoped(&caller, &params)
-                            .map(|(view, keys)| json!({"view":view, "keys":keys})),
+                            .map(|(view, keys)| (json!({"view":view, "keys":keys}), None)),
                         Inventory::Connectors(_) => crate::connectors::list(surface.store()).and_then(|reply| {
-                            reply["version"].as_str().map(|version| json!({"version":version})).ok_or(ReadError::StoreError)
+                            reply["version"].as_str().map(|version| (json!({"version":version}), None)).ok_or(ReadError::StoreError)
                         }),
                         Inventory::Manifest => {
                             let reply = crate::manifest::watch_snapshot(surface.store());
-                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
+                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok((reply, None)) }
                         }
                         Inventory::Policy => {
-                            let reply = crate::manifest::policy_watch_snapshot(surface.store());
+                            let (reply, rollout) = crate::manifest::policy_watch_snapshot(surface.store());
                             #[cfg(test)]
                             let reply = {
                                 let hook = surface.watches.policy_snapshot_hook.lock().unwrap().take();
@@ -406,17 +406,24 @@ impl Subscription {
                                     None => reply,
                                 }
                             };
-                            if reply["error"]["code"] == "store_error" { Err(ReadError::StoreError) } else { Ok(reply) }
+                            // Rollout changes wake readers without adding a notice member.
+                            if reply["error"]["code"] == "store_error" {
+                                Err(ReadError::StoreError)
+                            } else {
+                                Ok((reply, rollout))
+                            }
                         }
                     }).await;
                     match snapshot {
-                        Ok(values) => {
+                        Ok((values, rollout)) => {
                             if values.get("error").is_some() {
                                 let body = serde_json::to_vec(&wrap_result(values)).map_err(ModuleError::Json)?;
                                 emit(&writer, header, FrameType::Response, body).await?;
                                 return Ok(false);
                             }
-                            if last.as_ref() != Some(&values) {
+                            if last.as_ref().is_none_or(|(last_values, last_rollout)| {
+                                *last_values != values || *last_rollout != rollout
+                            }) {
                                 seq += 1;
                                 let mut notice = values.clone();
                                 notice["kind"] = json!("changed");
@@ -424,7 +431,7 @@ impl Subscription {
                                 notice["seq"] = json!(seq);
                                 let body = serde_json::to_vec(&notice).map_err(ModuleError::Json)?;
                                 emit(&writer, header, FrameType::StreamData, body).await?;
-                                last = Some(values);
+                                last = Some((values, rollout));
                             }
                             Ok(true)
                         }

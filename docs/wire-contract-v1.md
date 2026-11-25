@@ -5640,6 +5640,13 @@ version; `policy_text` is the exact UTF-8 JSON string from the signed policy
 envelope. When there is no ready pair, all four members are null. This selection
 does not change what `manifest.active_status` reports for each specific version.
 
+During a rollout, `policy.active` also returns
+`"rollout": {"manifest_version": <u64>, "policy_version": <u64>}`, naming the
+newest stored **paired** manifest and policy. The member is absent when that
+pair is ready or no stored pair exists. An unpaired newest manifest is not a
+rollout pair. If a stored pair exists but none is ready, the four ready members
+are null and `rollout` still names the newest stored pair.
+
 `policy.watch` uses WATCH delivery and the shared local inventory watch contract:
 one subscription per route, a shared maximum of 64, `STREAM_END` on replacement or
 drain, and silent cancellation or route close. An open that fails caller or
@@ -5650,8 +5657,11 @@ ends that new watch with one `RESPONSE`, not `STREAM_DATA` or `STREAM_END`.
 Each `STREAM_DATA` body is exactly
 `{"version": <int|null>, "policy_sha256": <hex|null>, "kind": "changed", "epoch": "<32 lowercase hex>", "seq": <int>}`.
 Sequence 1 is the snapshot at open, with both policy members null when none is
-active. Later notices are sent only when that pair changes. Commits that can affect
-policy pairing, readiness, reporter admission or the serving role wake the watch.
+active. Later notices are sent when the ready pair or the pair named by `rollout`
+changes. A rollout-only notice can repeat the previous ready metadata; use
+its new sequence number to re-read `policy.active`. Notices never carry a
+`rollout` member. Commits that can affect policy pairing, readiness, reporter
+admission or the serving role wake the watch.
 Writes coalesce over approximately 250 ms; intermediate changes may not be observed.
 A later non-serving role ends the subscription with one `RESPONSE`
 `not_found`/`permanent`. A transient snapshot failure after sequence 1 retains the
@@ -5663,6 +5673,11 @@ the current value, read `policy.active` or reopen for a fresh sequence 1.
 
 These examples use a test-only signed policy. The watch epoch is fixed for the
 examples; a running daemon chooses its own epoch.
+
+The exact `policy.active` reply bytes with and without `rollout` are pinned under
+[`tests/vectors/agent-policy-v1/`](../crates/credentials-module/tests/vectors/agent-policy-v1/)
+with `SHA256SUMS`. They come from the real query handler. Regenerate with
+`CK_EMIT_SECRET_VECTORS=1 cargo test --locked -p credentials-module --features credentials-core/test-support --bin ck-claustrum policy_active_rollout_samples_and_watch_changes`.
 
 <!-- golden:policy.active.none -->
 ```json

@@ -1761,7 +1761,9 @@ pub use declared_grants::{
     DECLARED_GRANT_APPROVAL_TEMPLATES, DECLARED_GRANT_CATEGORY_NAMES, MAX_DECLARED_GRANTS,
 };
 
-pub use agent_policy::{ActiveAgentPolicy, AgentPolicySummary};
+pub use agent_policy::{
+    ActiveAgentPolicy, AgentPolicyRead, AgentPolicyRollout, AgentPolicySummary,
+};
 pub use policy_token::{
     PolicyTokenCandidate, PolicyTokenError, PolicyTokenHandoff, PolicyTokenPlan, PolicyTokenRecord,
     PolicyTokenRecordKey, PolicyTokenRequest,

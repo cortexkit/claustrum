@@ -129,9 +129,17 @@ pub async fn serve(
     params: &Value,
 ) -> ProposeAnswer {
     let deadline = Instant::now() + PROPOSE_DEADLINE;
-    let params = match preflight(&store, principal, params) {
-        Ok(params) => params,
-        Err(answer) => return answer,
+    let admission_store = Arc::clone(&store);
+    let principal = principal.cloned();
+    let params = params.clone();
+    let params = match tokio::task::spawn_blocking(move || {
+        preflight(&admission_store, principal.as_ref(), &params)
+    })
+    .await
+    {
+        Ok(Ok(params)) => params,
+        Ok(Err(answer)) => return answer,
+        Err(_) => return store_refusal(GhManifestProposalError::StoreError),
     };
     let Some(outbound) = outbound else {
         return refusal("identity_unavailable", "transient");
@@ -200,11 +208,21 @@ async fn checked_proposal(
         Err(()) => return refusal("github_unavailable", "transient"),
     };
     let record_id = format!("github_app:{}", params.app_slug);
-    let credential =
-        match store.github_app_oauth_for_manifest_proposal(&record_id, &params.agent_id) {
-            Ok(credential) => credential,
-            Err(error) => return store_refusal(error),
-        };
+    let reader = Arc::clone(&store);
+    let id = record_id.clone();
+    let agent = params.agent_id.clone();
+    let credential = match tokio::task::spawn_blocking(move || {
+        reader.github_app_oauth_for_manifest_proposal(&id, &agent)
+    })
+    .await
+    {
+        Ok(Ok(credential)) => credential,
+        Ok(Err(error)) => return store_refusal(error),
+        Err(_) => return store_refusal(GhManifestProposalError::StoreError),
+    };
+    if Instant::now() >= deadline {
+        return refusal("github_unavailable", "transient");
+    }
     let installation_result = tokio::time::timeout_at(
         deadline,
         check_github_repository(&record_id, &credential, &params.repo, http),
@@ -235,19 +253,28 @@ async fn checked_proposal(
     if validate_installation_permissions(&permissions).is_err() {
         return refusal("installation_permissions_invalid", "permanent");
     }
-    let prepared = store.prepare_gh_manifest_proposal(GhManifestProposalInput {
-        agent_id: params.agent_id,
-        app_id: params.app_id,
-        app_slug: params.app_slug,
-        repo,
-        installation_permissions: permissions,
-    });
+    let reader = Arc::clone(&store);
+    let prepared = tokio::time::timeout_at(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            reader.prepare_gh_manifest_proposal(GhManifestProposalInput {
+                agent_id: params.agent_id,
+                app_id: params.app_id,
+                app_slug: params.app_slug,
+                repo,
+                installation_permissions: permissions,
+            })
+        }),
+    )
+    .await;
     if Instant::now() >= deadline {
         return refusal("github_unavailable", "transient");
     }
     let prepared = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => return store_refusal(error),
+        Ok(Ok(Ok(prepared))) => prepared,
+        Ok(Ok(Err(error))) => return store_refusal(error),
+        Ok(Err(_)) => return store_refusal(GhManifestProposalError::StoreError),
+        Err(_) => return refusal("github_unavailable", "transient"),
     };
     // The store checks the deadline with the writer held. Do not cancel this job:
     // an admitted transaction must commit and return its reply even after expiry.

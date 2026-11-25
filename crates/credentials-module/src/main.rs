@@ -572,7 +572,7 @@ where
                         || (frame.header.ty == FrameType::Request && serde_json::from_slice::<serde_json::Value>(&frame.body)
                             .is_ok_and(|body| body["op"] == MODULE_CONTROL_OP_HEALTH_CHECK))) {
                         handle_frame(frame, &egress, &surface, &admin, &routes).await?;
-                    } else { deferred.push_back(frame); }
+                    } else { deferred.push_back(Ok(frame)); }
                 }
             }
         }
@@ -696,8 +696,9 @@ where
         let frame = if let Some(frame) = deferred.pop_front() {
             Some(frame)
         } else {
-            ingress.recv().await.transpose()?
-        };
+            ingress.recv().await
+        }
+        .transpose()?;
         let Some(frame) = frame else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
@@ -712,7 +713,17 @@ where
                 continue;
             }
         }
-        if !handle_frame(frame, &egress, &surface, &admin, &routes).await? {
+        if !handle_ingress_frame(
+            frame,
+            &egress,
+            &surface,
+            &admin,
+            &routes,
+            &mut ingress,
+            &mut deferred,
+        )
+        .await?
+        {
             return Ok(());
         }
     }
@@ -1197,6 +1208,40 @@ where
     }
 }
 
+/// A bind may wait for a durable commit. Ingress stays ordered across that wait,
+/// except that a channel-0 Ping can use the control lane immediately.
+async fn handle_ingress_frame(
+    frame: Frame,
+    egress: &Egress,
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    routes: &Arc<RouteEpochs>,
+    ingress: &mut mpsc::Receiver<Result<Frame, ModuleError>>,
+    deferred: &mut std::collections::VecDeque<Result<Frame, ModuleError>>,
+) -> Result<bool, ModuleError> {
+    let control_request = frame.header.channel == 0 && frame.header.ty == FrameType::Request;
+    let handling = handle_frame(frame, egress, surface, admin, routes);
+    if !control_request {
+        return handling.await;
+    }
+    tokio::pin!(handling);
+    while deferred.len() < EGRESS_BUFFER {
+        tokio::select! {
+            biased;
+            result = &mut handling => return result,
+            next = ingress.recv() => match next {
+                Some(Ok(frame)) if frame.header.channel == 0 && frame.header.ty == FrameType::Ping => {
+                    handle_frame(frame, egress, surface, admin, routes).await?;
+                }
+                Some(frame) => deferred.push_back(frame),
+                None => break,
+            },
+        }
+    }
+    // A full inbox applies backpressure instead of accumulating more deferred frames.
+    handling.await
+}
+
 /// Returns `Ok(false)` to stop the loop (graceful goodbye / EOF). Channel-0 control
 /// frames (ping/pong, route-bind, health.check) egress on the priority control lane;
 /// data-plane route responses egress on the route lane, so control liveness is never
@@ -1467,21 +1512,26 @@ async fn handle_control_request(
                     .await;
                 }
             };
-            // Make the epoch live only after both parts of the bind have decoded.
-            routes.install(route_channel, epoch);
             if identity.harness.starts_with("fed-phone:") {
                 tracing::info!(target: "routes", route_channel, production_build = peer.peer_build.as_deref() == Some("production"), "phone route bound");
             }
-            admin.record_connector_bind(
-                route_channel,
-                epoch,
-                principal,
-                &identity.harness,
-                peer.operator_app.map(|app| app.app),
-                scope.as_ref(),
-                peer.caller.as_ref(),
-                peer.peer_build,
-            );
+            let admin = Arc::clone(admin);
+            blocking_task(move || {
+                admin.record_connector_bind(
+                    route_channel,
+                    epoch,
+                    principal,
+                    &identity.harness,
+                    peer.operator_app.map(|app| app.app),
+                    scope.as_ref(),
+                    peer.caller.as_ref(),
+                    peer.peer_build,
+                );
+            })
+            .await?;
+            // The committed declaration and the captured bind state must be in
+            // place before ingress can accept any frames for the new epoch.
+            routes.install(route_channel, epoch);
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1815,7 +1865,13 @@ async fn dispatch_request(
         {
             return send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await;
         }
-        return match admin.serve_permissions(&request.method, &request.params, "reserved:cingulate")
+        let admin = Arc::clone(admin);
+        let method = request.method.clone();
+        let params = request.params.clone();
+        return match blocking_task(move || {
+            admin.serve_permissions(&method, &params, "reserved:cingulate")
+        })
+        .await?
         {
             Ok(reply) => send_route_result(writer, header, wrap_result(reply)).await,
             Err(_) => {
@@ -2030,26 +2086,35 @@ async fn serve_secret_call(
     principal: Option<&subc_protocol::Principal>,
     method: &str,
     params: &serde_json::Value,
-) -> secret_use::UseAnswer {
+) -> Result<secret_use::UseAnswer, ModuleError> {
     use federation::remote_read::{SecretForwardAnswer, SecretRoute};
     let route = match secret_use::sender_call(method, principal, params) {
         Some(call) => surface.remote().route_secret_call(call).await,
         None => SecretRoute::Local,
     };
-    match route {
+    Ok(match route {
         SecretRoute::Answer(SecretForwardAnswer::Reply(reply)) => {
             secret_use::UseAnswer::Reply(reply)
         }
         SecretRoute::Answer(SecretForwardAnswer::InvalidParams) => {
             secret_use::UseAnswer::InvalidParams
         }
-        SecretRoute::Local => match method {
-            "secret.use" => admin.serve_secret_use(principal, params),
-            "secret.ssh_sign" => admin.serve_secret_ssh_sign(principal, params),
-            "secret.request_flow_approval" => admin.serve_flow_approval(principal, params),
-            _ => admin.serve_revoke_flow_grants(principal, params),
-        },
-    }
+        SecretRoute::Local => {
+            let admin = Arc::clone(admin);
+            let principal = principal.cloned();
+            let method = method.to_owned();
+            let params = params.clone();
+            blocking_task(move || match method.as_str() {
+                "secret.use" => admin.serve_secret_use(principal.as_ref(), &params),
+                "secret.ssh_sign" => admin.serve_secret_ssh_sign(principal.as_ref(), &params),
+                "secret.request_flow_approval" => {
+                    admin.serve_flow_approval(principal.as_ref(), &params)
+                }
+                _ => admin.serve_revoke_flow_grants(principal.as_ref(), &params),
+            })
+            .await?
+        }
+    })
 }
 
 #[cfg(test)]
@@ -2100,12 +2165,15 @@ async fn serve_read_request(
         method if module_secret::is_op(method) => {
             let route = federation::RouteCaller::Principal(caller.clone());
             match module_secret::admit(&route, &request.params) {
-                Some(owner) => wrap_result(module_secret::serve(
-                    surface.store(),
-                    &owner,
-                    method,
-                    &request.params,
-                )),
+                Some(owner) => {
+                    let store = Arc::clone(surface.store());
+                    wrap_result(
+                        blocking_task(move || {
+                            module_secret::serve(&store, &owner, &request.method, &request.params)
+                        })
+                        .await?,
+                    )
+                }
                 None => uniform_not_found(),
             }
         }
@@ -2176,7 +2244,7 @@ async fn serve_read_request(
         | "secret.request_flow_approval"
         | "secret.revoke_flow_grants") => {
             match serve_secret_call(surface, admin, principal.as_ref(), method, &request.params)
-                .await
+                .await?
             {
                 secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
                 secret_use::UseAnswer::InvalidParams => {
@@ -2244,12 +2312,15 @@ async fn serve_read_request(
             return Ok(());
         }
         OP_DEPOSIT_COOKIE => match serde_json::from_value::<DepositCookieParams>(request.params) {
-            Ok(params) => match surface.deposit_cookie(&caller, &params) {
-                Ok(result) => wrap_result(result),
-                Err(code) => {
-                    wrap_result(json!({ "error": { "code": code, "class": code.class() } }))
+            Ok(params) => {
+                let surface = Arc::clone(surface);
+                match blocking_task(move || surface.deposit_cookie(&caller, &params)).await? {
+                    Ok(result) => wrap_result(result),
+                    Err(code) => {
+                        wrap_result(json!({ "error": { "code": code, "class": code.class() } }))
+                    }
                 }
-            },
+            }
             Err(_) => {
                 return invalid_params(
                     writer,
@@ -2263,12 +2334,18 @@ async fn serve_read_request(
             }
         },
         OP_ENROLL_PROPOSE => match serde_json::from_value::<EnrollProposeParams>(request.params) {
-            Ok(params) => match surface.enroll_propose(principal.as_ref(), &params) {
-                Ok(result) => wrap_result(result),
-                Err(error) => {
-                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+            Ok(params) => {
+                let surface = Arc::clone(surface);
+                match blocking_task(move || surface.enroll_propose(principal.as_ref(), &params))
+                    .await?
+                {
+                    Ok(result) => wrap_result(result),
+                    Err(error) => {
+                        return send_enrollment_error(writer, ver, channel, epoch, corr, &error)
+                            .await
+                    }
                 }
-            },
+            }
             Err(_) => {
                 return send_enrollment_refusal(
                     writer,
@@ -2282,12 +2359,18 @@ async fn serve_read_request(
             }
         },
         OP_ENROLL_POLL => match serde_json::from_value::<EnrollPollParams>(request.params) {
-            Ok(params) => match surface.enroll_poll(principal.as_ref(), &params) {
-                Ok(result) => wrap_result(result),
-                Err(error) => {
-                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+            Ok(params) => {
+                let surface = Arc::clone(surface);
+                match blocking_task(move || surface.enroll_poll(principal.as_ref(), &params))
+                    .await?
+                {
+                    Ok(result) => wrap_result(result),
+                    Err(error) => {
+                        return send_enrollment_error(writer, ver, channel, epoch, corr, &error)
+                            .await
+                    }
                 }
-            },
+            }
             Err(_) => {
                 return send_enrollment_refusal(
                     writer,
@@ -2301,12 +2384,16 @@ async fn serve_read_request(
             }
         },
         OP_ENROLL_ROTATE => match serde_json::from_value::<EnrollRotateParams>(request.params) {
-            Ok(params) => match surface.enroll_rotate(&params) {
-                Ok(result) => wrap_result(result),
-                Err(error) => {
-                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+            Ok(params) => {
+                let surface = Arc::clone(surface);
+                match blocking_task(move || surface.enroll_rotate(&params)).await? {
+                    Ok(result) => wrap_result(result),
+                    Err(error) => {
+                        return send_enrollment_error(writer, ver, channel, epoch, corr, &error)
+                            .await
+                    }
                 }
-            },
+            }
             Err(_) => {
                 return send_enrollment_refusal(
                     writer,
@@ -2350,12 +2437,15 @@ async fn serve_read_request(
             }
         }
         OP_LIST_SCOPED => match serde_json::from_value::<ListScopedParams>(request.params) {
-            Ok(params) => match surface.list_scoped(&caller, &params) {
-                Ok(result) => wrap_result(result),
-                Err(code) => wrap_result(json!({
-                    "error": read_surface::ErrorBody { code, class: code.class() }
-                })),
-            },
+            Ok(params) => {
+                let surface = Arc::clone(surface);
+                match blocking_task(move || surface.list_scoped(&caller, &params)).await? {
+                    Ok(result) => wrap_result(result),
+                    Err(code) => wrap_result(json!({
+                        "error": read_surface::ErrorBody { code, class: code.class() }
+                    })),
+                }
+            }
             Err(error) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &error.to_string()).await
             }
@@ -2744,6 +2834,19 @@ async fn send(writer: &mpsc::Sender<Frame>, frame: Frame) -> Result<(), ModuleEr
 
 fn control_flags() -> Flags {
     Flags::new(false, Priority::Passive, false)
+}
+
+async fn blocking_task<T: Send + 'static>(
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ModuleError> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    // Dropping the waiter does not cancel an admitted store operation.
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || span.in_scope(task))
+    })
+    .await
+    .map_err(|_| ModuleError::Message("blocking route task failed".into()))
 }
 
 /// The data directory the vault lives in (the parent of the sqlite store path), so
@@ -4001,7 +4104,7 @@ mod tests {
     struct TtlFixtureAdapter {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         fresh_ttl_ms: i64,
-        release_first_exchange: Option<Arc<tokio::sync::Notify>>,
+        first_exchange: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
 
     #[async_trait::async_trait]
@@ -4019,7 +4122,8 @@ mod tests {
             credentials_core::refresh_adapters::RefreshError,
         > {
             let prior_calls = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if let (0, Some(release)) = (prior_calls, self.release_first_exchange.as_ref()) {
+            if let (0, Some((entered, release))) = (prior_calls, self.first_exchange.as_ref()) {
+                entered.notify_one();
                 release.notified().await;
             }
             Ok(credentials_core::refresh_adapters::RefreshedTokens {
@@ -4046,24 +4150,26 @@ mod tests {
         Arc<EncryptedStore>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        ttl_surface_with_exchange_gate(seed, fresh_ttl_ms, None)
+        let (surface, store, calls, _) = ttl_surface_with_exchange_gate(seed, fresh_ttl_ms, None);
+        (surface, store, calls)
     }
 
     fn ttl_surface_with_exchange_gate(
         seed: u8,
         fresh_ttl_ms: i64,
-        release_first_exchange: Option<Arc<tokio::sync::Notify>>,
+        first_exchange: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     ) -> (
         Arc<ReadSurface>,
         Arc<EncryptedStore>,
         Arc<std::sync::atomic::AtomicUsize>,
+        Arc<RefreshEngine>,
     ) {
         let (_unused_surface, store, _db_path, _root) = tmp_surface_with_store(seed);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let adapter = TtlFixtureAdapter {
             calls: Arc::clone(&calls),
             fresh_ttl_ms,
-            release_first_exchange,
+            first_exchange,
         };
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(
@@ -4071,19 +4177,21 @@ mod tests {
             vec![Arc::new(adapter)],
             http,
         ));
-        let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
-        (surface, store, calls)
+        let surface = Arc::new(ReadSurface::new(
+            Arc::clone(&engine),
+            FetchLimiter::new(Caps::default()),
+        ));
+        (surface, store, calls, engine)
     }
 
     #[tokio::test]
     async fn a_single_flight_waiter_checks_its_own_minimum_ttl_after_one_exchange() {
-        use std::future::{poll_fn, Future};
         use std::sync::atomic::Ordering;
-        use std::task::Poll;
 
+        let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let (surface, store, calls) =
-            ttl_surface_with_exchange_gate(91, 600_000, Some(release.clone()));
+        let (surface, store, calls, engine) =
+            ttl_surface_with_exchange_gate(91, 600_000, Some((entered.clone(), release.clone())));
         let handle = seed_ttl_refreshable(&store, "oauth:ttl-shared", 0);
         let leader_params = GetParams {
             handle: handle.clone(),
@@ -4098,13 +4206,17 @@ mod tests {
         let leader = surface.get(91, &leader_params);
         let waiter = surface.get(92, &waiter_params);
         tokio::pin!(leader, waiter);
-        poll_fn(|cx| {
-            assert!(leader.as_mut().poll(cx).is_pending());
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert!(waiter.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        tokio::select! {
+            _ = &mut leader => panic!("the leader finished before the exchange was released"),
+            _ = entered.notified() => {},
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (queued, waiting) = tokio::sync::oneshot::channel();
+        engine.set_before_flight_wait_hook_for_test(move || queued.send(()).unwrap());
+        tokio::select! {
+            _ = &mut waiter => panic!("the waiter bypassed the held flight"),
+            result = waiting => result.unwrap(),
+        }
         release.notify_one();
         assert!(matches!(leader.await, read_surface::GetOutcome::Ok(_)));
         let outcome = waiter.await;
@@ -13399,6 +13511,135 @@ mod tests {
             rx.try_recv().is_err(),
             "old watch emitted a frame after rebind"
         );
+    }
+
+    #[tokio::test]
+    async fn slow_declaration_bind_answers_ping_before_commit_and_preserves_ingress_order() {
+        let (surface, admin, store, db_path, _root) = scoped_rig_with_db(172);
+        let routes = Arc::new(RouteEpochs::default());
+        let (control, mut replies) = mpsc::channel(8);
+        let egress = Egress {
+            control,
+            route: mpsc::channel(1).0,
+        };
+        let (incoming, mut ingress) = mpsc::channel(8);
+        let mut deferred = std::collections::VecDeque::new();
+        let frame = |ty, corr, body| {
+            Frame::build_with_version(PROTOCOL_VERSION, ty, control_flags(), 0, 0, corr, body)
+                .unwrap()
+        };
+        let mut bind = serde_json::to_value(ModuleControlRequest::RouteBind {
+            route_channel: 7,
+            epoch: 1,
+            target: subc_protocol::RouteTarget::ToolProvider {
+                module_id: DEFAULT_MODULE_ID.into(),
+            },
+            identity: subc_protocol::BindIdentity::new("h", "s"),
+            principal: Some(reserved("declaration-test")),
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: None,
+            call_mode: None,
+        })
+        .unwrap();
+        bind["caller"] = json!({
+            "incarnation": "test",
+            "spawn": 1,
+            "authority_epoch": 1,
+            "claim": "own",
+            "first_party": true,
+            "origin": "other",
+            "declaration": {"grants": []},
+            "approved_declarations_digest": "approved",
+            "declaration_digest": "current",
+        });
+        let health = serde_json::to_vec(&ModuleControlRequest::HealthCheck {}).unwrap();
+        for next in [
+            frame(FrameType::Request, 2, health.clone()),
+            frame(FrameType::Ping, 3, Vec::new()),
+            frame(FrameType::Request, 4, health),
+        ] {
+            incoming.try_send(Ok(next)).unwrap();
+        }
+
+        let writer = rusqlite::Connection::open(db_path).unwrap();
+        let lock = writer.unchecked_transaction().unwrap();
+        // Take the write lock without changing any rows.
+        lock.execute("UPDATE cortexkit_fence SET epoch = epoch", [])
+            .unwrap();
+        {
+            let handling = handle_ingress_frame(
+                frame(FrameType::Request, 1, serde_json::to_vec(&bind).unwrap()),
+                &egress,
+                &surface,
+                &admin,
+                &routes,
+                &mut ingress,
+                &mut deferred,
+            );
+            tokio::pin!(handling);
+            let pong = tokio::select! {
+                biased;
+                result = &mut handling => panic!("bind completed before Pong: {result:?}"),
+                reply = replies.recv() => reply.unwrap(),
+            };
+            assert_eq!((pong.header.ty, pong.header.corr), (FrameType::Pong, 3));
+            assert_eq!(routes.expected(7), None);
+            assert!(
+                replies.try_recv().is_err(),
+                "bind is still waiting for a commit"
+            );
+            lock.rollback().unwrap();
+            assert!(handling.await.unwrap());
+        }
+        let ack = replies.try_recv().unwrap();
+        assert_eq!((ack.header.ty, ack.header.corr), (FrameType::Response, 1));
+        assert_eq!(routes.expected(7), Some(1));
+        let listing = store.list_declared_grant_sets().unwrap();
+        assert_eq!(
+            listing.rows[0].declaration_digest.as_deref(),
+            Some("current")
+        );
+
+        for corr in [2, 4] {
+            let next = deferred.pop_front().unwrap().unwrap();
+            assert!(handle_frame(next, &egress, &surface, &admin, &routes)
+                .await
+                .unwrap());
+            assert_eq!(replies.try_recv().unwrap().header.corr, corr);
+        }
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn unchanged_declaration_does_not_take_the_writer() {
+        let (_surface, _admin, store, db_path, _root) = scoped_rig_with_db(172);
+        let grants = credentials_core::store::DeclaredGrantSet::empty();
+        let record = || {
+            store.record_declared_grants_seen(
+                "declaration-test",
+                Some("current"),
+                Some("approved"),
+                Some("other"),
+                &grants,
+                0,
+            )
+        };
+        assert!(record().unwrap());
+        let writer = rusqlite::Connection::open(&db_path).unwrap();
+        let lock = writer.unchecked_transaction().unwrap();
+        lock.execute("UPDATE cortexkit_fence SET epoch = epoch", [])
+            .unwrap();
+        assert!(!record().expect("unchanged bind can read while the writer is held"));
+        lock.rollback().unwrap();
+
+        bump_fence_epoch(&db_path);
+        assert!(
+            record().is_err(),
+            "an unchanged declaration still refuses a superseded writer"
+        );
+        assert!(store.is_fenced_out());
     }
 
     /// A bind whose scope stamp carries a `flow_id` is refused by name and binds nothing;

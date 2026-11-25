@@ -215,9 +215,10 @@ impl From<StoreOpError> for EngineError {
 
 /// The refresh engine: owns the encrypted store, the adapter registry, the HTTP
 /// transport, and the per-credential single-flight locks.
+#[derive(Clone)]
 pub struct RefreshEngine {
     store: Arc<EncryptedStore>,
-    adapters: HashMap<String, Arc<dyn RefreshAdapter>>,
+    adapters: Arc<HashMap<String, Arc<dyn RefreshAdapter>>>,
     http: Arc<dyn HttpTransport>,
     skew_ms: i64,
     // The wall clock the report cooldown is measured against. Real time in
@@ -229,7 +230,7 @@ pub struct RefreshEngine {
     // only to prune/look up/insert a lock handle (never across an await); the per-id
     // tokio mutex is the one held across the refresh await. Weak entries let unused
     // ids be reclaimed without evicting locks still owned by holders or waiters.
-    inflight: Mutex<HashMap<String, InflightEntry>>,
+    inflight: Arc<Mutex<HashMap<String, InflightEntry>>>,
     // Test-only crash seam: fired AFTER the intent is durably committed and the new
     // tokens are staged, but BEFORE the commit transaction. The kill-9 conformance
     // helper sets this to a closure that signals readiness and parks forever, so a
@@ -237,10 +238,23 @@ pub struct RefreshEngine {
     // ONLY under the `kill9-test-seam` feature, so the release vault has no
     // block-before-commit path at all.
     #[cfg(feature = "kill9-test-seam")]
-    pre_commit: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    pre_commit: Arc<Mutex<Option<PreCommitHook>>>,
     #[cfg(test)]
-    after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    after_snapshot: Arc<Mutex<Option<AfterSnapshotHook>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    before_flight_wait: Arc<Mutex<Option<BeforeFlightWaitHook>>>,
+    #[cfg(test)]
+    credential_opens: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    plan_observation_finished: Arc<tokio::sync::Notify>,
 }
+
+#[cfg(feature = "kill9-test-seam")]
+type PreCommitHook = Box<dyn Fn() + Send + Sync>;
+#[cfg(test)]
+type AfterSnapshotHook = Box<dyn FnOnce() + Send>;
+#[cfg(any(test, feature = "test-support"))]
+type BeforeFlightWaitHook = Box<dyn FnOnce() + Send>;
 
 struct InflightEntry {
     lock: Weak<tokio::sync::Mutex<()>>,
@@ -260,15 +274,21 @@ impl RefreshEngine {
             .collect();
         RefreshEngine {
             store,
-            adapters,
+            adapters: Arc::new(adapters),
             http,
             skew_ms: DEFAULT_EXPIRY_SKEW_MS,
             clock: Arc::new(now_ms),
-            inflight: Mutex::new(HashMap::new()),
+            inflight: Arc::default(),
             #[cfg(feature = "kill9-test-seam")]
-            pre_commit: Mutex::new(None),
+            pre_commit: Arc::default(),
             #[cfg(test)]
-            after_snapshot: Mutex::new(None),
+            after_snapshot: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            before_flight_wait: Arc::default(),
+            #[cfg(test)]
+            credential_opens: Arc::default(),
+            #[cfg(test)]
+            plan_observation_finished: Arc::default(),
         }
     }
 
@@ -282,6 +302,23 @@ impl RefreshEngine {
     #[cfg(test)]
     pub(crate) fn set_after_snapshot_hook(&self, hook: impl FnOnce() + Send + 'static) {
         *self.after_snapshot.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn credential_opens_for_test(&self) -> usize {
+        self.credential_opens
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_plan_observation_for_test(&self) {
+        self.plan_observation_finished.notified().await;
+    }
+
+    /// Signal when a get queues for a held single-flight lock.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_before_flight_wait_hook_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_flight_wait.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Override the expiry skew (mostly for tests).
@@ -300,6 +337,28 @@ impl RefreshEngine {
     /// The underlying store (for the module's read/admin surfaces).
     pub fn store(&self) -> &Arc<EncryptedStore> {
         &self.store
+    }
+
+    async fn blocking_store<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&EncryptedStore) -> Result<T, StoreOpError> + Send + 'static,
+    ) -> Result<T, StoreOpError> {
+        let store = Arc::clone(&self.store);
+        #[cfg(test)]
+        let credential_opens = Arc::clone(&self.credential_opens);
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let before = crate::store::CREDENTIAL_OPEN_COUNT.get();
+            let result = operation(&store);
+            #[cfg(test)]
+            credential_opens.fetch_add(
+                crate::store::CREDENTIAL_OPEN_COUNT.get() - before,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            result
+        })
+        .await
+        .map_err(|_| StoreOpError::Store("vault store task failed".into()))?
     }
 
     /// Read a credential, refreshing first if it is stale (or `force_refresh`).
@@ -358,20 +417,27 @@ impl RefreshEngine {
         // Retain the entry before reading SQLite so a refresh that finishes
         // before we can wait still leaves its committed version for us to check.
         let lock = self.inflight_lock(credential_id);
-        let initial = match expected_incarnation {
-            Some(incarnation) => self.store.get_snapshot(credential_id, incarnation)?,
-            None => self
-                .store
-                .get_with_stale_pending_and_digest(credential_id)?,
-        };
-        let incarnation = initial.incarnation.clone();
+        let id = credential_id.to_owned();
+        let expected = expected_incarnation.map(str::to_owned);
         #[cfg(test)]
-        {
-            let hook = self.after_snapshot.lock().unwrap().take();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
+        let after_snapshot = Arc::clone(&self.after_snapshot);
+        let initial = self
+            .blocking_store(move |store| {
+                let snapshot = match expected {
+                    Some(incarnation) => store.get_snapshot(&id, &incarnation)?,
+                    None => store.get_with_stale_pending_and_digest(&id)?,
+                };
+                #[cfg(test)]
+                {
+                    let hook = after_snapshot.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                Ok(snapshot)
+            })
+            .await?;
+        let incarnation = initial.incarnation.clone();
         // Use the intent from the record snapshot: a later lookup could observe it
         // cleared by a refresh that just invalidated the record we read.
         let wants_refresh =
@@ -387,8 +453,51 @@ impl RefreshEngine {
             });
         }
         let initial_version = initial.record.record_version;
-        let _guard = lock.lock().await;
-        let initial = self.store.get_snapshot(credential_id, &incarnation)?;
+        let waiting = lock.lock_owned();
+        #[cfg(any(test, feature = "test-support"))]
+        let waiting = async move {
+            use std::future::Future;
+            tokio::pin!(waiting);
+            std::future::poll_fn(|cx| {
+                let result = waiting.as_mut().poll(cx);
+                if result.is_pending() {
+                    let hook = self.before_flight_wait.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                result
+            })
+            .await
+        };
+        let guard = waiting.await;
+        let engine = self.clone();
+        let id = credential_id.to_owned();
+        // An admitted exchange owns the lock through the intent, provider call,
+        // commit and version stamp. Dropping the reader must not drop that flight.
+        tokio::spawn(async move {
+            let _guard = guard;
+            engine
+                .get_locked(&id, incarnation, initial_version, min_ttl_ms, force_refresh)
+                .await
+        })
+        .await
+        .map_err(|_| StoreOpError::Store("vault refresh task failed".into()))?
+    }
+
+    async fn get_locked(
+        &self,
+        credential_id: &str,
+        incarnation: String,
+        initial_version: u64,
+        min_ttl_ms: Option<i64>,
+        force_refresh: bool,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
+        let id = credential_id.to_owned();
+        let admitted = incarnation.clone();
+        let initial = self
+            .blocking_store(move |store| store.get_snapshot(&id, &admitted))
+            .await?;
         // An intent surviving the prior holder is unresolved just as it would be
         // at boot; a fresh access token cannot prove its refresh token survived.
         if initial.has_refresh_intent {
@@ -413,22 +522,28 @@ impl RefreshEngine {
             // A stale marker means a consumer already refused this exact token. A
             // non-refreshable record cannot replace it, so defer to the existing
             // version-fenced terminal transition rather than serving it again.
-            self.store.invalidate_in_incarnation(
-                credential_id,
-                initial.record.record_version,
-                &incarnation,
-                AuditCtx::vault(AuditOp::Invalidate),
-                Some(AuthObservation {
-                    kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
-                    provider_status: None,
-                    detail: None,
-                    reporter_source: None,
-                    principal: None,
-                }),
-            )?;
-            // If a concurrent write moved the version, return the replacement rather
-            // than incorrectly refusing the record this get did not inspect.
-            let replacement = self.store.get_snapshot(credential_id, &incarnation)?;
+            let id = credential_id.to_owned();
+            let admitted = incarnation.clone();
+            let version = initial.record.record_version;
+            let replacement = self
+                .blocking_store(move |store| {
+                    store.invalidate_in_incarnation(
+                        &id,
+                        version,
+                        &admitted,
+                        AuditCtx::vault(AuditOp::Invalidate),
+                        Some(AuthObservation {
+                            kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
+                            provider_status: None,
+                            detail: None,
+                            reporter_source: None,
+                            principal: None,
+                        }),
+                    )?;
+                    // If a concurrent write moved the version, return the replacement.
+                    store.get_snapshot(&id, &admitted)
+                })
+                .await?;
             return Ok(GetWithRefreshStatus {
                 incarnation,
                 record: replacement.record,
@@ -465,9 +580,11 @@ impl RefreshEngine {
             && self.within_report_cooldown(record_written_at_ms)
         {
             // Best-effort: a diagnostic write must never fail the read it explains.
+            let id = credential_id.to_owned();
+            let version = served.record.record_version;
             let _ = self
-                .store
-                .record_stale_refresh_deferred(credential_id, served.record.record_version);
+                .blocking_store(move |store| store.record_stale_refresh_deferred(&id, version))
+                .await;
             // The deferral ends exactly when the cooldown does, computed on the same
             // clock the cooldown test just ran on, so a caller that reports it as a
             // duration cannot drift from this read's own decision by clock skew.
@@ -570,8 +687,10 @@ impl RefreshEngine {
 
         // txn1: durably record the intent BEFORE any network call.
         let old_hash = refresh_token_hash(oauth.refresh_token.expose());
-        self.store
-            .open_intent(credential_id, record.record_version, &old_hash)?;
+        let id = credential_id.to_owned();
+        let version = record.record_version;
+        self.blocking_store(move |store| store.open_intent(&id, version, &old_hash))
+            .await?;
 
         // The provider call (rotating). Tokens are staged in memory only.
         match adapter
@@ -580,9 +699,11 @@ impl RefreshEngine {
         {
             Ok((tokens, _)) if tokens.access_token.expose().is_empty() => {
                 // A successful provider response with no access token is not a valid
-                // rotation. Clear txn1 while preserving the old record/version; otherwise
+                // rotation. Clear the intent while preserving the old record and version; otherwise
                 // the sealed record would later decrypt to a successful zero-byte read.
-                self.store.clear_intent(credential_id)?;
+                let id = credential_id.to_owned();
+                self.blocking_store(move |store| store.clear_intent(&id))
+                    .await?;
                 Err(EngineError::RefreshFailed(RefreshError::Decode(
                     "provider returned an empty access token".into(),
                 )))
@@ -595,113 +716,121 @@ impl RefreshEngine {
                 let github_app_permissions = is_github_app
                     .then(|| tokens.github_app_permissions.clone())
                     .flatten();
-                let mut new_record = apply_refreshed(record, oauth, tokens);
-                if adapter_name == "anthropic" {
-                    // Profiles survive a restart in a side table, but still ride the
-                    // next token commit: a separate sealed write would invalidate a
-                    // consumer's report_auth_failure version for the just-served token.
-                    match self.store.held_detected_plan(credential_id, record) {
-                        Ok(Some(plan)) => new_record.detected_plan = Some(plan),
-                        Ok(None) => {}
-                        Err(error) => {
-                            eprintln!(
+                let new_record = apply_refreshed(record, oauth, tokens);
+                let is_anthropic = adapter_name == "anthropic";
+                let id = credential_id.to_owned();
+                let admitted = incarnation.to_owned();
+                let previous = record.clone();
+                #[cfg(feature = "kill9-test-seam")]
+                let pre_commit = Arc::clone(&self.pre_commit);
+                let (new_record, digest) = self
+                    .blocking_store(move |store| {
+                        let mut new_record = new_record;
+                        if is_anthropic {
+                            // Profiles survive a restart in a side table, but still ride the
+                            // next token commit: a separate sealed write would invalidate a
+                            // consumer's report_auth_failure version for the just-served token.
+                            match store.held_detected_plan(&id, &previous) {
+                                Ok(Some(plan)) => new_record.detected_plan = Some(plan),
+                                Ok(None) => {}
+                                Err(error) => {
+                                    eprintln!(
                                 "credential vault: could not read held detected plan: {error}"
                             );
-                        }
-                    }
-                }
-
-                // Test-only crash seam: the intent is durably committed and the new
-                // tokens are staged, but the commit transaction has NOT run. The
-                // kill-9 helper parks here so a parent test can SIGKILL it at exactly
-                // this point. No-op (and absent entirely) in a release build.
-                #[cfg(feature = "kill9-test-seam")]
-                {
-                    let hook = self.pre_commit.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(hook) = hook.as_ref() {
-                        hook();
-                    }
-                }
-
-                match self.store.commit_refresh_with_previous(
-                    credential_id,
-                    record.record_version,
-                    incarnation,
-                    Some(record),
-                    new_record,
-                    github_app.as_ref().filter(|_| is_github_app),
-                ) {
-                    Ok((new_record, digest)) => {
-                        let record_version = new_record.record_version;
-                        if let ("anthropic", Some(new_oauth)) =
-                            (adapter_name, new_record.oauth.as_ref())
-                        {
-                            let http = self.http.clone();
-                            let store = self.store.clone();
-                            let id = credential_id.to_owned();
-                            let access = new_oauth.access_token.clone();
-                            let identity = new_record.identity.clone();
-                            tokio::spawn(async move {
-                                if let Ok(plan) = crate::plan_detection::fetch_anthropic_plan(
-                                    &*http,
-                                    access.expose(),
-                                )
-                                .await
-                                {
-                                    if let Err(error) = store.hold_detected_plan(
-                                        &id,
-                                        record_version,
-                                        &refresh_token_hash(access.expose()),
-                                        &identity,
-                                        &plan,
-                                    ) {
-                                        eprintln!("credential vault: could not persist held detected plan: {error}");
-                                    }
                                 }
-                            });
+                            }
                         }
-                        if let Some(permissions) = github_app_permissions.as_ref() {
-                            // Diagnostic persistence is deliberately non-fallible: a valid
-                            // token has already committed and must be served even if this
-                            // extra observation cannot be recorded.
-                            self.store.observe_github_app_permissions(
-                                credential_id,
-                                record_version,
-                                permissions,
-                            );
+
+                        // Test-only crash seam: the intent is durably committed and the new
+                        // tokens are staged, but the commit transaction has NOT run. The
+                        // kill-9 helper parks here so a parent test can SIGKILL it at exactly
+                        // this point. No-op (and absent entirely) in a release build.
+                        #[cfg(feature = "kill9-test-seam")]
+                        {
+                            let hook = pre_commit.lock().unwrap_or_else(|p| p.into_inner());
+                            if let Some(hook) = hook.as_ref() {
+                                hook();
+                            }
                         }
-                        Ok((new_record, digest))
-                    }
-                    // Lease handover fenced our commit: the new lease owner will
-                    // reconcile the still-dangling intent. Discard the staged tokens,
-                    // do NOT retry, do NOT serve them. (The staged `new_record` drops
-                    // here, scrubbing the token strings it owns.)
-                    Err(e @ StoreOpError::Fenced { .. }) => Err(EngineError::Store(e)),
-                    // The row changed while the request was in flight. The refresh
-                    // is moot; leave the current row and its intent alone.
-                    Err(StoreOpError::CasMismatch) => {
-                        Err(EngineError::Store(StoreOpError::CasMismatch))
-                    }
-                    Err(other) => Err(EngineError::Store(other)),
+
+                        // A failed fence or version check discards the staged tokens and leaves the current row alone.
+                        store.commit_refresh_with_previous(
+                            &id,
+                            version,
+                            &admitted,
+                            Some(&previous),
+                            new_record,
+                            github_app.as_ref().filter(|_| is_github_app),
+                        )
+                    })
+                    .await?;
+                let record_version = new_record.record_version;
+                if let ("anthropic", Some(new_oauth)) = (adapter_name, new_record.oauth.as_ref()) {
+                    let http = self.http.clone();
+                    let store = self.store.clone();
+                    let id = credential_id.to_owned();
+                    let access = new_oauth.access_token.clone();
+                    let identity = new_record.identity.clone();
+                    #[cfg(test)]
+                    let finished = Arc::clone(&self.plan_observation_finished);
+                    tokio::spawn(async move {
+                        if let Ok(plan) =
+                            crate::plan_detection::fetch_anthropic_plan(&*http, access.expose())
+                                .await
+                        {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Err(error) = store.hold_detected_plan(
+                                    &id,
+                                    record_version,
+                                    &refresh_token_hash(access.expose()),
+                                    &identity,
+                                    &plan,
+                                ) {
+                                    eprintln!("credential vault: could not persist held detected plan: {error}");
+                                }
+                            }).await;
+                        }
+                        #[cfg(test)]
+                        finished.notify_one();
+                    });
                 }
+                if let Some(permissions) = github_app_permissions {
+                    // Diagnostic persistence is deliberately non-fallible: a valid
+                    // token has already committed and must be served even if this
+                    // extra observation cannot be recorded.
+                    let id = credential_id.to_owned();
+                    let _ = self
+                        .blocking_store(move |store| {
+                            store.observe_github_app_permissions(&id, record_version, &permissions);
+                            Ok(())
+                        })
+                        .await;
+                }
+                Ok((new_record, digest))
             }
             // The provider's verdict applies only to the version and incarnation it
             // saw. The admin lock prevents route admin writes during an exchange;
             // the store guard also protects replacements made without that lock.
             Err(e @ (RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired)) => {
-                self.store.invalidate_in_incarnation(
-                    credential_id,
-                    record.record_version,
-                    incarnation,
-                    AuditCtx::vault(AuditOp::Invalidate),
-                    Some(AuthObservation {
-                        kind: AuthEventKind::RefreshFailed.as_str(),
-                        provider_status: None,
-                        detail: Some(e.variant_name()),
-                        reporter_source: None,
-                        principal: None,
-                    }),
-                )?;
+                let id = credential_id.to_owned();
+                let admitted = incarnation.to_owned();
+                let detail = e.variant_name();
+                self.blocking_store(move |store| {
+                    store.invalidate_in_incarnation(
+                        &id,
+                        version,
+                        &admitted,
+                        AuditCtx::vault(AuditOp::Invalidate),
+                        Some(AuthObservation {
+                            kind: AuthEventKind::RefreshFailed.as_str(),
+                            provider_status: None,
+                            detail: Some(detail),
+                            reporter_source: None,
+                            principal: None,
+                        }),
+                    )
+                })
+                .await?;
                 Err(EngineError::RefreshFailed(e))
             }
             // A transient/ambiguous failure (transport, decode, unexpected status):
@@ -711,23 +840,30 @@ impl RefreshEngine {
             // Even if reuse revokes the whole token family, its only live member is
             // the new refresh token the vault never received.
             Err(other) => {
-                self.store.clear_intent(credential_id)?;
-                // Record that the provider WAS called and refused, which nothing else
-                // does on this arm: the intent is cleared and the record left active,
-                // so a credential failing every refresh looked untouched from outside.
-                // Best-effort by construction -- a diagnostics write must never mask
-                // the provider failure being returned.
-                let _ = self.store.record_auth_event(
-                    credential_id,
-                    AuthObservation {
-                        kind: AuthEventKind::RefreshFailed.as_str(),
-                        provider_status: other.provider_status(),
-                        detail: Some(other.variant_name()),
-                        reporter_source: None,
-                        principal: None,
-                    },
-                    Some(record.record_version),
-                );
+                let id = credential_id.to_owned();
+                let provider_status = other.provider_status();
+                let detail = other.variant_name();
+                self.blocking_store(move |store| {
+                    store.clear_intent(&id)?;
+                    // Record that the provider WAS called and refused, which nothing else
+                    // does on this arm: the intent is cleared and the record left active,
+                    // so a credential failing every refresh looked untouched from outside.
+                    // Best-effort by construction -- a diagnostics write must never mask
+                    // the provider failure being returned.
+                    let _ = store.record_auth_event(
+                        &id,
+                        AuthObservation {
+                            kind: AuthEventKind::RefreshFailed.as_str(),
+                            provider_status,
+                            detail: Some(detail),
+                            reporter_source: None,
+                            principal: None,
+                        },
+                        Some(version),
+                    );
+                    Ok(())
+                })
+                .await?;
                 Err(EngineError::RefreshFailed(other))
             }
         }
@@ -737,7 +873,7 @@ impl RefreshEngine {
     /// the decision table and returns the outcomes for the audit log. Call once,
     /// before the read surface serves any `get`.
     pub async fn reconcile(&self) -> Result<Vec<Reconciliation>, EngineError> {
-        let intents = self.store.list_intents()?;
+        let intents = self.blocking_store(EncryptedStore::list_intents).await?;
         let mut outcomes = Vec::with_capacity(intents.len());
         for intent in intents {
             outcomes.push(self.reconcile_one(&intent).await?);
@@ -750,14 +886,20 @@ impl RefreshEngine {
 
         // A pending intent on the same needs_reauth version means an earlier
         // validity check did not complete. It remains eligible for reconciliation.
-        let (record, incarnation) = match self.store.get_for_reconciliation(intent) {
+        let candidate = intent.clone();
+        let (record, incarnation) = match self
+            .blocking_store(move |store| store.get_for_reconciliation(&candidate))
+            .await
+        {
             Ok(snapshot) => snapshot,
             Err(StoreOpError::NotFound)
             | Err(StoreOpError::NeedsReauth)
             | Err(StoreOpError::Quarantined)
             | Err(StoreOpError::Decrypt(_))
             | Err(StoreOpError::Corrupt(_)) => {
-                self.store.clear_intent(id)?;
+                let orphan = id.to_owned();
+                self.blocking_store(move |store| store.clear_intent(&orphan))
+                    .await?;
                 return Ok(Reconciliation::OrphanCleared {
                     credential_id: id.to_string(),
                 });
@@ -777,14 +919,18 @@ impl RefreshEngine {
                 // durable alarm entry (ReconcileHashMismatch) atomically, so this tamper
                 // signal survives in the audit chain rather than reading as a silent
                 // generic invalidate.
-                self.store.invalidate_audited(
-                    id,
-                    AuditCtx {
-                        op: AuditOp::Invalidate,
-                        actor: "vault-reconcile",
-                        alarm: Some(AlarmReason::ReconcileHashMismatch),
-                    },
-                )?;
+                let damaged = id.to_owned();
+                self.blocking_store(move |store| {
+                    store.invalidate_audited(
+                        &damaged,
+                        AuditCtx {
+                            op: AuditOp::Invalidate,
+                            actor: "vault-reconcile",
+                            alarm: Some(AlarmReason::ReconcileHashMismatch),
+                        },
+                    )
+                })
+                .await?;
                 return Ok(Reconciliation::NeedsReauth {
                     credential_id: id.to_string(),
                     reason: ReauthReason::HashMismatch,
@@ -803,44 +949,50 @@ impl RefreshEngine {
             _ => None,
         };
 
-        match check {
-            // No non-mutating check (the v1 default): INDETERMINATE ⇒ fail safe.
-            None => {
-                self.store.invalidate(id)?;
-                Ok(Reconciliation::NeedsReauth {
-                    credential_id: id.to_string(),
-                    reason: ReauthReason::NoValidityCheck,
-                })
+        let intent = intent.clone();
+        self.blocking_store(move |store| {
+            let id = intent.credential_id.as_str();
+            match check {
+                    // Without a non-mutating check, treat the result as indeterminate and fail safe.
+                None => {
+                    store.invalidate(id)?;
+                    Ok(Reconciliation::NeedsReauth {
+                        credential_id: id.to_string(),
+                        reason: ReauthReason::NoValidityCheck,
+                    })
+                }
+                // The check proved the stored grant still valid, including if an
+                // earlier check left it in needs_reauth.
+                Some(Ok(ValidityOutcome::Valid)) => {
+                    store.confirm_refresh_intent_valid(
+                        &intent,
+                        &incarnation,
+                        record.record_version,
+                    )?;
+                    Ok(Reconciliation::ClearedValid {
+                        credential_id: id.to_string(),
+                    })
+                }
+                // The check proved it invalid: needs_reauth.
+                Some(Ok(ValidityOutcome::Invalid)) => {
+                    store.invalidate(id)?;
+                    Ok(Reconciliation::NeedsReauth {
+                        credential_id: id.to_string(),
+                        reason: ReauthReason::CheckInvalid,
+                    })
+                }
+                // The check could not run (transient): mark needs_reauth to fail closed
+                // NOW, but RETAIN the intent so a later retry can re-check and restore.
+                Some(Err(_transient)) => {
+                    store.mark_needs_reauth_retaining_intent(id)?;
+                    Ok(Reconciliation::Retained {
+                        credential_id: id.to_string(),
+                    })
+                }
             }
-            // The check proved the stored grant still valid, including if an
-            // earlier check left it in needs_reauth.
-            Some(Ok(ValidityOutcome::Valid)) => {
-                self.store.confirm_refresh_intent_valid(
-                    intent,
-                    &incarnation,
-                    record.record_version,
-                )?;
-                Ok(Reconciliation::ClearedValid {
-                    credential_id: id.to_string(),
-                })
-            }
-            // The check proved it invalid: needs_reauth.
-            Some(Ok(ValidityOutcome::Invalid)) => {
-                self.store.invalidate(id)?;
-                Ok(Reconciliation::NeedsReauth {
-                    credential_id: id.to_string(),
-                    reason: ReauthReason::CheckInvalid,
-                })
-            }
-            // The check could not run (transient): mark needs_reauth to fail closed
-            // NOW, but RETAIN the intent so a later retry can re-check and restore.
-            Some(Err(_transient)) => {
-                self.store.mark_needs_reauth_retaining_intent(id)?;
-                Ok(Reconciliation::Retained {
-                    credential_id: id.to_string(),
-                })
-            }
-        }
+        })
+        .await
+        .map_err(EngineError::from)
     }
 
     /// Run an admin mutation for one credential UNDER that credential's single-flight
@@ -1040,6 +1192,124 @@ mod lock_registry_tests {
     }
 
     #[tokio::test]
+    async fn engine_snapshot_work_does_not_park_the_executor() {
+        let (_dir, engine) = engine();
+        engine
+            .store
+            .create(
+                "apikey:test",
+                &VaultRecord::new_static(
+                    crate::record::CredentialKind::ApiKey,
+                    "test",
+                    b"test-key".to_vec(),
+                    None,
+                ),
+            )
+            .unwrap();
+        let (entered, worker) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let executor = std::thread::current().id();
+        engine.set_after_snapshot_hook(move || {
+            let blocking_worker = std::thread::current().id() != executor;
+            entered.send(blocking_worker).unwrap();
+            // If the snapshot ran inline, report the failure without deadlocking
+            // the only runtime thread that can release the gate.
+            if blocking_worker {
+                released.recv().unwrap();
+            }
+        });
+        let get = tokio::spawn(async move { engine.get("apikey:test", None, false).await });
+        assert!(
+            worker.await.unwrap(),
+            "snapshot work ran on the async executor"
+        );
+        assert!(!get.is_finished());
+        release.send(()).unwrap();
+        assert_eq!(get.await.unwrap().unwrap().payload.expose(), b"test-key");
+    }
+
+    #[tokio::test]
+    async fn aborted_waiter_does_not_cancel_admitted_refresh() {
+        use crate::refresh_adapters::RefreshedTokens;
+        use tokio::sync::Notify;
+
+        struct PausedProvider {
+            entered: Notify,
+            release: Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl RefreshAdapter for PausedProvider {
+            fn name(&self) -> &str {
+                "paused-provider"
+            }
+
+            async fn refresh(
+                &self,
+                _: &OAuthCredential,
+                _: &dyn HttpTransport,
+            ) -> Result<RefreshedTokens, RefreshError> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(RefreshedTokens {
+                    access_token: "new-access".to_string().into(),
+                    refresh_token: "new-refresh".to_string().into(),
+                    expires_at_ms: Some(i64::MAX),
+                    github_app_permissions: None,
+                })
+            }
+        }
+
+        let (_dir, engine) = engine();
+        let provider = Arc::new(PausedProvider {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let engine = Arc::new(RefreshEngine::new(
+            Arc::clone(engine.store()),
+            vec![provider.clone()],
+            Arc::new(FixtureTransport::new(vec![])),
+        ));
+        let id = "oauth:cancel-test";
+        engine
+            .store
+            .create(
+                id,
+                &VaultRecord::new_oauth(
+                    "test",
+                    provider.name(),
+                    OAuthCredential {
+                        access_token: "old-access".to_string().into(),
+                        refresh_token: "old-refresh".to_string().into(),
+                        expires_at_ms: Some(0),
+                        token_url: crate::refresh_adapters::xai::TOKEN_URL.into(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: vec![],
+                    },
+                    b"old-access".to_vec(),
+                ),
+            )
+            .unwrap();
+        let reader = Arc::clone(&engine);
+        let waiter = tokio::spawn(async move { reader.get(id, None, false).await });
+        provider.entered.notified().await;
+        assert!(engine.store.read_intent(id).unwrap().is_some());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        provider.release.notify_one();
+        // The same lock serializes the refresh commit and any following admin write.
+        let _after_refresh = engine.acquire_admin_lock(id).await;
+        assert!(
+            engine.store.read_intent(id).unwrap().is_none(),
+            "aborted reader left a dangling intent"
+        );
+        let record = engine.store.get(id).unwrap();
+        assert_eq!(record.payload.expose(), b"new-access");
+        assert_eq!(record.oauth.unwrap().refresh_token.expose(), "new-refresh");
+    }
+
+    #[tokio::test]
     async fn fresh_read_does_not_wait_for_a_lock_without_an_intent() {
         let (_dir, engine) = engine();
         let record = VaultRecord::new_oauth(
@@ -1067,15 +1337,9 @@ mod lock_registry_tests {
         });
         entered_rx.await.unwrap();
         assert!(engine.store.read_intent("oauth:fresh").unwrap().is_none());
-        let read = engine.get("oauth:fresh", None, false);
-        tokio::pin!(read);
-        // A ready first poll proves this read never queued behind the held lock.
-        let served = std::future::poll_fn(|cx| match read.as_mut().poll(cx) {
-            std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
-            std::task::Poll::Pending => panic!("fresh read queued behind an unrelated lock holder"),
-        })
-        .await
-        .unwrap();
+        // The read can await its blocking snapshot, but must finish before the
+        // other operation releases this credential's single-flight lock.
+        let served = engine.get("oauth:fresh", None, false).await.unwrap();
         assert_eq!(served.payload.expose(), b"fresh-access");
         release_tx.send(()).unwrap();
         holder.await.unwrap();

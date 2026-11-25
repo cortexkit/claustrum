@@ -42,6 +42,13 @@ pub(super) struct StubAdapter {
     /// first arrival waits for a second that cannot start, and the test hangs
     /// rather than passing slowly.
     rendezvous: Option<Arc<tokio::sync::Barrier>>,
+    paused: Option<ProviderGate>,
+}
+
+#[derive(Clone, Default)]
+struct ProviderGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl StubAdapter {
@@ -53,6 +60,7 @@ impl StubAdapter {
             fail: None,
             access_token: "refreshed-access",
             rendezvous: None,
+            paused: None,
         }
     }
 }
@@ -73,6 +81,10 @@ impl RefreshAdapter for StubAdapter {
         tokio::task::yield_now().await;
         if let Some(barrier) = self.rendezvous.as_ref() {
             barrier.wait().await;
+        }
+        if let Some(gate) = self.paused.as_ref() {
+            gate.entered.notify_one();
+            gate.release.notified().await;
         }
         if let Some(reason) = self.fail {
             return match reason {
@@ -977,13 +989,12 @@ async fn a_refresh_reuses_the_open_record_and_returns_the_written_envelope_diges
     let id = "oauth:stub";
     store.create(id, &stale_oauth_record()).unwrap();
     let (engine, _) = engine(store, StubAdapter::new("stub"));
-    crate::store::CREDENTIAL_OPEN_COUNT.set(0);
     let served = engine
         .get_with_refresh_status(id, None, true)
         .await
         .unwrap();
     assert_eq!(
-        crate::store::CREDENTIAL_OPEN_COUNT.get(),
+        engine.credential_opens_for_test(),
         2,
         "only the initial and locked reads open the record"
     );
@@ -1468,9 +1479,6 @@ async fn invalid_grant_marks_needs_reauth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
-    use std::future::{poll_fn, Future};
-    use std::task::Poll;
-
     let (_root, descriptor) = tmp_descriptor();
     let store = open_store(&descriptor, 3);
     let id = "oauth:stub";
@@ -1480,6 +1488,8 @@ async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
     let incarnation = store.credential_incarnation(id).unwrap();
     let mut adapter = StubAdapter::new("stub");
     adapter.fail = Some("invalid_grant");
+    let gate = ProviderGate::default();
+    adapter.paused = Some(gate.clone());
     let (engine, calls) = engine(store, adapter);
     let engine = Arc::new(engine);
     assert_eq!(
@@ -1487,14 +1497,10 @@ async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
         b"old-access"
     );
 
-    // Poll through the durable intent write, but leave the adapter at its first yield.
-    let forced = engine.get(id, None, true);
-    tokio::pin!(forced);
-    poll_fn(|cx| {
-        assert!(forced.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
+    // The provider is entered only after its intent is durable.
+    let writer = Arc::clone(&engine);
+    let forced = tokio::spawn(async move { writer.get(id, None, true).await });
+    gate.entered.notified().await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(engine.store().read_intent(id).unwrap().is_some());
 
@@ -1511,7 +1517,8 @@ async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
             .await
     });
     snapshot_rx.await.unwrap();
-    let refusal = forced.await;
+    gate.release.notify_one();
+    let refusal = forced.await.unwrap();
     resume_tx.send(()).unwrap();
     assert!(matches!(
         refusal,
@@ -1530,9 +1537,6 @@ async fn fresh_read_observing_an_intent_rechecks_after_definitive_refusal() {
 
 #[tokio::test]
 async fn invalid_grant_cannot_invalidate_a_recreated_credential_at_the_same_version() {
-    use std::future::{poll_fn, Future};
-    use std::task::Poll;
-
     let (_root, descriptor) = tmp_descriptor();
     let store = open_store(&descriptor, 3);
     let id = "oauth:stub";
@@ -1541,15 +1545,14 @@ async fn invalid_grant_cannot_invalidate_a_recreated_credential_at_the_same_vers
     let incarnation = store.credential_incarnation(id).unwrap();
     let mut adapter = StubAdapter::new("stub");
     adapter.fail = Some("invalid_grant");
+    let gate = ProviderGate::default();
+    adapter.paused = Some(gate.clone());
     let (engine, calls) = engine(store, adapter);
+    let engine = Arc::new(engine);
 
-    let refresh = engine.get(id, None, true);
-    tokio::pin!(refresh);
-    poll_fn(|cx| {
-        assert!(refresh.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
+    let writer = Arc::clone(&engine);
+    let refresh = tokio::spawn(async move { writer.get(id, None, true).await });
+    gate.entered.notified().await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // Route admin operations hold the engine lock; this direct store caller does not.
@@ -1560,7 +1563,8 @@ async fn invalid_grant_cannot_invalidate_a_recreated_credential_at_the_same_vers
     store.create(id, &record).unwrap();
     assert_ne!(store.credential_incarnation(id).unwrap(), incarnation);
     assert_eq!(store.meta(id).unwrap().record_version, 1);
-    assert!(refresh.await.is_err());
+    gate.release.notify_one();
+    assert!(refresh.await.unwrap().is_err());
     assert_eq!(
         store.meta(id).unwrap().state,
         crate::record::RecordState::Active
@@ -2101,7 +2105,7 @@ async fn anthropic_profile_failure_keeps_refresh_green_and_old_detected_value() 
     );
     for version in 2..=4 {
         let record = engine.get("oauth:anthropic", None, true).await.unwrap();
-        http.observed.notified().await;
+        engine.wait_for_plan_observation_for_test().await;
         assert_eq!(record.record_version, version);
         assert_eq!(record.detected_plan, before.detected_plan);
         assert_eq!(
@@ -2180,12 +2184,12 @@ async fn anthropic_refresh_returns_only_committed_unmapped_plan_observations() {
             .await
             .unwrap();
         assert_eq!(first.unmapped_plan, None, "profile has not committed yet");
-        http.observed.notified().await;
+        engine.wait_for_plan_observation_for_test().await;
         let second = engine
             .get_with_refresh_status(id, None, true)
             .await
             .unwrap();
-        http.observed.notified().await;
+        engine.wait_for_plan_observation_for_test().await;
         assert_eq!(second.record.record_version, 3);
         assert_eq!(
             second.unmapped_plan,
@@ -2237,7 +2241,7 @@ async fn anthropic_profile_lands_on_next_refresh_without_extra_version_bump() {
         http.clone(),
     );
     let first = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     assert_eq!(first.record_version, 2);
     assert_eq!(
         first.detected_plan.as_ref().unwrap().tier.as_deref(),
@@ -2249,7 +2253,7 @@ async fn anthropic_profile_lands_on_next_refresh_without_extra_version_bump() {
         "observation must not write"
     );
     let second = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     assert_eq!(second.record_version, 3);
     assert_eq!(
         second.detected_plan.as_ref().unwrap().tier.as_deref(),
@@ -2284,7 +2288,7 @@ async fn anthropic_profile_survives_restart_until_next_refresh_without_extra_ver
         http.clone(),
     );
     let first = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     assert_eq!(first.record_version, 2);
     assert_eq!(first.detected_plan, anthropic_plan_record().detected_plan);
     assert_eq!(engine.store().get("oauth:anthropic").unwrap(), first);
@@ -2311,7 +2315,7 @@ async fn anthropic_profile_survives_restart_until_next_refresh_without_extra_ver
     );
     assert_eq!(engine.store().get("oauth:anthropic").unwrap(), first);
     let second = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     assert_eq!(second.record_version, 3);
     assert_eq!(
         second.detected_plan.as_ref().unwrap().tier.as_deref(),
@@ -2355,7 +2359,7 @@ async fn anthropic_held_plan_write_failure_does_not_fail_or_add_a_refresh_commit
     );
     for version in 2..=3 {
         let record = engine.get("oauth:anthropic", None, true).await.unwrap();
-        http.observed.notified().await;
+        engine.wait_for_plan_observation_for_test().await;
         assert_eq!(record.record_version, version);
         assert_eq!(record.detected_plan, anthropic_plan_record().detected_plan);
         assert_eq!(engine.store().get("oauth:anthropic").unwrap(), record);
@@ -2394,14 +2398,14 @@ async fn held_anthropic_profile_cannot_follow_an_account_replacement() {
         http.clone(),
     );
     let mut first = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     first.identity.account_id = Some("other".into());
     engine
         .store()
         .overwrite_unconditional_audited("oauth:anthropic", &first, AuditCtx::admin(AuditOp::Login))
         .unwrap();
     let next = engine.get("oauth:anthropic", None, true).await.unwrap();
-    http.observed.notified().await;
+    engine.wait_for_plan_observation_for_test().await;
     assert_eq!(next.record_version, 4);
     assert_eq!(next.detected_plan, None);
 }

@@ -6,6 +6,7 @@ use credentials_core::store::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +43,7 @@ enum Mutation<'a> {
 
 impl ReadSurface {
     pub(crate) async fn report_condition_reply(
-        &self,
+        self: &Arc<Self>,
         caller: &ScopedCaller,
         params: &ReportConditionParams,
     ) -> Value {
@@ -61,7 +62,7 @@ impl ReadSurface {
     }
 
     pub(crate) async fn clear_condition_reply(
-        &self,
+        self: &Arc<Self>,
         caller: &ScopedCaller,
         params: &ClearConditionParams,
     ) -> Value {
@@ -76,7 +77,7 @@ impl ReadSurface {
     }
 
     async fn mutate_condition(
-        &self,
+        self: &Arc<Self>,
         caller: &ScopedCaller,
         id: &str,
         version: u64,
@@ -87,18 +88,31 @@ impl ReadSurface {
             Mutation::Report(_) => "accepted",
             Mutation::Clear => "cleared",
         };
-        let store = self.store();
         // Capture the lifetime before authorization, but never expose the lookup result
         // to an unauthorized caller. The write or dispatch checks that lifetime again.
-        let copy = self.remote.remote_record(id);
-        let incarnation = store.credential_incarnation(id);
-        let (kind, name) =
-            match self.authorize_scoped_as(caller, enrollment_token, id, GrantOperation::Read) {
-                Ok(principal) => principal,
-                Err(error) => return condition_reply(field, Err(error)),
-            };
-        #[cfg(test)]
-        self.run_incarnation_hook("admitted");
+        let surface = Arc::clone(self);
+        let caller = caller.clone();
+        let credential_id = id.to_owned();
+        let token = enrollment_token.map(str::to_owned);
+        let (copy, incarnation, (kind, name)) = match tokio::task::spawn_blocking(move || {
+            let copy = surface.remote.remote_record(&credential_id);
+            let incarnation = surface.store().credential_incarnation(&credential_id);
+            let principal = surface.authorize_scoped_as(
+                &caller,
+                token.as_deref(),
+                &credential_id,
+                GrantOperation::Read,
+            )?;
+            #[cfg(test)]
+            surface.run_incarnation_hook("admitted");
+            Ok((copy, incarnation, principal))
+        })
+        .await
+        {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(error)) => return condition_reply(field, Err(error)),
+            Err(_) => return condition_reply(field, Err(ReadError::StoreError)),
+        };
 
         match copy {
             Ok(Some(copy)) => {
@@ -128,38 +142,61 @@ impl ReadSurface {
             Ok(incarnation) => incarnation,
             Err(error) => return condition_reply(field, Err(map_store_error(&error))),
         };
-        let (actor, principal) = if kind == "enrolled" {
-            (
-                format!("enrolled:{name}"),
-                AuthEventPrincipal::Enrolled(&name),
-            )
-        } else {
-            (name.clone(), AuthEventPrincipal::Reserved(&name))
+        let store = Arc::clone(self.store());
+        let id = id.to_owned();
+        let report = match mutation {
+            Mutation::Report(report) => Some((
+                report.reason.to_owned(),
+                report.provider_status,
+                report.action_url.map(str::to_owned),
+            )),
+            Mutation::Clear => None,
         };
-        let audit = AuditCtx {
-            op: match mutation {
-                Mutation::Report(_) => AuditOp::ReportCondition,
-                Mutation::Clear => AuditOp::ClearCondition,
-            },
-            actor: &actor,
-            alarm: None,
-        };
-        let result = match mutation {
-            Mutation::Report(report) => store
-                .report_condition_in_incarnation(
-                    id,
+        let result = tokio::task::spawn_blocking(move || {
+            let (actor, principal) = if kind == "enrolled" {
+                (
+                    format!("enrolled:{name}"),
+                    AuthEventPrincipal::Enrolled(&name),
+                )
+            } else {
+                (name.clone(), AuthEventPrincipal::Reserved(&name))
+            };
+            let audit = AuditCtx {
+                op: match report {
+                    Some(_) => AuditOp::ReportCondition,
+                    None => AuditOp::ClearCondition,
+                },
+                actor: &actor,
+                alarm: None,
+            };
+            match report {
+                Some((reason, provider_status, action_url)) => store
+                    .report_condition_in_incarnation(
+                        &id,
+                        version,
+                        &incarnation,
+                        ConditionReport {
+                            reason: &reason,
+                            provider_status,
+                            action_url: action_url.as_deref(),
+                        },
+                        audit,
+                        principal,
+                    )
+                    .map(|_| true),
+                None => store.clear_condition_in_incarnation(
+                    &id,
                     version,
                     &incarnation,
-                    report,
                     audit,
                     principal,
-                )
-                .map(|_| true),
-            Mutation::Clear => {
-                store.clear_condition_in_incarnation(id, version, &incarnation, audit, principal)
+                ),
             }
-        };
-        condition_reply(field, result.map_err(|error| condition_error(&error)))
+            .map_err(|error| condition_error(&error))
+        })
+        .await
+        .unwrap_or(Err(ReadError::StoreError));
+        condition_reply(field, result)
     }
 }
 

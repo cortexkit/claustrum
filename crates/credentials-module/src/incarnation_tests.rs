@@ -44,6 +44,38 @@ fn assert_not_found(answer: read_surface::GetOutcome) {
 }
 
 #[tokio::test]
+async fn open_resolution_does_not_hold_another_connections_refusal_counter() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let (surface, _admin, _store) = scoped_rig(188);
+    let caller = federation::ingress::ScopedCaller::hand_only(None);
+    let params = read_surface::OpenParams {
+        credential_id: "kem:missing".into(),
+        enc_b64: String::new(),
+        ciphertext_b64: String::new(),
+        info_b64: String::new(),
+        aad_b64: String::new(),
+        enrollment_token: None,
+    };
+    let mut resolving = std::pin::pin!(surface.open(1, &caller, &params));
+    let mut same_connection = std::pin::pin!(surface.open(1, &caller, &params));
+    let mut other_connection = std::pin::pin!(surface.open(2, &caller, &params));
+    poll_fn(|cx| {
+        // In tests, open yields with its counter locked before resolving the key.
+        assert!(resolving.as_mut().poll(cx).is_pending());
+        assert!(same_connection.as_mut().poll(cx).is_pending());
+        assert!(same_connection.as_mut().poll(cx).is_pending());
+        assert!(other_connection.as_mut().poll(cx).is_pending());
+        assert!(matches!(
+            other_connection.as_mut().poll(cx),
+            Poll::Ready(Err(read_surface::ReadError::NotFound))
+        ), "a held refusal counter blocked another connection");
+        Poll::Ready(())
+    }).await;
+}
+
+#[tokio::test]
 async fn closed_route_cannot_grow_counters_when_its_requests_resume() {
     let (surface, _admin, _store) = scoped_rig(188);
     let connection = route_connection_id(7, 1);

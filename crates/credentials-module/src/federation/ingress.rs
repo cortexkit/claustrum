@@ -1581,7 +1581,9 @@ impl HomeVault {
     ) -> Result<Value, Refusal> {
         // 1. Only a home-role vault serves forwarded secret ops; nothing else falls back
         // to local state or forwards again.
-        let self_id = self.secret_home_self()?;
+        let self_id = self
+            .forwarded_secret_store(Self::secret_home_self_on)
+            .await?;
         // 2. The member's current pairing id, and a `secret_use` member grant under it.
         // The grant is checked before anything is parsed, as for the flow ops, so a
         // member without it cannot drive the grammar or binding diagnostics below.
@@ -1591,102 +1593,141 @@ impl HomeVault {
             OP_SECRET_USE
         };
         let pairing_id = self.current_pairing(member, op, budget).await?;
-        self.require_secret_use_grant(member, &pairing_id, op)?;
-        // 3. Strict parse of the params, the aad and the sender.
-        let request: SecretUseParams = serde_json::from_value(params.clone())
-            .map_err(|error| Refusal::InvalidParams(error.to_string()))?;
-        let aad = parse_secret_aad(&request.aad)?;
-        if ssh && request.sender != "aft" {
-            return Err(Refusal::NotFound);
-        }
-        let sender = forwarded_sender(&request.sender).ok_or_else(|| {
-            Refusal::InvalidParams("sender is not aft, cerebellum or basal".into())
-        })?;
-        let call_sha256 = secret_call_sha256(&request.sender, &request.call).ok_or_else(|| {
-            Refusal::InvalidParams("call holds a number outside the exact integer range".into())
-        })?;
-        // 4. The requester's own self id must name the attested caller.
-        if aad.requester != member {
-            return Err(Refusal::SetupIncomplete(member.to_string()));
-        }
-        // 5. This home's self id and Active transfer key.
-        let Some(self_id) = self_id else {
-            return Err(Refusal::SetupIncomplete(aad.home.clone()));
-        };
-        let sender_pem = self.active_transfer_key(&self_id)?;
-        // 6. The aad must be meant for this home and bound to exactly these params.
-        let subject = match aad.secret_name.as_deref() {
-            Some(name) if ssh => name.to_owned(),
-            Some(name) => format!("secret|{name}"),
-            None => "secret-use|unaddressed".to_owned(),
-        };
-        if aad.home != self_id {
-            return Err(self.secret_refusal(&subject, member, "home_mismatch"));
-        }
-        if aad.call_sha256 != call_sha256 {
-            return Err(self.secret_refusal(&subject, member, "call_sha256_mismatch"));
-        }
-        let name_matches = match (
-            request.call.get(if ssh { "key" } else { "name" }),
-            aad.secret_name.as_deref(),
-        ) {
-            (Some(Value::String(name)), Some(bound)) => name == bound,
-            (None, None) => !ssh,
-            _ => false,
-        };
-        if !name_matches {
-            return Err(self.secret_refusal(&subject, member, "secret_name_mismatch"));
-        }
+        let caller = member.to_owned();
+        let params = params.clone();
+        let (request, aad, sender, sender_pem, self_id, subject, pairing_id) = self
+            .forwarded_secret_store(move |store| {
+                Self::require_secret_use_grant_on(store, &caller, &pairing_id, op)?;
+                // 3. Strict parse of the params, the aad and the sender.
+                let request: SecretUseParams = serde_json::from_value(params)
+                    .map_err(|error| Refusal::InvalidParams(error.to_string()))?;
+                let aad = parse_secret_aad(&request.aad)?;
+                if ssh && request.sender != "aft" {
+                    return Err(Refusal::NotFound);
+                }
+                let sender = forwarded_sender(&request.sender).ok_or_else(|| {
+                    Refusal::InvalidParams("sender is not aft, cerebellum or basal".into())
+                })?;
+                let call_sha256 =
+                    secret_call_sha256(&request.sender, &request.call).ok_or_else(|| {
+                        Refusal::InvalidParams(
+                            "call holds a number outside the exact integer range".into(),
+                        )
+                    })?;
+                // 4. The requester id in the AAD must match the calling member.
+                if aad.requester != caller {
+                    return Err(Refusal::SetupIncomplete(caller));
+                }
+                // 5. This home's self id and Active transfer key.
+                let Some(self_id) = self_id else {
+                    return Err(Refusal::SetupIncomplete(aad.home.clone()));
+                };
+                let sender_pem = Self::active_transfer_key_on(store, &self_id)?;
+                // 6. The aad must be meant for this home and bound to exactly these params.
+                let subject = match aad.secret_name.as_deref() {
+                    Some(name) if ssh => name.to_owned(),
+                    Some(name) => format!("secret|{name}"),
+                    None => "secret-use|unaddressed".to_owned(),
+                };
+                if aad.home != self_id {
+                    return Err(Self::secret_refusal_on(
+                        store,
+                        &subject,
+                        &caller,
+                        "home_mismatch",
+                    ));
+                }
+                if aad.call_sha256 != call_sha256 {
+                    return Err(Self::secret_refusal_on(
+                        store,
+                        &subject,
+                        &caller,
+                        "call_sha256_mismatch",
+                    ));
+                }
+                let name_matches = match (
+                    request.call.get(if ssh { "key" } else { "name" }),
+                    aad.secret_name.as_deref(),
+                ) {
+                    (Some(Value::String(name)), Some(bound)) => name == bound,
+                    (None, None) => !ssh,
+                    _ => false,
+                };
+                if !name_matches {
+                    return Err(Self::secret_refusal_on(
+                        store,
+                        &subject,
+                        &caller,
+                        "secret_name_mismatch",
+                    ));
+                }
+                Ok((
+                    request, aad, sender, sender_pem, self_id, subject, pairing_id,
+                ))
+            })
+            .await?;
         // 7. The requester's announced key, matching the aad's key id.
         let peer = match self.peer_key(member, budget).await {
             Ok(peer) => peer,
             Err(Refusal::SetupIncomplete(_)) => {
-                return Err(self.secret_refusal(&subject, member, "no_announced_key"));
+                return Err(self
+                    .note_secret_refusal(subject, member, "no_announced_key")
+                    .await);
             }
             Err(refusal) => return Err(refusal),
         };
         if peer.key_id != aad.recipient_key_id {
-            return Err(self.secret_refusal(&subject, member, "recipient_key_mismatch"));
+            return Err(self
+                .note_secret_refusal(subject, member, "recipient_key_mismatch")
+                .await);
         }
         // 8. The local sender's grammar, then the store's grant choice, release receipt
         // and seal, all under the asking member. The seal runs inside the store's
         // transaction, over the received aad bytes.
-        let release = ReleaseRequest {
-            requester: member,
-            pairing_id: &pairing_id,
-            nonce: &aad.nonce,
-            aad: request.aad.as_bytes(),
-        };
-        let seal = |released: &Value| -> Result<SealedRelease, Refusal> {
-            let plaintext = serde_json::to_vec(released).map_err(|_| CORRUPT)?;
-            let (enc, ciphertext) = credentials_core::kem::seal_auth(
-                sender_pem.expose(),
-                &peer.public,
-                &plaintext,
-                if ssh {
-                    SSH_SIGN_RELEASE_INFO
-                } else {
-                    SECRET_RELEASE_INFO
-                },
-                request.aad.as_bytes(),
-            )
-            .map_err(|error| seal_refusal(error, member, &self_id))?;
-            Ok(SealedRelease { enc, ciphertext })
-        };
+        let requester = member.to_owned();
         let clock = Arc::clone(&self.secret_clock);
-        let serve = if ssh {
-            crate::secret_use::serve_ssh_sign_forwarded
-        } else {
-            crate::secret_use::serve_forwarded
-        };
-        let answer = serve(
-            self.engine.store(),
-            sender,
-            &request.call,
-            &release,
-            seal,
-            move || clock(),
-        );
+        let call = request.call;
+        let was_local = !ssh && crate::secret_use::is_local_use(&call);
+        let answer = self
+            .forwarded_secret_store(move |store| {
+                let release = ReleaseRequest {
+                    requester: &requester,
+                    pairing_id: &pairing_id,
+                    nonce: &aad.nonce,
+                    aad: request.aad.as_bytes(),
+                };
+                let seal = |released: &Value| -> Result<SealedRelease, Refusal> {
+                    let plaintext = serde_json::to_vec(released).map_err(|_| CORRUPT)?;
+                    let (enc, ciphertext) = credentials_core::kem::seal_auth(
+                        sender_pem.expose(),
+                        &peer.public,
+                        &plaintext,
+                        if ssh {
+                            SSH_SIGN_RELEASE_INFO
+                        } else {
+                            SECRET_RELEASE_INFO
+                        },
+                        request.aad.as_bytes(),
+                    )
+                    .map_err(|error| seal_refusal(error, &requester, &self_id))?;
+                    Ok(SealedRelease { enc, ciphertext })
+                };
+                let serve = if ssh {
+                    crate::secret_use::serve_ssh_sign_forwarded
+                } else {
+                    crate::secret_use::serve_forwarded
+                };
+                let answer = serve(store, sender, &call, &release, seal, move || clock());
+                // Local-use handlers already decide which refusals to record.
+                // Do not add a member diagnostic to those decisions.
+                if !ssh && !was_local {
+                    if let ForwardedUseAnswer::Reply(reply) = &answer {
+                        Self::note_forwarded_refusal_on(store, &subject, &requester, reply);
+                    }
+                }
+                Ok(answer)
+            })
+            .await?;
         match answer {
             ForwardedUseAnswer::Sealed(sealed) => {
                 let b64 = base64::engine::general_purpose::STANDARD;
@@ -1696,14 +1737,7 @@ impl HomeVault {
                     "ciphertext": b64.encode(sealed.ciphertext),
                 }))
             }
-            ForwardedUseAnswer::Reply(reply) => {
-                // Local-use parsers own their diagnostics, including the deliberately
-                // silent admission, closed-params and disabled-setting refusals.
-                if !ssh && !crate::secret_use::is_local_use(&request.call) {
-                    self.note_forwarded_refusal(&subject, member, &reply);
-                }
-                Ok(reply)
-            }
+            ForwardedUseAnswer::Reply(reply) => Ok(reply),
             ForwardedUseAnswer::InvalidParams => {
                 Err(Refusal::InvalidParams("invalid secret use call".into()))
             }
@@ -1725,36 +1759,56 @@ impl HomeVault {
         params: &Value,
         budget: tokio::time::Instant,
     ) -> Result<Value, Refusal> {
-        self.secret_home_self()?;
+        self.forwarded_secret_store(Self::secret_home_self_on)
+            .await?;
         let pairing_id = self.current_pairing(member, method, budget).await?;
-        self.require_secret_use_grant(member, &pairing_id, method)?;
-        let store = self.engine.store();
-        let answer = if method == OP_SECRET_REQUEST_FLOW_APPROVAL {
-            let clock = Arc::clone(&self.secret_clock);
-            crate::secret_use::serve_flow_approval_forwarded(
-                store,
-                member,
-                &pairing_id,
-                params,
-                move || clock(),
-            )
-        } else {
-            crate::secret_use::serve_revoke_flow_grants_forwarded(
-                store,
-                member,
-                &pairing_id,
-                params,
-            )
-        };
+        let clock = Arc::clone(&self.secret_clock);
+        let requester = member.to_owned();
+        let params = params.clone();
+        let method = method.to_owned();
+        let answer = self
+            .forwarded_secret_store(move |store| {
+                Self::require_secret_use_grant_on(store, &requester, &pairing_id, &method)?;
+                let answer = if method == OP_SECRET_REQUEST_FLOW_APPROVAL {
+                    crate::secret_use::serve_flow_approval_forwarded(
+                        store,
+                        &requester,
+                        &pairing_id,
+                        &params,
+                        move || clock(),
+                    )
+                } else {
+                    crate::secret_use::serve_revoke_flow_grants_forwarded(
+                        store,
+                        &requester,
+                        &pairing_id,
+                        &params,
+                    )
+                };
+                if let UseAnswer::Reply(reply) = &answer {
+                    Self::note_forwarded_refusal_on(store, &method, &requester, reply);
+                }
+                Ok(answer)
+            })
+            .await?;
         match answer {
-            UseAnswer::Reply(reply) => {
-                self.note_forwarded_refusal(method, member, &reply);
-                Ok(reply)
-            }
+            UseAnswer::Reply(reply) => Ok(reply),
             UseAnswer::InvalidParams => Err(Refusal::InvalidParams(
                 "invalid flow secret parameters".into(),
             )),
         }
+    }
+
+    async fn forwarded_secret_store<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&EncryptedStore) -> Result<T, Refusal> + Send + 'static,
+    ) -> Result<T, Refusal> {
+        let store = Arc::clone(self.engine.store());
+        // No timeout wraps the worker: a release already admitted by the store
+        // must finish its transaction even if the caller stops waiting for it.
+        tokio::task::spawn_blocking(move || f(&store))
+            .await
+            .map_err(|_| STORE_ERROR)?
     }
 
     /// Whether this vault is the secret home, and its self id if it has one. A vault
@@ -1764,7 +1818,11 @@ impl HomeVault {
     /// `remote_setup_incomplete` naming this vault, and an unreadable store
     /// `store_error`.
     fn secret_home_self(&self) -> Result<Option<String>, Refusal> {
-        match self.engine.store().secret_home_role() {
+        Self::secret_home_self_on(self.engine.store())
+    }
+
+    fn secret_home_self_on(store: &EncryptedStore) -> Result<Option<String>, Refusal> {
+        match store.secret_home_role() {
             SecretHomeRole::Home { self_member } => Ok(self_member),
             SecretHomeRole::Single | SecretHomeRole::Remote { .. } => Err(Refusal::NotFound),
             SecretHomeRole::RemoteSetupIncomplete { self_member } => {
@@ -1783,12 +1841,17 @@ impl HomeVault {
         pairing_id: &str,
         subject: &str,
     ) -> Result<(), Refusal> {
+        Self::require_secret_use_grant_on(self.engine.store(), member, pairing_id, subject)
+    }
+
+    fn require_secret_use_grant_on(
+        store: &EncryptedStore,
+        member: &str,
+        pairing_id: &str,
+        subject: &str,
+    ) -> Result<(), Refusal> {
         // A store fault is transient here, not the authoritative `not_found`.
-        let grants = self
-            .engine
-            .store()
-            .list_member_grants()
-            .map_err(|_| STORE_ERROR)?;
+        let grants = store.list_member_grants().map_err(|_| STORE_ERROR)?;
         if grants.iter().any(|grant| {
             grant.member_id == member
                 && grant.operation == MemberGrantOperation::SecretUse
@@ -1797,14 +1860,40 @@ impl HomeVault {
         }) {
             Ok(())
         } else {
-            Err(self.secret_refusal(subject, member, "no_secret_use_grant"))
+            Err(Self::secret_refusal_on(
+                store,
+                subject,
+                member,
+                "no_secret_use_grant",
+            ))
         }
     }
 
     /// Record a forwarded secret refusal naming the member, and answer the uniform
     /// `not_found`.
-    fn secret_refusal(&self, subject: &str, member: &str, reason: &'static str) -> Refusal {
-        self.note_secret_event(subject, member, reason);
+    fn secret_refusal_on(
+        store: &EncryptedStore,
+        subject: &str,
+        member: &str,
+        reason: &'static str,
+    ) -> Refusal {
+        Self::note_secret_event_on(store, subject, member, reason);
+        Refusal::NotFound
+    }
+
+    async fn note_secret_refusal(
+        &self,
+        subject: String,
+        member: &str,
+        reason: &'static str,
+    ) -> Refusal {
+        let member = member.to_owned();
+        let _ = self
+            .forwarded_secret_store(move |store| {
+                Self::note_secret_event_on(store, &subject, &member, reason);
+                Ok(())
+            })
+            .await;
         Refusal::NotFound
     }
 
@@ -1814,7 +1903,12 @@ impl HomeVault {
     /// decided nothing and is not recorded; neither are releases and approval requests,
     /// whose audit rows and pending requests already carry the member, and which would
     /// otherwise push refusal rows out of the trimmed diagnostics table.
-    fn note_forwarded_refusal(&self, subject: &str, member: &str, reply: &Value) {
+    fn note_forwarded_refusal_on(
+        store: &EncryptedStore,
+        subject: &str,
+        member: &str,
+        reply: &Value,
+    ) {
         let code = reply
             .get("error")
             .and_then(|error| error.get("code"))
@@ -1826,17 +1920,15 @@ impl HomeVault {
             Some("pending_limit") => "forwarded_pending_limit",
             _ => return,
         };
-        self.note_secret_event(subject, member, reason);
+        Self::note_secret_event_on(store, subject, member, reason);
     }
 
     /// One `secret_use_refusal` diagnostic row naming the member, under the forwarded
     /// call's own subject. Best effort, like [`Self::note_refusal`]. It goes through the
     /// secret writer: the generic credential writer files any `secret|<name>` subject
     /// under `credential.invalid_id`, which would hide which secret was refused.
-    fn note_secret_event(&self, subject: &str, member: &str, reason: &str) {
-        self.engine
-            .store()
-            .record_member_secret_refusal(member, subject, reason);
+    fn note_secret_event_on(store: &EncryptedStore, subject: &str, member: &str, reason: &str) {
+        store.record_member_secret_refusal(member, subject, reason);
     }
 
     /// Step 2: the member's current pairing id from callosum.
@@ -1893,7 +1985,14 @@ impl HomeVault {
     /// Step 5's transfer key: the stored `kem:vault-transfer:1`, readable (so `Active`)
     /// and a KEM key. Anything else is a setup fault of this home.
     fn active_transfer_key(&self, self_id: &str) -> Result<Secret<String>, Refusal> {
-        match super::transfer::transfer_key(self.engine.store()) {
+        Self::active_transfer_key_on(self.engine.store(), self_id)
+    }
+
+    fn active_transfer_key_on(
+        store: &EncryptedStore,
+        self_id: &str,
+    ) -> Result<Secret<String>, Refusal> {
+        match super::transfer::transfer_key(store) {
             Ok(Some(key)) => Ok(key.pem),
             Ok(None) => Err(Refusal::SetupIncomplete(self_id.to_string())),
             Err(_) => Err(STORE_ERROR),

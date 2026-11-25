@@ -116,11 +116,15 @@ impl GitHubAppAdmin {
 
         // There is no local slot record to roll back. If audit fails, don't hand
         // out the URL; the pending slot will expire at the relay.
-        if engine
-            .store()
-            .audit_github_app_relay_slot_open(&reply.slot, ROUTE_ADMIN_ACTOR)
-            .is_err()
-        {
+        let store = Arc::clone(engine.store());
+        let slot = reply.slot.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(
+                move || store.audit_github_app_relay_slot_open(&slot, ROUTE_ADMIN_ACTOR)
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
             return AdminOutcome::Refused(
                 "audit_write_failed/permanent: could not record the confirmed relay slot".into(),
             );
@@ -273,25 +277,35 @@ impl GitHubAppAdmin {
         app: Conversion,
     ) -> AdminOutcome {
         let id = format!("github_app:{}", app.slug);
-        let unsaved = |cause| unsaved(Some(&app.slug), Some(app.id), cause);
+        let slug = app.slug.clone();
+        let app_id = app.id;
+        let unsaved = |cause| unsaved(Some(&slug), Some(app_id), cause);
         // GitHub will not return the key again. Acquire an immediately available
         // lock even at the deadline and finish the local write once locked.
-        let Ok(_lock) = timeout_at(deadline, engine.acquire_admin_lock(&id)).await else {
+        let Ok(lock) = timeout_at(deadline, engine.acquire_admin_lock(&id)).await else {
             return unsaved("busy");
         };
-        let relay = slot.zip(app.webhook_secret.as_ref());
-        let material = GitHubAppCreation {
-            slug: &app.slug,
-            app_id: app.id,
-            agent,
-            pem: &app.pem,
-            client_id: &app.client_id,
-            relay,
+        let agent = agent.to_owned();
+        let relay_slot = slot.map(str::to_owned);
+        let Ok((_lock, (app, stored))) = app_store_task(engine, lock, move |store| {
+            let stored = store.create_github_app_audited(
+                GitHubAppCreation {
+                    slug: &app.slug,
+                    app_id: app.id,
+                    agent: &agent,
+                    pem: &app.pem,
+                    client_id: &app.client_id,
+                    relay: relay_slot.as_deref().zip(app.webhook_secret.as_ref()),
+                },
+                ROUTE_ADMIN_ACTOR,
+            );
+            (app, stored)
+        })
+        .await
+        else {
+            return unsaved("store_failed");
         };
-        if let Err(error) = engine
-            .store()
-            .create_github_app_audited(material, ROUTE_ADMIN_ACTOR)
-        {
+        if let Err(error) = stored {
             return unsaved(match error {
                 StoreOpError::AlreadyExists => "github_app_exists",
                 StoreOpError::Encode(message)
@@ -310,7 +324,7 @@ impl GitHubAppAdmin {
             "app_id": app_id,
             "install_url": format!("{GITHUB_APPS_BASE}/{}/installations/new", app.slug),
         });
-        if let Some((slot, secret)) = relay {
+        if let Some((slot, secret)) = slot.zip(app.webhook_secret.as_ref()) {
             let put = self.put_relay_slot(engine, http, deadline, slot, &app_id, secret);
             if let Err(failure) = timeout_at(deadline, put)
                 .await
@@ -371,21 +385,21 @@ impl GitHubAppAdmin {
         if Instant::now() >= deadline {
             return Err(RelayFailure::Unavailable.refusal());
         }
-        let relay = engine
-            .store()
-            .github_app_relay(slug)
-            .map_err(|reason| match reason {
-                GitHubAppRelayError::NotFound => {
-                    refusal("not_found/permanent: GitHub App not found")
-                }
-                GitHubAppRelayError::Inactive => {
-                    refusal("github_app_inactive/permanent: GitHub App is not active")
-                }
-                GitHubAppRelayError::NoRelay => {
-                    refusal("github_app_no_relay/permanent: GitHub App has no managed relay slot")
-                }
-                GitHubAppRelayError::Store(_) => RelayFailure::Unavailable.refusal(),
-            })?;
+        let slug = slug.to_owned();
+        let (lock, relay) =
+            app_store_task(engine, lock, move |store| store.github_app_relay(&slug))
+                .await
+                .map_err(|_| RelayFailure::Unavailable.refusal())?;
+        let relay = relay.map_err(|reason| match reason {
+            GitHubAppRelayError::NotFound => refusal("not_found/permanent: GitHub App not found"),
+            GitHubAppRelayError::Inactive => {
+                refusal("github_app_inactive/permanent: GitHub App is not active")
+            }
+            GitHubAppRelayError::NoRelay => {
+                refusal("github_app_no_relay/permanent: GitHub App has no managed relay slot")
+            }
+            GitHubAppRelayError::Store(_) => RelayFailure::Unavailable.refusal(),
+        })?;
         if !valid_relay_slot(&relay.slot) {
             return Err(RelayFailure::ReplyInvalid.refusal());
         }
@@ -397,7 +411,7 @@ impl GitHubAppAdmin {
         engine: &Arc<RefreshEngine>,
         slug: &str,
     ) -> AdminOutcome {
-        let (deadline, _lock, relay) = match self.locked_relay(engine, slug).await {
+        let (deadline, lock, relay) = match self.locked_relay(engine, slug).await {
             Ok(state) => state,
             Err(refused) => return refused,
         };
@@ -412,11 +426,12 @@ impl GitHubAppAdmin {
         {
             return failure.refusal();
         }
-        if engine
-            .store()
-            .audit_github_app_relay_retry(&relay, ROUTE_ADMIN_ACTOR)
-            .is_err()
-        {
+        if !matches!(
+            app_store_task(engine, lock, move |store| store
+                .audit_github_app_relay_retry(&relay, ROUTE_ADMIN_ACTOR))
+            .await,
+            Ok((_, Ok(())))
+        ) {
             return refusal(
                 "audit_write_failed/permanent: could not record the confirmed relay retry",
             );
@@ -429,14 +444,13 @@ impl GitHubAppAdmin {
         engine: &Arc<RefreshEngine>,
         slug: &str,
     ) -> AdminOutcome {
-        let (deadline, _lock, mut relay) = match self.locked_relay(engine, slug).await {
+        let (deadline, mut lock, mut relay) = match self.locked_relay(engine, slug).await {
             Ok(state) => state,
             Err(refused) => return refused,
         };
         if Instant::now() >= deadline {
             return RelayFailure::Unavailable.refusal();
         }
-        let store = engine.store();
         // An unconfirmed candidate may already be in use at the relay if the reply
         // or the local confirmation was lost. Always send the same secret again.
         let repeated_put = relay.pending().is_some() && !relay.pending_put_confirmed();
@@ -457,16 +471,12 @@ impl GitHubAppAdmin {
                     })
                     .collect(),
             );
-            if store
-                .rotate_github_app_webhook_audited(
-                    &mut relay,
-                    WebhookRotation::Stage(secret),
-                    ROUTE_ADMIN_ACTOR,
-                )
-                .is_err()
-            {
+            let Some(state) =
+                rotate_relay(engine, lock, relay, WebhookRotation::Stage(secret)).await
+            else {
                 return refusal(HOOK_UPDATE_FAILED);
-            }
+            };
+            (lock, relay) = state;
         }
         if !relay.pending_put_confirmed() {
             let Some(pending) = relay.pending() else {
@@ -478,30 +488,19 @@ impl GitHubAppAdmin {
             {
                 return failure.refusal();
             }
-            if store
-                .rotate_github_app_webhook_audited(
-                    &mut relay,
-                    WebhookRotation::ConfirmPut,
-                    ROUTE_ADMIN_ACTOR,
-                )
-                .is_err()
-            {
+            let Some(state) = rotate_relay(engine, lock, relay, WebhookRotation::ConfirmPut).await
+            else {
                 return refusal(HOOK_UPDATE_FAILED);
-            }
+            };
+            (lock, relay) = state;
         }
-        let Some(pending) = relay.pending() else {
+        let Some((lock, relay)) = self.patch_github_hook(engine, deadline, lock, relay).await
+        else {
             return refusal(HOOK_UPDATE_FAILED);
         };
-        if !self
-            .patch_github_hook(engine, deadline, &relay, pending)
+        if rotate_relay(engine, lock, relay, WebhookRotation::Promote)
             .await
-            || store
-                .rotate_github_app_webhook_audited(
-                    &mut relay,
-                    WebhookRotation::Promote,
-                    ROUTE_ADMIN_ACTOR,
-                )
-                .is_err()
+            .is_none()
         {
             return refusal(HOOK_UPDATE_FAILED);
         }
@@ -535,32 +534,41 @@ impl GitHubAppAdmin {
         &self,
         engine: &RefreshEngine,
         deadline: Instant,
-        relay: &GitHubAppRelay,
-        pending: &SecretString,
-    ) -> bool {
+        lock: AppLock,
+        relay: GitHubAppRelay,
+    ) -> Option<(AppLock, GitHubAppRelay)> {
         if Instant::now() >= deadline {
-            return false;
+            return None;
         }
-        let Ok(oauth) = engine.store().github_app_relay_oauth(relay) else {
-            return false;
-        };
-        let now = self.clock.map(|ms| ms / 1000).unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-        });
-        let Ok(jwt) = GithubAppAdapter::build_app_jwt(&oauth, now).map(SecretString::new) else {
-            return false;
-        };
-        let Ok(http) = self.http() else {
-            return false;
-        };
+        let clock = self.clock;
+        let (lock, (relay, jwt)) = timeout_at(
+            deadline,
+            app_store_task(engine, lock, move |store| {
+                let jwt = store.github_app_relay_oauth(&relay).ok().and_then(|oauth| {
+                    let now = clock.map(|ms| ms / 1000).unwrap_or_else(|| {
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64
+                    });
+                    GithubAppAdapter::build_app_jwt(&oauth, now)
+                        .ok()
+                        .map(SecretString::new)
+                });
+                (relay, jwt)
+            }),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let jwt = jwt?;
+        let pending = relay.pending()?;
+        let http = self.http().ok()?;
         let bearer = SecretString::new(format!("Bearer {}", jwt.expose()));
         let body = serde_json::to_vec(&HookPatch { secret: pending })
             .expect("a string field always serializes");
         if Instant::now() >= deadline {
-            return false;
+            return None;
         }
         let reply = timeout_at(
             deadline,
@@ -576,8 +584,40 @@ impl GitHubAppAdmin {
             ),
         )
         .await;
-        reply.is_ok_and(|result| result.is_ok_and(confirmed_hook_patch))
+        reply
+            .is_ok_and(|result| result.is_ok_and(confirmed_hook_patch))
+            .then_some((lock, relay))
     }
+}
+
+type AppLock = tokio::sync::OwnedMutexGuard<()>;
+
+async fn app_store_task<T: Send + 'static>(
+    engine: &RefreshEngine,
+    lock: AppLock,
+    action: impl FnOnce(&credentials_core::store::EncryptedStore) -> T + Send + 'static,
+) -> Result<(AppLock, T), tokio::task::JoinError> {
+    let store = Arc::clone(engine.store());
+    // Retain the App lock on the worker until the store operation has finished,
+    // even if the caller no longer waits for the result.
+    tokio::task::spawn_blocking(move || (lock, action(&store))).await
+}
+
+async fn rotate_relay(
+    engine: &RefreshEngine,
+    lock: AppLock,
+    mut relay: GitHubAppRelay,
+    rotation: WebhookRotation,
+) -> Option<(AppLock, GitHubAppRelay)> {
+    let (lock, (relay, result)) = app_store_task(engine, lock, move |store| {
+        let result =
+            store.rotate_github_app_webhook_audited(&mut relay, rotation, ROUTE_ADMIN_ACTOR);
+        (relay, result)
+    })
+    .await
+    .ok()?;
+    result.ok()?;
+    Some((lock, relay))
 }
 
 #[derive(Serialize)]

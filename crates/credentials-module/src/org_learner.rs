@@ -66,7 +66,9 @@ impl Learner {
     }
 
     async fn pass(&mut self) -> Option<Instant> {
-        let Ok(targets) = self.store.org_probe_targets() else {
+        let store = Arc::clone(&self.store);
+        let Ok(Ok(targets)) = tokio::task::spawn_blocking(move || store.org_probe_targets()).await
+        else {
             return Some(Instant::now() + INITIAL_RETRY);
         };
         // Keep backoff only for candidates still missing an org at the same version
@@ -106,9 +108,11 @@ impl Learner {
         provider: &ApiKeyProvider,
         header: &str,
     ) -> Result<(), (Option<u16>, &'static str)> {
-        let Some(key) = self
-            .store
-            .org_probe_key(target)
+        let store = Arc::clone(&self.store);
+        let candidate = target.clone();
+        let Some(key) = tokio::task::spawn_blocking(move || store.org_probe_key(&candidate))
+            .await
+            .map_err(|_| (None, "store_read"))?
             .map_err(|_| (None, "store_read"))?
         else {
             return Ok(());
@@ -131,9 +135,15 @@ impl Learner {
             .ok()
             .filter(|value| is_valid_org_id(value))
             .ok_or((status, "invalid_header"))?;
-        self.store
-            .learn_org(target, org_id, crate::read_surface::now_ms())
-            .map_err(|_| (status, "store_write"))?;
+        let store = Arc::clone(&self.store);
+        let target = target.clone();
+        let org_id = org_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            store.learn_org(&target, &org_id, crate::read_surface::now_ms())
+        })
+        .await
+        .map_err(|_| (status, "store_write"))?
+        .map_err(|_| (status, "store_write"))?;
         Ok(())
     }
 }

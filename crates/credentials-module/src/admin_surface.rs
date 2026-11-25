@@ -164,6 +164,15 @@ impl AdminSurface {
         params: &serde_json::Value,
         actor: &str,
     ) -> Result<serde_json::Value, credentials_core::agent_secret::SecretError> {
+        Self::permissions_on(self.engine.store(), method, params, actor)
+    }
+
+    fn permissions_on(
+        store: &EncryptedStore,
+        method: &str,
+        params: &serde_json::Value,
+        actor: &str,
+    ) -> Result<serde_json::Value, credentials_core::agent_secret::SecretError> {
         let object = params
             .as_object()
             .ok_or(credentials_core::agent_secret::SecretError::InvalidParams)?;
@@ -175,7 +184,7 @@ impl AdminSurface {
                 {
                     return Err(credentials_core::agent_secret::SecretError::InvalidParams);
                 }
-                self.engine.store().secret_permissions_list(
+                store.secret_permissions_list(
                     params.get("agent_id").and_then(serde_json::Value::as_str),
                     now,
                 )
@@ -188,9 +197,7 @@ impl AdminSurface {
                     .get("id")
                     .and_then(serde_json::Value::as_str)
                     .ok_or(credentials_core::agent_secret::SecretError::InvalidParams)?;
-                self.engine
-                    .store()
-                    .secret_permissions_revoke(id, actor, now)
+                store.secret_permissions_revoke(id, actor, now)
             }
             _ => return Err(credentials_core::agent_secret::SecretError::InvalidParams),
         };
@@ -708,9 +715,15 @@ impl AdminSurface {
                 let object = body.as_object_mut().expect("object has op");
                 object.remove("op");
                 object.remove("v");
-                return match self.serve_permissions(&method, &body, ROUTE_ADMIN_ACTOR) {
-                    Ok(v) => AdminOutcome::Ok(v),
-                    Err(_) => AdminOutcome::Refused("invalid permissions params".into()),
+                let store = Arc::clone(self.engine.store());
+                return match tokio::task::spawn_blocking(move || {
+                    Self::permissions_on(&store, &method, &body, ROUTE_ADMIN_ACTOR)
+                })
+                .await
+                {
+                    Ok(Ok(v)) => AdminOutcome::Ok(v),
+                    Ok(Err(_)) => AdminOutcome::Refused("invalid permissions params".into()),
+                    Err(_) => store_err(StoreOpError::Store("permissions task failed".into())),
                 };
             }
         }
@@ -764,17 +777,19 @@ impl AdminSurface {
         // engine's per-credential single-flight lock (same lock a refresh holds), so
         // an admin write and a refresh for one credential are strictly serialized;
         // revoke-by-handle names no credential, so it commits directly.
-        let result = match op.lock_id() {
-            Some(_) => {
-                let lock_id = op.lock_id().expect("Some checked").to_string();
-                self.engine
-                    .with_admin_lock(&lock_id, move |store| {
-                        credentials_core::admin_ops::apply(store, op, ROUTE_ADMIN_ACTOR)
-                    })
-                    .await
-            }
-            None => credentials_core::admin_ops::apply(self.engine.store(), op, ROUTE_ADMIN_ACTOR),
+        let guard = match op.lock_id() {
+            Some(id) => Some(self.engine.acquire_admin_lock(id).await),
+            None => None,
         };
+        let store = Arc::clone(self.engine.store());
+        let result = tokio::task::spawn_blocking(move || {
+            // The worker owns the admission guard: a dropped reply cannot unlock
+            // the credential before this mutation commits.
+            let _guard = guard;
+            credentials_core::admin_ops::apply(&store, op, ROUTE_ADMIN_ACTOR)
+        })
+        .await
+        .unwrap_or_else(|_| Err(StoreOpError::Store("admin store task failed".into())));
         match result {
             Ok(v) => {
                 if v.get("declared_grants_incomplete")

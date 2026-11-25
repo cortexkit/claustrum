@@ -347,18 +347,38 @@ impl EncryptedStore {
         };
         let skipped_count = i64::try_from(skipped_count)
             .map_err(|_| StoreOpError::Store("skipped count overflow".into()))?;
+        let unchanged = |conn: &rusqlite::Connection| {
+            declaration_unchanged(conn, module_id, declaration_digest, &grants_json)
+        };
+        if self.store.with_read(|conn| {
+            // Skip the writer only when this store's epoch matches the persisted fence.
+            // A fence mismatch goes through the writer to claim the epoch or latch
+            // a newer holder exactly as a changed declaration would.
+            let has_fence: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'cortexkit_fence')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_fence {
+                return Ok(false);
+            }
+            let epoch = conn
+                .query_row(
+                    "SELECT epoch FROM cortexkit_fence WHERE id = 0",
+                    [],
+                    |row| row.get::<_, i64>(0).map(|epoch| epoch as u64),
+                )
+                .optional()?;
+            if epoch != Some(self.store.epoch()) {
+                return Ok(false);
+            }
+            unchanged(conn)
+        })? {
+            return Ok(false);
+        }
         Ok(self.fenced_write(|tx| {
-            let previous: Option<(Option<String>, String)> = tx.query_row(
-                "SELECT declaration_digest, grants_json FROM declared_grant_sets WHERE module_id = ?1",
-                [module_id], |row| Ok((row.get(0)?, row.get(1)?)),
-            ).optional()?;
-            if declaration_digest.is_none() {
-                if previous.as_ref().is_none_or(|(digest, _)| digest.is_none()) {
-                    return Ok(false);
-                }
-            } else if previous.as_ref().is_some_and(|(digest, json)| {
-                digest.as_deref() == declaration_digest && json == &grants_json
-            }) {
+            // Another bind may have recorded the same declaration after the read.
+            if unchanged(tx)? {
                 return Ok(false);
             }
             tx.execute(
@@ -384,6 +404,27 @@ impl EncryptedStore {
             .with_conn(declared_sets_from_conn)
             .map_err(StoreOpError::from)
     }
+}
+
+fn declaration_unchanged(
+    conn: &rusqlite::Connection,
+    module_id: &str,
+    declaration_digest: Option<&str>,
+    grants_json: &str,
+) -> rusqlite::Result<bool> {
+    let previous: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT declaration_digest, grants_json FROM declared_grant_sets WHERE module_id = ?1",
+            [module_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match declaration_digest {
+        None => previous.is_none_or(|(digest, _)| digest.is_none()),
+        Some(incoming) => previous.is_some_and(|(digest, json)| {
+            digest.as_deref() == Some(incoming) && json == grants_json
+        }),
+    })
 }
 
 fn declared_sets_from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<DeclaredGrantListing> {

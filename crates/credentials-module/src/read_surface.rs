@@ -2236,7 +2236,7 @@ pub struct ReadSurface {
     /// vault). Every op that can see a remote id asks it first.
     remote: Arc<crate::federation::RemoteReader>,
     limiter: Mutex<FetchLimiter>,
-    open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
+    open_refusals: std::sync::Mutex<HashMap<u64, OpenRefusalEntry>>,
     live_routes: OnceLock<Arc<crate::RouteEpochs>>,
     // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
     // the daemon's health refresher). The subc health.check reply MUST be cheap and
@@ -2848,7 +2848,7 @@ impl ReadSurface {
             usage: Arc::new(crate::usage_forwarder::UsageForwarder::default()),
             remote,
             limiter: Mutex::new(limiter),
-            open_refusals: Mutex::new(HashMap::new()),
+            open_refusals: std::sync::Mutex::new(HashMap::new()),
             live_routes: OnceLock::new(),
             health: std::sync::Mutex::new(initial),
             last_refresh: std::sync::Mutex::new(Instant::now()),
@@ -3092,17 +3092,12 @@ impl ReadSurface {
         {
             return Err(ReadError::SignPayloadTooLarge);
         }
-        // Hold the refusal lock through resolution and counting so pipelined probes
-        // cannot all pass the threshold before any refusal is recorded.
-        let mut counters = self.open_refusals.lock().await;
-        {
-            if let Some((start, count)) = counters.get(&connection_id).copied() {
-                if start.elapsed() >= OPEN_REFUSAL_WINDOW {
-                    counters.remove(&connection_id);
-                } else if count >= OPEN_REFUSAL_THRESHOLD {
-                    return Err(ReadError::OpenRateLimited);
-                }
-            }
+        // Hold only this connection's lock through resolution and counting, so
+        // pipelined probes cannot all pass the threshold before a refusal is recorded.
+        let entry = self.open_refusal_entry(connection_id);
+        let mut counter = entry.lock().await;
+        if open_refusal_limited(&mut counter) {
+            return Err(ReadError::OpenRateLimited);
         }
         // Let concurrent test probes reach the gap that a split check/count would expose.
         #[cfg(test)]
@@ -3120,12 +3115,12 @@ impl ReadSurface {
         {
             Ok(resolved) => resolved,
             Err(ReadError::NotFound) => {
-                self.count_open_refusal(&mut counters, connection_id);
+                self.count_open_refusal(&mut counter, connection_id);
                 return Err(ReadError::NotFound);
             }
             Err(error) => return Err(error),
         };
-        drop(counters);
+        drop(counter);
         #[cfg(test)]
         self.run_incarnation_hook("admitted");
         let credential_id = resolved.credential_id;
@@ -3233,16 +3228,13 @@ impl ReadSurface {
 
         // The same per-connection counter `open` uses, held through resolution so
         // pipelined probes cannot all pass the gate before any refusal is counted.
-        let mut counters = self.open_refusals.lock().await;
-        if let Some((start, count)) = counters.get(&connection_id).copied() {
-            if start.elapsed() >= OPEN_REFUSAL_WINDOW {
-                counters.remove(&connection_id);
-            } else if count >= OPEN_REFUSAL_THRESHOLD {
-                return Err(ReadError::SealRateLimited);
-            }
+        let entry = self.open_refusal_entry(connection_id);
+        let mut counter = entry.lock().await;
+        if open_refusal_limited(&mut counter) {
+            return Err(ReadError::SealRateLimited);
         }
-        let refuse = |counters: &mut HashMap<u64, (Instant, usize)>| {
-            self.count_open_refusal(counters, connection_id);
+        let refuse = |counter: &mut Option<(Instant, usize)>| {
+            self.count_open_refusal(counter, connection_id);
             ReadError::NotFound
         };
         let incarnation = self
@@ -3256,7 +3248,7 @@ impl ReadSurface {
             GrantOperation::Seal,
         ) {
             Ok(resolved) => resolved,
-            Err(_) => return Err(refuse(&mut counters)),
+            Err(_) => return Err(refuse(&mut counter)),
         };
         let credential_id = params.credential_id.as_str();
         let snapshot = match incarnation.and_then(|incarnation| {
@@ -3271,7 +3263,7 @@ impl ReadSurface {
                     _ => ScopedReadRefusal::StoreError,
                 };
                 self.record_scoped_refusal(principal, credential_id, refusal);
-                return Err(refuse(&mut counters));
+                return Err(refuse(&mut counter));
             }
         };
         let record = snapshot.record;
@@ -3279,9 +3271,9 @@ impl ReadSurface {
         // exactly like no grant at all.
         if record.kind != credentials_core::record::CredentialKind::KemKey {
             self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::WrongKind);
-            return Err(refuse(&mut counters));
+            return Err(refuse(&mut counter));
         }
-        drop(counters);
+        drop(counter);
 
         // A record typed as a KEM key whose bytes are not one is vault damage, reported
         // as `corrupt` exactly as `sign` reports an unusable signing key.
@@ -5019,13 +5011,20 @@ impl ReadSurface {
             .is_none_or(|routes| routes.matches(connection_id as u16, (connection_id >> 16) as u32))
     }
 
-    fn count_open_refusal(
-        &self,
-        counters: &mut HashMap<u64, (Instant, usize)>,
-        connection_id: u64,
-    ) {
+    fn open_refusal_entry(&self, connection_id: u64) -> OpenRefusalEntry {
+        let mut entries = self.open_refusals.lock().unwrap_or_else(|p| p.into_inner());
+        // A late task can still resolve under its captured caller, but must not
+        // recreate a map entry once teardown has retired its route epoch.
         if self.route_counters_live(connection_id) {
-            let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
+            Arc::clone(entries.entry(connection_id).or_default())
+        } else {
+            OpenRefusalEntry::default()
+        }
+    }
+
+    fn count_open_refusal(&self, counter: &mut Option<(Instant, usize)>, connection_id: u64) {
+        if self.route_counters_live(connection_id) {
+            let entry = counter.get_or_insert_with(|| (Instant::now(), 0));
             if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
                 *entry = (Instant::now(), 0);
             }
@@ -5035,31 +5034,61 @@ impl ReadSurface {
 
     #[cfg(test)]
     pub(crate) async fn route_counter_presence(&self, connection_id: u64) -> (bool, bool) {
-        let has_open = self.open_refusals.lock().await.contains_key(&connection_id);
+        let has_open = match self.find_open_refusal_entry(connection_id) {
+            Some(entry) => entry.lock().await.is_some(),
+            None => false,
+        };
         let has_fetch = self.limiter.lock().await.has_connection(connection_id);
         (has_fetch, has_open)
     }
 
     #[cfg(test)]
     pub async fn expire_open_window_for_test(&self, connection_id: u64) {
-        if let Some((start, _)) = self.open_refusals.lock().await.get_mut(&connection_id) {
-            *start = Instant::now() - OPEN_REFUSAL_WINDOW;
+        if let Some(entry) = self.find_open_refusal_entry(connection_id) {
+            if let Some((start, _)) = &mut *entry.lock().await {
+                *start = Instant::now() - OPEN_REFUSAL_WINDOW;
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn find_open_refusal_entry(&self, connection_id: u64) -> Option<OpenRefusalEntry> {
+        self.open_refusals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&connection_id)
+            .cloned()
     }
 
     /// Clear all old epoch keys before acknowledging a reused route channel.
     pub async fn drop_channel(&self, channel: u16) {
         self.open_refusals
             .lock()
-            .await
+            .unwrap_or_else(|p| p.into_inner())
             .retain(|id, _| *id as u16 != channel);
         self.limiter.lock().await.drop_channel(channel);
     }
 
     /// Forget a closed connection's limiter state.
     pub async fn drop_connection(&self, connection_id: u64) {
-        self.open_refusals.lock().await.remove(&connection_id);
+        self.open_refusals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&connection_id);
         self.limiter.lock().await.drop_connection(connection_id);
+    }
+}
+
+type OpenRefusalEntry = Arc<Mutex<Option<(Instant, usize)>>>;
+
+fn open_refusal_limited(counter: &mut Option<(Instant, usize)>) -> bool {
+    match *counter {
+        Some((start, _)) if start.elapsed() >= OPEN_REFUSAL_WINDOW => {
+            *counter = None;
+            false
+        }
+        Some((_, count)) => count >= OPEN_REFUSAL_THRESHOLD,
+        None => false,
     }
 }
 

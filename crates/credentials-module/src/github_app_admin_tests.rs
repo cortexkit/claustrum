@@ -1881,12 +1881,14 @@ async fn github_app_retry_keeps_refresh_and_remove_behind_the_confirmed_put() {
         _ = rig.http.pending.notified() => {},
         _ = &mut retry => panic!("retry finished before the PUT was released"),
     }
+    let (queued, waiting) = tokio::sync::oneshot::channel();
+    rig.engine
+        .set_before_flight_wait_hook_for_test(move || queued.send(()).unwrap());
     let refresh = rig.engine.get(MANAGED_ID, None, true);
     tokio::pin!(refresh);
     tokio::select! {
-        biased;
         _ = &mut refresh => panic!("refresh did not wait for the retry's App lock"),
-        _ = std::future::ready(()) => {},
+        result = waiting => result.unwrap(),
     }
     let remove = rig.call(r#"{"op":"admin.remove","v":1,"id":"github_app:managed-app"}"#);
     tokio::pin!(remove);

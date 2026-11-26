@@ -1,3 +1,4 @@
 {
-  "anthropic-platform": "anthropic"
+  "anthropic-platform": "anthropic",
+  "openai-platform": "openai"
 }

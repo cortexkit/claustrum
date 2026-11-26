@@ -130,6 +130,33 @@ mod scoped_watch {
         }
     }
 
+    #[tokio::test]
+    async fn scoped_list_keeps_openai_api_key_route_distinct_from_its_vendor() {
+        let mut rig = Rig::new();
+        let id = "apikey:openai:work";
+        let record = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"fixture-key".to_vec(), None);
+        rig.store.create(id, &record).unwrap();
+        let defaults = credentials_core::catalog::default_provider_ids(id)
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<Vec<_>>();
+        rig.store
+            .set_providers_audited(id, SetProvidersMode::Set, &defaults, AuditCtx::admin(AuditOp::SetProviders))
+            .unwrap();
+        rig.bind(1, reserved("openai-reader"));
+        rig.grant("openai-reader", id);
+
+        rig.dispatch(1, 1, FrameType::Request, OP_LIST_SCOPED, json!({})).await;
+        let frame = rig.next().await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let reply: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+        let row = &reply["result"]["credentials"][0];
+        assert_eq!(row["id"], id);
+        assert_eq!(row["provider_ids"], json!(["openai-platform"]));
+        assert_eq!(row["serves"], json!(["openai"]));
+        assert_eq!(row["fusiform_provider_id"], "openai");
+    }
+
     async fn scoped_login_result(method: &str, id: &str, adapter: &str) -> serde_json::Value {
         let mut rig = Rig::new();
         let mut record = roster_oauth_record();

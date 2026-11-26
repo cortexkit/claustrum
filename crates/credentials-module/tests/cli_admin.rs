@@ -10502,7 +10502,7 @@ fn provider_catalog_report_is_read_only_and_compares_mapped_and_unmapped_rows() 
     );
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "ID\tSTORED\tTABLE\napikey:kagi\t[\"custom-pool\"]\t[]\napikey:openai\t[]\t[\"openai\"]\n"
+        "ID\tSTORED\tTABLE\napikey:kagi\t[\"custom-pool\"]\t[]\napikey:openai\t[]\t[\"openai-platform\"]\n"
     );
     assert_eq!(vault.run(&["list", "--json"]).stdout, before);
     assert_eq!(vault.run(&["audit"]).stdout, audit);

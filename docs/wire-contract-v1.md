@@ -890,6 +890,11 @@ replacement preserves an existing set. Existing records are never automatically
 remapped. The vault never derives these ids at read time from the credential id,
 catalog, adapter, or `serves`. `ck auth provider-report` compares stored ids with the
 current table without changing any record, taking no writer lease.
+New OpenAI API keys (`apikey:openai` and `apikey:openai:<label>`) default to
+`provider_ids: ["openai-platform"]`. ChatGPT sign-ins (`chatgpt:openai` and labeled
+variants) still default to `provider_ids: ["openai"]`. The API-key row still lists
+`serves: ["openai"]` and `fusiform_provider_id: "openai"`.
+
 The OpenAI and Google API-key rows default to both `llm-provider` and
 `media-provider`; ElevenLabs defaults to `media-provider` alone. The 302.AI, Abacus,
 AIHubMix, AI/ML API, Alibaba, Alibaba (China), Alibaba Token Plan, Alibaba Token

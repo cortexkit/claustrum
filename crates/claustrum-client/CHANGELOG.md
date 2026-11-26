@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.1
+
+- 0.17.0 treated `unknown_channel` and `stale_route_epoch` on an open route as
+  permanent failures. For retrying calls, 0.17.1 restores the 0.16 behavior:
+  reopen the route and resend once. Held watches report these errors as
+  transport loss.
+
 ## 0.17.0
 
 - The `consumer` feature now uses `subc-client-rs` 0.42.1, which supports call

@@ -40,8 +40,9 @@ use base64::Engine;
 use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use subc_protocol::{ErrorBody, Flags};
 #[cfg(feature = "transport")]
-use subc_protocol::{Flags, Frame, FrameType, Priority};
+use subc_protocol::{Frame, FrameType, Priority};
 #[cfg(feature = "transport")]
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 #[cfg(feature = "transport")]
@@ -156,6 +157,7 @@ pub struct CredentialResolverError {
     pub class: CredentialErrorClass,
     code: String,
     safe_message: String,
+    established_route_dead: bool,
 }
 
 impl CredentialResolverError {
@@ -165,6 +167,7 @@ impl CredentialResolverError {
             class,
             code: code.to_owned(),
             safe_message: safe_message.into(),
+            established_route_dead: false,
         }
     }
 
@@ -184,6 +187,7 @@ impl CredentialResolverError {
             class: CredentialErrorClass::Unclassified,
             code: code.into(),
             safe_message: message.into(),
+            established_route_dead: false,
         }
     }
 
@@ -855,9 +859,16 @@ impl ClaustrumCredentialResolver {
         should_retry: impl Fn(&CredentialResolverError) -> bool,
         mut attempt: impl FnMut() -> F,
     ) -> Result<T, CredentialResolverError> {
+        let mut retried_dead_route = false;
         for _ in 0..self.transient_retries {
             match attempt().await {
                 Err(error) if should_retry(&error) => {
+                    if error.established_route_dead {
+                        if retried_dead_route {
+                            return Err(error);
+                        }
+                        retried_dead_route = true;
+                    }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 result => return result,
@@ -2152,15 +2163,27 @@ fn credential_seal_request(request: SealRequest<'_>) -> Value {
     })
 }
 
-/// Decodes a subc error-frame body without opening a connection.
+/// Decodes a subc Error frame answering `route.open`.
 pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
+    decode_wire_error_with(bytes, classify_route_open_error)
+}
+
+/// Decodes a subc Error frame received on an established route or watch.
+pub fn decode_established_route_wire_error(flags: Flags, bytes: &[u8]) -> CredentialResolverError {
+    decode_wire_error_with(bytes, |body| classify_established_route_error(flags, body))
+}
+
+fn decode_wire_error_with(
+    bytes: &[u8],
+    classify: impl FnOnce(ErrorBody) -> CredentialResolverError,
+) -> CredentialResolverError {
     let value = serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null);
     let Some(code) = value.get("code").and_then(Value::as_str) else {
         return CredentialResolverError::transport(
             "credential service returned an invalid error frame",
         );
     };
-    let body = subc_protocol::ErrorBody {
+    classify(ErrorBody {
         code: code.to_owned(),
         message: value
             .get("message")
@@ -2168,7 +2191,10 @@ pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
             .unwrap_or("credential route refused the request")
             .to_owned(),
         detail: value.get("detail").cloned(),
-    };
+    })
+}
+
+fn classify_route_open_error(body: ErrorBody) -> CredentialResolverError {
     // Error frames describe the route, not credential state. Honor the daemon's
     // recovery verdict instead of inferring it from the failure message.
     if subc_protocol::error_codes::is_retryable_route_open_refusal(&body) {
@@ -2176,10 +2202,24 @@ pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
             class: CredentialErrorClass::Transport,
             code: body.code,
             safe_message: body.message,
+            established_route_dead: false,
         }
     } else {
         CredentialResolverError::unclassified(body.code, body.message)
     }
+}
+
+fn classify_established_route_error(flags: Flags, body: ErrorBody) -> CredentialResolverError {
+    if subc_protocol::error_codes::is_established_route_dead(flags, &body.code) {
+        return CredentialResolverError {
+            class: CredentialErrorClass::Transport,
+            code: body.code,
+            safe_message: body.message,
+            established_route_dead: true,
+        };
+    }
+    // Keep the previous classification for errors that do not invalidate the route.
+    classify_route_open_error(body)
 }
 
 /// Classify a credential refusal in a `result.error` member of a Response frame.
@@ -2960,6 +3000,8 @@ mod tests {
     fn wire_refusals_follow_the_daemon_recovery_verdict() {
         for (code, expected_back, retryable) in [
             ("unknown_module", None, false),
+            ("unknown_channel", None, false),
+            ("stale_route_epoch", None, false),
             ("missing_identity", None, false),
             ("future_refusal", None, false),
             ("module_warming", None, true),
@@ -3151,7 +3193,8 @@ mod tests {
 
     #[test]
     fn unknown_method_without_a_class_remains_unclassified_and_preserves_producer_details() {
-        let error = decode_wire_error(
+        let error = decode_established_route_wire_error(
+            Flags(0),
             br#"{"code":"unknown_method","message":"unknown method 'credential.put'"}"#,
         );
         assert_eq!(error.class, CredentialErrorClass::Unclassified);

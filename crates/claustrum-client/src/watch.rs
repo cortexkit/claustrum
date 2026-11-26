@@ -287,12 +287,11 @@ async fn read_policy_watch(
                 };
             }
             Ok(transport::WatchFrame::End) => return ScopedWatchOutcome::Ended,
-            Ok(transport::WatchFrame::Error(body)) => {
-                let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-                return if value.get("code").and_then(Value::as_str) == Some("unknown_method") {
+            Ok(transport::WatchFrame::Error(error)) => {
+                return if error.code() == "unknown_method" {
                     ScopedWatchOutcome::Unsupported
                 } else {
-                    ScopedWatchOutcome::TransportLost(decode_wire_error(&body))
+                    ScopedWatchOutcome::TransportLost(error)
                 };
             }
             Err(error) => return ScopedWatchOutcome::TransportLost(error),
@@ -412,14 +411,13 @@ async fn read_scoped_watch(
                     Err(error) => ScopedWatchOutcome::TransportLost(error),
                 };
             }
-            transport::WatchFrame::Error(body) => {
-                let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-                if value.get("code").and_then(Value::as_str) == Some("unknown_method") {
+            transport::WatchFrame::Error(error) => {
+                if error.code() == "unknown_method" {
                     tracker.unknown_method();
                     return ScopedWatchOutcome::Unsupported;
                 }
                 tracker.route_lost();
-                return ScopedWatchOutcome::TransportLost(decode_wire_error(&body));
+                return ScopedWatchOutcome::TransportLost(error);
             }
         }
     }

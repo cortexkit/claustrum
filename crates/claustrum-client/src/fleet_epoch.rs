@@ -121,6 +121,7 @@ fn refusal(body: &RawValue) -> Result<Option<CredentialResolverError>, Credentia
         class,
         code: error.code.to_owned(),
         safe_message: "vault refused the fleet epoch operation".to_owned(),
+        established_route_dead: false,
     }))
 }
 
@@ -182,7 +183,7 @@ fn batch_reply(bytes: &[u8]) -> Result<Vec<&RawValue>, CredentialResolverError> 
 }
 
 /// Decodes the JSON body of a fleet seal Response frame (including a vault refusal).
-/// Decode Error frames separately with [`crate::decode_wire_error`].
+/// Decode Error frames on the route separately with [`crate::decode_established_route_wire_error`].
 pub fn decode_fleet_epoch_seal_reply(
     bytes: &[u8],
 ) -> Result<FleetEpochSeal, CredentialResolverError> {

@@ -1,7 +1,8 @@
 use super::transport::{CredentialTransport, WatchFrame};
 use super::*;
 use subc_client_rs::{
-    CallError, CallOptions, SubcConsumer, SubscribeOptions, Subscription, SubscriptionEnd,
+    CallError, CallOptions, CloseRouteOptions, SubcConsumer, SubscribeOptions, Subscription,
+    SubscriptionEnd,
 };
 use subc_protocol::{BindIdentity, RouteTarget};
 
@@ -33,7 +34,7 @@ fn connect(
         let handle = consumer
             .open_route(target(), identity, options())
             .await
-            .map_err(decode_error)?;
+            .map_err(decode_open_error)?;
         Ok(Box::new(ConsumerConnection {
             consumer,
             handle,
@@ -94,26 +95,41 @@ fn options() -> CallOptions {
     }
 }
 
-fn error_bytes(body: &subc_protocol::ErrorBody) -> Vec<u8> {
-    serde_json::to_vec(body).unwrap_or_default()
+fn decode_open_error(error: CallError) -> CredentialResolverError {
+    if let CallError::Module(body) = error {
+        return classify_route_open_error(body);
+    }
+    decode_sdk_error(error)
 }
 
-fn decode_error(error: CallError) -> CredentialResolverError {
-    if let CallError::Module(body) = &error {
-        return decode_wire_error(&error_bytes(body));
-    }
+fn decode_sdk_error(error: CallError) -> CredentialResolverError {
     if let Some(body) = error.route_open_refusal() {
-        return decode_wire_error(&error_bytes(body));
+        return classify_route_open_error(body.clone());
     }
     if let Some(code) = error.code() {
-        return decode_wire_error(
-            &serde_json::to_vec(&json!({
-                "code": code, "message": "credential SDK request refused",
-            }))
-            .expect("wire error JSON"),
-        );
+        return classify_route_open_error(ErrorBody {
+            code: code.to_owned(),
+            message: "credential SDK request refused".to_owned(),
+            detail: None,
+        });
     }
     CredentialResolverError::transport("credential SDK connection failed")
+}
+
+impl ConsumerConnection {
+    async fn decode_established_frame(&mut self, body: ErrorBody) -> CredentialResolverError {
+        // The SDK does not expose reply flags yet. Pass them through when it does
+        // so the daemon-origin check can recognize these refusals.
+        let error = classify_established_route_error(Flags(0), body);
+        if error.established_route_dead {
+            // Dropping this connection wrapper alone leaves the dead handle cached in the SDK.
+            let _ = self
+                .consumer
+                .close_handle(&self.handle, CloseRouteOptions::default())
+                .await;
+        }
+        error
+    }
 }
 
 impl CredentialConsumerConnection for ConsumerConnection {
@@ -153,7 +169,7 @@ impl CredentialTransport for ConsumerConnection {
         Box::pin(async move {
             // request()/call() can replay route_busy refusals. Reserve/send keeps
             // every unary attempt single-shot, including non-idempotent seals.
-            let body = subc_client_rs::RequestBody::new(body).map_err(decode_error)?;
+            let body = subc_client_rs::RequestBody::new(body).map_err(decode_sdk_error)?;
             let reservation = self
                 .consumer
                 .reserve(
@@ -161,9 +177,13 @@ impl CredentialTransport for ConsumerConnection {
                     tokio::time::Instant::now() + CREDENTIAL_CALL_DEADLINE,
                 )
                 .await
-                .map_err(decode_error)?;
+                .map_err(decode_sdk_error)?;
             let (_, reply) = reservation.send(body, options());
-            reply.await.map_err(decode_error)
+            match reply.await {
+                Ok(body) => Ok(body),
+                Err(CallError::Module(body)) => Err(self.decode_established_frame(body).await),
+                Err(error) => Err(decode_sdk_error(error)),
+            }
         })
     }
 
@@ -184,7 +204,7 @@ impl CredentialTransport for ConsumerConnection {
                         },
                     )
                     .await
-                    .map_err(decode_error)?,
+                    .map_err(decode_sdk_error)?,
             );
             Ok(0)
         })
@@ -208,7 +228,9 @@ impl CredentialTransport for ConsumerConnection {
             match subscription.ended().await {
                 SubscriptionEnd::Response(body) => Ok(WatchFrame::Response(body)),
                 SubscriptionEnd::StreamEnd => Ok(WatchFrame::End),
-                SubscriptionEnd::Error(body) => Ok(WatchFrame::Error(error_bytes(&body))),
+                SubscriptionEnd::Error(body) => {
+                    Ok(WatchFrame::Error(self.decode_established_frame(body).await))
+                }
                 SubscriptionEnd::RouteClosed { .. } => Err(CredentialResolverError::unclassified(
                     "route_closed",
                     "scoped watch route closed",

@@ -264,6 +264,21 @@ async fn route_closed_is_transport_loss() {
 
 #[cfg(feature = "transport")]
 #[tokio::test]
+async fn established_route_death_is_transport_loss_for_held_watch() {
+    for code in ["unknown_channel", "stale_route_epoch"] {
+        let (mut watch, server) =
+            stand_in(vec![(FrameType::Error, json!({"code":code}))], Value::Null).await;
+        let ScopedWatchOutcome::TransportLost(error) = closed(&mut watch).await else {
+            panic!("{code} must use the reconnect path");
+        };
+        assert_eq!(error.code(), code);
+        assert_eq!(error.class, CredentialErrorClass::Transport, "{code}");
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(feature = "transport")]
+#[tokio::test]
 async fn authority_changed_is_transport_loss_for_reopen() {
     let (mut watch, server) = stand_in(
         vec![(

@@ -6,7 +6,8 @@ fn error_frames_never_infer_credential_state_from_a_class() {
         ("not_found", "permanent"),
         ("auth_required", "auth_required"),
     ] {
-        let error = decode_wire_error(
+        let error = decode_established_route_wire_error(
+            Flags(0),
             &serde_json::to_vec(&json!({
                 "code": code, "class": class, "message": "route failure"
             }))
@@ -299,6 +300,7 @@ mod retry {
         code: &'static str,
         dials: Arc<std::sync::atomic::AtomicUsize>,
         failing_dials: usize,
+        refuse_open: bool,
     }
 
     impl CredentialConsumerConnector for ErrorConnector {
@@ -310,6 +312,9 @@ mod retry {
         > {
             Box::pin(async move {
                 let dial = self.dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.refuse_open && dial < self.failing_dials {
+                    return Err(decode_wire_error(&wire_error(self.code)));
+                }
                 Ok(Box::new(ErrorConsumer {
                     code: (dial < self.failing_dials).then_some(self.code),
                 }) as Box<dyn CredentialConsumerConnection>)
@@ -321,6 +326,10 @@ mod retry {
         code: Option<&'static str>,
     }
 
+    fn wire_error(code: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"code": code, "message": "route refused"})).unwrap()
+    }
+
     impl CredentialConsumerConnection for ErrorConsumer {
         fn credential_get<'a>(
             &'a mut self,
@@ -330,11 +339,9 @@ mod retry {
         ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
             Box::pin(async move {
                 match self.code {
-                    Some(code) => Err(decode_wire_error(
-                        &serde_json::to_vec(&json!({
-                            "code": code, "message": "route refused"
-                        }))
-                        .unwrap(),
+                    Some(code) => Err(decode_established_route_wire_error(
+                        Flags(0),
+                        &wire_error(code),
                     )),
                     None => Ok(success(Operation::Get)),
                 }
@@ -375,6 +382,7 @@ mod retry {
                     code,
                     dials: dials.clone(),
                     failing_dials: 1,
+                    refuse_open: true,
                 }),
                 Duration::from_secs(1),
             ));
@@ -397,6 +405,7 @@ mod retry {
                     code,
                     dials: dials.clone(),
                     failing_dials: 1,
+                    refuse_open: false,
                 }),
                 Duration::from_secs(1),
             ));
@@ -420,6 +429,7 @@ mod retry {
                     code,
                     dials: dials.clone(),
                     failing_dials: 3,
+                    refuse_open: false,
                 }),
                 Duration::from_secs(1),
             ));
@@ -449,6 +459,7 @@ mod retry {
                     code,
                     dials: dials.clone(),
                     failing_dials: 1,
+                    refuse_open: false,
                 }),
                 Duration::from_secs(1),
             ));

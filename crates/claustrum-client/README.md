@@ -1,5 +1,10 @@
 # cortexkit-claustrum-client
 
+> [!WARNING]
+> **Alpha.** cortexkit-claustrum-client is in early development and is not yet released for general use.
+> Breaking changes will happen between versions, including changes to its settings,
+> stored data and interfaces. Pin an exact version if you depend on it.
+
 Rust client for the claustrum credential vault, used by subc-supervised CortexKit
 modules. The vault owns this client alongside its TypeScript client so the wire
 decoders can be tested against the producer's serialized replies.

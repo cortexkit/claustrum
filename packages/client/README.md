@@ -1,5 +1,10 @@
 # @cortexkit/claustrum-client
 
+> [!WARNING]
+> **Alpha.** @cortexkit/claustrum-client is in early development and is not yet released for general use.
+> Breaking changes will happen between versions, including changes to its settings,
+> stored data and interfaces. Pin an exact version if you depend on it.
+
 Policy-free TypeScript transport for the Claustrum credential vault. Consumers own
 credential caching, refresh, account scheduling, and retry policy.
 

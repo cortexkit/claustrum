@@ -1,5 +1,10 @@
 # claustrum
 
+> [!WARNING]
+> **Alpha.** claustrum is in early development and is not yet released for general use.
+> Breaking changes will happen between versions, including changes to its settings,
+> stored data and interfaces. Pin an exact version if you depend on it.
+
 claustrum is the CortexKit credential vault: a daemon, run under the CortexKit supervisor,
 that holds OAuth tokens, API keys, session cookies and signing keys encrypted at rest,
 refreshes OAuth credentials before they expire, and serves each consumer only the credential it

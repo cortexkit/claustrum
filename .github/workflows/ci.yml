@@ -191,6 +191,12 @@ jobs:
         shell: bash
         run: python3 scripts/check-file-size.py
 
+      - name: Cortexkit layout
+        if: runner.os != 'Windows'
+        # Only the allowlisted .cortexkit paths may be tracked; internal docs never are.
+        shell: bash
+        run: bash scripts/check-cortexkit-layout.sh
+
       - name: Path rendering
         if: runner.os != 'Windows'
         # The scripts compare paths against posix literals in manifests. str(Path)

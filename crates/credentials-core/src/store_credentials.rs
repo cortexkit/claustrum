@@ -272,6 +272,54 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        self.create_with_category_selection_audited(credential_id, record, ctx, None)
+    }
+
+    /// Deposit a static credential with an explicit category set instead of defaults.
+    /// The credential, its categories, and both audit rows commit together.
+    pub(crate) fn create_with_categories_audited(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        mut categories: Vec<String>,
+        actor: &str,
+    ) -> Result<(), StoreOpError> {
+        if categories.is_empty()
+            || !categories
+                .iter()
+                .all(|c| crate::catalog::valid_category_name(c))
+        {
+            return Err(StoreOpError::InvalidCategoryName);
+        }
+        if !matches!(
+            record.kind,
+            CredentialKind::ApiKey | CredentialKind::Dsn | CredentialKind::Opaque
+        ) || matches!(
+            crate::credential_id::parse_credential_id(credential_id).method,
+            Some(crate::credential_id::AuthMethod::Cookie)
+        ) || credential_id.starts_with("github_app:")
+        {
+            return Err(StoreOpError::Encode(
+                "explicit create categories are only for API keys, DSNs and opaque records, not cookie ids or GitHub App deposits".into(),
+            ));
+        }
+        categories.sort_unstable();
+        categories.dedup();
+        self.create_with_category_selection_audited(
+            credential_id,
+            record,
+            AuditCtx::route_admin(AuditOp::Put, actor),
+            Some(&categories),
+        )
+    }
+
+    fn create_with_category_selection_audited(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+        categories: Option<&[String]>,
+    ) -> Result<(), StoreOpError> {
         check_github_app_companion_id(credential_id)?;
         // A retry as create must not bypass the write check for the vault's
         // active transfer key.
@@ -280,7 +328,14 @@ impl EncryptedStore {
             if super::gh_manifests::policy_root_mutation_protected(tx, credential_id)? {
                 return Ok(Err(StoreOpError::PolicyRootProtected));
             }
-            self.create_audited_in_tx(tx, credential_id, record, ctx, now_ms())
+            self.create_with_category_selection_in_tx(
+                tx,
+                credential_id,
+                record,
+                ctx,
+                now_ms(),
+                categories,
+            )
         })
     }
 
@@ -340,7 +395,21 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
         now: i64,
     ) -> rusqlite::Result<Result<(), StoreOpError>> {
-        if let Err(error) = self.insert_new_record_in_tx(tx, credential_id, record, now)? {
+        self.create_with_category_selection_in_tx(tx, credential_id, record, ctx, now, None)
+    }
+
+    fn create_with_category_selection_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+        now: i64,
+        categories: Option<&[String]>,
+    ) -> rusqlite::Result<Result<(), StoreOpError>> {
+        if let Err(error) =
+            self.insert_new_record_in_tx(tx, credential_id, record, now, categories)?
+        {
             return Ok(Err(error));
         }
         let payload_hash = hex32(&audit::payload_fingerprint(
@@ -358,6 +427,22 @@ impl EncryptedStore {
                 alarm: ctx.alarm,
             },
         )?;
+        if let Some(categories) = categories {
+            append_audit_tx(
+                tx,
+                &self.audit_key,
+                &AuditRecord {
+                    op: AuditOp::SetCategory,
+                    credential_id: Some(format!(
+                        "category:{credential_id}|{}",
+                        categories.join(",")
+                    )),
+                    payload_hash: None,
+                    actor: ctx.actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+        }
         Ok(Ok(()))
     }
 
@@ -367,6 +452,7 @@ impl EncryptedStore {
         credential_id: &str,
         record: &VaultRecord,
         now: i64,
+        categories: Option<&[String]>,
     ) -> rusqlite::Result<Result<(), StoreOpError>> {
         let record = match Self::prepare_create_record(credential_id, record) {
             Ok(record) => record,
@@ -416,7 +502,15 @@ impl EncryptedStore {
             // constrains a type no reachable writer goes through. Three visible copies
             // under three contracts beat one helper hiding which contract it is serving.
             if n > 0 {
-                for category in registered_providers::category_defaults(tx, credential_id)? {
+                let defaults;
+                let categories = match categories {
+                    Some(categories) => categories,
+                    None => {
+                        defaults = registered_providers::category_defaults(tx, credential_id)?;
+                        &defaults
+                    }
+                };
+                for category in categories {
                     tx.execute(
                         "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
                         rusqlite::params![credential_id, category],

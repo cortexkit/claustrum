@@ -181,6 +181,7 @@ pub(super) fn prepare(global: &GlobalArgs, options: &mut ParsedOptions) -> Resul
     };
 
     if !super::has_gateway_flags(options)
+        && options.optional("--category").is_none()
         && !options.has_flag("--replace")
         && options.optional("--expected-hash").is_none()
     {

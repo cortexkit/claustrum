@@ -1402,6 +1402,13 @@ are unchanged.
 
 ### Category and grant audit targets
 
+`admin.store_with_categories` is a create-only operator write. Its body has `v: 1`,
+`id`, `record`, and `categories` (a nonempty list of category names). The explicit
+set replaces catalog defaults. The write stores the record and categories and
+appends `put` followed by `set_category` in one transaction. A refusal leaves all
+of them unchanged. The legacy `admin.store` body is unchanged; clients must not
+fall back to it when a daemon does not recognize `admin.store_with_categories`.
+
 Category transitions use audit op `set_category` and target
 `category:<credential-id>|<sorted-comma-list>`; clearing the set leaves the trailing `|`.
 Migration 10's one category backfill row uses audit op `category.migrate`, actor

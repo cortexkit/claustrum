@@ -8,6 +8,11 @@ use super::{
     AdminOpBody, AuthMethod, CliError, CredentialKind, GlobalArgs, ParsedOptions, RecordIdentity,
     SetCategoryMode, StoreMode, VaultRecord, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
 };
+use credentials_core::secret::Secret;
+use ring::rand::{SecureRandom, SystemRandom};
+
+const MIN_GENERATE_HEX_BYTES: usize = 16;
+const MAX_GENERATE_HEX_BYTES: usize = 256;
 
 pub(super) fn has_gateway_flags(options: &ParsedOptions) -> bool {
     [
@@ -18,6 +23,24 @@ pub(super) fn has_gateway_flags(options: &ParsedOptions) -> bool {
     ]
     .iter()
     .any(|flag| options.optional(flag).is_some())
+}
+
+fn put_option_values<'a>(args: &'a [String], name: &'static str) -> impl Iterator<Item = &'a str> {
+    let mut args = args.iter().map(String::as_str);
+    std::iter::from_fn(move || {
+        // The parser preserves each flag-value pair. In particular, a filename
+        // spelled like a flag must still be skipped as the value of --payload-file.
+        while let Some(flag) = args.next() {
+            if flag == "--replace" {
+                continue;
+            }
+            let value = args.next()?;
+            if flag == name {
+                return Some(value);
+            }
+        }
+        None
+    })
 }
 
 fn put_gateway_settings(
@@ -38,19 +61,9 @@ fn put_gateway_settings(
     let auth_header = options.required("--gateway-auth-header")?;
     let auth_scheme = options.required("--gateway-auth-scheme")?;
     let base_url = normalize_gateway_base_url(&base_url);
-    let mut headers = Vec::new();
-    let mut args = args.iter();
-    while let Some(flag) = args.next() {
-        if flag == "--replace" {
-            continue;
-        }
-        let value = args.next();
-        if flag == "--gateway-header" {
-            headers.push(parse_gateway_header(
-                value.map(String::as_str).unwrap_or_default(),
-            )?);
-        }
-    }
+    let mut headers = put_option_values(args, "--gateway-header")
+        .map(parse_gateway_header)
+        .collect::<Result<Vec<_>, _>>()?;
     headers.sort_by(|a, b| a.name.cmp(&b.name));
     // Do not deduplicate: the shared validator refuses repeated names, including
     // names that become equal after lowercasing.
@@ -100,11 +113,114 @@ pub(super) fn normalize_gateway_base_url(base_url: &str) -> String {
     .to_string()
 }
 
+fn put_generate_hex(options: &ParsedOptions) -> Result<Option<usize>, CliError> {
+    let Some(size) = options.optional("--generate-hex") else {
+        return Ok(None);
+    };
+    for flag in ["--payload-file", "--replace", "--expected-hash"] {
+        if options.optional(flag).is_some() || options.has_flag(flag) {
+            return Err(CliError::Usage(format!(
+                "--generate-hex cannot be used with {flag}"
+            )));
+        }
+    }
+    if has_gateway_flags(options) {
+        return Err(CliError::Usage(
+            "--generate-hex cannot be used with gateway flags".into(),
+        ));
+    }
+    let id = options.optional("--id").ok_or_else(|| {
+        CliError::Usage("--generate-hex requires --id and does not prompt for input".into())
+    })?;
+    if matches!(parse_credential_id(&id).method, Some(AuthMethod::Cookie))
+        || id.starts_with("github_app:")
+        || !matches!(
+            options.optional("--kind").as_deref(),
+            None | Some("api_key" | "opaque")
+        )
+    {
+        return Err(CliError::Usage(
+            "--generate-hex is only for api_key or opaque records, not cookie ids or github_app deposits"
+                .into(),
+        ));
+    }
+    let size = size
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (MIN_GENERATE_HEX_BYTES..=MAX_GENERATE_HEX_BYTES).contains(n))
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "--generate-hex requires an integer from {MIN_GENERATE_HEX_BYTES} to {MAX_GENERATE_HEX_BYTES} (bytes)"
+            ))
+        })?;
+    Ok(Some(size))
+}
+
+fn put_categories(args: &[String], options: &ParsedOptions) -> Result<Vec<String>, CliError> {
+    if options.optional("--category").is_none() {
+        return Ok(Vec::new());
+    }
+    for flag in ["--replace", "--expected-hash"] {
+        if options.optional(flag).is_some() || options.has_flag(flag) {
+            return Err(CliError::Usage(format!(
+                "--category cannot be used with {flag}; use ck auth set-category to change categories"
+            )));
+        }
+    }
+    if has_gateway_flags(options) {
+        return Err(CliError::Usage(
+            "--category cannot be used with gateway flags".into(),
+        ));
+    }
+    put_option_values(args, "--category")
+        .map(|name| {
+            if credentials_core::catalog::valid_category_name(name) {
+                Ok(name.to_owned())
+            } else {
+                Err(CliError::Usage(format!("invalid --category name '{name}'")))
+            }
+        })
+        .collect()
+}
+
+fn generate_hex_payload(n: usize) -> Result<Vec<u8>, CliError> {
+    let mut random = Secret::new(vec![0; n]).into_inner();
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| CliError::Io("OS randomness unavailable".into()))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut payload = Secret::new(vec![0; n * 2]).into_inner();
+    for (&byte, pair) in random.iter().zip(payload.as_chunks_mut::<2>().0) {
+        pair[0] = HEX[(byte >> 4) as usize];
+        pair[1] = HEX[(byte & 0xf) as usize];
+    }
+    // The caller moves this allocation directly into the record's secret payload.
+    Ok(std::mem::take(&mut *payload))
+}
+
+fn read_put_payload(options: &ParsedOptions, is_cookie: bool) -> Result<Vec<u8>, CliError> {
+    // Keep secret bytes out of argv: read a file or use the hidden terminal prompt.
+    // Ordinary key files lose trailing whitespace, but a cookie header is sent
+    // verbatim upstream, so its file bytes cannot be trimmed or normalized.
+    match options.optional("--payload-file") {
+        Some(path) if is_cookie => {
+            std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))
+        }
+        Some(path) => Ok(read_key_file(&path)?.into_bytes()),
+        None if put_prompt::is_terminal() => put_prompt::payload(is_cookie),
+        None => Err(CliError::Usage(
+            "--payload-file <path> is required without a terminal for the hidden interactive prompt".to_string(),
+        )),
+    }
+}
+
 pub(super) fn cmd_put(
     global: &GlobalArgs,
     args: &[String],
     mut options: ParsedOptions,
 ) -> Result<(), CliError> {
+    let generate_hex = put_generate_hex(&options)?;
+    let categories = put_categories(args, &options)?;
     if let Some(id) = options.optional("--id") {
         credentials_core::store::check_github_app_companion_id(&id).map_err(CliError::Store)?;
     }
@@ -116,20 +232,30 @@ pub(super) fn cmd_put(
         check_deposit_provider_flags(options.optional("--id").as_deref(), &ids)?;
         ids
     };
-    if !put_prompt::prepare(global, &mut options)? {
+    // Generated secrets never enter the interactive path, which can prompt for
+    // metadata and turn a create into a replacement.
+    if generate_hex.is_none() && !put_prompt::prepare(global, &mut options)? {
         return Ok(());
     }
     let id = options.required("--id")?;
     credentials_core::store::check_github_app_companion_id(&id).map_err(CliError::Store)?;
+    let parsed = parse_credential_id(&id);
+    let is_cookie = matches!(parsed.method, Some(AuthMethod::Cookie));
+    if !categories.is_empty() && (is_cookie || id.starts_with("github_app:")) {
+        return Err(CliError::Usage(
+            "--category cannot be used with cookie ids or github_app deposits".into(),
+        ));
+    }
     if let Some(settings) = &gateway {
         credentials_core::gateway::validate_gateway_settings(&id, settings, &explicit_ids)
             .map_err(CliError::Store)?;
     } else {
         check_deposit_provider_flags(Some(&id), &explicit_ids)?;
     }
-    if options
-        .optional("--kind")
-        .is_none_or(|kind| kind == "api_key")
+    if generate_hex.is_none()
+        && options
+            .optional("--kind")
+            .is_none_or(|kind| kind == "api_key")
         && !put_prompt::provider(global, &id)?
     {
         return Ok(());
@@ -141,27 +267,15 @@ pub(super) fn cmd_put(
     } else {
         deposit_provider_ids(global, &id, explicit_ids)?
     };
-    let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
             "signing keys must be generated with mint-signing-key, not put".to_string(),
         ));
     }
-    // Keep secret bytes out of argv: read a file or use the hidden terminal prompt.
-    // Ordinary key files lose surrounding whitespace, but a cookie header is sent
-    // verbatim upstream, so its file bytes cannot be trimmed or normalized.
-    let is_cookie = matches!(parsed.method, Some(AuthMethod::Cookie));
-    let payload = match options.optional("--payload-file") {
-        Some(path) if is_cookie => {
-            std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))?
-        }
-        Some(path) => read_key_file(&path)?.into_bytes(),
-        None if put_prompt::is_terminal() => put_prompt::payload(is_cookie)?,
-        None => {
-            return Err(CliError::Usage(
-                "--payload-file <path> is required without a terminal for the hidden interactive prompt".to_string(),
-            ))
-        }
+    let payload = if generate_hex.is_none() {
+        read_put_payload(&options, is_cookie)?
+    } else {
+        Vec::new()
     };
     // A GitHub App deposit is the one `put` that must NOT produce a static record.
     //
@@ -254,7 +368,15 @@ pub(super) fn cmd_put(
             VaultRecord::new_oauth("operator", "github_app", oauth, Vec::new())
         }
         None if kind == CredentialKind::Cookie => VaultRecord::new_cookie("operator", payload),
-        None => VaultRecord::new_static(kind, "operator", payload, expires_at_ms),
+        None => VaultRecord::new_static(
+            kind,
+            "operator",
+            match generate_hex {
+                Some(n) => generate_hex_payload(n)?,
+                None => payload,
+            },
+            expires_at_ms,
+        ),
     };
     if let Some(settings) = gateway {
         commit_admin(
@@ -316,10 +438,17 @@ pub(super) fn cmd_put(
             println!("replaced {id} (unconditional)");
         }
         (None, false) => {
-            commit_admin(
-                global,
-                store_op(&id, record, AdminAuditOp::Put, StoreMode::Create),
-            )?;
+            let op = if categories.is_empty() {
+                store_op(&id, record, AdminAuditOp::Put, StoreMode::Create)
+            } else {
+                AdminOpBody::StoreWithCategories {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: id.clone(),
+                    record: Box::new(record),
+                    categories,
+                }
+            };
+            commit_admin(global, op)?;
             println!("created {id}");
             // SAID ONLY ON THE CREATE ARM, and only when nothing already reaches the id.
             //

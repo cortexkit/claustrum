@@ -1988,6 +1988,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_bind_store_with_categories_is_create_only() {
+        let r = rig(13);
+        r.admin.record_bind(5, Principal::Direct);
+        let id = "opaque:categorized";
+        for (category, expected_success) in [("test-category", true), ("other-category", false)] {
+            let op = AdminOpBody::StoreWithCategories {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: id.into(),
+                record: Box::new(VaultRecord::new_static(
+                    CredentialKind::Opaque,
+                    "operator",
+                    b"test-canary".to_vec(),
+                    None,
+                )),
+                categories: vec![category.into()],
+            };
+            let body = String::from_utf8(op.to_bytes().unwrap()).unwrap();
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let outcome = r.admin.execute(5, body.as_bytes(), &tag).await;
+            if expected_success {
+                assert!(matches!(outcome, AdminOutcome::Ok(_)));
+            } else {
+                assert!(
+                    matches!(outcome, AdminOutcome::Refused(message) if message.contains("already exists"))
+                );
+            }
+        }
+        let meta = r.store.meta(id).unwrap();
+        assert_eq!(meta.categories, ["test-category"]);
+        assert_eq!(meta.record_version, 1);
+    }
+
+    #[tokio::test]
     async fn direct_bind_store_refuses_an_invalid_import_identity() {
         let r = rig(13);
         r.admin.record_bind(5, Principal::Direct);
@@ -2756,6 +2789,7 @@ mod tests {
             "provider_remove",
             "operator_sign",
             "store",
+            "store_with_categories",
             "store_with_identity_policy",
             "set_identity",
             "invalidate",

@@ -92,6 +92,56 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn generate_hex_put_never_prompts_at_a_terminal() {
+    let fixture = Fixture::new();
+    let args = [
+        "put",
+        "--id",
+        "apikey:unknown-fixture",
+        "--generate-hex",
+        "32",
+    ];
+    let (status, screen) = terminal_cli::run(fixture.command(&args), &[]);
+    assert!(status.success(), "generated put at a terminal failed");
+    assert!(!screen.contains("Value (hidden)"));
+    assert!(!screen.contains("Groups for this provider"));
+
+    let (status, screen) = terminal_cli::run(fixture.command(&args), &[]);
+    assert_eq!(status.code(), Some(1));
+    assert!(screen.contains("already exists"));
+    assert!(!screen.contains("Replace it?"));
+    let (status, screen) =
+        terminal_cli::run(fixture.command(&["put", "--generate-hex", "32"]), &[]);
+    assert_eq!(status.code(), Some(1));
+    assert!(screen.contains("--id"));
+    assert!(!screen.contains("Credential kind"));
+}
+
+#[test]
+fn put_with_categories_at_a_terminal_does_not_offer_replacement() {
+    let fixture = Fixture::new();
+    let args = [
+        "put",
+        "--id",
+        "opaque:interactive-category",
+        "--kind",
+        "opaque",
+        "--category",
+        "explicit-category",
+    ];
+    let value = format!("{VALUE}\r");
+    let steps = [("Value (hidden)", value.as_bytes(), true)];
+    fixture.terminal(&args, &steps);
+    let (status, screen) = terminal_cli::run(fixture.command(&args), &steps);
+    assert_eq!(status.code(), Some(1));
+    assert!(screen.contains("already exists"));
+    assert!(!screen.contains("Replace it?"));
+    let stored = fixture.store().meta("opaque:interactive-category").unwrap();
+    assert_eq!(stored.categories, ["explicit-category"]);
+    assert_eq!(stored.record_version, 1);
+}
+
+#[test]
 fn gateway_put_existing_id_never_offers_replacement_or_provider_registration() {
     let fixture = Fixture::new();
     let args = [

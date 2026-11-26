@@ -251,7 +251,7 @@ impl EncryptedStore {
                 return Ok(Err(StoreOpError::Encode(AGENT_EXISTS.into())));
             }
             let now = now_ms();
-            if let Err(error) = self.insert_new_record_in_tx(tx, &id, &record, now)? {
+            if let Err(error) = self.insert_new_record_in_tx(tx, &id, &record, now, None)? {
                 return Ok(Err(error));
             }
             tx.execute(
@@ -262,7 +262,7 @@ impl EncryptedStore {
             )?;
             if let Some(companion) = &companion {
                 if let Err(error) =
-                    self.insert_new_record_in_tx(tx, &companion_id, companion, now)?
+                    self.insert_new_record_in_tx(tx, &companion_id, companion, now, None)?
                 {
                     return Ok(Err(error));
                 }

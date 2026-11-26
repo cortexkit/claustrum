@@ -424,9 +424,21 @@ and cookies entered in the hidden prompt keep their surrounding whitespace:
 ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key
 ```
 
+On a fresh install, `ck setup` can create Broca's storage key and assign its category in one write:
+
+```sh
+ck auth put --id opaque:broca-deployment:<suffix> --kind opaque --generate-hex 32 --category broca-deployment
+```
+
+Replace `<suffix>` with the deployment key suffix (for example `1`). The vault CLI
+stores 64 lowercase hex characters without printing the value. If the id exists, the
+command refuses without changing the key or its categories. On other static puts,
+repeat `--category` to replace the defaults at creation; change categories on an existing
+record with `ck auth set-category`.
+
 Inline `--payload` input is refused because command-line arguments can expose secrets.
-Use a payload file for scripts, or omit `--payload-file` at a terminal to enter the
-value in the hidden interactive prompt. `put` does not read payloads from stdin.
+Use a payload file or `--generate-hex` for scripts, or omit both flags at a terminal to
+enter the value in the hidden interactive prompt. `put` does not read payloads from stdin.
 Every value-taking flag needs a following value; an incomplete flag is a usage error
 before any write. Flag-looking filenames remain values: `--payload-file --replace`
 reads the file named `--replace` and does not request replacement. To replace with that
@@ -1238,7 +1250,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 
 | Value | Meaning |
 | --- | --- |
-| `put` | Create a new credential without replacing an existing row. |
+| `put` | Create a new credential without replacing an existing row. With `--category`, the same write also appends a `set_category` row. |
 | `import` | Import a credential from an external source format. |
 | `login` | Mint a vault-native first-party OAuth credential. |
 | `overwrite` | Replace a credential under an unconditional or compare-and-set write path. |

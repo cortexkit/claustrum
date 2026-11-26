@@ -22,7 +22,8 @@
 //!
 //! ```text
 //!   bootstrap                                  provision a new master key
-//!   put       --id <id> --payload-file <path> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
+//!   put       --id <id> [--payload-file <path> | --generate-hex <n>]
+//!             [--kind api_key|dsn|opaque] [--expires-ms N] [--category <name>]... [--replace]
 //!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
 //!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
 //!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature] [--operator-sign]
@@ -569,6 +570,8 @@ fn verb_flags(command: &str, subcommand: &str) -> FlagSpec {
         "put" => &[
             "--id",
             "--payload-file",
+            "--generate-hex",
+            "--category",
             "--kind",
             "--expires-ms",
             "--expected-hash",
@@ -867,7 +870,7 @@ fn usage_short() -> String {
         manifest            import, sign and track GitHub routing manifests\n\
          policy              derive, sign, list and export fleet agent policies\n\
          policy-root         initialize or show the policy signing root\n\
-           put                 store a secret or company AI gateway key\n\
+            put                 store or generate a secret; enroll gateway keys\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
            ssh-key             allow or deny agent SSH use of a signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
@@ -1445,8 +1448,9 @@ fn help_verb(verb: &str) -> String {
              Never stores, refreshes, or prints keys, JWTs, or installation tokens."
         }
         "put" => {
-            "ck auth put [--id <id>] [--payload-file <path>]\n\
+            "ck auth put [--id <id>] [--payload-file <path> | --generate-hex <n>]\n\
              \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
+             \x20           [--category <name>]...\n\
              \x20           [--replace | --expected-hash <hex>] [--client-id <id>]\n\
              \x20           [--gateway-base-url <url> --gateway-auth-header <name>\n\
              \x20            --gateway-auth-scheme <bearer|raw> --provider-id <id>]\n\
@@ -1457,6 +1461,10 @@ fn help_verb(verb: &str) -> String {
              \x20                              preserved exactly; for every other kind strip\n\
              \x20                              TRAILING whitespace (any amount: newlines, CR,\n\
              \x20                              spaces, tabs), keeping LEADING whitespace\n\
+             \x20 --generate-hex <n>           generate 16 to 256 random bytes and store\n\
+             \x20                              them as lowercase hex without printing them\n\
+             \x20 --category <name>            set a category at creation (repeatable);\n\
+             \x20                              the given set replaces catalog defaults\n\
              \x20 --kind <api_key|dsn|opaque>  record kind; defaults to api_key; refused for\n\
              \x20                              cookie ids\n\
              \x20 --expires-ms <N>             expiry timestamp in milliseconds; refused for\n\
@@ -1488,6 +1496,14 @@ fn help_verb(verb: &str) -> String {
               stores the key and names ck auth provider set for future defaults.\n\
               Use ck auth set-category to change one key's groups afterwards.\n\
              \n\
+             --generate-hex needs --id and never prompts or replaces a record. Use it\n\
+             only for api_key or opaque records, without --payload-file, --replace,\n\
+             --expected-hash or gateway flags. Cookie and github_app: ids are refused.\n\
+             \n\
+             --category is create-only; use ck auth set-category for existing records.\n\
+             Names match ^[a-z][a-z0-9-]{1,31}$. Do not combine with --replace,\n\
+             --expected-hash, gateway flags, cookie ids, or github_app: deposits.\n\
+             \n\
              Gateway creation needs all three settings flags and exactly one routing\n\
              id, matching the service in apikey:<vendor>-gw-<name>[:<label>].\n\
              URL scheme, host and header names are lowercased; trailing URL slashes\n\
@@ -1508,7 +1524,7 @@ fn help_verb(verb: &str) -> String {
              must not be empty, and never enters argv or a temporary file.\n\
              Known API-key providers suggest ck auth login --provider <name> instead\n\
              of storing unchecked; declining unchecked storage writes nothing.\n\
-             Without a terminal, --id and a payload source are required as before.\n\
+              Without a terminal, --id and a payload source are required.\n\
              Generated keys: ck auth mint-signing-key / ck auth mint-kem-key.\n\
              OAuth logins: ck auth login.\n\
              GitHub App ids must be github_app:<GitHub slug>. The App JWT checks\n\
@@ -2086,6 +2102,8 @@ fn provider_id_values(args: &[String]) -> Result<Vec<String>, CliError> {
             args[i].as_str(),
             "--id"
                 | "--payload-file"
+                | "--generate-hex"
+                | "--category"
                 | "--kind"
                 | "--expires-ms"
                 | "--expected-hash"

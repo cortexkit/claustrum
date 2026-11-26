@@ -30,6 +30,65 @@ pub(super) fn api_record() -> VaultRecord {
 }
 
 #[test]
+fn create_with_categories_rolls_back_when_the_category_audit_fails() {
+    use crate::admin_ops::{apply, AdminOpBody, ADMIN_OP_SCHEMA_V1};
+
+    let (_root, store) = rig("category-audit-fault", 82);
+    let id = "apikey:openrouter:explicit";
+    let create = |category: &str| {
+        apply(
+            &store,
+            AdminOpBody::StoreWithCategories {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: id.into(),
+                record: Box::new(api_record()),
+                categories: vec![category.into()],
+            },
+            "category-test",
+        )
+    };
+    let tip = store.audit_tip().unwrap();
+    let generation = store.grants_generation().unwrap();
+    assert!(matches!(
+        create("Bad"),
+        Err(StoreOpError::InvalidCategoryName)
+    ));
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_category_audit BEFORE INSERT ON audit_log \
+         WHEN NEW.op = 'set_category' BEGIN SELECT RAISE(ABORT, 'category audit refused'); END;",
+            )
+        })
+        .unwrap();
+    let err = create("custom-category").unwrap_err();
+    assert!(err.to_string().contains("category audit refused"), "{err}");
+    assert!(matches!(store.get(id), Err(StoreOpError::NotFound)));
+    let category_rows: u32 = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM credential_categories WHERE credential_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(category_rows, 0);
+    assert_eq!(store.audit_tip().unwrap(), tip);
+    assert_eq!(store.grants_generation().unwrap(), generation);
+    store
+        .with_raw_conn(|conn| conn.execute_batch("DROP TRIGGER refuse_category_audit"))
+        .unwrap();
+    create("custom-category").unwrap();
+    assert_eq!(store.meta(id).unwrap().categories, ["custom-category"]);
+    assert!(matches!(
+        create("replacement-category"),
+        Err(StoreOpError::AlreadyExists)
+    ));
+    assert_eq!(store.meta(id).unwrap().categories, ["custom-category"]);
+}
+
+#[test]
 fn migration_n_guard_is_byte_exact_and_leaves_the_previous_schema_untouched() {
     let (_root, sqlite) = sqlite("guard", 81);
     sqlite

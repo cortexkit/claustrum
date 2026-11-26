@@ -198,6 +198,14 @@ pub enum AdminOpBody {
         audit_op: AdminAuditOp,
         mode: StoreMode,
     },
+    /// Use a separate discriminator so an older daemon cannot silently use defaults.
+    #[serde(rename = "admin.store_with_categories")]
+    StoreWithCategories {
+        v: u32,
+        id: String,
+        record: Box<VaultRecord>,
+        categories: Vec<String>,
+    },
     /// A separate discriminator prevents an older daemon storing a plain API key.
     #[serde(rename = "admin.gateway_create")]
     GatewayCreate {
@@ -733,6 +741,18 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("audit_op", audit_op)
                 .field("mode", mode)
                 .finish(),
+            AdminOpBody::StoreWithCategories {
+                v,
+                id,
+                record,
+                categories,
+            } => f
+                .debug_struct("StoreWithCategories")
+                .field("v", v)
+                .field("id", id)
+                .field("record", record)
+                .field("categories", categories)
+                .finish(),
             AdminOpBody::StoreWithIdentityPolicy {
                 v,
                 id,
@@ -1175,6 +1195,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::SshKeyAgentAllow { v, .. } | AdminOpBody::SshKeyAgentDeny { v, .. } => *v,
             AdminOpBody::Store { v, .. }
+            | AdminOpBody::StoreWithCategories { v, .. }
             | AdminOpBody::GatewayCreate { v, .. }
             | AdminOpBody::ProviderSet { v, .. }
             | AdminOpBody::ProviderRemove { v, .. }
@@ -1340,6 +1361,7 @@ impl AdminOpBody {
             | AdminOpBody::GitHubAppRelayRetry { .. }
             | AdminOpBody::GitHubAppWebhookRotate { .. }
             | AdminOpBody::Store { .. }
+            | AdminOpBody::StoreWithCategories { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
@@ -1381,6 +1403,7 @@ impl AdminOpBody {
                 credential_id: id, ..
             }
             | AdminOpBody::Store { id, .. }
+            | AdminOpBody::StoreWithCategories { id, .. }
             | AdminOpBody::GatewayCreate { id, .. }
             | AdminOpBody::OperatorSign { id, .. }
             | AdminOpBody::StoreWithIdentityPolicy { id, .. }
@@ -1531,6 +1554,7 @@ impl AdminOpBody {
             AdminOpBody::ProviderSet { .. } => "admin.provider_set",
             AdminOpBody::ProviderRemove { .. } => "admin.provider_remove",
             AdminOpBody::Store { .. } => "admin.store",
+            AdminOpBody::StoreWithCategories { .. } => "admin.store_with_categories",
             AdminOpBody::GatewayCreate { .. } => "admin.gateway_create",
             AdminOpBody::StoreWithIdentityPolicy { .. } => "admin.store_with_identity_policy",
             AdminOpBody::SetIdentity { .. } => "admin.set_identity",
@@ -1602,6 +1626,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::SshKeyAgentAllow { .. } | AdminOpBody::SshKeyAgentDeny { .. } => false,
             AdminOpBody::Store { .. }
+            | AdminOpBody::StoreWithCategories { .. }
             | AdminOpBody::GatewayCreate { .. }
             | AdminOpBody::ProviderSet { .. }
             | AdminOpBody::ProviderRemove { .. }
@@ -2106,6 +2131,15 @@ pub fn apply(
                     store.overwrite_cas_audited(&id, &record, &expected, ctx)?
                 }
             }
+            Ok(serde_json::json!({ "stored": true }))
+        }
+        AdminOpBody::StoreWithCategories {
+            id,
+            record,
+            categories,
+            ..
+        } => {
+            store.create_with_categories_audited(&id, &record, categories, actor)?;
             Ok(serde_json::json!({ "stored": true }))
         }
         AdminOpBody::StoreWithIdentityPolicy {
@@ -3333,6 +3367,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_create_store_bytes_remain_compatible() {
+        let op = AdminOpBody::Store {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: "apikey:x".into(),
+            record: Box::new(VaultRecord::new_static(
+                CredentialKind::ApiKey,
+                "t",
+                b"k".to_vec(),
+                None,
+            )),
+            audit_op: AdminAuditOp::Put,
+            mode: StoreMode::Create,
+        };
+        let legacy = br#"{"op":"admin.store","v":1,"id":"apikey:x","record":{"schema_version":1,"kind":"api_key","source":"t","record_version":1,"expires_at_ms":null,"refresh_adapter":null,"oauth":null,"payload":[107]},"audit_op":"put","mode":{"kind":"create"}}"#;
+        assert_eq!(op.to_bytes().unwrap(), legacy);
+    }
+
+    #[test]
     fn legacy_unconditional_store_bytes_remain_compatible() {
         let op = AdminOpBody::Store {
             v: 1,
@@ -3534,6 +3586,17 @@ mod admin_schema_v2_tests {
                     record: record(),
                     audit_op: AdminAuditOp::Put,
                     mode: StoreMode::Create,
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "StoreWithCategories",
+                AdminOpBody::StoreWithCategories {
+                    v: v1,
+                    id: "id".into(),
+                    record: record(),
+                    categories: vec!["fixture-category".into()],
                 },
                 v1,
                 Some("id"),

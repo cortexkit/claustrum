@@ -56,6 +56,9 @@ mod secret_desktop_cli;
 #[path = "support/gateway_put_cli.rs"]
 mod gateway_put_cli;
 
+#[path = "support/generate_hex_put_cli.rs"]
+mod generate_hex_put_cli;
+
 #[path = "support/gateway_list_cli.rs"]
 mod gateway_list_cli;
 

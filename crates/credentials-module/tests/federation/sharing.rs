@@ -868,12 +868,13 @@ fn method_count(rig: &Rig, method: &str) -> usize {
 
 #[tokio::test(start_paused = true)]
 async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
+    use claustrum_module_probe::federation::sharing::{
+        run_with_retry_timing_for_test, RetryTimingForTest,
+    };
     use std::time::Duration;
+    use tracing::instrument::WithSubscriber;
+
     let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let _capture = tracing::subscriber::set_default(WarnCapture {
-        logs: Arc::clone(&warnings),
-        module: "federation::sharing",
-    });
     let rig = Rig::new("sharing-refused-watch", snapshot("all_classes")).await;
     rig.callosum.answer(
         TARGET_MODULE,
@@ -883,55 +884,49 @@ async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
             body: json!({"code": "fed_not_ready", "message": "watch refused"}),
         },
     );
-    let (published, task) = record_published(&rig);
-    // Each round publishes the read's roster, then withdraws it when the watch is
-    // refused, just before the loop sleeps.
-    let rounds = || {
-        published
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|seen| seen.is_none())
-            .count()
-    };
-    wait_until(|| rounds() == 1).await;
+    let (timing, mut retries) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(
+        run_with_retry_timing_for_test(
+            Arc::clone(&rig.home.store),
+            rig.vault.outbound.clone(),
+            timing,
+        )
+        .with_subscriber(WarnCapture {
+            logs: Arc::clone(&warnings),
+            module: "federation::sharing",
+        }),
+    );
     let mut gaps = Vec::new();
-    for round in 2..=5 {
-        let mut seconds = 0;
-        loop {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            seconds += 1;
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
-            }
-            // The next round starts with a read, which waits for its reply.
-            if rig
-                .vault
-                .outbound
-                .pending_waiter_count_for_test()
-                .await
-                .unwrap_or(0)
-                > 0
-            {
-                break;
-            }
-            assert!(seconds <= 64, "no reread after {seconds} s");
+    for round in 1..=5 {
+        // Keep virtual time still while the socket and store threads finish the
+        // attempt. Once it sleeps, let Tokio advance to the actual retry timer.
+        let Some(RetryTimingForTest::Sleeping(started)) = wait_for_signal(retries.recv()).await
+        else {
+            panic!("no retry sleep after round {round}");
+        };
+        assert_eq!(method_count(&rig, READ), round);
+        assert_eq!(method_count(&rig, WATCH), round);
+        if round == 5 {
+            break;
         }
-        gaps.push(seconds);
-        wait_until(|| rounds() == round).await;
+        let Ok(Some(RetryTimingForTest::Woke(woke))) =
+            tokio::time::timeout(Duration::from_secs(10), retries.recv()).await
+        else {
+            panic!("no retry wake after round {round}");
+        };
+        gaps.push(woke - started);
     }
-    assert_eq!(gaps, [1, 2, 4, 8], "seconds between successive reads");
-    // One WARN per distinct failure, never one per round.
-    let warnings = warnings.lock().unwrap();
-    let distinct: std::collections::BTreeSet<_> = warnings.iter().collect();
-    assert_eq!(distinct.len(), warnings.len(), "{warnings:?}");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("fed_not_ready")),
-        "{warnings:?}"
+    assert_eq!(
+        gaps,
+        [1, 2, 4, 8].map(Duration::from_secs),
+        "retry sleeps before successive reads"
     );
     task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
+    // Repeating the same refusal does not log one WARN per round.
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("fed_not_ready"), "{warnings:?}");
 }
 
 #[tokio::test(start_paused = true)]

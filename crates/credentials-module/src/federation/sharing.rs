@@ -349,6 +349,32 @@ pub async fn run_with_manifest_watches(
     run_with_pairing_snapshots(store, client, manifest_watches, None).await;
 }
 
+/// The paused-clock times immediately before and after the retry sleep.
+#[cfg(feature = "test-support")]
+pub enum RetryTimingForTest {
+    Sleeping(tokio::time::Instant),
+    Woke(tokio::time::Instant),
+}
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static RETRY_TIMING: tokio::sync::mpsc::UnboundedSender<RetryTimingForTest>;
+}
+
+#[cfg(feature = "test-support")]
+pub async fn run_with_retry_timing_for_test(
+    store: Arc<EncryptedStore>,
+    client: OutboundClient,
+    timing: tokio::sync::mpsc::UnboundedSender<RetryTimingForTest>,
+) {
+    RETRY_TIMING.scope(timing, run(store, client)).await;
+}
+
+#[cfg(feature = "test-support")]
+fn report_retry_timing(event: fn(tokio::time::Instant) -> RetryTimingForTest) {
+    let _ = RETRY_TIMING.try_with(|timing| timing.send(event(tokio::time::Instant::now())));
+}
+
 pub(crate) async fn run_with_pairing_snapshots(
     store: Arc<EncryptedStore>,
     client: OutboundClient,
@@ -421,7 +447,11 @@ async fn reconcile(
             }
             Ok(()) => retries.ended(),
         };
+        #[cfg(feature = "test-support")]
+        report_retry_timing(RetryTimingForTest::Sleeping);
         tokio::time::sleep(delay).await;
+        #[cfg(feature = "test-support")]
+        report_retry_timing(RetryTimingForTest::Woke);
     }
 }
 

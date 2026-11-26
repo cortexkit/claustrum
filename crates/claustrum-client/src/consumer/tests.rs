@@ -78,7 +78,7 @@ impl Rig {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            if frame.header.ty == FrameType::Cancel {
+            if matches!(frame.header.ty, FrameType::Cancel | FrameType::Goodbye) {
                 continue;
             }
             let body: Value = serde_json::from_slice(&frame.body).unwrap();
@@ -308,6 +308,84 @@ async fn consumer_routes_every_operation_without_identity_override() {
 }
 
 #[tokio::test]
+async fn established_route_unknown_channel_reopens_and_resends() {
+    established_route_reopens_and_resends("unknown_channel").await;
+}
+
+#[tokio::test]
+async fn established_route_stale_route_epoch_reopens_and_resends() {
+    established_route_reopens_and_resends("stale_route_epoch").await;
+}
+
+async fn established_route_reopens_and_resends(code: &str) {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let credential = resolver
+            .resolve("handle", Some(12), true)
+            .await
+            .expect("a dead route must reopen and resend");
+        assert_eq!(credential.expose(), b"sdk");
+    };
+    let server = async {
+        let (initial, request) = rig.next().await;
+        assert_eq!(request, credential_get_request("handle", Some(12), true));
+        rig.reply(
+            &initial,
+            FrameType::Error,
+            json!({"code":code,"message":"route no longer exists"}),
+        )
+        .await;
+        let (retry, resent) = rig.next().await;
+        assert_eq!(resent, request);
+        assert_ne!(retry.header.channel, initial.header.channel);
+        rig.reply(
+            &retry,
+            FrameType::Response,
+            json!({"result":{"payload":[115,100,107],"record_version":4}}),
+        )
+        .await;
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 2, "exactly one replacement route");
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn established_route_death_on_resend_surfaces_without_a_third_attempt() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let error = resolver.resolve("handle", None, false).await.unwrap_err();
+        assert_eq!(error.class, CredentialErrorClass::Transport);
+        assert_eq!(error.code(), "stale_route_epoch");
+        assert!(resolver.status_scoped("barrier").await.is_err());
+    };
+    let server = async {
+        for code in ["unknown_channel", "stale_route_epoch"] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body, credential_get_request("handle", None, false));
+            rig.reply(
+                &frame,
+                FrameType::Error,
+                json!({"code":code,"message":"route no longer exists"}),
+            )
+            .await;
+        }
+        let (frame, body) = rig.next().await;
+        assert_eq!(body, credential_status_request("barrier"));
+        rig.reply(
+            &frame,
+            FrameType::Error,
+            json!({"code":"invalid_params","message":"barrier"}),
+        )
+        .await;
+    };
+    tokio::join!(calls, server);
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
 async fn consumer_closed_by_caller_refuses_scoped_read_as_transport() {
     let rig = Rig::new().await;
     let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
@@ -410,6 +488,60 @@ async fn consumer_watch_drains_notices_and_confirms_empty_streams() {
     };
     tokio::join!(calls, server);
     rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn established_route_death_releases_sdk_watch_handles() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let codes = ["unknown_channel", "stale_route_epoch"];
+    let calls = async {
+        for code in codes {
+            let mut watch = resolver.watch_scoped(None).await.unwrap();
+            assert_eq!(watch.next().await.unwrap().seq, 1);
+            assert_dead_watch(watch.closed().await, code);
+        }
+        for code in codes {
+            let mut watch = resolver.policy_watch().await.unwrap();
+            assert_dead_watch(watch.closed().await, code);
+        }
+    };
+    let server = async {
+        for (index, (method, code)) in ["auth.watch_scoped", "policy.watch"]
+            .into_iter()
+            .flat_map(|method| codes.map(|code| (method, code)))
+            .enumerate()
+        {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body["method"], method);
+            assert_eq!(usize::from(frame.header.channel), 7 + index);
+            if method == "auth.watch_scoped" {
+                rig.reply(
+                    &frame,
+                    FrameType::StreamData,
+                    json!({"kind":"changed","epoch":"launch","seq":1,"view":"v1","keys":"k1"}),
+                )
+                .await;
+            }
+            rig.reply(
+                &frame,
+                FrameType::Error,
+                json!({"code":code,"message":"route no longer exists"}),
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 4);
+    rig.consumer.close().await;
+}
+
+fn assert_dead_watch(outcome: ScopedWatchOutcome, code: &str) {
+    let ScopedWatchOutcome::TransportLost(error) = outcome else {
+        panic!("{code} must use the reconnect path: {outcome:?}");
+    };
+    assert_eq!(error.code(), code);
+    assert_eq!(error.class, CredentialErrorClass::Transport);
 }
 
 #[tokio::test]

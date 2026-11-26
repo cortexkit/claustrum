@@ -82,6 +82,7 @@ pub(super) fn policy_result(bytes: &[u8]) -> Result<&RawValue, CredentialResolve
             class,
             code: error.code.to_owned(),
             safe_message: "vault refused the policy operation".to_owned(),
+            established_route_dead: false,
         });
     }
     Ok(result)

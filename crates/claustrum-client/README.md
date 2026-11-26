@@ -13,13 +13,14 @@ fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.17.0"
+cortexkit-claustrum-client = "0.17.1"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.17.0", default-features = false }` for the public `decode_*_reply` functions,
-`decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
+"0.17.1", default-features = false }` for the public `decode_*_reply` functions,
+the route-open and established-route error decoders, record/error types,
+`WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.
 

@@ -158,7 +158,8 @@ fn fleet_epoch_refusals_keep_wire_code_and_class() {
             assert_eq!(items[1].as_ref().unwrap().expose(), &[255]);
         }
     }
-    let invalid_params = crate::decode_wire_error(
+    let invalid_params = crate::decode_established_route_wire_error(
+        subc_protocol::Flags(0),
         br#"{"code":"invalid_params","message":"params not decodable: invalid fleet parameters"}"#,
     );
     assert_eq!(invalid_params.code(), "invalid_params");

@@ -21,7 +21,7 @@ pub(super) enum WatchFrame {
     Data(Vec<u8>),
     Response(Vec<u8>),
     End,
-    Error(Vec<u8>),
+    Error(CredentialResolverError),
 }
 
 pub(super) async fn sensitive_request(
@@ -78,7 +78,10 @@ impl CredentialTransport for ClaustrumConsumer {
                 .read_reply(self.route_channel, self.route_epoch, corr)
                 .await?;
             if reply.header.ty == FrameType::Error {
-                return Err(decode_wire_error(&reply.body));
+                return Err(decode_established_route_wire_error(
+                    reply.header.flags,
+                    &reply.body,
+                ));
             }
             Ok(reply.body)
         })
@@ -133,7 +136,12 @@ impl CredentialTransport for ClaustrumConsumer {
                     FrameType::StreamData => return Ok(WatchFrame::Data(frame.body)),
                     FrameType::Response => return Ok(WatchFrame::Response(frame.body)),
                     FrameType::StreamEnd => return Ok(WatchFrame::End),
-                    FrameType::Error => return Ok(WatchFrame::Error(frame.body)),
+                    FrameType::Error => {
+                        return Ok(WatchFrame::Error(decode_established_route_wire_error(
+                            frame.header.flags,
+                            &frame.body,
+                        )))
+                    }
                     _ => {}
                 }
             }

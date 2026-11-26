@@ -350,20 +350,24 @@ fi
 # known seams, and what their test arms do against a staged artifact:
 #
 #   1  api_key_login.rs        validation bypass; its arm skips under CRED_CLI_BIN
-#   2  browser_login.rs        fake OAuth endpoints; login arms skip under CRED_CLI_BIN
+#   4  browser_login.rs        fake OAuth endpoints, and the callback address a test
+#                              asks the kernel for (port 0); login arms skip under
+#                              CRED_CLI_BIN
 #   3  github_apps.rs          GitHub API redirect; its arms skip under CRED_CLI_BIN
-#   1  google_login.rs         fake Google endpoints; covered by the login-arm skips
-#   1  credentials_cli.rs      the login wire hook; covered by the login-arm skips
+#   2  google_login.rs         fake Google endpoints and the port-0 callback; covered by
+#                              the login-arm skips
+#   2  login_cli.rs            the login wire hook and the port-0 callback; covered by
+#                              the login-arm skips
 #  13  import_picker.rs        scripted prompts and injected commits; release builds
 #                              never compile them, even with import-prompt-seam on
-#   4  Windows-only seams      store.rs, test_support.rs and two in credentials_cli.rs;
-#                              never compiled into this macOS build
+#   4  Windows-only seams      store_metadata.rs, test_support.rs, keys_cli.rs and
+#                              credentials_cli.rs; never compiled into this macOS build
 #
 # A NEW seam silently NARROWS artifact verification while every line above still prints
 # green, so the count is pinned. Raising it means deciding what the matching test arm
 # does under an override -- skip with a printed reason, or be rewritten not to need the
 # seam -- rather than discovering the narrowing at some later deploy.
-KNOWN_DEBUG_SEAMS=25
+KNOWN_DEBUG_SEAMS=29
 seams="$(grep -rcE 'cfg\(.*debug_assertions' crates/*/src --include='*.rs' 2>/dev/null \
   | awk -F: '{n += $2} END {print n + 0}')"
 if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then

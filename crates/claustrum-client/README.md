@@ -4,20 +4,21 @@ Rust client for the claustrum credential vault, used by subc-supervised CortexKi
 modules. The vault owns this client alongside its TypeScript client so the wire
 decoders can be tested against the producer's serialized replies.
 
-Version 0.12.0 adds a resolver over a caller-owned `subc-client-rs` 0.41.1
-consumer for claim-bound modules. It uses subc-protocol 0.37, subc-control 0.41
-and subc-transport 0.18. The legacy raw constructors remain available. Listed
-credentials carry optional `plan_tier_since_ms`: use the operator's effective
-start when present, otherwise fall back to `plan_tier_observed_at_ms`.
+The resolver for claim-bound modules uses a caller-owned `subc-client-rs` 0.42.1
+consumer. Its subc dependencies use `subc-protocol` 0.37.11, `subc-control` 0.43.0
+(via the SDK), `subc-transport` 0.18.0, and `subc-os` 0.1.54. The legacy raw
+constructors remain available. Listed credentials carry optional
+`plan_tier_since_ms`: use the operator's effective start when present, otherwise
+fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.16.0"
+cortexkit-claustrum-client = "0.17.0"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.16.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.17.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
 no socket or authentication code is built in this mode.
@@ -303,6 +304,8 @@ tagged Magic Context and Prefrontal samples in
 
 ## Changes
 
+- 0.17.0: `with_consumer` uses `SubcConsumer` from the `subc-client-rs` 0.42 line.
+  See the [changelog](CHANGELOG.md).
 - 0.16.0: optional `org_id` on scoped listings. See the [changelog](CHANGELOG.md).
 - 0.15.0: optional `condition` on scoped listing rows, and single-attempt
   `report_condition` and `clear_condition`. A vault without login conditions

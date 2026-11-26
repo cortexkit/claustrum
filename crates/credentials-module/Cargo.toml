@@ -62,7 +62,7 @@ subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
 subc-config = { workspace = true }
-subc-client-rs = "0.41.1"
+subc-client-rs = "0.42.1"
 cortexkit-bus-client = "=0.1.17"
 cortexkit-bus-nats = "0.5.6"
 async-nats = "0.50"

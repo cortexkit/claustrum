@@ -1216,6 +1216,10 @@ async fn send_hello(
         // cannot observe which case it is in and must send the nonce on that path,
         // so nothing here should be read as evidence that the check happens.
         launch_nonce: config.launch_nonce.clone(),
+        // Do not advertise new connection capabilities or resume registration.
+        // The protocol omits both fields when unset.
+        module_capabilities: None,
+        resume_token: None,
     })
     .map_err(ModuleError::Json)?;
     // Channel-0 control frames carry the reserved epoch 0 (wire v2 §3.1).
@@ -10745,6 +10749,8 @@ mod tests {
             assert_eq!(hello.header.ty, FrameType::Hello);
             let body: serde_json::Value = serde_json::from_slice(&hello.body).unwrap();
             assert_eq!(body["manifest"]["registration_channel"], true);
+            assert!(body.get("module_capabilities").is_none());
+            assert!(body.get("resume_token").is_none());
             if channel {
                 assert!(body.get("launch_nonce").is_none());
                 assert!(body["manifest"]["provenance"]

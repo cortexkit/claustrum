@@ -217,7 +217,6 @@ struct HttpStub {
     responses: Mutex<VecDeque<HttpResponse>>,
     calls: AtomicUsize,
     hang: bool,
-    completed: Option<Arc<tokio::sync::Notify>>,
 }
 impl HttpStub {
     fn new(replies: Vec<(u16, Vec<u8>)>) -> Self {
@@ -230,7 +229,6 @@ impl HttpStub {
             ),
             calls: AtomicUsize::new(0),
             hang: false,
-            completed: None,
         }
     }
     fn good() -> Self {
@@ -245,14 +243,12 @@ impl HttpStub {
         if self.hang {
             std::future::pending().await
         } else {
-            let mut responses = self.responses.lock().unwrap();
-            let response = responses.pop_front().expect("unexpected outbound call");
-            if responses.is_empty() {
-                if let Some(done) = &self.completed {
-                    done.notify_one();
-                }
-            }
-            Ok(response)
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected outbound call"))
         }
     }
 }
@@ -291,6 +287,7 @@ async fn propose(rig: &Rig, identity: &IdentityStub, http: &HttpStub) -> Propose
         Ok(http),
         Instant::now() + PROPOSE_DEADLINE,
         || NOW,
+        None,
     )
     .await
 }
@@ -314,6 +311,7 @@ async fn manifest_propose_rechecks_one_tap_after_preflight_before_inserting() {
         Ok(&http),
         Instant::now() + PROPOSE_DEADLINE,
         || NOW,
+        None,
     )
     .await;
     assert_refusal(answer, "one_tap_disabled", "transient");
@@ -983,33 +981,37 @@ async fn manifest_propose_writer_lock_past_deadline_never_inserts_later() {
     let before = snapshot(&rig);
     let competing = Connection::open(&rig.path).unwrap();
     competing.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let completed = Arc::new(tokio::sync::Notify::new());
-    let signal = Arc::clone(&completed);
+    let (started, writer_started) = tokio::sync::oneshot::channel();
+    let (release_writer, release) = std::sync::mpsc::channel();
+    let deadline = Instant::now() + PROPOSE_DEADLINE;
     let store = Arc::clone(&rig.store);
     let job = tokio::spawn(async move {
-        let identity = IdentityStub::good();
-        let mut http = HttpStub::good();
-        http.completed = Some(signal);
         let p = preflight(&store, Some(&plexus()), &params()).ok().unwrap();
         checked_proposal(
             store,
             p,
-            &identity,
-            Ok(&http),
-            Instant::now() + PROPOSE_DEADLINE,
+            &IdentityStub::good(),
+            Ok(&HttpStub::good()),
+            deadline,
             || NOW,
+            Some(WriterGate { started, release }),
         )
         .await
     });
-    // On this current-thread runtime, the ready final HTTP response runs through
-    // preparation and queues the blocking write before the task yields to us.
-    completed.notified().await;
+    // HTTP completion precedes blocking preparation, so wait for the writer
+    // gate instead. Hold it until rollback so SQLite's real-time busy timeout
+    // cannot determine whether the job is pending at the deadline.
+    writer_started
+        .await
+        .expect("the blocking writer must start");
+    assert!(Instant::now() < deadline);
     tokio::time::advance(PROPOSE_DEADLINE).await;
     assert!(
         !job.is_finished(),
         "the blocking writer must be awaited, not detached at expiry"
     );
     competing.execute_batch("ROLLBACK").unwrap();
+    release_writer.send(()).unwrap();
     assert_refusal(job.await.unwrap(), "github_unavailable", "transient");
     assert_eq!(snapshot(&rig), before);
 }
@@ -1035,6 +1037,7 @@ async fn manifest_propose_admitted_before_deadline_returns_committed_reply() {
                 finish_rx.recv().unwrap();
                 NOW
             },
+            None,
         )
         .await
     });

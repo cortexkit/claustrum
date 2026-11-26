@@ -155,8 +155,16 @@ pub async fn serve(
             .map_err(|_| ()),
         deadline,
         wall_now_ms,
+        #[cfg(test)]
+        None,
     )
     .await
+}
+
+#[cfg(test)]
+struct WriterGate {
+    started: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 async fn checked_proposal(
@@ -166,6 +174,7 @@ async fn checked_proposal(
     http: Result<&dyn HttpTransport, ()>,
     deadline: Instant,
     clock: impl FnOnce() -> i64 + Send + 'static,
+    #[cfg(test)] writer_gate: Option<WriterGate>,
 ) -> ProposeAnswer {
     if Instant::now() >= deadline {
         return refusal("identity_unavailable", "transient");
@@ -279,6 +288,11 @@ async fn checked_proposal(
     // The store checks the deadline with the writer held. Do not cancel this job:
     // an admitted transaction must commit and return its reply even after expiry.
     match tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(gate) = writer_gate {
+            gate.started.send(()).unwrap();
+            gate.release.recv().unwrap();
+        }
         store.propose_gh_manifest_binding(
             &prepared,
             "reserved:plexus",

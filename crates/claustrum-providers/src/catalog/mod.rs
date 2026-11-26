@@ -2442,7 +2442,7 @@ mod tests {
             ("huggingface", &["huggingface"]),
             ("nvidia", &["nvidia"]),
             ("xai", &["xai"]),
-            ("openai", &["openai"]),
+            ("openai", &["openai-platform"]),
             ("google", &["google"]),
             ("anthropic", &["anthropic-platform"]),
             ("inception", &["inception"]),

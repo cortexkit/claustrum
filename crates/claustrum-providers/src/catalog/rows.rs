@@ -320,7 +320,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         hosts: &["api.openai.com"],
         hosts_doc: "https://developers.openai.com/api/reference/overview",
         invalid_key: Some(InvalidKeyEvidence { status: 401, error_code: Some("invalid_api_key"), error_code_field: Some("/error/code") }),
-        default_provider_ids: &["openai"],
+        default_provider_ids: &["openai-platform"],
         display_name: "OpenAI (API Key)",
         default_id: "apikey:openai",
         dashboard_url: "https://platform.openai.com/api-keys",

@@ -85,14 +85,10 @@ impl Fixture {
         flags: &[&str],
         callback: SocketAddr,
     ) -> Command {
-        let mut command = cli();
+        let mut command = self.vault_command();
         command
             .args(["login", "--provider", provider])
             .args(flags)
-            .args(["--data-dir"])
-            .arg(self.root.join("vault"))
-            .arg("--key-path")
-            .arg(self.root.join("master.key"))
             .env("DISPLAY", ":0")
             .env_remove("WAYLAND_DISPLAY")
             .env(
@@ -105,6 +101,16 @@ impl Fixture {
                 })
                 .to_string(),
             );
+        command
+    }
+
+    fn vault_command(&self) -> Command {
+        let mut command = cli();
+        command
+            .arg("--data-dir")
+            .arg(self.root.join("vault"))
+            .arg("--key-path")
+            .arg(self.root.join("master.key"));
         command
     }
 
@@ -503,6 +509,80 @@ fn browser_callback_wins_without_waiting_for_stdin_to_close() {
     assert!(login.stdin.is_some());
     login.finish(true);
     assert_eq!(server.join().unwrap()["code"], "from-browser");
+}
+
+#[test]
+fn new_openai_api_keys_and_chatgpt_sign_in_list_distinct_provider_ids() {
+    let fixture = Fixture::new();
+    let server = fixture.exchange(true);
+    let mut login =
+        Login::start(fixture.command("openai", &["--approve-on", "other", "--browser", "show"]));
+    let url = login.authorize_url();
+    login.paste(&format!(
+        "{}?code=fixture-code&state={}",
+        param(&url, "redirect_uri"),
+        param(&url, "state"),
+    ));
+    login.finish(true);
+    assert_eq!(server.join().unwrap()["code"], "fixture-code");
+
+    let payload = fixture.root.join("api-key");
+    std::fs::write(&payload, "fixture-api-key").unwrap();
+    let put = |id: &str, flags: &[&str]| {
+        let out = fixture
+            .vault_command()
+            .args(["put", "--id", id, "--payload-file"])
+            .arg(&payload)
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "put {id}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    put("apikey:openai", &[]);
+    put("apikey:openai:work", &[]);
+    put("apikey:openai:legacy", &["--provider-id", "openai"]);
+
+    let out = fixture
+        .vault_command()
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "list: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = listed["credentials"].as_array().unwrap();
+    for (id, method, provider_id) in [
+        ("chatgpt:openai", "chatgpt", "openai"),
+        ("apikey:openai:legacy", "apikey", "openai"),
+        ("apikey:openai", "apikey", "openai-platform"),
+        ("apikey:openai:work", "apikey", "openai-platform"),
+    ] {
+        let row = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["auth_method"], method, "{id}");
+        assert_eq!(row["provider_ids"], json!([provider_id]), "{id}");
+    }
+
+    let report = fixture
+        .vault_command()
+        .arg("provider-report")
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "provider-report: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(report.stdout).unwrap(),
+        "ID\tSTORED\tTABLE\napikey:openai:legacy\t[\"openai\"]\t[\"openai-platform\"]\n"
+    );
 }
 
 #[test]

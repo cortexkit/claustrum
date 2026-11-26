@@ -2,9 +2,8 @@
 """Keep release-build.sh's pinned count of debug-only seams equal to the source.
 
 The release builder refuses when the count differs, but it runs only after a change
-has landed. This check runs in the gate, so a new seam is noticed before landing,
-together with the decision the pin asks for (what its test arm does against a
-staged release binary).
+has landed. scripts/gate.sh runs this check before a change lands, so a new seam is
+noticed in time to decide what its test arm does against a staged release binary.
 """
 from pathlib import Path
 import re

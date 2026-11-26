@@ -356,8 +356,9 @@ fi
 #   3  github_apps.rs          GitHub API redirect; its arms skip under CRED_CLI_BIN
 #   2  google_login.rs         fake Google endpoints and the port-0 callback; covered by
 #                              the login-arm skips
-#   2  login_cli.rs            the login wire hook and the port-0 callback; covered by
-#                              the login-arm skips
+#   2  login_cli.rs            swapping a provider's OAuth endpoints for a test's fake
+#                              ones, and the port-0 callback; covered by the login-arm
+#                              skips
 #  13  import_picker.rs        scripted prompts and injected commits; release builds
 #                              never compile them, even with import-prompt-seam on
 #   4  Windows-only seams      store_metadata.rs, test_support.rs, keys_cli.rs and

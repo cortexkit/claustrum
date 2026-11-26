@@ -117,14 +117,18 @@ pub async fn serve(
     params: &Value,
 ) -> PhoneAnswer {
     let deadline = tokio::time::Instant::now() + PHONE_OP_DEADLINE;
-    serve_with_lookup(
+    serve_with_pairing(
         store,
         fingerprint,
         peer_build,
         method,
         params,
         deadline,
-        federation::callosum_lookup(client, "callosum.paired_devices_read", deadline),
+        async {
+            let reply =
+                federation::callosum_lookup(client, "callosum.paired_devices_read", deadline).await;
+            federation::lookup_paired_device(&reply, &format!("fed-phone:{fingerprint}"))
+        },
     )
     .await
 }
@@ -175,6 +179,7 @@ pub async fn serve_dev_desktop(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn serve_with_lookup(
     store: Arc<EncryptedStore>,
     fingerprint: &str,
@@ -183,6 +188,35 @@ pub(crate) async fn serve_with_lookup(
     params: &Value,
     deadline: tokio::time::Instant,
     lookup: impl std::future::Future<Output = Option<Value>>,
+) -> PhoneAnswer {
+    serve_with_pairing(
+        store,
+        fingerprint,
+        peer_build,
+        method,
+        params,
+        deadline,
+        async {
+            match lookup.await {
+                Some(body) => {
+                    federation::decode_paired_devices(&body, &format!("fed-phone:{fingerprint}"))
+                }
+                None => Lookup::Unavailable,
+            }
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_with_pairing(
+    store: Arc<EncryptedStore>,
+    fingerprint: &str,
+    peer_build: Option<&str>,
+    method: &str,
+    params: &Value,
+    deadline: tokio::time::Instant,
+    pairing: impl std::future::Future<Output = Lookup<String>>,
 ) -> PhoneAnswer {
     if ATTESTED_PHONE_OPS.contains(&method) && peer_build != Some("production") {
         return answer(Err(if method == OP_APPROVE_ACTION {
@@ -207,14 +241,10 @@ pub(crate) async fn serve_with_lookup(
     let pairing = if matches!(op, PhoneOperation::DepositKeys) {
         None
     } else {
-        let body = match tokio::time::timeout_at(deadline, lookup).await {
-            Ok(Some(body)) => body,
-            _ => return answer_for_method(method, Err(SecretError::PairingUnavailable)),
-        };
-        match federation::decode_paired_devices(&body, &format!("fed-phone:{fingerprint}")) {
-            Lookup::Found(pairing) => Some(pairing),
-            Lookup::Absent => None,
-            Lookup::Unavailable => {
+        match tokio::time::timeout_at(deadline, pairing).await {
+            Ok(Lookup::Found(pairing)) => Some(pairing),
+            Ok(Lookup::Absent) => None,
+            Ok(Lookup::Unavailable) | Err(_) => {
                 return answer_for_method(method, Err(SecretError::PairingUnavailable));
             }
         }

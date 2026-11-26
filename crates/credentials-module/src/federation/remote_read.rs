@@ -339,6 +339,7 @@ fn map_outbound_error(error: OutboundError) -> Failure {
             failure.wire_outcome = Some(diagnostic_code(&code).to_string());
             failure
         }
+        OutboundError::ModuleRefused { code, .. } => map_frame_code(&code),
         OutboundError::Unavailable(_) => Failure::home_unreachable(),
     }
 }
@@ -810,26 +811,25 @@ impl RemoteReader {
         self.before_apply.set(hook).is_ok()
     }
 
-    /// One route call within `left`, through the outbound client (or the test stub),
-    /// with its failure already mapped to a consumer-table row.
+    /// One route call within `left`, through the outbound client or the test stub.
     async fn call_route(
         &self,
         route_key: &str,
         call: RouteCall,
         left: Duration,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Value, OutboundError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(stub) = self.route_stub.get() {
             return match tokio::time::timeout(left, stub(route_key, call.request)).await {
-                Ok(result) => result.map_err(map_outbound_error),
-                Err(_) => Err(Failure::home_unreachable()),
+                Ok(result) => result,
+                Err(_) => Err(OutboundError::Unavailable("no route reply in time".into())),
             };
         }
-        let client = self.outbound.get().ok_or_else(Failure::home_unreachable)?;
-        client
-            .call(route_key, call, left)
-            .await
-            .map_err(map_outbound_error)
+        let client = self
+            .outbound
+            .get()
+            .ok_or_else(|| OutboundError::Unavailable("no outbound client".into()))?;
+        client.call(route_key, call, left).await
     }
 
     /// The remote record stored under `credential_id`, or `None` when the id is not a
@@ -1222,7 +1222,7 @@ impl RemoteReader {
         budget: tokio::time::Instant,
     ) -> Result<super::ingress::PeerKey, Failure> {
         let left = Self::left(budget).ok_or_else(Failure::home_unreachable)?;
-        let body = self
+        let reply = self
             .call_route(
                 CALLOSUM_ROUTE_KEY,
                 RouteCall {
@@ -1232,8 +1232,15 @@ impl RemoteReader {
                 },
                 left,
             )
-            .await?;
-        match decode_peer_transfer_key(&body, home) {
+            .await;
+        let key = match reply {
+            Ok(body) => decode_peer_transfer_key(&body, home),
+            Err(OutboundError::ModuleRefused { code, .. }) => {
+                super::ingress::peer_keys_refusal(&code)
+            }
+            Err(error) => return Err(map_outbound_error(error)),
+        };
+        match key {
             Lookup::Found(key) => Ok(key),
             Lookup::Absent => Err(Failure::home_key_missing(home)),
             Lookup::Unavailable => Err(Failure::home_unreachable()),
@@ -1831,8 +1838,7 @@ fn valid_approval_required(reply: &Value) -> bool {
         && reply.get("expires_at_ms").is_some_and(Value::is_i64)
 }
 
-/// A home answer that is neither a §15 body nor sealed: the home's refusal, an
-/// `Error` frame, or something this vault does not recognise.
+/// Interpret a home response that is neither an approval, a revocation, nor a sealed release.
 fn classify_secret_refusal(reply: &Value, home: &str, self_id: &str) -> SecretFault {
     if let Some(error) = reply.get("error").filter(|error| error.is_object()) {
         return SecretFault::Refused(map_secret_refusal(error, home, self_id));
@@ -1848,9 +1854,12 @@ fn classify_secret_refusal(reply: &Value, home: &str, self_id: &str) -> SecretFa
 
 /// Whether a home call's outcome is a transport fault worth one more try with the
 /// same request bytes: the home could not be reached, or it could not finish a lookup.
-fn retryable(outcome: &Result<Value, Failure>) -> bool {
+fn retryable(outcome: &Result<Value, OutboundError>) -> bool {
     match outcome {
-        Err(failure) => failure.refusal.code == "home_unreachable",
+        Err(OutboundError::Unavailable(_)) => true,
+        Err(OutboundError::ModuleRefused { code, .. } | OutboundError::Refused { code, .. }) => {
+            map_frame_code(code).refusal.code == "home_unreachable"
+        }
         Ok(reply) => {
             reply
                 .get("error")
@@ -1903,6 +1912,9 @@ impl RemoteReader {
             )
             .await;
         Some(match reply {
+            Err(OutboundError::ModuleRefused { code, .. }) if code == "invalid_params" => {
+                SecretForwardAnswer::InvalidParams
+            }
             Ok(reply) if reply.get("code").and_then(Value::as_str) == Some("invalid_params") => {
                 SecretForwardAnswer::InvalidParams
             }
@@ -2114,7 +2126,7 @@ impl RemoteReader {
         home: &str,
         request: &Value,
         budget: tokio::time::Instant,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Value, SecretFault> {
         loop {
             let left = Self::left(budget).ok_or_else(Failure::home_unreachable)?;
             let outcome = self
@@ -2130,7 +2142,12 @@ impl RemoteReader {
                 .await;
             let room = Self::left(budget).is_some_and(|left| left > SECRET_FORWARD_RETRY_PAUSE);
             if !retryable(&outcome) || !room {
-                return outcome;
+                return outcome.map_err(|error| match error {
+                    OutboundError::ModuleRefused { ref code, .. } if code == "invalid_params" => {
+                        SecretFault::InvalidParams
+                    }
+                    _ => map_outbound_error(error).into(),
+                });
             }
             tokio::time::sleep(SECRET_FORWARD_RETRY_PAUSE).await;
         }

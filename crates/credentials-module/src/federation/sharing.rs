@@ -14,7 +14,9 @@ use credentials_core::store::EncryptedStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::outbound::{management_surface, OutboundClient, RouteCall, ADMIN_OP_BUDGET};
+use super::outbound::{
+    management_surface, OutboundClient, OutboundError, RouteCall, ADMIN_OP_BUDGET,
+};
 use super::outbound::{Subscription, SubscriptionEvent};
 
 // Ignore additional Callosum metadata so a newer reply can still revoke a
@@ -186,10 +188,18 @@ async fn apply(
     manifest_watches: Option<&super::manifest_watch_ingress::ManifestWatchHub>,
     hub_pairings: Option<&PairingSnapshots>,
 ) -> Result<(), String> {
-    let snapshot = Arc::new(
-        check_snapshot(&body)
-            .map_err(|reason| format!("invalid paired-device snapshot: {reason}"))?,
-    );
+    let snapshot = Arc::new(check_snapshot(&body).map_err(|reason| {
+        if reason == "shape" {
+            let keys: Vec<_> = body
+                .as_object()
+                .into_iter()
+                .flat_map(|obj| obj.keys())
+                .collect();
+            format!("invalid paired-device snapshot: shape (top-level keys: {keys:?})")
+        } else {
+            format!("invalid paired-device snapshot: {reason}")
+        }
+    })?);
     let removals = Arc::clone(removals);
     let reconciled = Arc::clone(&snapshot);
     tokio::task::spawn_blocking(move || {
@@ -472,7 +482,12 @@ async fn watch(
             ADMIN_OP_BUDGET,
         )
         .await
-        .map_err(|e| e.message().to_string())?;
+        .map_err(|error| match error {
+            OutboundError::ModuleRefused { code, .. } => {
+                format!("paired-device read refused: {code}")
+            }
+            _ => error.message().to_string(),
+        })?;
     apply(
         Arc::clone(&store),
         snapshot,

@@ -53,7 +53,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use subc_protocol::Principal;
 
-use super::outbound::{management_surface, OutboundClient, RouteCall, HOME_OP_DEADLINE};
+use super::outbound::{
+    management_surface, OutboundClient, OutboundError, RouteCall, HOME_OP_DEADLINE,
+};
 use crate::secret_use::{ForwardedUseAnswer, UseAnswer};
 
 /// A peer asks the home for a short-lived access token (a `query`: callosum keeps no
@@ -323,9 +325,7 @@ fn member_fingerprint(member_id: &str) -> Option<&str> {
     member_id.strip_prefix(MEMBER_ID_PREFIX)
 }
 
-/// The refusal code of a callosum answer that is a refusal rather than a reply: an
-/// object with a string `code` and none of `reply_member`. Callosum's refusals arrive
-/// as the route's error body, which the outbound client hands back as the value.
+/// Recognise a bare refusal in a discovery body, as in Callosum's published vectors.
 fn refusal_code<'a>(body: &'a Value, reply_member: &str) -> Option<&'a str> {
     if body.get(reply_member).is_some() {
         return None;
@@ -348,10 +348,7 @@ fn refusal_code<'a>(body: &'a Value, reply_member: &str) -> Option<&'a str> {
 /// (`fed_not_ready`, `fed_target_unavailable`), which are transient.
 pub fn decode_paired_devices(body: &Value, member_id: &str) -> Lookup<String> {
     if let Some(code) = refusal_code(body, "devices") {
-        return match code {
-            "fed_not_ready" | "fed_target_unavailable" => Lookup::Unavailable,
-            _ => Lookup::Absent,
-        };
+        return paired_devices_refusal(code);
     }
     let Some(devices) = body.get("devices").and_then(Value::as_array) else {
         return Lookup::Absent;
@@ -383,6 +380,24 @@ pub fn decode_paired_devices(body: &Value, member_id: &str) -> Lookup<String> {
     found.map_or(Lookup::Absent, Lookup::Found)
 }
 
+fn paired_devices_refusal(code: &str) -> Lookup<String> {
+    match code {
+        "fed_not_ready" | "fed_target_unavailable" => Lookup::Unavailable,
+        _ => Lookup::Absent,
+    }
+}
+
+pub(crate) fn lookup_paired_device(
+    reply: &Result<Value, OutboundError>,
+    member: &str,
+) -> Lookup<String> {
+    match reply {
+        Ok(body) => decode_paired_devices(body, member),
+        Err(OutboundError::ModuleRefused { code, .. }) => paired_devices_refusal(code),
+        Err(_) => Lookup::Unavailable,
+    }
+}
+
 /// Decode a `callosum.peer_keys_read` reply into `member_id`'s announced
 /// `vault_transfer_x25519` key.
 ///
@@ -400,10 +415,7 @@ pub fn decode_paired_devices(body: &Value, member_id: &str) -> Lookup<String> {
 /// transient.
 pub fn decode_peer_transfer_key(body: &Value, member_id: &str) -> Lookup<PeerKey> {
     if let Some(code) = refusal_code(body, "peers") {
-        return match code {
-            "fed_not_ready" => Lookup::Unavailable,
-            _ => Lookup::Absent,
-        };
+        return peer_keys_refusal(code);
     }
     let Some(fingerprint) = member_fingerprint(member_id) else {
         return Lookup::Absent;
@@ -432,6 +444,24 @@ pub fn decode_peer_transfer_key(body: &Value, member_id: &str) -> Lookup<PeerKey
             public,
         }),
         None => Lookup::Absent,
+    }
+}
+
+pub(super) fn peer_keys_refusal(code: &str) -> Lookup<PeerKey> {
+    match code {
+        "fed_not_ready" => Lookup::Unavailable,
+        _ => Lookup::Absent,
+    }
+}
+
+pub(super) fn lookup_peer_transfer_key(
+    reply: &Result<Value, OutboundError>,
+    member: &str,
+) -> Lookup<PeerKey> {
+    match reply {
+        Ok(body) => decode_peer_transfer_key(body, member),
+        Err(OutboundError::ModuleRefused { code, .. }) => peer_keys_refusal(code),
+        Err(_) => Lookup::Unavailable,
     }
 }
 
@@ -467,19 +497,18 @@ pub fn decode_self_member(body: &Value) -> Lookup<String> {
         })
 }
 
-/// One call to callosum's management surface (`method`, no params) through `client`,
-/// within what is left of `budget`. `None` for no client, no time left or no answer,
-/// all of which a caller treats as transient. A callosum refusal comes back as the
-/// value, for the decoders above to classify.
+/// One call to Callosum's management surface (`method`, no params) within the
+/// remaining budget. A refusal is distinct from a roster or an unanswered call.
 pub async fn callosum_lookup(
     client: Option<&OutboundClient>,
     method: &str,
     budget: tokio::time::Instant,
-) -> Option<Value> {
-    let client = client?;
+) -> Result<Value, OutboundError> {
+    let client = client.ok_or_else(|| OutboundError::Unavailable("no Callosum client".into()))?;
     let left = budget
         .checked_duration_since(tokio::time::Instant::now())
-        .filter(|left| !left.is_zero())?;
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| OutboundError::Unavailable("no time for a Callosum lookup".into()))?;
     client
         .call(
             CALLOSUM_ROUTE_KEY,
@@ -491,7 +520,6 @@ pub async fn callosum_lookup(
             left,
         )
         .await
-        .ok()
 }
 
 /// Exactly 64 lowercase hex characters, as 32 bytes.
@@ -2037,14 +2065,10 @@ impl HomeVault {
         subject: &str,
         budget: tokio::time::Instant,
     ) -> Result<String, Refusal> {
-        let body = match self
+        let reply = self
             .callosum_call("callosum.paired_devices_read", budget)
-            .await
-        {
-            Some(body) => body,
-            None => return Err(Refusal::HomeUnavailable),
-        };
-        match decode_paired_devices(&body, member) {
+            .await;
+        match lookup_paired_device(&reply, member) {
             Lookup::Found(pairing_id) => Ok(pairing_id),
             Lookup::Absent => {
                 self.note_refusal(subject, member, "member_not_paired");
@@ -2060,23 +2084,23 @@ impl HomeVault {
         member: &str,
         budget: tokio::time::Instant,
     ) -> Result<PeerKey, Refusal> {
-        let body = match self.callosum_call("callosum.peer_keys_read", budget).await {
-            Some(body) => body,
-            None => return Err(Refusal::HomeUnavailable),
-        };
-        match decode_peer_transfer_key(&body, member) {
+        let reply = self.callosum_call("callosum.peer_keys_read", budget).await;
+        match lookup_peer_transfer_key(&reply, member) {
             Lookup::Found(key) => Ok(key),
             Lookup::Absent => Err(Refusal::SetupIncomplete(member.to_string())),
             Lookup::Unavailable => Err(Refusal::HomeUnavailable),
         }
     }
 
-    /// One callosum call within what is left of the home's budget. `None` for no
-    /// client, no time or no answer, all of which are transient for the caller.
-    async fn callosum_call(&self, method: &str, budget: tokio::time::Instant) -> Option<Value> {
+    async fn callosum_call(
+        &self,
+        method: &str,
+        budget: tokio::time::Instant,
+    ) -> Result<Value, OutboundError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(stub) = self.callosum_stub.as_ref() {
-            return stub(method);
+            return stub(method)
+                .ok_or_else(|| OutboundError::Unavailable("no stub lookup reply".into()));
         }
         callosum_lookup(self.callosum.get(), method, budget).await
     }

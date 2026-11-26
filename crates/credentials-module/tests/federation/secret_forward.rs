@@ -833,6 +833,52 @@ async fn forwarded_worker_statements_name_only_on_behalf_of_agent() {
     }
 }
 
+#[tokio::test]
+async fn forwarded_secret_and_manifest_calls_keep_the_modules_invalid_params_refusal() {
+    let rig = Rig::new("forward-invalid-params").await;
+    let principal = Principal::Reserved {
+        module_id: "aft".into(),
+    };
+    let params = golden("use.request.api_key");
+    let call =
+        claustrum_module_probe::secret_use::sender_call("secret.use", Some(&principal), &params)
+            .unwrap();
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        OP_SECRET_USE,
+        Reply::RouteRefusal("invalid_params".into()),
+    );
+    assert!(matches!(
+        rig.reader.route_secret_call(call).await,
+        SecretRoute::Answer(SecretForwardAnswer::InvalidParams)
+    ));
+
+    let method = "manifest.latest";
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        method,
+        Reply::RouteRefusal("invalid_params".into()),
+    );
+    assert!(matches!(
+        rig.reader.route_manifest_call(method, &json!({})).await,
+        Some(SecretForwardAnswer::InvalidParams)
+    ));
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        method,
+        Reply::RouteRefusal("unknown_method".into()),
+    );
+    let Some(SecretForwardAnswer::Reply(reply)) =
+        rig.reader.route_manifest_call(method, &json!({})).await
+    else {
+        panic!("expected a transient refusal");
+    };
+    assert_eq!(
+        reply,
+        json!({"error":{"code":"home_unavailable","class":"transient"}})
+    );
+}
+
 /// An AFT `secret.use` on B is answered `approval_required` with a v2 statement naming
 /// A as the home and B as the asking computer. The phone's envelope, sent to A, grants
 /// it, and B's retry is released with the key's exact bytes, opened from a sealed

@@ -144,6 +144,26 @@ async fn shared_epoch(a: &Vault, b: &Vault, callosum: &SharedCallosumStandIn) {
         .await;
 }
 
+#[tokio::test]
+async fn fleet_peer_key_module_refusal_is_transient() {
+    let root = temp_root("fleet-peer-refusal");
+    let callosum = SharedCallosumStandIn::start(&root).await;
+    let vault = Vault::new(&root, 1, &callosum);
+    let before = vault.call("fleet.epoch_status", json!({})).await;
+    callosum.answer(
+        TARGET_MODULE,
+        "callosum.peer_keys_read",
+        Reply::RouteRefusal("fed_not_ready".into()),
+    );
+    assert_eq!(
+        vault
+            .call("fleet.epoch_mint", json!({"members": [member(1)]}))
+            .await,
+        json!({"error":{"code":"fleet_peer_keys_unavailable","class":"transient"}})
+    );
+    assert_eq!(vault.call("fleet.epoch_status", json!({})).await, before);
+}
+
 fn open_params(sealed: &Value, aad: &str) -> Value {
     json!({"epoch":sealed["epoch"],"nonce":sealed["nonce"],
         "ciphertext":sealed["ciphertext"],"aad":aad})

@@ -866,6 +866,71 @@ fn method_count(rig: &Rig, method: &str) -> usize {
         .count()
 }
 
+async fn paired_device_read_warning(reply: Reply) -> String {
+    use claustrum_module_probe::federation::sharing::{
+        run_with_retry_timing_for_test, RetryTimingForTest,
+    };
+    use tracing::instrument::WithSubscriber;
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rig = Rig::new("sharing-refused-read", snapshot("all_classes")).await;
+    rig.callosum.answer(TARGET_MODULE, READ, reply);
+    let (timing, mut retries) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(
+        run_with_retry_timing_for_test(
+            Arc::clone(&rig.home.store),
+            rig.vault.outbound.clone(),
+            timing,
+        )
+        .with_subscriber(WarnCapture {
+            logs: Arc::clone(&warnings),
+            module: "federation::sharing",
+        }),
+    );
+    assert!(matches!(
+        wait_for_signal(retries.recv()).await,
+        Some(RetryTimingForTest::Sleeping(_))
+    ));
+    task.abort();
+    assert!(wait_for_signal(task).await.unwrap_err().is_cancelled());
+    assert_eq!(method_count(&rig, READ), 1);
+    assert_eq!(method_count(&rig, WATCH), 0);
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    warnings[0].clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_paired_device_read_warns_with_its_code_not_snapshot_shape() {
+    let warning = paired_device_read_warning(Reply::SubscriptionError {
+        channel_zero: false,
+        body: json!({"code": "fed_not_ready", "message": "peer runtimes are not ready yet"}),
+    })
+    .await;
+    assert!(
+        warning.contains("paired-device read refused: fed_not_ready"),
+        "{warning}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_malformed_paired_device_body_warns_with_top_level_keys_only() {
+    let warning = paired_device_read_warning(Reply::Ok(json!({
+        "devices": {"nested_key": "example value"}, "other": "another value"
+    })))
+    .await;
+    assert!(
+        warning.contains(
+            "invalid paired-device snapshot: shape (top-level keys: [\"devices\", \"other\"]);"
+        ),
+        "{warning}"
+    );
+    assert!(
+        !warning.contains("nested_key") && !warning.contains("value"),
+        "{warning}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_refused_watch_backs_off_and_warns_once_with_its_code() {
     use claustrum_module_probe::federation::sharing::{

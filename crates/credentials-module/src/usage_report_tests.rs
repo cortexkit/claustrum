@@ -620,3 +620,18 @@ fn usage_report_scoped_malformed_reply_drops_batch_without_accepting_partial_ver
     assert_eq!(queue.metrics()["usageDroppedRows"], 3);
     assert_eq!(queue.metrics()["usageForwardedRows"], 0);
 }
+
+#[tokio::test]
+async fn usage_observe_module_refusal_drops_the_batch() {
+    let root = support::temp_root("usage-module-refusal");
+    let stand_in = SharedCallosumStandIn::start(&root).await;
+    stand_in.answer(support::TARGET_MODULE, "usage.observe", Reply::RouteRefusal("overloaded".into()));
+    let client = federation::OutboundClient::for_daemon(stand_in.connection_file(), "claustrum", Some("usage-nonce"));
+    let queue = UsageForwarder::default();
+    queue.enqueue(json!({"credentialId":"synthetic"}));
+    support::wait_for_signal(queue.flush(&client)).await;
+    assert!(queue.pending().is_empty());
+    assert_eq!(queue.metrics()["usageDroppedRows"], 1);
+    assert_eq!(queue.metrics()["usageForwardedRows"], 0);
+    assert_eq!(stand_in.methods("insula"), ["usage.observe"]);
+}

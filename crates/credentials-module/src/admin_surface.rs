@@ -1053,20 +1053,18 @@ impl AdminSurface {
                 if let Err(why) = member_grant_shape(operation, &selector) {
                     return refused("invalid_params", "permanent", None).with_detail(why);
                 }
-                let body = crate::federation::callosum_lookup(
+                let reply = crate::federation::callosum_lookup(
                     self.home.outbound(),
                     PAIRED_DEVICES_READ,
                     budget,
                 )
                 .await;
-                let pairing_id = match body
-                    .map(|body| crate::federation::decode_paired_devices(&body, &member))
-                {
-                    Some(crate::federation::Lookup::Found(pairing_id)) => pairing_id,
-                    Some(crate::federation::Lookup::Absent) => {
+                let pairing_id = match crate::federation::lookup_paired_device(&reply, &member) {
+                    crate::federation::Lookup::Found(pairing_id) => pairing_id,
+                    crate::federation::Lookup::Absent => {
                         return refused("member_not_paired", "permanent", Some(&member))
                     }
-                    Some(crate::federation::Lookup::Unavailable) | None => {
+                    crate::federation::Lookup::Unavailable => {
                         return refused("callosum_unavailable", "transient", None)
                     }
                 };
@@ -1130,20 +1128,15 @@ impl AdminSurface {
             Ok(_) => {}
             Err(error) => return Err(store_err(error)),
         }
-        let Some(body) =
+        let reply =
             crate::federation::callosum_lookup(self.home.outbound(), PAIRED_DEVICES_READ, budget)
-                .await
-        else {
-            return Err(refused("callosum_unavailable", "transient", None));
-        };
-        if let crate::federation::Lookup::Found(actual) =
-            crate::federation::decode_self_member(&body)
-        {
-            if actual == member {
-                return Ok(this_vault());
-            }
+                .await;
+        if reply.as_ref().is_ok_and(|body| {
+            matches!(crate::federation::decode_self_member(body), crate::federation::Lookup::Found(actual) if actual == member)
+        }) {
+            return Ok(this_vault());
         }
-        match crate::federation::decode_paired_devices(&body, member) {
+        match crate::federation::lookup_paired_device(&reply, member) {
             crate::federation::Lookup::Found(_) => Ok(member.to_string()),
             crate::federation::Lookup::Absent => {
                 Err(refused("member_not_paired", "permanent", Some(member)))
@@ -1165,22 +1158,22 @@ impl AdminSurface {
         if !valid_member_id(typed) {
             return Err(store_err(StoreOpError::InvalidMemberId));
         }
-        let body =
+        let reply =
             crate::federation::callosum_lookup(self.home.outbound(), PAIRED_DEVICES_READ, budget)
                 .await;
-        match body.map(|body| crate::federation::decode_self_member(&body)) {
-            Some(crate::federation::Lookup::Found(actual)) if actual == typed => Ok(()),
-            Some(crate::federation::Lookup::Found(actual)) => Err(AdminOutcome::Refused(format!(
+        match reply.as_ref().map(crate::federation::decode_self_member) {
+            Ok(crate::federation::Lookup::Found(actual)) if actual == typed => Ok(()),
+            Ok(crate::federation::Lookup::Found(actual)) => Err(AdminOutcome::Refused(format!(
                 "self_member_mismatch/permanent: the id given is {typed}, but callosum computes \
                  {actual} for this computer from its own static key"
             ))),
-            Some(crate::federation::Lookup::Absent) => Err(AdminOutcome::Refused(
+            Ok(crate::federation::Lookup::Absent) => Err(AdminOutcome::Refused(
                 "self_member_unchecked/permanent: callosum's paired_devices_read reply has no \
                  `self` key (callosum is older than 1.3), so this computer's member id cannot \
                  be checked; upgrade callosum and run the command again"
                     .to_string(),
             )),
-            Some(crate::federation::Lookup::Unavailable) | None => {
+            Ok(crate::federation::Lookup::Unavailable) | Err(_) => {
                 Err(refused("callosum_unavailable", "transient", None))
             }
         }

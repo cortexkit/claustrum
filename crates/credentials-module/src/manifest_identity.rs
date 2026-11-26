@@ -53,8 +53,11 @@ impl GithubIdentitySource for EntorhinalIdentity {
             .await
         {
             Ok(reply) => decode_identity_reply(reply).map_err(|_| IdentityCheckError::Unavailable),
-            // Channel-zero refusals expose only code and message. Target-channel
-            // Error bodies retain their detail and pass through the decoder above.
+            // Validate the module's typed refusal, including the required detail for gone.
+            Err(OutboundError::ModuleRefused { refusal, .. }) => refusal
+                .and_then(|body| serde_json::from_value::<IdentityRefusal>(body).ok())
+                .map(IdentityReply::Refused)
+                .ok_or(IdentityCheckError::Unavailable),
             Err(OutboundError::Refused { code, .. }) => Err(match code.as_str() {
                 "unknown_agent" | "gone" | "invalid_request" => IdentityCheckError::Mismatch,
                 _ => IdentityCheckError::Unavailable,
@@ -144,7 +147,7 @@ pub enum GoneReason {
 }
 
 /// Accept both the published envelope and OutboundClient's unwrapped result.
-/// Error frames have no result envelope and retain their typed refusal details.
+/// Published refusal examples have no result envelope.
 pub fn decode_identity_reply(reply: Value) -> Result<IdentityReply, serde_json::Error> {
     let reply = reply.get("result").cloned().unwrap_or(reply);
     if reply.get("code").is_some() {

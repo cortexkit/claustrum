@@ -336,6 +336,18 @@ async fn transfer_init_and_federation_self_check_the_id_against_callosums_self_k
         unchecked.starts_with("self_member_unchecked/permanent"),
         "{unchecked}"
     );
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        PAIRED_DEVICES_READ,
+        Reply::RouteRefusal("fed_not_ready".into()),
+    );
+    for op in [set_self(&actual), init(&actual)] {
+        assert_eq!(refusal(b.run(&op).await), "callosum_unavailable/transient");
+    }
+    assert_eq!(
+        audit_count(b.store(), AuditOp::FederationSelfSet),
+        self_rows
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -387,6 +399,14 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
     );
     let unavailable = refusal(a.run(&grant(&member)).await);
     assert_eq!(unavailable, "callosum_unavailable/transient");
+    nothing_written(&a);
+
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        PAIRED_DEVICES_READ,
+        Reply::RouteRefusal("fed_bad_request".into()),
+    );
+    assert!(refusal(a.run(&grant(&member)).await).starts_with("member_not_paired/permanent"));
     nothing_written(&a);
 
     let lookup = Held::new();
@@ -590,6 +610,15 @@ async fn home_set_checks_the_member_against_callosum_and_stores_this_vault_as_se
     vaults.callosum.set_pairing(OTHER_HOME, Some(PAIRING));
     let refused = refusal(a.run(&member(OTHER_HOME)).await);
     assert_eq!(refused, "callosum_unavailable/transient");
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        PAIRED_DEVICES_READ,
+        Reply::RouteRefusal("fed_bad_request".into()),
+    );
+    assert_eq!(
+        refusal(a.run(&member(OTHER_HOME)).await),
+        format!("member_not_paired/permanent: remedy_member={OTHER_HOME}")
+    );
     vaults.callosum.forget_answers();
     assert_eq!(a.store().secret_home_role(), SecretHomeRole::Single);
     assert_eq!(set_rows(), 0);

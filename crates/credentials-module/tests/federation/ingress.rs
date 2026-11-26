@@ -616,6 +616,17 @@ async fn a_requester_with_no_announced_key_is_told_to_fix_its_own_setup() {
     let reply = rig.fetch(TOKEN_ID).await;
     assert_eq!(error_code(&reply), "remote_setup_incomplete", "{reply}");
     assert_eq!(reply["error"]["remedy_member"], rig.requester());
+    for (refusal, want) in [
+        ("fed_not_ready", "home_unavailable"),
+        ("fed_bad_request", "remote_setup_incomplete"),
+    ] {
+        rig.vaults.callosum.answer(
+            "claustrum",
+            "callosum.peer_keys_read",
+            Reply::RouteRefusal(refusal.into()),
+        );
+        assert_eq!(error_code(&rig.fetch(TOKEN_ID).await), want);
+    }
 }
 
 #[tokio::test]
@@ -634,6 +645,13 @@ async fn an_unpaired_member_is_not_found_and_a_failed_pairing_lookup_is_transien
     let reply = rig.fetch(TOKEN_ID).await;
     assert_eq!(error_code(&reply), "home_unavailable", "{reply}");
     assert_eq!(reply["error"]["class"], "transient");
+
+    rig.vaults.callosum.answer(
+        "claustrum",
+        "callosum.paired_devices_read",
+        Reply::RouteRefusal("fed_bad_request".into()),
+    );
+    assert_eq!(rig.fetch(TOKEN_ID).await, not_found());
 
     let lookup = Held::new();
     rig.vaults.callosum.answer(
@@ -655,6 +673,36 @@ async fn an_unpaired_member_is_not_found_and_a_failed_pairing_lookup_is_transien
         "{:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn phone_pairing_module_refusals_keep_absent_and_unavailable_distinct() {
+    use claustrum_module_probe::secret_phone::{serve, PhoneAnswer};
+
+    let rig = Rig::new("phone-pairing-refusal").await;
+    for (code, expected) in [
+        ("fed_not_ready", "pairing_unavailable"),
+        ("fed_bad_request", "phone_not_registered"),
+    ] {
+        rig.vaults.callosum.answer(
+            "claustrum",
+            "callosum.paired_devices_read",
+            Reply::RouteRefusal(code.into()),
+        );
+        let PhoneAnswer::Reply(reply) = serve(
+            Arc::clone(&rig.home_store.store),
+            Some(&rig.vaults.a.outbound),
+            "11223344556677889900112233445566",
+            Some("production"),
+            "secret.list",
+            &json!({}),
+        )
+        .await
+        else {
+            panic!("expected the phone refusal");
+        };
+        assert_eq!(error_code(&reply), expected);
+    }
 }
 
 #[tokio::test]

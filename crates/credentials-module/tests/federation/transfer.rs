@@ -1549,6 +1549,22 @@ async fn send_to_a_receiver_with_no_announced_key_commits_nothing() {
     let refused = rig.a.transfers.send(API_ID, stranger).await.unwrap_err();
     assert_eq!(refused.code, "remote_setup_incomplete");
     assert_eq!(refused.remedy_member.as_deref(), Some(stranger));
+    rig.vaults.callosum.answer(
+        "claustrum",
+        "callosum.peer_keys_read",
+        Reply::RouteRefusal("fed_bad_request".into()),
+    );
+    let refused = rig
+        .a
+        .transfers
+        .send(API_ID, &rig.b.member)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "remote_setup_incomplete");
+    assert_eq!(
+        refused.remedy_member.as_deref(),
+        Some(rig.b.member.as_str())
+    );
     rig.stall_lookup("callosum.peer_keys_read");
     let refused = rig
         .a
@@ -1560,6 +1576,37 @@ async fn send_to_a_receiver_with_no_announced_key_commits_nothing() {
     assert!(rig.a.store().list_outgoing_transfers().unwrap().is_empty());
     assert_eq!(audit_count(rig.a.store(), AuditOp::TransferOut), 0);
     assert!(rig.deliveries().is_empty());
+}
+
+#[tokio::test]
+async fn module_transfer_refusal_keeps_the_row_with_the_mapped_code() {
+    let rig = Rig::new("transfer-module-refusal").await;
+    rig.api_key_on_a(API_ID, b"sk-module-refusal");
+    rig.vaults.callosum.answer(
+        "claustrum",
+        OP_TRANSFER_DELIVER,
+        Reply::RouteRefusal("unknown_method".into()),
+    );
+    let sent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+    let resumed = rig.a.transfers.resume(&sent.transfer_id).await.unwrap();
+    for attempt in [sent, resumed] {
+        assert_eq!(
+            attempt.reply,
+            DeliveryReply::Refused {
+                code: "home_unavailable".into(),
+                class: "transient".into()
+            }
+        );
+        assert!(attempt.row_kept);
+        let row = rig
+            .a
+            .store()
+            .outgoing_transfer(&attempt.transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_reply_code.as_deref(), Some("home_unavailable"));
+    }
+    assert!(rig.b.incoming().is_empty());
 }
 
 #[tokio::test]
@@ -1670,6 +1717,15 @@ async fn a_delayed_channel_zero_refusal_discards_the_committed_row() {
 async fn a_failed_pairing_lookup_at_delivery_is_transient_and_keeps_the_row() {
     let rig = Rig::new("transfer-pairing-lookup").await;
     rig.api_key_on_a(API_ID, b"sk-pairing");
+    rig.vaults.callosum.answer(
+        "claustrum",
+        "callosum.paired_devices_read",
+        Reply::RouteRefusal("fed_bad_request".into()),
+    );
+    let absent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+    assert_eq!(refused_code(&absent.reply), "not_found");
+    assert!(!absent.row_kept);
+    assert!(rig.b.incoming().is_empty());
     rig.stall_lookup("callosum.paired_devices_read");
     let sent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
     assert_eq!(refused_code(&sent.reply), "callosum_unavailable");

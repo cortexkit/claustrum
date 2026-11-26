@@ -48,6 +48,7 @@ pub mod remote_read;
 pub mod sharing;
 pub mod transfer;
 
+pub(crate) use ingress::lookup_paired_device;
 pub use ingress::{
     callosum_lookup, carries_bearer, decode_paired_devices, decode_self_member, is_federation_op,
     map_route_caller, member_id_for_static_key, HomeAnswer, HomeVault, Lookup, MappingGate,

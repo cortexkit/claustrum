@@ -255,7 +255,7 @@ async fn peers(client: Option<&OutboundClient>) -> Result<Vec<FleetPeer>, FleetE
         tokio::time::Instant::now() + ADMIN_OP_BUDGET,
     )
     .await
-    .ok_or(FleetError::PeerKeysUnavailable)?;
+    .map_err(|_| FleetError::PeerKeysUnavailable)?;
     decode_peers(&snapshot)
 }
 

@@ -41,6 +41,65 @@ async fn call(
 }
 
 #[tokio::test]
+async fn unary_call_refuses_error_frames_on_control_and_route_channels() {
+    const READ: &str = "callosum.paired_devices_read";
+    let root = crate::support::temp_root("outbound-unary-refusal");
+    let vaults = TwoVaults::new(&root).await;
+    let code = "fed_not_ready";
+    let message = "peer runtimes are not ready yet";
+    let body = json!({"code": code, "message": message});
+    for channel_zero in [true, false] {
+        vaults.callosum.answer(
+            crate::support::TARGET_MODULE,
+            READ,
+            Reply::SubscriptionError {
+                channel_zero,
+                body: body.clone(),
+            },
+        );
+        let result = wait_for_signal(vaults.b.outbound.call(
+            "callosum",
+            route("callosum", json!({"method": READ, "params": {}})),
+            fed::HOME_OP_DEADLINE,
+        ))
+        .await;
+        assert_eq!(
+            result,
+            Err(if channel_zero {
+                fed::OutboundError::Refused {
+                    code: code.into(),
+                    message: message.into(),
+                }
+            } else {
+                fed::OutboundError::ModuleRefused {
+                    code: code.into(),
+                    message: message.into(),
+                    refusal: Some(body.clone()),
+                }
+            }),
+            "channel_zero={channel_zero}"
+        );
+    }
+    let opens = vaults.callosum.opens("callosum").len();
+    let roster = json!({"devices": []});
+    vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        READ,
+        Reply::Ok(roster.clone()),
+    );
+    assert_eq!(
+        wait_for_signal(vaults.b.outbound.call(
+            "callosum",
+            route("callosum", json!({"method": READ, "params": {}})),
+            fed::HOME_OP_DEADLINE,
+        ))
+        .await,
+        Ok(roster)
+    );
+    assert_eq!(vaults.callosum.opens("callosum").len(), opens);
+}
+
+#[tokio::test]
 async fn subscription_events_distinguish_data_and_clean_end() {
     use fed::outbound::SubscriptionEvent;
 

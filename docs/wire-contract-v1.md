@@ -2193,9 +2193,12 @@ reconciler handles both exactly like the operator turning the switch off or on.
 Existing grants have source `operator`. The reconciler never changes or removes an
 operator row, including an identical selector whose pairing is stale. All grant
 creates/revokes for one snapshot and their audits commit in one transaction. A failed
-read, refusal or undecodable snapshot leaves grants unchanged. The daemon keeps the
-watch open, re-reads on every reopen after a close or lost connection, and cancels the
-watch on shutdown. Discovery samples are pinned at `paired-devices-vectors-v1.5`.
+read, refusal or undecodable snapshot leaves grants unchanged. A route-channel `Error`
+from `paired_devices_read` is a refusal, not a snapshot; the retry warning names its
+code. The daemon keeps the watch open, re-reads on every reopen after a close or lost
+connection, and cancels the watch on shutdown. The pinned
+[Callosum discovery samples](../crates/credentials-module/tests/fixtures/callosum/paired-devices/)
+are from `paired-devices-vectors-v1.5`.
 
 When any vault switch is on, the daemon prepares a missing `kem:vault-transfer:1` and
 its exact announce `read` for `reserved:callosum` through the same path as

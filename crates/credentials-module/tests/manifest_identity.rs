@@ -415,6 +415,10 @@ async fn identity_production_unreachable_or_unusable_replies_are_unavailable() {
     for answer in [
         support::Reply::Ok(json!({"unexpected":"body"})),
         support::Reply::RouteRefusal("unknown_method".into()),
+        support::Reply::SubscriptionError {
+            channel_zero: false,
+            body: json!({"code":"gone", "message":"agent is gone"}),
+        },
         support::Reply::Permanent("fed_not_exposed".into()),
         support::Reply::Drop,
     ] {

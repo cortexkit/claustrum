@@ -1435,6 +1435,35 @@ async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the
 }
 
 #[tokio::test(start_paused = true)]
+async fn peer_key_module_refusals_keep_the_discovery_outcome() {
+    let rig = Rig::new("remote-peer-refusal").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let home = rig.home_member();
+    for (wire, expected) in [
+        ("fed_not_ready", ("home_unreachable", "transient", None)),
+        (
+            "fed_bad_request",
+            ("remote_setup_incomplete", "permanent", Some(home.as_str())),
+        ),
+    ] {
+        rig.vaults.callosum.answer(
+            crate::support::TARGET_MODULE,
+            "callosum.peer_keys_read",
+            Reply::RouteRefusal(wire.into()),
+        );
+        assert_eq!(code(&rig.refused(TOKEN_ID, None).await), expected);
+        assert_eq!(
+            rig.record(TOKEN_ID).last_fetch_outcome.as_deref(),
+            Some(expected.0)
+        );
+    }
+    assert_eq!(rig.fetches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_no_expiry_token_stops_being_served_300_s_after_the_grant_is_revoked() {
     let rig = Rig::new("remote-no-expiry").await;
     rig.login(
@@ -2144,6 +2173,9 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
         code(&refusal),
         ("federation_setup_invalid", "permanent", None)
     );
+    rig.report_then(Step::Frame("unknown_method"));
+    let refusal = rig.report(TOKEN_ID, 1, 401).await.unwrap_err();
+    assert_eq!(code(&refusal), ("home_unavailable", "transient", None));
     let stalled = Held::new();
     rig.report_then(Step::Held(stalled.clone()));
     let record = rig.record(TOKEN_ID);
@@ -2172,6 +2204,29 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
         .unwrap();
     let refusal = rig.report(TOKEN_ID, 1, 401).await.unwrap_err();
     assert_eq!(code(&refusal), ("not_found", "permanent", None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_condition_module_refusal_is_not_retried_or_taken_as_a_verdict() {
+    use claustrum_module_probe::federation::ingress::OP_CLEAR_CONDITION;
+
+    let rig = Rig::new("remote-condition-refusal").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    let before = rig.record(TOKEN_ID);
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        OP_CLEAR_CONDITION,
+        Reply::RouteRefusal("unknown_method".into()),
+    );
+    let refusal = wait_for_signal(rig.reader.forward_condition(&before, 1, None))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&refusal), ("home_unavailable", "transient", None));
+    assert_eq!(rig.requests(OP_CLEAR_CONDITION).len(), 1);
+    assert_eq!(authoritative(&rig.record(TOKEN_ID)), authoritative(&before));
 }
 
 // ---------------------------------------------------------------------------------

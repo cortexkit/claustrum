@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ingress::{
-    decode_paired_devices, decode_peer_transfer_key, Lookup, PeerKey, CALLOSUM_MODULE_ID,
+    callosum_lookup, lookup_paired_device, lookup_peer_transfer_key, Lookup, PeerKey,
     OP_TRANSFER_DELIVER,
 };
 use super::outbound::{
@@ -68,10 +68,6 @@ pub const TRANSFER_BODY_VERSION: u32 = 1;
 /// The AEAD tag ChaCha20-Poly1305 adds to every ciphertext: a ciphertext longer than
 /// the plaintext cap plus this carries a body over the cap.
 const AEAD_TAG_LEN: usize = 16;
-
-/// The outbound client's binding-cache key for callosum, shared with the other
-/// federation surfaces so they reuse one route.
-const CALLOSUM_ROUTE_KEY: &str = "callosum";
 
 /// The `auth_events` subject for a delivery refused before it names a credential.
 const DELIVERY_SUBJECT: &str = "federation.transfer_deliver";
@@ -668,31 +664,6 @@ impl TransferKeyCache {
     }
 }
 
-/// One callosum lookup within what is left of `budget`. `None` for no client, no time
-/// or no answer, all of which are transient for the caller.
-async fn callosum_call(
-    client: Option<&OutboundClient>,
-    method: &str,
-    budget: tokio::time::Instant,
-) -> Option<Value> {
-    let client = client?;
-    let left = budget
-        .checked_duration_since(tokio::time::Instant::now())
-        .filter(|left| !left.is_zero())?;
-    client
-        .call(
-            CALLOSUM_ROUTE_KEY,
-            RouteCall {
-                target: management_surface(CALLOSUM_MODULE_ID),
-                prelude: None,
-                request: json!({ "method": method, "params": {} }),
-            },
-            left,
-        )
-        .await
-        .ok()
-}
-
 /// `member`'s announced transfer key, looked up for a member this vault fixed itself
 /// (the attested harness member, the stored sender or the `--to` member), never for one
 /// named in a request.
@@ -701,10 +672,8 @@ async fn peer_key(
     member: &str,
     budget: tokio::time::Instant,
 ) -> Lookup<PeerKey> {
-    match callosum_call(client, "callosum.peer_keys_read", budget).await {
-        Some(body) => decode_peer_transfer_key(&body, member),
-        None => Lookup::Unavailable,
-    }
+    let reply = callosum_lookup(client, "callosum.peer_keys_read", budget).await;
+    lookup_peer_transfer_key(&reply, member)
 }
 
 /// One diagnostic row naming the member. Best effort: a diagnostic that could fail the
@@ -795,11 +764,8 @@ async fn deliver_inner(
     budget: tokio::time::Instant,
 ) -> Result<IncomingTransferState, Stop> {
     // 2. The sender's current pairing, then a `transfer_deliver` grant made under it.
-    let Some(devices) = callosum_call(callosum, "callosum.paired_devices_read", budget).await
-    else {
-        return Err(TransferRefusal::callosum_unavailable().into());
-    };
-    let pairing_id = match decode_paired_devices(&devices, member) {
+    let devices = callosum_lookup(callosum, "callosum.paired_devices_read", budget).await;
+    let pairing_id = match lookup_paired_device(&devices, member) {
         Lookup::Found(pairing_id) => pairing_id,
         Lookup::Absent => {
             note_refusal(store, DELIVERY_SUBJECT, member, "member_not_paired");
@@ -1039,15 +1005,19 @@ fn classify_delivery(reply: &Value) -> DeliveryReply {
         return DeliveryReply::refused(code, class);
     }
     if let Some(code) = reply.get("code").and_then(Value::as_str) {
-        return if is_permanent_callosum_class(code) {
-            DeliveryReply::refused("federation_setup_invalid", "permanent")
-        } else if code.starts_with("fed_") {
-            DeliveryReply::refused("home_unreachable", "transient")
-        } else {
-            DeliveryReply::refused("home_unavailable", "transient")
-        };
+        return classify_delivery_code(code);
     }
     DeliveryReply::refused("home_unavailable", "transient")
+}
+
+fn classify_delivery_code(code: &str) -> DeliveryReply {
+    if is_permanent_callosum_class(code) {
+        DeliveryReply::refused("federation_setup_invalid", "permanent")
+    } else if code.starts_with("fed_") {
+        DeliveryReply::refused("home_unreachable", "transient")
+    } else {
+        DeliveryReply::refused("home_unavailable", "transient")
+    }
 }
 
 // ---------------------------------------------------------------------------------
@@ -1513,6 +1483,7 @@ impl Transfers {
             .await
         {
             Ok(reply) => classify_delivery(&reply),
+            Err(OutboundError::ModuleRefused { code, .. }) => classify_delivery_code(&code),
             Err(OutboundError::Refused { code, .. }) if is_permanent_callosum_class(&code) => {
                 DeliveryReply::refused("federation_setup_invalid", "permanent")
             }

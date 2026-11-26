@@ -24,6 +24,7 @@
 //! into one transient failure followed by a success instead of a vault restart.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -260,30 +261,57 @@ impl Drop for ClaimWaiter<'_> {
 }
 
 /// What an outbound call can fail with, in the terms the federation surfaces speak.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum OutboundError {
     /// Nothing usable answered in time, or the connection died under the call. The
     /// binding is already dropped; the next call reopens.
     Unavailable(String),
     /// The daemon or broker answered with a definite refusal, not a timeout.
     Refused { code: String, message: String },
+    /// The target module refused the request on the route it received it on.
+    ModuleRefused {
+        code: String,
+        message: String,
+        /// The Error frame's own JSON body, never a success reply.
+        refusal: Option<Value>,
+    },
+}
+
+impl fmt::Debug for OutboundError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(message) => f.debug_tuple("Unavailable").field(message).finish(),
+            Self::Refused { code, message } => f
+                .debug_struct("Refused")
+                .field("code", code)
+                .field("message", message)
+                .finish(),
+            Self::ModuleRefused { code, .. } => f
+                .debug_struct("ModuleRefused")
+                .field("code", code)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl OutboundError {
-    /// True for transport uncertainty or a retryable control refusal. A route refusal
-    /// says nothing about the credential behind the route.
+    /// True for transport uncertainty or a refusal outside the permanent Callosum
+    /// classes. A frame-level refusal says nothing about the credential itself.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Unavailable(_) => true,
-            Self::Refused { code, .. } => !is_permanent_callosum_class(code),
+            Self::Refused { code, .. } | Self::ModuleRefused { code, .. } => {
+                !is_permanent_callosum_class(code)
+            }
         }
     }
 
-    /// The message a caller may log or return.
+    /// The refusal reason, or an explanation of why no answer arrived. Log the code
+    /// for a module refusal rather than its free-form reason.
     pub fn message(&self) -> &str {
         match self {
             Self::Unavailable(message) => message,
-            Self::Refused { message, .. } => message,
+            Self::Refused { message, .. } | Self::ModuleRefused { message, .. } => message,
         }
     }
 }
@@ -505,14 +533,10 @@ impl Subscription {
                 FrameType::StreamEnd => Ok(SubscriptionEvent::End),
                 FrameType::Error => {
                     let body = serde_json::from_slice::<Value>(&frame.body).ok();
+                    let (code, message) = refusal_reason(body.as_ref());
                     Ok(SubscriptionEvent::Error {
-                        code: body
-                            .as_ref()
-                            .and_then(|value| value.get("code"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("unrecognised")
-                            .to_string(),
-                        message: error_reason(&frame.body),
+                        code,
+                        message,
                         detail: body.and_then(|value| value.get("detail").cloned()),
                     })
                 }
@@ -729,7 +753,7 @@ impl OutboundClient {
     /// in time, the connection dying) is [`OutboundError::Unavailable`].
     ///
     /// A failure or cancellation withdraws this call's own waiter and drops this
-    /// call's own binding.
+    /// call's own binding, except when the target module answered with a refusal.
     /// It never tears down a connection another call is using: only the reader task
     /// does that, and only when a frame proves the connection itself is gone.
     pub async fn call(
@@ -754,7 +778,9 @@ impl OutboundClient {
                 Ok(reply)
             }
             Err(failure) => {
-                binding.drop_used();
+                if !matches!(failure.error, OutboundError::ModuleRefused { .. }) {
+                    binding.drop_used();
+                }
                 binding.completed = true;
                 if let Some(dead) = failure.dead.as_ref() {
                     self.retire(dead, budget).await;
@@ -918,8 +944,17 @@ impl OutboundClient {
                 Some(&binding),
             )
             .await?;
-        if reply.header.channel == 0 && reply.header.ty == FrameType::Error {
-            return Err(failure(control_refusal(&reply.body)));
+        if reply.header.ty == FrameType::Error {
+            if reply.header.channel == 0 {
+                return Err(failure(control_refusal(&reply.body)));
+            }
+            let refusal = serde_json::from_slice(&reply.body).ok();
+            let (code, message) = refusal_reason(refusal.as_ref());
+            return Err(failure(OutboundError::ModuleRefused {
+                code,
+                message,
+                refusal,
+            }));
         }
         let body: Value = serde_json::from_slice(&reply.body)
             .map_err(|error| OutboundError::Unavailable(format!("decode reply: {error}")))?;
@@ -1393,29 +1428,31 @@ fn remaining(
     Ok(budget - now)
 }
 
-fn error_reason(body: &[u8]) -> String {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("message")
-                .or_else(|| value.get("detail"))
-                .or_else(|| value.get("code"))
-                .and_then(Value::as_str)
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "the daemon refused the operation".to_string())
+fn refusal_message(body: Option<&Value>) -> String {
+    body.and_then(|value| {
+        value
+            .get("message")
+            .or_else(|| value.get("detail"))
+            .or_else(|| value.get("code"))
+            .and_then(Value::as_str)
+            .map(String::from)
+    })
+    .unwrap_or_else(|| "the daemon refused the operation".to_string())
 }
 
 fn control_refusal(body: &[u8]) -> OutboundError {
-    let code = serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| value.get("code").and_then(Value::as_str).map(String::from))
-        .unwrap_or_else(|| "unrecognised".into());
-    OutboundError::Refused {
-        code,
-        message: error_reason(body),
-    }
+    let body = serde_json::from_slice(body).ok();
+    let (code, message) = refusal_reason(body.as_ref());
+    OutboundError::Refused { code, message }
+}
+
+fn refusal_reason(body: Option<&Value>) -> (String, String) {
+    let code = body
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("unrecognised")
+        .to_string();
+    (code, refusal_message(body))
 }
 
 /// Callosum's permanent refusal classes describe a route that cannot be retried.
@@ -1513,6 +1550,21 @@ pub fn bind_identity() -> BindIdentity {
 mod tests {
     use super::*;
     use subc_control::Claim;
+
+    #[test]
+    fn module_refusal_debug_does_not_print_its_payload() {
+        let refusal = OutboundError::ModuleRefused {
+            code: "fed_not_ready".into(),
+            message: "private message".into(),
+            refusal: Some(json!({"detail": "private detail"})),
+        };
+        assert_eq!(
+            format!("{refusal:?}"),
+            "ModuleRefused { code: \"fed_not_ready\", .. }"
+        );
+        assert_eq!(refusal.message(), "private message");
+        assert!(refusal.is_transient());
+    }
 
     #[test]
     fn the_deadlines_sit_below_the_consumers_that_wait_on_them() {

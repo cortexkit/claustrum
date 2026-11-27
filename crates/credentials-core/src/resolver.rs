@@ -519,7 +519,10 @@ fn resolve_with_backend(
     backend: &dyn MasterKeyStore,
 ) -> Result<MasterKey, MasterKeyError> {
     let data_dir_exists = config.data_dir.try_exists().map_err(MasterKeyError::Io)?;
-    if !data_dir_exists && !matches!(config.source, KeySource::OperatorPath { .. }) {
+    if data_dir_exists {
+        // Existing store files need owner-only access even if no key can be loaded.
+        ensure_vault_dir(&config.data_dir)?;
+    } else if !matches!(config.source, KeySource::OperatorPath { .. }) {
         // Native stores only look up keys scoped to an existing canonical directory.
         return Err(MasterKeyError::NotBootstrapped);
     }
@@ -533,7 +536,7 @@ fn resolve_with_backend(
         }
     }
     if data_dir_exists {
-        record_resolved_key_source(config)?;
+        source_record::record_migration(config)?;
     }
     Ok(key)
 }

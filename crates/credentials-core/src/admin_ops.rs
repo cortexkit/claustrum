@@ -121,6 +121,8 @@ pub enum AdminOpBody {
         id: String,
         payload_b64: String,
     },
+    #[serde(rename = "admin.signing_public_key")]
+    SigningPublicKey { v: u32, id: String },
     #[serde(rename = "admin.ssh_key_agent_allow")]
     SshKeyAgentAllow {
         v: u32,
@@ -646,6 +648,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .finish(),
             AdminOpBody::SshKeyAgentDeny { v, id } => f
                 .debug_struct("SshKeyAgentDeny")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::SigningPublicKey { v, id } => f
+                .debug_struct("SigningPublicKey")
                 .field("v", v)
                 .field("id", id)
                 .finish(),
@@ -1213,6 +1220,7 @@ impl AdminOpBody {
             | AdminOpBody::ProviderSet { v, .. }
             | AdminOpBody::ProviderRemove { v, .. }
             | AdminOpBody::OperatorSign { v, .. }
+            | AdminOpBody::SigningPublicKey { v, .. }
             | AdminOpBody::ManifestImport { v, .. }
             | AdminOpBody::ManifestSign { v, .. }
             | AdminOpBody::ManifestExport { v, .. }
@@ -1369,6 +1377,7 @@ impl AdminOpBody {
             | AdminOpBody::RemoteList { .. }
             | AdminOpBody::MemberGrant { .. }
             | AdminOpBody::MemberRevoke { .. }
+            | AdminOpBody::SigningPublicKey { .. }
             | AdminOpBody::MemberList { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::PolicyRootInit { .. }
             | AdminOpBody::PolicyRootShow { .. }
@@ -1466,6 +1475,7 @@ impl AdminOpBody {
             | AdminOpBody::ManifestOneTapSet { .. }
             | AdminOpBody::ManifestOneTapStatus { .. }
             | AdminOpBody::PolicyRootShow { .. }
+            | AdminOpBody::SigningPublicKey { .. }
             | AdminOpBody::GitHubAppManifestPrepare { .. }
             | AdminOpBody::GitHubBindingPreview { .. }
             | AdminOpBody::GitHubAppRelaySlotOpen { .. }
@@ -1559,6 +1569,7 @@ impl AdminOpBody {
             AdminOpBody::ManifestOneTapStatus { .. } => "admin.manifest_one_tap_status",
             AdminOpBody::PolicyRootInit { .. } => "admin.policy_root_init",
             AdminOpBody::PolicyRootShow { .. } => "admin.policy_root_show",
+            AdminOpBody::SigningPublicKey { .. } => "admin.signing_public_key",
             AdminOpBody::GitHubAppManifestPrepare { .. } => "admin.github_app_manifest_prepare",
             AdminOpBody::GitHubAppRelaySlotOpen { .. } => "admin.github_app_relay_slot_open",
             AdminOpBody::GitHubAppCreateComplete { .. } => "admin.github_app_create_complete",
@@ -1718,6 +1729,7 @@ impl AdminOpBody {
             | AdminOpBody::RemoteRemove { .. }
             | AdminOpBody::RemoteList { .. }
             | AdminOpBody::MemberRevoke { .. }
+            | AdminOpBody::SigningPublicKey { .. }
             | AdminOpBody::MemberList { .. } => false,
             // The self id is checked against the member id callosum computes for this
             // computer; a send and an accept look up a peer's announced key, a send and
@@ -1830,6 +1842,9 @@ pub fn apply(
     match op {
         AdminOpBody::PolicyRootInit { .. } => store.init_policy_root_admin(actor),
         AdminOpBody::PolicyRootShow { .. } => store.show_policy_root_admin(),
+        AdminOpBody::SigningPublicKey { id, .. } => {
+            Ok(serde_json::json!(store.signing_public_key(&id)?))
+        }
         AdminOpBody::GitHubAppManifestPrepare { agent, .. } => {
             store.prepare_github_app_manifest(&agent)
         }
@@ -3457,6 +3472,15 @@ mod admin_schema_v2_tests {
         let v1 = ADMIN_OP_SCHEMA_V1;
         let v2 = ADMIN_OP_SCHEMA_V2;
         let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
+            (
+                "SigningPublicKey",
+                AdminOpBody::SigningPublicKey {
+                    v: v2,
+                    id: "signing:bus:1".into(),
+                },
+                v2,
+                None,
+            ),
             (
                 "SshKeyAgentAllow",
                 AdminOpBody::SshKeyAgentAllow {

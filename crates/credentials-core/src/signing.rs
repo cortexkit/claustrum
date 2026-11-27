@@ -176,7 +176,8 @@ pub struct Signature {
 ///
 /// This deliberately has no private-key field: callers that need verification material
 /// must be unable to accidentally select the custody payload while building a response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublicKey {
     /// The 32-byte Ed25519 verification key, lowercase hex.
     pub public_key_hex: String,

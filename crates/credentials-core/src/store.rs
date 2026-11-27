@@ -797,6 +797,8 @@ pub enum StoreOpError {
     InvalidAgentSsh,
     /// The credential id does not exist.
     NotFound,
+    SigningKeyNotFound,
+    NotSigningKey,
     /// The record or its provider does not admit the reported condition.
     ConditionNotAdmitted,
     /// The provider status does not admit a condition report.
@@ -1122,6 +1124,8 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::PolicyRootExists => f.write_str("policy_root_exists/permanent: a policy root is already configured"),
             StoreOpError::PolicyRootEstablished => f.write_str("policy_root_established/permanent: signed manifest or policy versions already exist; initialization cannot recover a lost root"),
             StoreOpError::PolicyRootAbsent => f.write_str("policy_root_absent/permanent: no usable policy root is configured"),
+            StoreOpError::SigningKeyNotFound => f.write_str("signing_key_not_found/permanent: credential not found"),
+            StoreOpError::NotSigningKey => f.write_str("not_signing_key/permanent: credential is not a signing key"),
             StoreOpError::Decrypt(e) => write!(f, "envelope decrypt failed: {e}"),
             StoreOpError::Corrupt(m) => write!(f, "record body corrupt: {m}"),
             StoreOpError::Fenced {
@@ -1181,6 +1185,8 @@ impl StoreOpError {
             StoreOpError::PolicyRootExists => Some("policy_root_exists"),
             StoreOpError::PolicyRootEstablished => Some("policy_root_established"),
             StoreOpError::PolicyRootAbsent => Some("policy_root_absent"),
+            StoreOpError::SigningKeyNotFound => Some("signing_key_not_found"),
+            StoreOpError::NotSigningKey => Some("not_signing_key"),
             _ => None,
         }
     }

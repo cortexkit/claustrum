@@ -27,6 +27,7 @@
 //!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
 //!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
 //!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature] [--operator-sign]
+//!   public-key --id <id>
 //!   sign --id <id> --payload-file <path|->
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   set-identity <id> --account-id <id> [--email <email>] [--org-name <name>] | --clear
@@ -458,6 +459,7 @@ fn run_args(args: Vec<String>) -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args, options),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
+        "public-key" => keys_cli::cmd_public_key(&global, &args),
         "ssh-key" => cli_support::ssh_key::cmd_ssh_key(&global, &args),
         "sign" => cmd_sign(&global, &args),
         "mint-kem-key" => cmd_mint_kem_key(&global, &args),
@@ -595,7 +597,7 @@ fn verb_flags(command: &str, subcommand: &str) -> FlagSpec {
             "--fusiform-id",
         ],
         "github" => &["--repo", "--to", "--agent", "--app"],
-        "mint-signing-key" | "mint-kem-key" => &["--id"],
+        "mint-signing-key" | "mint-kem-key" | "public-key" => &["--id"],
         "sign" => &["--id", "--payload-file"],
         "import" => &[
             "--source",
@@ -872,6 +874,7 @@ fn usage_short() -> String {
          policy-root         initialize or show the policy signing root\n\
             put                 store or generate a secret; enroll gateway keys\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
+           public-key          show an existing Ed25519 signing key's public half\n\
            ssh-key             allow or deny agent SSH use of a signing key\n\
            sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
@@ -1421,6 +1424,16 @@ fn help_verb(verb: &str) -> String {
                A replacement is a fresh key: pass the policy flags again to keep them.\n\
                Operator signing is for machine account keys. Root keys must never carry it."
         }
+        "public-key" => {
+            "ck auth public-key --id <id>\n\
+             \n\
+             \x20 --id <id>  existing Ed25519 signing credential\n\
+             \n\
+             NOTES\n\
+             Print public_key_hex and key_id, exactly as mint-signing-key prints them.\n\
+             Uses authenticated admin access online; reads without a writer lease offline.\n\
+             Does not change the vault or append an audit row. KEM keys are not accepted."
+        }
         "sign" => {
             "ck auth sign --id <id> --payload-file <path>\n\
              \n\
@@ -1829,9 +1842,10 @@ fn help_verb(verb: &str) -> String {
 ///   route plane (admin.challenge → master-key message authentication code (MAC) →
 ///   admin.op). Zero downtime; the
 ///   module is the single writer, serializing the op against live refreshes. If no
-///   live module is reachable, fall back to the offline lease path (nothing was
+///   live module is reachable, fall back to the offline path (nothing was
 ///   dispatched, so the fallback cannot double-execute).
-/// - absent: the offline lease path exactly as before (daemon must be stopped).
+/// - absent: use a lease-free reader for signing public keys. Other operations
+///   on this path take the offline writer lease (daemon must be stopped).
 ///
 /// A REFUSAL from a live module is terminal (never falls back — the module is alive
 /// and said no); a DISPATCHED op with a lost response is indeterminate (never falls
@@ -2151,9 +2165,17 @@ fn commit_admin_with_key(
                     return Err(CliError::LocalFailure(m));
                 }
                 // Nothing was dispatched; the offline path below is safe.
-                eprintln!("(no live module: {m}; using the offline lease path)");
+                let path = if matches!(op, AdminOpBody::SigningPublicKey { .. }) {
+                    "offline read-only path"
+                } else {
+                    "offline lease path"
+                };
+                eprintln!("(no live module: {m}; using the {path})");
             }
         }
+    }
+    if let AdminOpBody::SigningPublicKey { id, .. } = op {
+        return keys_cli::read_signing_public_key_offline(global, &id);
     }
     let store = open_for_admin_with_key(global, true, preflighted_key.take())?;
     #[cfg(all(windows, debug_assertions, feature = "windows-runtime-test-seam"))]

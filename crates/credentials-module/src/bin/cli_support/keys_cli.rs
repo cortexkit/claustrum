@@ -2,11 +2,13 @@
 
 use super::{
     commit_admin, descriptor, has_flag, open_for_admin, open_sqlite, parse_credential_id, required,
-    resolver, resolver_config, store_op, AdminAuditOp, AdminOpBody, AuthMethod, CliError,
-    Ed25519KeyPair, GlobalArgs, MasterKey, MasterKeyError, StoreError, StoreMode, SystemRandom,
-    VaultRecord, ADMIN_OP_SCHEMA_V1,
+    resolve_store_key, resolver, resolver_config, store_op, store_path, AdminAuditOp, AdminOpBody,
+    AuthMethod, CliError, Ed25519KeyPair, EncryptedStore, GlobalArgs, MasterKey, MasterKeyError,
+    StoreError, StoreMode, StoreOpError, SystemRandom, VaultRecord, ADMIN_OP_SCHEMA_V1,
+    ADMIN_OP_SCHEMA_V2,
 };
 use base64::Engine;
+use credentials_core::signing::PublicKey;
 
 pub(super) fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
     // Bootstrap must also take the lease (the daemon must be stopped) and must not
@@ -106,9 +108,55 @@ pub(super) fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Resu
     // Public material is the intentional output of this ceremony. The private PEM
     // stays inside the sealed record and is never interpolated into a success message.
     println!("{success} {id}");
+    print_signing_public_key(&public);
+    Ok(())
+}
+
+fn print_signing_public_key(public: &PublicKey) {
     println!("public_key_hex {}", public.public_key_hex);
     println!("key_id {}", public.key_id);
+}
+
+pub(super) fn cmd_public_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let result = commit_admin(
+        global,
+        AdminOpBody::SigningPublicKey {
+            v: ADMIN_OP_SCHEMA_V2,
+            id,
+        },
+    )?;
+    let invalid = || CliError::Io("invalid signing public key reply".into());
+    let public: PublicKey = serde_json::from_value(result).map_err(|_| invalid())?;
+    let is_hex = |s: &str, len| {
+        s.len() == len
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    if !is_hex(&public.public_key_hex, 64) || !is_hex(&public.key_id, 16) {
+        return Err(invalid());
+    }
+    print_signing_public_key(&public);
     Ok(())
+}
+
+pub(super) fn read_signing_public_key_offline(
+    global: &GlobalArgs,
+    id: &str,
+) -> Result<serde_json::Value, CliError> {
+    let path = store_path(global);
+    if !path
+        .try_exists()
+        .map_err(|error| CliError::Io(error.to_string()))?
+    {
+        return Err(CliError::Store(StoreOpError::SigningKeyNotFound));
+    }
+    let key = resolve_store_key(global)?;
+    let conn = credentials_core::usable::open_store_read_only(&path)
+        .map_err(|error| CliError::Io(error.to_string()))?;
+    let public =
+        EncryptedStore::signing_public_key_read_only(&conn, &key, id).map_err(CliError::Store)?;
+    Ok(serde_json::json!(public))
 }
 
 pub(super) fn guard_policy_root_args(args: &[String]) -> Result<(), CliError> {

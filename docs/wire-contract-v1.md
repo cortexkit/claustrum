@@ -1400,6 +1400,29 @@ authentication. Root keys `signing:cortexkit-root:1` and
 through this path. Bus `credential.sign` authorization and unflagged key behavior
 are unchanged.
 
+### `admin.signing_public_key` and `ck auth public-key`
+
+This read uses the existing authenticated admin plane when a daemon is running.
+It does not authorize a consumer principal, capability handle, or grant.
+
+```json
+{"op":"admin.signing_public_key","v":2,"id":"signing:account-machine:1"}
+```
+
+The result contains only `public_key_hex` (64 lowercase hex characters) and
+`key_id` (the first eight bytes of SHA-256 of the decoded public key, lowercase
+hex). The record must be a local `SigningKey`, regardless of its `operator_sign`
+flag. An absent id returns `signing_key_not_found/permanent`; another record kind,
+including `KemKey`, returns `not_signing_key/permanent`. Quarantined, unreadable,
+or malformed records use the existing store-error reply. A daemon without this
+operation refuses the unknown discriminator; the CLI does not fall back on that
+refusal.
+
+`ck auth public-key --id <id>` prints `public_key_hex <hex>` and `key_id <hex>`,
+in that order, like the last two lines of `ck auth mint-signing-key`. Offline it
+opens the store read-only without taking the writer lease. Neither path writes
+an audit row, modifies a record, or returns any private key material.
+
 ### Category and grant audit targets
 
 `admin.store_with_categories` is a create-only operator write. Its body has `v: 1`,

@@ -694,11 +694,14 @@ jobs:
               require_file "$archive.sha256"
               # A valid sidecar for a different zip must not satisfy this check.
               checksum=$(< "$archive.sha256")
-              if [[ ! "${checksum%$'\r'}" =~ $checksum_prefix"$archive"$ ]]; then
+              checksum=${checksum%$'\r'}
+              if [[ ! "$checksum" =~ $checksum_prefix"$archive"$ ]]; then
                 echo "REFUSING: $archive.sha256 must describe $archive." >&2
                 exit 1
               fi
-              sha256sum -c "$archive.sha256"
+              # Check the line just validated, without the CR a Windows leg may write.
+              # Not every sha256sum strips it, so the file itself is never passed to -c.
+              printf '%s\n' "$checksum" | sha256sum -c -
             done
           done <<< "$platforms"
           require_file release-manifest.json

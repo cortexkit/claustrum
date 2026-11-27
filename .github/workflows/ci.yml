@@ -44,23 +44,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Linux + Windows matrix. Windows is the load-bearing leg (the cfg(windows)
-  # master-key/operator-path branches and any path handling can't be exercised on
-  # local macOS/Linux). macOS is intentionally not in CI: it is the dev platform
-  # (continuously tested locally) and is where the keychain path is developed.
-  #
-    # Runners are GitHub-hosted. They were Blacksmith while this repo was private:
-    # the org is on the free plan, where GitHub blocks private-repo Actions jobs at
-    # the zero spending limit, and third-party runners do not consume the included
-    # minutes. Public repos get GitHub-hosted minutes for free, so the workaround
-    # retired with the repo's visibility on 2026-08-27.
-    #
-    # macOS is still absent, and the earlier note here ("re-add macOS if public")
-    # oversimplified. Two facts pull in opposite directions: the keychain path is
-    # macOS-only and has NO CI coverage at all, which is a real gap; but the macOS
-    # leg has never run green here, and coupling an unproven leg to a visibility
-    # flip risks reddening CI at the worst possible moment. It goes in as its own
-    # change, proven on its own, rather than riding this one.
+  # Run natively on GitHub-hosted Linux, Windows, and Apple Silicon macOS.
+  # The Windows and macOS legs cover OS-specific paths and credential stores.
   test:
     name: Test (${{ matrix.os }})
     # Fork PRs need no secrets. The public subconscious checkout supplies only
@@ -75,6 +60,8 @@ jobs:
               runner: ubuntu-latest
             - os: windows
               runner: windows-latest
+            - os: macos
+              runner: macos-latest
     defaults:
       run:
         working-directory: claustrum
@@ -136,8 +123,8 @@ jobs:
         with:
           repository: cortexkit/subconscious
           path: subconscious
-          # Windows only reads the contract document; it never runs ck-subc.
-          sparse-checkout: ${{ runner.os == 'Windows' && 'docs/push-sealed-payload.md' || '' }}
+          # Only Linux builds and runs ck-subc; the other legs read the contract.
+          sparse-checkout: ${{ runner.os != 'Linux' && 'docs/push-sealed-payload.md' || '' }}
           sparse-checkout-cone-mode: false
 
       - uses: dtolnay/rust-toolchain@stable
@@ -227,6 +214,59 @@ jobs:
         env:
           CK_NATIVE_STORE_TESTS: '1'
         run: bash scripts/test-native-store.sh
+
+      - name: macOS Keychain round trips and locked refusal
+        if: runner.os == 'macOS'
+        env:
+          CK_NATIVE_STORE_TESTS: '1'
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d "$RUNNER_TEMP/claustrum-native-store.XXXXXX")
+          printf 'CK_NATIVE_STORE_SCRATCH=%s\n' "$scratch" >> "$GITHUB_ENV"
+          keychain="$scratch/claustrum-native.keychain-db"
+          /usr/bin/security default-keychain > "$scratch/original-default"
+          /usr/bin/security list-keychains > "$scratch/original-search-list"
+          touch "$scratch/settings-saved"
+
+          password=$(uuidgen)
+          /usr/bin/security create-keychain -p "$password" "$keychain"
+          /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
+          /usr/bin/security unlock-keychain -p "$password" "$keychain"
+          # A path after `security add-generic-password -w` becomes the password.
+          # Keep the shipped stdin write by changing the runner's default and search list.
+          /usr/bin/security default-keychain -s "$keychain"
+          /usr/bin/security list-keychains -s "$keychain"
+          CK_NATIVE_STORE_KEYCHAIN="$keychain" \
+            cargo test --locked -p credentials-core --test native_store -- --ignored
+
+      - name: Restore macOS Keychain settings
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="${CK_NATIVE_STORE_SCRATCH:-}"
+          [[ -n "$scratch" ]] || exit 0
+          result=0
+          if [[ -f "$scratch/settings-saved" ]]; then
+            # `security` prints each path on its own line, surrounded by double quotes.
+            original=$(<"$scratch/original-default")
+            original="${original#*\"}"
+            /usr/bin/security default-keychain -s "${original%\"}" || result=1
+            set --
+            while IFS= read -r entry; do
+              entry="${entry#*\"}"
+              set -- "$@" "${entry%\"}"
+            done < "$scratch/original-search-list"
+            /usr/bin/security list-keychains -s "$@" || result=1
+            keychain="$scratch/claustrum-native.keychain-db"
+            if [[ -e "$keychain" ]]; then
+              /usr/bin/security delete-keychain "$keychain" || result=1
+            fi
+          fi
+          rm -r -- "$scratch"
+          exit "$result"
 
       - name: Fixture line endings
         if: runner.os != 'Windows'

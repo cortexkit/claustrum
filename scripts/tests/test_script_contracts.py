@@ -920,6 +920,24 @@ printf '%s %s (%s)\\n' '{binary}' "$STUB_VERSION" "$STUB_REV"''')
         ci_flags = re.search(r'cargo clippy.*--features ([^\s]+)', ci).group(1).split(',')
         self.assertEqual(set(gate_flags), set(ci_flags))
 
+    def test_landing_ci_matrix_and_required_macos_keychain_test(self):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
+        job = workflow['jobs']['test']
+        runners = job['strategy']['matrix']['include']
+        self.assertCountEqual(runners, [
+            {'os': 'ubuntu', 'runner': 'ubuntu-latest'},
+            {'os': 'windows', 'runner': 'windows-latest'},
+            {'os': 'macos', 'runner': 'macos-latest'},
+        ])
+        steps = {step.get('name'): step for step in job['steps']}
+        native = steps['macOS Keychain round trips and locked refusal']
+        self.assertEqual(native['if'], "runner.os == 'macOS'")
+        self.assertEqual(native['env']['CK_NATIVE_STORE_TESTS'], '1')
+        self.assertIn('--test native_store -- --ignored', native['run'])
+        self.assertNotIn('continue-on-error', native)
+        cleanup = steps['Restore macOS Keychain settings']
+        self.assertEqual(cleanup['if'], "always() && runner.os == 'macOS'")
+
     def test_windows_runtime_workflows_are_a_required_ci_and_gate_arm(self):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         steps = workflow['jobs']['test']['steps']

@@ -149,6 +149,9 @@ For manual downloads, choose the suffix matching your system:
 Each target has `ck-claustrum-<suffix>.zip` and `ck-auth-<suffix>.zip` archives, each with
 a matching `.zip.sha256` sidecar. `ck setup` does not support Intel Macs.
 
+Landing CI runs the native test suites on Apple Silicon macOS, Linux x64, and Windows x64.
+The release workflow runs the native suites for Linux ARM64 and Windows ARM64.
+
 To rehearse the five-platform release without creating or modifying a GitHub release:
 
 ```sh
@@ -1862,7 +1865,7 @@ the same name when fixing and retrying that deployment's train.
 
 ```sh
 ./scripts/gate.sh
-# Land through the train so the Linux and Windows CI legs run too.
+# Land through the train so the Linux, Windows, and macOS CI legs run too.
 ./scripts/train-push.sh <train-name>
 ```
 

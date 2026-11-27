@@ -185,10 +185,10 @@ ck auth bootstrap --data-dir "$DATA_DIR"
 
 All native stores keep independent current and next slots for crash-safe rotation,
 scoped by the canonical vault directory. The Linux and Windows stores never request an
-interactive unlock. On macOS, reading a locked keychain makes `security` wait on the
-system's unlock prompt, so keep the login keychain unlocked while the vault runs; in a
-session with no screen (SSH, a VM tool) nobody can answer that prompt. If the Linux
-keyring is locked, unlock it in your desktop keyring manager before starting or
+interactive unlock. On macOS it depends on the session. In a logged-in desktop session,
+reading a locked keychain shows the system's unlock prompt, and the vault waits until
+someone answers it. Over SSH or a VM tool, the read is refused at once as locked. If the
+Linux keyring is locked, unlock it in your desktop keyring manager before starting or
 retrying the daemon. For an unattended session, arrange an unlocked keyring and its D-Bus
 session bus before launching the daemon. A missing bus, absent default collection, or
 refused Credential Manager access is a refusal, not permission to choose another backend.

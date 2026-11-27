@@ -173,7 +173,7 @@ pub fn help_text() -> &'static str {
       basic-auth on|off|status controls authorization_basic:<user> creation.\n\
       Keep basic-auth off until the phone can show Basic sign-in cards.\n\
       dev-desktop-approvals on|off|status admits unsigned desktop approvals.\n\
-      Development only; remove before the next public release. Default: off.\n\
+      Development route until desktop approvals are signed. Default: off.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\

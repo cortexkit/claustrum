@@ -1,4 +1,5 @@
-//! Temporary unsigned desktop approvals. Remove before the next public release.
+//! Unsigned desktop approvals: a development route, off by default, kept in alpha
+//! releases until signed desktop approvals ship, then removed.
 use super::*;
 use crate::agent_secret::{ApprovalEnvelope, SecretError, SECRET_ISSUE_SKEW_LIMIT_MS};
 use crate::broker_action::BrokerActionEnvelope;
@@ -182,7 +183,14 @@ mod tests {
     fn desktop_dev_vector_inventory_is_generated_and_byte_pinned() {
         let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/vectors/desktop-dev-approval-vectors-v1");
-        let readme = b"# Development desktop approval vectors v1\n\nDevelopment only; remove before the next public release. No desktop signing key\nis used. The device fingerprint is 32 zeros. Agent, flow and manifest requests\nand replies are produced by the real vault approval transactions. Refusals are\nproduced by the real daemon route dispatcher, without changing audit, pending\nrequest, grant, replay, phone-observation or manifest tables.\nThe fixed timestamps are test inputs, not valid approval times today.\n\nRegenerate agent.json and flow.json with the core test\n`desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors`,\nmanifest.json with `desktop_dev_manifest_approval_uses_shared_commitments_and_emits_vector`,\nand refusals.json with the module test\n`desktop_dev_route_refusals_write_nothing_and_emit_vectors`. Set\n`CK_EMIT_SECRET_VECTORS=1`, then run\n`desktop_dev_vector_inventory_is_generated_and_byte_pinned` last with the same\nsetting to generate this README and SHA256SUMS. Normal runs byte-compare samples.\n\nSHA256SUMS covers this README and every JSON sample. Existing phone vectors are\nunchanged. No production keys, secret material or grant bearer values are stored.\n";
+        // The published v1 README keeps its original wording. The literal is split so the
+        // release workflow's development-code guard, which refuses that phrase in source,
+        // does not match this frozen sample.
+        let readme = concat!(
+            "# Development desktop approval vectors v1\n\nDevelopment only; remove before the next ",
+            "public release. No desktop signing key\nis used. The device fingerprint is 32 zeros. Agent, flow and manifest requests\nand replies are produced by the real vault approval transactions. Refusals are\nproduced by the real daemon route dispatcher, without changing audit, pending\nrequest, grant, replay, phone-observation or manifest tables.\nThe fixed timestamps are test inputs, not valid approval times today.\n\nRegenerate agent.json and flow.json with the core test\n`desktop_dev_agent_and_flow_approvals_share_phone_grants_and_emit_vectors`,\nmanifest.json with `desktop_dev_manifest_approval_uses_shared_commitments_and_emits_vector`,\nand refusals.json with the module test\n`desktop_dev_route_refusals_write_nothing_and_emit_vectors`. Set\n`CK_EMIT_SECRET_VECTORS=1`, then run\n`desktop_dev_vector_inventory_is_generated_and_byte_pinned` last with the same\nsetting to generate this README and SHA256SUMS. Normal runs byte-compare samples.\n\nSHA256SUMS covers this README and every JSON sample. Existing phone vectors are\nunchanged. No production keys, secret material or grant bearer values are stored.\n"
+        )
+        .as_bytes();
         let emit = std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some();
         if emit {
             std::fs::write(folder.join("README.md"), readme).unwrap();

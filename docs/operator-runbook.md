@@ -2100,9 +2100,9 @@ semantics are in [the account-token wire contract](wire-contract-v1.md#12-accoun
 
 ## Development desktop approvals
 
-Development only: remove this unsigned approval path before the next public
-release. Keep the switch off except while approving cards from the development
-desktop:
+A development route with no device key. Alpha releases keep it, switched off by
+default, until signed desktop approvals ship; it is removed then. Keep the switch
+off except while approving cards from the development desktop:
 
 ```sh
 ck auth secret dev-desktop-approvals status

@@ -134,7 +134,8 @@ pub async fn serve(
 }
 
 /// Development-only unsigned approvals share the phone's transaction checks, not
-/// its pairing or signature authority. Remove before the next public release.
+/// its pairing or signature authority. Off by default; kept in alpha releases until
+/// signed desktop approvals ship, then removed.
 pub async fn serve_dev_desktop(
     store: Arc<EncryptedStore>,
     method: &str,

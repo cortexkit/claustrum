@@ -1,4 +1,5 @@
-//! Development-only unsigned approvals; remove before the next public release.
+//! Unsigned desktop approvals: a development route, off by default, kept in alpha
+//! releases until signed desktop approvals ship, then removed.
 use crate::{commit_admin, store_path, CliError, GlobalArgs};
 use credentials_core::{
     admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2},

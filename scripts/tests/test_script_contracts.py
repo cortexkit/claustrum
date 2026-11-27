@@ -620,6 +620,10 @@ class ScriptContracts(unittest.TestCase):
         self.assertIn('crates/development.rs:1:', rehearsal.stdout)
         self.assertIn('::warning::', rehearsal.stdout)
         marker.unlink()
+        # The frozen v1 desktop sample keeps the phrase in its published README.
+        frozen = self.root / 'crates' / 'tests' / 'vectors' / 'desktop-dev-approval-vectors-v1'
+        frozen.mkdir(parents=True)
+        (frozen / 'README.md').write_text('Development only; remove before the next public release.\n')
         clean = self.run_shell(step['run'], dict(self.env, REHEARSE='false'), cwd=self.root)
         self.assertEqual(clean.returncode, 0, clean.stdout)
 

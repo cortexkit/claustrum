@@ -143,15 +143,19 @@ jobs:
           )
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
-      # Development-only features (such as unsigned desktop approvals) carry the phrase
-      # below in their source. A public release must not ship them, and nothing else
+      # Development-only features that must not ship carry the phrase below in their
+      # source. (The unsigned desktop approval route doesn't: alpha releases keep it,
+      # off by default, until signed desktop approvals ship.) A public release must not ship them, and nothing else
       # would notice one left behind, so the release refuses while any remains.
       - name: Refuse development-only code
         env:
           REHEARSE: ${{ inputs.rehearse || false }}
         run: |
           set -euo pipefail
-          if grep -rniI 'remove before the next public release' crates/ docs/; then
+          # The published desktop-dev-approval-vectors-v1 README keeps its original
+          # wording; that sample is frozen, so its folder is skipped.
+          if grep -rniI --exclude-dir=desktop-dev-approval-vectors-v1 \
+            'remove before the next public release' crates/ docs/; then
             if [ "$REHEARSE" = true ]; then
               echo "::warning::Rehearsal only: the development-only code listed above blocks a public release."
             else

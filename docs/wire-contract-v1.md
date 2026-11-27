@@ -6679,8 +6679,8 @@ against `ModuleSecretError` in both directions.
 
 ## Development desktop approvals
 
-Development only; remove this unsigned approval path before the next public
-release. It exists so the development desktop can approve the same pending agent,
+A development route, kept in alpha releases (switched off by default) until signed
+desktop approvals ship, then removed. It exists so the development desktop can approve the same pending agent,
 flow and bot-repository manifest cards as the phone, without desktop keys or a
 daemon stamp identifying a signed desktop app. It is not a production approval
 authority.

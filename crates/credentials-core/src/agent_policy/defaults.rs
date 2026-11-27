@@ -44,6 +44,18 @@ pub fn github_default_rule_set() -> Result<RuleSet, PolicyError> {
     github_rule_set_for_release(GITHUB_DEFAULT_RELEASE, GITHUB_DEFAULT_SHA256)
 }
 
+pub(crate) fn github_release_names() -> impl Iterator<Item = &'static str> {
+    GITHUB_RELEASES.iter().map(|item| item.release)
+}
+
+pub(crate) fn github_rule_set_for_named_release(release: &str) -> Result<RuleSet, PolicyError> {
+    let artifact = GITHUB_RELEASES
+        .iter()
+        .find(|item| item.release == release)
+        .ok_or(PolicyError::UnknownDefaultRelease)?;
+    load_release(artifact)
+}
+
 pub(super) fn github_rule_set_for_release(
     release: &str,
     sha256: &str,
@@ -58,6 +70,10 @@ pub(super) fn github_rule_set_for_release(
     let artifact = matching
         .find(|item| item.sha256 == sha256)
         .ok_or(PolicyError::UnknownDefaultDigest)?;
+    load_release(artifact)
+}
+
+fn load_release(artifact: &Release) -> Result<RuleSet, PolicyError> {
     let mut object: BTreeMap<String, Value> = parse_canonical(artifact.bytes)?;
     // The release artifact omits source so its digest doesn't depend on itself.
     if object

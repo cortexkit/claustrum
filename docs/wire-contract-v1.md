@@ -6212,14 +6212,15 @@ consent. A token is not bound to a single HTTP request.
 
 ### Policy administration
 
-The master-key admin surface provides four operations with `v: 2`:
+The master-key admin surface provides four operations with `v: 2`, except when
+derive explicitly selects a rules release:
 
 | Operation | Parameters besides `v` | Result |
 |---|---|---|
 | `admin.agent_policy_sign` | `policy_bytes` (canonical JSON text), `manifest_version`, `approver` | `{version, policy_sha256, envelope}` |
 | `admin.agent_policy_list` | None | `{policies, head, active}` from one store snapshot |
 | `admin.agent_policy_export` | `version` | Retained envelope for that version, or `not_found` |
-| `admin.agent_policy_derive` | `manifest_version`, `identities` | Canonical policy text (unsigned) |
+| `admin.agent_policy_derive` | `manifest_version`, `identities`; `rules_release` (string, required for `v: 3`, omitted for `v: 2`) | Canonical policy text (unsigned) |
 
 Only the operator's `ck auth github bindings` ceremony can remove or move a
 repository or change an agent's App identity. It uses the same master-key admin
@@ -6382,8 +6383,18 @@ Sign and derive require the newest manifest to have no paired policy. Sign requi
 the next policy version and, if a policy is stored, the same bindings as the head,
 including identities. Derive copies the head policy's rules if one exists;
 otherwise it uses the [current embedded GitHub rule set](#rule-sets-kinds-and-actions)
-(revision 2). Its `identities` object maps exactly the manifest's agents to distinct
-active GitHub App credentials.
+(revision 2). To override that choice, `ck auth policy derive --rules-release <release>`
+requests a named embedded release. The returned rule set contains all rules from
+that release and cites its name and SHA-256 in `source`. Derive still requires its
+`identities` object to map exactly the manifest's agents to distinct active GitHub
+App credentials, and preserves the head's bindings and identities when a head exists.
+
+Derive uses `v: 2` without `rules_release` and requires `v: 3` with it. The vault
+refuses either version with the wrong shape. Older daemons refuse derive `v: 3`
+as an unsupported version; use matching `ck auth` and daemon builds to select a
+release. An unknown release returns `rules_release_unknown` (`permanent`) and
+lists the known release names.
+
 Sign and derive refuse `policy_identity_agent_mismatch` (permanent) when a
 binding names a vault-created App attested for a different agent.
 After the first policy, manifest import is refused and manifest ceremony signing

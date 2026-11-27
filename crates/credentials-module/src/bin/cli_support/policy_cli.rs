@@ -1,6 +1,6 @@
 //! Generate and publish agent policies through the master-key admin surface.
 use crate::{commit_admin, CliError, GlobalArgs};
-use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
+use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2, ADMIN_OP_SCHEMA_V3};
 use credentials_core::agent_policy::AgentPolicyEnvelope;
 use credentials_core::gh_manifest::ManifestValue;
 use std::path::Path;
@@ -12,7 +12,12 @@ pub(crate) fn value_flags(verb: &str) -> Option<&'static [&'static str]> {
         "sign" => &["--file", "--manifest-version", "--approver"],
         "list" => &[],
         "export" => &["--version"],
-        "derive" => &["--manifest-version", "--identities", "--out"],
+        "derive" => &[
+            "--manifest-version",
+            "--identities",
+            "--out",
+            "--rules-release",
+        ],
         _ => return None,
     })
 }
@@ -36,7 +41,7 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
         }
     }
     for flag in flags {
-        if !seen.contains(flag) {
+        if *flag != "--rules-release" && !seen.contains(flag) {
             return Err(CliError::Usage(format!(
                 "missing {flag}\n\n{}",
                 help_text(Some(verb))
@@ -88,10 +93,19 @@ pub fn cmd_policy(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
                     _ => Err(invalid()),
                 })
                 .collect::<Result<_, _>>()?;
+            let rules_release =
+                rest.as_chunks::<2>().0.iter().find_map(|[flag, release]| {
+                    (flag == "--rules-release").then(|| release.clone())
+                });
             AdminOpBody::AgentPolicyDerive {
-                v,
+                v: if rules_release.is_some() {
+                    ADMIN_OP_SCHEMA_V3
+                } else {
+                    v
+                },
                 manifest_version: positive_version(rest, "--manifest-version")?,
                 identities,
+                rules_release,
             }
         }
         _ => unreachable!(),
@@ -149,8 +163,8 @@ pub fn help_text(verb: Option<&str>) -> String {
         Some("sign") => "ck auth policy sign --file <policy.json> --manifest-version <M>\n  --approver <name>\n\n  --file <policy.json>    exact canonical policy bytes to approve and sign\n  --manifest-version <M>  newest stored manifest (must be unpaired)\n  --approver <name>       approver recorded in the audit chain\n\nNOTES\nApproval, signing and retention commit before the envelope file is written.",
         Some("list") => "ck auth policy list\n\nNOTES\nPrint JSON policies in ascending order, with the head and active versions.\nThe active policy is paired with the ready manifest.",
         Some("export") => "ck auth policy export --version <P>\n\n  --version <P>  stored policy version whose envelope file is rewritten\n\nNOTES\nExport signs nothing and works for inactive versions.",
-        Some("derive") => "ck auth policy derive --manifest-version <M> --identities <file>\n  --out <policy.json>\n\n  --manifest-version <M>  newest stored manifest (must be unpaired)\n  --identities <file>     JSON map of agent names to github_app:<slug> IDs\n  --out <policy.json>     write the unsigned canonical policy on success\n\nNOTES\nDerive uses the seeded GitHub rules and writes no vault or audit row.",
-        _ => "ck auth policy <verb> [flags]\n\n  --file <policy.json>    sign: exact canonical policy bytes\n  --manifest-version <M>  sign or derive: newest unpaired manifest\n  --approver <name>       sign: who approves those bytes\n  --version <P>           export: stored policy version to recover\n  --identities <file>     derive: JSON map of agent names to App IDs\n  --out <policy.json>     derive: output file\n\nNOTES\nVerbs: sign, list, export, derive.\nRun ck auth help policy <verb> for that verb's page.",
+        Some("derive") => "ck auth policy derive --manifest-version <M> --identities <file>\n  --out <policy.json> [--rules-release <release>]\n\n  --manifest-version <M>     newest stored manifest (must be unpaired)\n  --identities <file>        JSON map of agent names to github_app:<slug> IDs\n  --out <policy.json>        write the unsigned canonical policy on success\n  --rules-release <release>  use all GitHub rules from an embedded release\n\nNOTES\nWithout this flag, derive keeps the head's rules or uses the default.\nDerive writes no vault or audit row.",
+        _ => "ck auth policy <verb> [flags]\n\n  --file <policy.json>    sign: exact canonical policy bytes\n  --manifest-version <M>  sign or derive: newest unpaired manifest\n  --approver <name>       sign: who approves those bytes\n  --version <P>           export: stored policy version to recover\n  --identities <file>     derive: JSON map of agent names to App IDs\n  --out <policy.json>     derive: output file\n  --rules-release <release>  derive: select an embedded GitHub rules release\n\nNOTES\nVerbs: sign, list, export, derive.\nRun ck auth help policy <verb> for that verb's page.",
     };
     format!("{page}\nAll commands use the master-key admin path, online or under the offline lease.\nSign and export write signed-policies/v<P>-envelope.json at mode 0600\nthrough a temporary file and rename. Recover a lost envelope with export.")
 }

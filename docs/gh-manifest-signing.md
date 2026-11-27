@@ -109,14 +109,19 @@ Derive a candidate from the newest manifest and an identities JSON object mappin
 agent to its active `github_app:<slug>` credential:
 
 ```sh
-ck auth policy derive --manifest-version <M> --identities <file> --out <policy.json>
+ck auth policy derive --manifest-version <M> --identities <file> \
+  --out <policy.json> [--rules-release <release>]
 ck auth policy sign --file <policy.json> --manifest-version <M> --approver <name>
 ```
 
 For the first policy, derive uses the
 [current embedded GitHub rules](wire-contract-v1.md#rule-sets-kinds-and-actions)
-(revision 2). Later derivations keep the head policy's rules. The signer still
-accepts policies that cite revision 1 and stay within its rules.
+(revision 2) unless a release is specified. Later derivations keep the head
+policy's rules unless `--rules-release` names an embedded release. For example,
+`--rules-release cortexkit-defaults-2026.11.2` derives a candidate with all revision 2
+rules while keeping the head policy's bindings and identities. Review the candidate
+before approving it. The signer still accepts policies that cite revision 1 and
+stay within its rules.
 
 Approve the exact canonical file before signing. The newest manifest must be unpaired
 and its repository-to-agent map must equal the policy's. Once a policy exists, policy

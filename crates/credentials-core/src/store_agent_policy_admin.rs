@@ -14,9 +14,9 @@ use super::{
     append_audit_tx, now_ms, AuditOp, AuditRecord, EncryptedStore, RecordState, StoreOpError,
 };
 use crate::agent_policy::{
-    github_default_rule_set, manifest_projection, policy_sha256, signed_input,
-    validate_signer_rule_sets, AgentPolicy, AgentPolicyEnvelope, Binding, PolicyError,
-    AGENT_POLICY_SCHEMA_V1,
+    github_default_rule_set, github_release_names, github_rule_set_for_named_release,
+    manifest_projection, policy_sha256, signed_input, validate_signer_rule_sets, AgentPolicy,
+    AgentPolicyEnvelope, Binding, PolicyError, RuleSet, AGENT_POLICY_SCHEMA_V1,
 };
 use crate::audit::AgentPolicyAudit;
 use crate::gh_manifest::GhManifest;
@@ -65,6 +65,21 @@ fn refusal(reason: &str) -> StoreOpError {
 
 fn policy_error(error: PolicyError) -> StoreOpError {
     StoreOpError::Encode(error.to_string())
+}
+
+fn github_rules_for_derivation(release: Option<&str>) -> Result<RuleSet, StoreOpError> {
+    let Some(release) = release else {
+        return github_default_rule_set().map_err(policy_error);
+    };
+    github_rule_set_for_named_release(release).map_err(|error| match error {
+        PolicyError::UnknownDefaultRelease => {
+            let known = github_release_names().collect::<Vec<_>>().join(", ");
+            refusal(&format!(
+                "rules_release_unknown: unknown GitHub rules release; known releases: {known}"
+            ))
+        }
+        other => policy_error(other),
+    })
 }
 
 fn identity_agent_mismatch() -> StoreOpError {
@@ -366,6 +381,7 @@ impl EncryptedStore {
         &self,
         manifest_version: i64,
         identities: &BTreeMap<String, String>,
+        rules_release: Option<&str>,
     ) -> Result<String, StoreOpError> {
         self.store.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -413,11 +429,11 @@ impl EncryptedStore {
                     version: next_version(head.as_ref()),
                     issued_at_unix_secs: now_ms() / 1000,
                     root_key_id: public.key_id,
-                    rule_sets: match head {
-                        Some(head) => head.rule_sets,
-                        None => BTreeMap::from([(
+                    rule_sets: match (head, rules_release) {
+                        (Some(head), None) => head.rule_sets,
+                        (_, release) => BTreeMap::from([(
                             "github".into(),
-                            github_default_rule_set().map_err(policy_error)?,
+                            github_rules_for_derivation(release)?,
                         )]),
                     },
                     bindings,

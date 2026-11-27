@@ -868,7 +868,7 @@ fn usage_short() -> String {
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
         manifest            import, sign and track GitHub routing manifests\n\
-         policy              derive, sign, list and export fleet agent policies\n\
+          policy              derive (optionally select rules), sign, list and export\n\
          policy-root         initialize or show the policy signing root\n\
             put                 store or generate a secret; enroll gateway keys\n\
            mint-signing-key    generate and custody a new Ed25519 signing key\n\
@@ -3633,9 +3633,11 @@ mod deposit_cli_tests {
 
     #[test]
     fn policy_cli_derives_signs_lists_and_recovers_an_inactive_envelope() {
-        use credentials_core::agent_policy::AgentPolicy;
+        use credentials_core::agent_policy::{github_default_rule_set, AgentPolicy};
         use serde_json::{json, Value};
 
+        const OLD_RELEASE: &str = "cortexkit-defaults-2026.11";
+        const NEW_RELEASE: &str = "cortexkit-defaults-2026.11.2";
         let root = root("policy-cli");
         let global = global(&root);
         let json_output = |args: &[&str]| {
@@ -3674,20 +3676,21 @@ mod deposit_cli_tests {
         };
         manifest_sign(41);
         manifest_sign(42);
-        let derive = |version| {
-            invoke(
-                &root,
-                &[
-                    "policy",
-                    "derive",
-                    "--manifest-version",
-                    version,
-                    "--identities",
-                    &identities_file,
-                    "--out",
-                    &policy_file,
-                ],
-            )
+        let derive = |version, release| {
+            let mut args = vec![
+                "policy",
+                "derive",
+                "--manifest-version",
+                version,
+                "--identities",
+                &identities_file,
+                "--out",
+                &policy_file,
+            ];
+            if let Some(release) = release {
+                args.extend(["--rules-release", release]);
+            }
+            invoke(&root, &args)
         };
         let sign = |version| {
             json_output(&[
@@ -3703,28 +3706,34 @@ mod deposit_cli_tests {
         };
         std::fs::write(&identities_file, r#"{"agent":"github_app:sample"}"#).unwrap();
         std::fs::write(&policy_file, "leave this alone").unwrap();
-        assert!(!derive("41").status.success());
-        assert!(!derive("42").status.success());
+        assert!(!derive("41", None).status.success());
+        assert!(!derive("42", None).status.success());
         assert_eq!(
             std::fs::read_to_string(&policy_file).unwrap(),
             "leave this alone"
         );
         put_policy_test_identity(&global);
-        let derived = derive("42");
-        assert!(
-            derived.status.success(),
-            "{}",
-            String::from_utf8_lossy(&derived.stderr)
-        );
-        let policy = std::fs::read_to_string(&policy_file).unwrap();
-        assert!(!policy.ends_with('\n'));
+        let derive_policy = |version, release| {
+            let derived = derive(version, release);
+            assert!(
+                derived.status.success(),
+                "{}",
+                String::from_utf8_lossy(&derived.stderr)
+            );
+            let text = std::fs::read_to_string(&policy_file).unwrap();
+            let parsed = AgentPolicy::parse_canonical(text.as_bytes()).unwrap();
+            (text, parsed)
+        };
+        let (_, seeded) = derive_policy("42", None);
         assert_eq!(
-            AgentPolicy::parse_canonical(policy.as_bytes())
-                .unwrap()
-                .bindings[0]
-                .resources,
-            ["org/r"]
+            seeded.rule_sets["github"],
+            github_default_rule_set().unwrap()
         );
+        let (policy, head) = derive_policy("42", Some(OLD_RELEASE));
+        assert!(!policy.ends_with('\n'));
+        assert_eq!(head.bindings[0].resources, ["org/r"]);
+        assert_eq!(head.rule_sets["github"].source.release, OLD_RELEASE);
+        assert_eq!(head.rule_sets["github"].revision, 1);
         let first = sign("42");
         assert_eq!(first["envelope"]["policy"], policy);
         let published = global.data_dir.join("signed-policies/v1-envelope.json");
@@ -3740,17 +3749,35 @@ mod deposit_cli_tests {
             }
         };
         check_mode();
-        assert!(!derive("42").status.success());
+        assert!(!derive("42", Some(NEW_RELEASE)).status.success());
         assert_eq!(std::fs::read_to_string(&policy_file).unwrap(), policy);
         manifest_sign(43);
-        let derived = derive("43");
-        assert!(
-            derived.status.success(),
-            "{}",
-            String::from_utf8_lossy(&derived.stderr)
-        );
-        assert_eq!(sign("43")["version"], 2);
         let tip = || open_for_admin(&global, false).unwrap().audit_tip().unwrap();
+        let (copied_text, copied) = derive_policy("43", None);
+        assert_eq!(copied.rule_sets, head.rule_sets);
+        assert_eq!(copied.bindings, head.bindings);
+        let before_unknown = tip();
+        let unknown = derive("43", Some("not-a-release"));
+        assert!(!unknown.status.success());
+        let error = String::from_utf8_lossy(&unknown.stderr);
+        assert!(error.contains("rules_release_unknown"), "{error}");
+        assert!(
+            error.contains(&format!("known releases: {OLD_RELEASE}, {NEW_RELEASE}")),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&policy_file).unwrap(), copied_text);
+        assert_eq!(tip(), before_unknown);
+        assert_eq!(json_output(&["policy", "list"])["head"], 1);
+
+        let (upgraded_text, upgraded) = derive_policy("43", Some(NEW_RELEASE));
+        let rules = &upgraded.rule_sets["github"];
+        assert_eq!(rules.source.release, NEW_RELEASE);
+        assert_eq!((rules.revision, rules.kinds.len()), (2, 45));
+        assert_eq!(*rules, github_default_rule_set().unwrap());
+        assert_eq!(upgraded.bindings, head.bindings);
+        let second = sign("43");
+        assert_eq!(second["version"], 2);
+        assert_eq!(second["envelope"]["policy"], upgraded_text);
         let before = tip();
         let list = json_output(&["policy", "list"]);
         assert_eq!(list["head"], 2);
@@ -3784,6 +3811,9 @@ mod deposit_cli_tests {
         for verb in ["sign", "list", "export", "derive"] {
             let help = success(&root, &["help", "policy", verb]);
             assert!(help.contains(&format!("ck auth policy {verb}")));
+            if verb == "derive" {
+                assert!(help.contains("--rules-release <release>"));
+            }
             assert!(help.lines().all(|line| line.chars().count() <= 80));
         }
         std::fs::remove_dir_all(root).unwrap();

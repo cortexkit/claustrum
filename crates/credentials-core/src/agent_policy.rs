@@ -17,6 +17,7 @@ mod matching;
 mod narrowing;
 
 pub use defaults::github_default_rule_set;
+pub(crate) use defaults::{github_release_names, github_rule_set_for_named_release};
 pub(crate) use matching::valid_resource;
 pub(crate) use narrowing::validate_signer_rule_sets;
 

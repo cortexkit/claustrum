@@ -973,6 +973,7 @@ fn policy_admin_derive_normalizes_and_refuses_identity_and_pairing_changes() {
                 .iter()
                 .map(|(agent, id)| (agent.to_string(), id.to_string()))
                 .collect(),
+            rules_release: None,
         };
     refuses(&store, derive_op(40, &[]), "ManifestProjectionCollision");
     refuses(

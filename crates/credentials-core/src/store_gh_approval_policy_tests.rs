@@ -147,7 +147,9 @@ fn derive_preserves_narrowed_head_rules() {
     store
         .sign_gh_manifest_admin(&v29, "operator", "test")
         .unwrap();
-    let bytes = store.derive_agent_policy_admin(29, &identities).unwrap();
+    let bytes = store
+        .derive_agent_policy_admin(29, &identities, None)
+        .unwrap();
     let derived = AgentPolicy::parse_canonical(bytes.as_bytes()).unwrap();
     assert_eq!(derived.rule_sets, policy.rule_sets);
 }
@@ -165,7 +167,9 @@ fn policy_sign_and_derive_refuse_an_app_binding_across_owners() {
     let bytes = String::from_utf8(policy.canonical_bytes().unwrap()).unwrap();
     let before = snapshot(&store);
     for result in [
-        store.derive_agent_policy_admin(28, &identities).map(|_| ()),
+        store
+            .derive_agent_policy_admin(28, &identities, None)
+            .map(|_| ()),
         store
             .sign_agent_policy_admin(&bytes, 28, "operator", "test")
             .map(|_| ()),
@@ -229,7 +233,9 @@ fn github_app_attestation_rejects_the_same_mismatch_on_every_policy_signing_path
     create("zulu-bot", FIRST_AGENT);
     let before = snapshot(&store);
     for result in [
-        store.derive_agent_policy_admin(29, &identities).map(|_| ()),
+        store
+            .derive_agent_policy_admin(29, &identities, None)
+            .map(|_| ()),
         store
             .sign_agent_policy_admin(&candidate, 29, "operator", "test")
             .map(|_| ()),
@@ -243,7 +249,9 @@ fn github_app_attestation_rejects_the_same_mismatch_on_every_policy_signing_path
 
     remove_zulu();
     create("zulu-bot", EXISTING_AGENT);
-    let derived = store.derive_agent_policy_admin(29, &identities).unwrap();
+    let derived = store
+        .derive_agent_policy_admin(29, &identities, None)
+        .unwrap();
     let parsed = AgentPolicy::parse_canonical(derived.as_bytes()).unwrap();
     assert_eq!(parsed.bindings, policy.bindings);
     store
@@ -403,7 +411,7 @@ fn configured_policy_root_rejects_missing_and_sign_granted_ordinary_keys_in_ever
                 .sign_agent_policy_admin(&policy_bytes, 28, "operator", "test")
                 .map(|_| ()),
             store
-                .derive_agent_policy_admin(28, &BTreeMap::new())
+                .derive_agent_policy_admin(28, &BTreeMap::new(), None)
                 .map(|_| ()),
         ] {
             assert!(

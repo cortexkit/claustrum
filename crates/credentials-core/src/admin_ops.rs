@@ -46,6 +46,13 @@ where
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
+fn present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GitHubBindingChange {
@@ -187,6 +194,12 @@ pub enum AdminOpBody {
         v: u32,
         manifest_version: i64,
         identities: std::collections::BTreeMap<String, String>,
+        #[serde(
+            default,
+            deserialize_with = "present_string",
+            skip_serializing_if = "Option::is_none"
+        )]
+        rules_release: Option<String>,
     },
     #[serde(rename = "admin.store")]
     Store {
@@ -1300,6 +1313,10 @@ impl AdminOpBody {
                     ADMIN_OP_SCHEMA_V2
                 }
             }
+            AdminOpBody::AgentPolicyDerive {
+                rules_release: Some(_),
+                ..
+            } => ADMIN_OP_SCHEMA_V3,
             AdminOpBody::ManifestImport { .. }
             | AdminOpBody::ManifestSign { .. }
             | AdminOpBody::GitHubBindingPreview { .. }
@@ -1880,9 +1897,10 @@ pub fn apply(
         AdminOpBody::AgentPolicyDerive {
             manifest_version,
             identities,
+            rules_release,
             ..
         } => store
-            .derive_agent_policy_admin(manifest_version, &identities)
+            .derive_agent_policy_admin(manifest_version, &identities, rules_release.as_deref())
             .map(serde_json::Value::String),
         AdminOpBody::ProviderSet {
             v,
@@ -3367,6 +3385,14 @@ mod tests {
     }
 
     #[test]
+    fn agent_policy_derive_without_release_keeps_the_v2_request_bytes() {
+        let legacy = br#"{"op":"admin.agent_policy_derive","v":2,"manifest_version":42,"identities":{"agent":"github_app:sample"}}"#;
+        let op: AdminOpBody = serde_json::from_slice(legacy).unwrap();
+        assert!(op.has_valid_schema_version());
+        assert_eq!(op.to_bytes().unwrap(), legacy);
+    }
+
+    #[test]
     fn legacy_create_store_bytes_remain_compatible() {
         let op = AdminOpBody::Store {
             v: ADMIN_OP_SCHEMA_V1,
@@ -3564,6 +3590,7 @@ mod admin_schema_v2_tests {
                     v: v2,
                     manifest_version: 42,
                     identities: [("agent".into(), "github_app:sample".into())].into(),
+                    rules_release: None,
                 },
                 v2,
                 None,

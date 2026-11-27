@@ -790,8 +790,13 @@ impl AdminSurface {
         // addition can't be silently dropped by an old module — the caller learns
         // the module is too old rather than getting a partial write.
         if !op.has_valid_schema_version() {
+            let supported = if matches!(op, AdminOpBody::AgentPolicyDerive { .. }) {
+                "AgentPolicyDerive requires v2 without rules_release or v3 with rules_release"
+            } else {
+                "module accepts v1 and v2 for their declared variants; ProviderSet accepts v2 and v3"
+            };
             return AdminOutcome::Refused(format!(
-                "unsupported admin op schema version/variant pairing {} (module accepts v1 and v2 for their declared variants; ProviderSet accepts v2 and v3)",
+                "unsupported admin op schema version/variant pairing {} ({supported})",
                 op.schema_version()
             ));
         }
@@ -1328,6 +1333,7 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             "policy_identity_agent_mismatch",
             "policy_identity_not_active_github_app",
             "policy_binding_conflict",
+            "rules_release_unknown",
             "not_found",
             "stale_base",
             "policy_unavailable",
@@ -2774,7 +2780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_set_is_the_only_variant_admitted_at_v3() {
+    async fn provider_set_keeps_its_v3_rules_and_other_ops_keep_their_versions() {
         use serde_json::{json, Value};
         let r = rig(31);
         r.admin.record_bind(5, Principal::Direct);
@@ -2927,6 +2933,38 @@ mod tests {
             AdminOutcome::Refused(message) if message.contains("unknown-provider")
         ));
         assert_eq!(r.store.registered_providers().unwrap(), before);
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
+    }
+
+    #[tokio::test]
+    async fn agent_policy_derive_refuses_mismatched_rules_release_schema() {
+        use serde_json::{json, Value};
+
+        let r = rig(50);
+        r.admin.record_bind(5, Principal::Direct);
+        let tip = r.store.audit_tip().unwrap();
+        let mut body = json!({
+            "op": "admin.agent_policy_derive", "v": 3, "manifest_version": 42, "identities": {},
+        });
+        for (version, release) in [(3, None), (2, Some("cortexkit-defaults-2026.11.2"))] {
+            body["v"] = json!(version);
+            if let Some(release) = release {
+                body["rules_release"] = json!(release);
+            }
+            let raw = body.to_string();
+            let (tag, _) = challenge_and_sign(&r, 5, &raw);
+            assert!(matches!(
+                r.admin.execute(5, raw.as_bytes(), &tag).await,
+                AdminOutcome::Refused(message) if message.contains("unsupported admin op schema")
+            ));
+        }
+        body["rules_release"] = Value::Null;
+        let raw = body.to_string();
+        let (tag, _) = challenge_and_sign(&r, 5, &raw);
+        assert!(matches!(
+            r.admin.execute(5, raw.as_bytes(), &tag).await,
+            AdminOutcome::Refused(message) if message.contains("admin op body not decodable")
+        ));
         assert_eq!(r.store.audit_tip().unwrap(), tip);
     }
 

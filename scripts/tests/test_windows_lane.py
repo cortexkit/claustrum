@@ -58,7 +58,8 @@ class WindowsLane(unittest.TestCase):
         # Unknown conditions refuse here: adding a new Windows run step must not
         # silently bypass the shared lane that the local gate runs.
         conditions = {None, "runner.os != 'Windows'", "runner.os == 'Windows'",
-                      "runner.os == 'Linux'", "matrix.os == 'ubuntu'"}
+                      "runner.os == 'Linux'", "matrix.os == 'ubuntu'",
+                      "runner.os == 'macOS'", "always() && runner.os == 'macOS'"}
         run_steps = []
         for step in steps:
             if "run" not in step:

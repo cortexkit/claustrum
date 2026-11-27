@@ -1,9 +1,10 @@
 //! Opt-in real OS custody tests. CI must set CK_NATIVE_STORE_TESTS=1: an unavailable
 //! store is then a failure, not a successful skip. Linux lock testing additionally
 //! requires a disposable bus/keyring so it cannot lock a developer's login keyring.
+//! macOS tests require the GitHub Actions runner's disposable keychain.
 #![forbid(unsafe_code)]
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod native {
     use credentials_core::{
         key::MasterKey,
@@ -17,6 +18,52 @@ mod native {
             Ok("1"),
             "native custody tests require CK_NATIVE_STORE_TESTS=1 and an available OS store"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn require_disposable_keychain() -> PathBuf {
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "macOS native custody tests require a disposable GitHub Actions runner"
+        );
+        let runner_temp = std::fs::canonicalize(
+            std::env::var_os("RUNNER_TEMP").expect("GitHub Actions runner temp directory required"),
+        )
+        .expect("runner temp directory must exist");
+        let keychain = std::fs::canonicalize(
+            std::env::var_os("CK_NATIVE_STORE_KEYCHAIN").expect("disposable keychain required"),
+        )
+        .expect("disposable keychain must exist");
+        assert!(
+            keychain.starts_with(runner_temp)
+                && keychain.ends_with("claustrum-native.keychain-db")
+                && keychain.is_file(),
+            "expected the disposable keychain in the runner temp directory"
+        );
+
+        // `security add-generic-password -w` takes the next argument as the password,
+        // so the production stdin write needs the disposable keychain as the default.
+        // Check that and the read/delete search order before accessing any slot.
+        for command in ["default-keychain", "list-keychains"] {
+            let output = std::process::Command::new("/usr/bin/security")
+                .arg(command)
+                .output()
+                .expect("could not run security");
+            assert!(output.status.success(), "security {command} failed");
+            let paths = std::str::from_utf8(&output.stdout).expect("non-UTF-8 keychain list");
+            let first = paths
+                .lines()
+                .next()
+                .and_then(|line| line.trim().strip_prefix('"')?.strip_suffix('"'))
+                .expect("missing quoted keychain path");
+            assert_eq!(
+                std::fs::canonicalize(first).expect("selected keychain must exist"),
+                keychain,
+                "security {command} must select the disposable keychain first"
+            );
+        }
+        keychain
     }
 
     struct Fixture {
@@ -37,6 +84,8 @@ mod native {
                 clean_store: true,
                 #[cfg(target_os = "linux")]
                 source: KeySource::SecretService,
+                #[cfg(target_os = "macos")]
+                source: KeySource::Keychain,
                 #[cfg(windows)]
                 source: KeySource::CredentialManager,
             }
@@ -79,6 +128,8 @@ mod native {
 
     pub fn round_trip() {
         require_enabled();
+        #[cfg(target_os = "macos")]
+        let keychain = require_disposable_keychain();
         let fixture = Fixture::new();
         let config = fixture.config();
         let store = fixture.source.backend();
@@ -124,6 +175,38 @@ mod native {
             assert_eq!(id(store.as_ref(), &fixture.dir, slot), None);
         }
         fixture.cleanup().unwrap();
+        #[cfg(target_os = "macos")]
+        keychain_locked_refusal(fixture, &keychain);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn keychain_locked_refusal(mut fixture: Fixture, keychain: &Path) {
+        let config = fixture.config();
+        let current = resolver::bootstrap(&config).unwrap();
+        assert_eq!(
+            resolver::resolve(&config, None).unwrap().key_id(),
+            current.key_id()
+        );
+        // The runner deletes the entire keychain. Do not access the store on drop
+        // after locking it, and do the lock check after the round trip is finished.
+        fixture.clean_store = false;
+        let status = std::process::Command::new("/usr/bin/security")
+            .arg("lock-keychain")
+            .arg(keychain)
+            .status()
+            .expect("could not run security lock-keychain");
+        assert!(status.success(), "could not lock the disposable keychain");
+        let error = resolver::resolve(&config, None).unwrap_err();
+        assert!(
+            matches!(error, resolver::MasterKeyError::VaultLocked),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("security unlock-keychain"), "{message}");
+        assert!(
+            message.contains("--key-path") && message.contains("CK_MASTER_KEY_PATH"),
+            "{message}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -185,10 +268,10 @@ mod native {
 }
 
 #[test]
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[ignore = "requires CK_NATIVE_STORE_TESTS=1 and an available native custody service"]
 fn native_store_round_trip_both_slots_and_rotation() {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     native::round_trip();
 }
 

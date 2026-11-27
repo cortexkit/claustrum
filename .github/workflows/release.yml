@@ -96,7 +96,8 @@ jobs:
       # released binary is always fetchable and reproducible. What a non-ancestor tag
       # breaks is the claim that the released code passed the master CI matrix: this
       # workflow verifies the tag-version match and runs `--version` on the packaged binary,
-      # but it does not rerun the x64 workspace suites from landing CI.
+      # but it does not rerun the x64 workspace suites that ci.yml runs when a commit lands
+      # on master.
       #
       # No override. A release is the one act here with no legitimate off-master case: a
       # binary other people install from a commit that is not on the branch is a
@@ -119,7 +120,7 @@ jobs:
           if ! git merge-base --is-ancestor "$checked_sha" origin/master; then
             echo "REFUSING: $(git rev-parse --short HEAD) is not an ancestor of origin/master." >&2
             echo "  A released binary is installed by other seats. Off master it has not" >&2
-            echo "  passed landing CI, which supplies the x64 test results for this release." >&2
+            echo "  passed master's CI (ci.yml), which supplies the x64 test results for this release." >&2
             echo "  Land the commit first, then retry the dispatch or move the tag." >&2
             exit 1
           fi

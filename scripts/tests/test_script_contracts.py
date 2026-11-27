@@ -929,6 +929,10 @@ printf '%s %s (%s)\\n' '{binary}' "$STUB_VERSION" "$STUB_REV"''')
         native = steps['macOS Keychain round trips and locked refusal']
         self.assertEqual(native['if'], "runner.os == 'macOS'")
         self.assertEqual(native['env']['CK_NATIVE_STORE_TESTS'], '1')
+        self.assertEqual(native['timeout-minutes'], '8')
+        self.assertIn("perl -e 'alarm 60; exec @ARGV' /usr/bin/security", native['run'])
+        self.assertLess(native['run'].index("probe_find 'read existing Current while locked'"),
+                        native['run'].index('cargo test'))
         self.assertIn('--test native_store -- --ignored', native['run'])
         self.assertNotIn('continue-on-error', native)
         cleanup = steps['Restore macOS Keychain settings']

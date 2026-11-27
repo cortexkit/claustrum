@@ -96,8 +96,9 @@ jobs:
       # released binary is always fetchable and reproducible. What a non-ancestor tag
       # breaks is the claim that the released code passed the master CI matrix: this
       # workflow verifies the tag-version match and runs `--version` on the packaged binary,
-      # but it relies on landing CI for the native workspace suites on linux-x64,
-      # windows-x64, and darwin-arm64 (the Apple Silicon macOS leg).
+      # but it relies on ci.yml, which runs on every commit that lands on master, for the
+      # native workspace suites on linux-x64, windows-x64, and darwin-arm64 (the Apple
+      # Silicon macOS leg).
       #
       # No override. A release is the one act here with no legitimate off-master case: a
       # binary other people install from a commit that is not on the branch is a

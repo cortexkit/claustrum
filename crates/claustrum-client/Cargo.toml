@@ -1,6 +1,6 @@
 [package]
 name = "cortexkit-claustrum-client"
-version = "0.17.1"
+version = "0.17.2"
 edition = "2021"
 license = "MIT"
 description = "Rust credential vault client for subc-supervised CortexKit modules."
@@ -24,7 +24,7 @@ zeroize = { workspace = true }
 subc-protocol = { workspace = true }
 subc-transport = { workspace = true, optional = true }
 subc-os = { workspace = true, optional = true }
-subc-client-rs = { version = "0.42.1", optional = true }
+subc-client-rs = { version = "0.43.0", optional = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]

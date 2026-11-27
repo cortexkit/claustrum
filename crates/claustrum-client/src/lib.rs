@@ -2210,7 +2210,15 @@ fn classify_route_open_error(body: ErrorBody) -> CredentialResolverError {
 }
 
 fn classify_established_route_error(flags: Flags, body: ErrorBody) -> CredentialResolverError {
-    if subc_protocol::error_codes::is_established_route_dead(flags, &body.code) {
+    let route_dead = subc_protocol::error_codes::is_established_route_dead(flags, &body.code);
+    classify_established_route_verdict(body, route_dead)
+}
+
+fn classify_established_route_verdict(
+    body: ErrorBody,
+    route_dead: bool,
+) -> CredentialResolverError {
+    if route_dead {
         return CredentialResolverError {
             class: CredentialErrorClass::Transport,
             code: body.code,

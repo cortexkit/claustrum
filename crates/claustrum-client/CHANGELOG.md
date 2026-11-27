@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.2
+
+- The `consumer` feature uses `subc-client-rs` 0.43.0 and follows its route-death
+  verdict. Retrying calls still reopen and resend once; held watches report
+  route death as transport loss. Callers of `with_consumer` need the same SDK line.
+
 ## 0.17.1
 
 - 0.17.0 treated `unknown_channel` and `stale_route_epoch` on an open route as

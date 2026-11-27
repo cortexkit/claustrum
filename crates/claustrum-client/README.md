@@ -18,12 +18,12 @@ fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.17.1"
+cortexkit-claustrum-client = "0.17.2"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.17.1", default-features = false }` for the public `decode_*_reply` functions,
+"0.17.2", default-features = false }` for the public `decode_*_reply` functions,
 the route-open and established-route error decoders, record/error types,
 `WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
@@ -310,6 +310,8 @@ tagged Magic Context and Prefrontal samples in
 
 ## Changes
 
+- 0.17.2: SDK-backed calls and watches use the `subc-client-rs` 0.43 route-death
+  verdict. See the [changelog](CHANGELOG.md).
 - 0.17.0: `with_consumer` uses `SubcConsumer` from the `subc-client-rs` 0.42 line.
   See the [changelog](CHANGELOG.md).
 - 0.16.0: optional `org_id` on scoped listings. See the [changelog](CHANGELOG.md).

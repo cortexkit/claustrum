@@ -116,11 +116,38 @@ fn decode_sdk_error(error: CallError) -> CredentialResolverError {
     CredentialResolverError::transport("credential SDK connection failed")
 }
 
+fn decode_established_call_error(error: CallError) -> CredentialResolverError {
+    let route_dead = error.is_route_dead();
+    match error {
+        CallError::Module(body) => classify_established_route_verdict(body, route_dead),
+        CallError::RouteDead(body) => classify_established_route_verdict(*body, route_dead),
+        error => decode_sdk_error(error),
+    }
+}
+
+fn decode_subscription_end(end: SubscriptionEnd) -> Result<WatchFrame, CredentialResolverError> {
+    let route_dead = end.is_route_dead();
+    match end {
+        SubscriptionEnd::Response(body) => Ok(WatchFrame::Response(body)),
+        SubscriptionEnd::StreamEnd => Ok(WatchFrame::End),
+        SubscriptionEnd::Error(body) | SubscriptionEnd::RouteDead(body) => Ok(WatchFrame::Error(
+            classify_established_route_verdict(body, route_dead),
+        )),
+        SubscriptionEnd::RouteClosed { .. } => Err(CredentialResolverError::unclassified(
+            "route_closed",
+            "scoped watch route closed",
+        )),
+        SubscriptionEnd::Backpressure => Err(CredentialResolverError::transport(
+            "scoped watch consumer lagged",
+        )),
+        _ => Err(CredentialResolverError::transport(
+            "scoped watch connection lost",
+        )),
+    }
+}
+
 impl ConsumerConnection {
-    async fn decode_established_frame(&mut self, body: ErrorBody) -> CredentialResolverError {
-        // The SDK does not expose reply flags yet. Pass them through when it does
-        // so the daemon-origin check can recognize these refusals.
-        let error = classify_established_route_error(Flags(0), body);
+    async fn release_dead_route(&self, error: &CredentialResolverError) {
         if error.established_route_dead {
             // Dropping this connection wrapper alone leaves the dead handle cached in the SDK.
             let _ = self
@@ -128,7 +155,6 @@ impl ConsumerConnection {
                 .close_handle(&self.handle, CloseRouteOptions::default())
                 .await;
         }
-        error
     }
 }
 
@@ -181,8 +207,11 @@ impl CredentialTransport for ConsumerConnection {
             let (_, reply) = reservation.send(body, options());
             match reply.await {
                 Ok(body) => Ok(body),
-                Err(CallError::Module(body)) => Err(self.decode_established_frame(body).await),
-                Err(error) => Err(decode_sdk_error(error)),
+                Err(error) => {
+                    let error = decode_established_call_error(error);
+                    self.release_dead_route(&error).await;
+                    Err(error)
+                }
             }
         })
     }
@@ -225,23 +254,11 @@ impl CredentialTransport for ConsumerConnection {
             if let Some(body) = subscription.events().recv().await {
                 return Ok(WatchFrame::Data(body));
             }
-            match subscription.ended().await {
-                SubscriptionEnd::Response(body) => Ok(WatchFrame::Response(body)),
-                SubscriptionEnd::StreamEnd => Ok(WatchFrame::End),
-                SubscriptionEnd::Error(body) => {
-                    Ok(WatchFrame::Error(self.decode_established_frame(body).await))
-                }
-                SubscriptionEnd::RouteClosed { .. } => Err(CredentialResolverError::unclassified(
-                    "route_closed",
-                    "scoped watch route closed",
-                )),
-                SubscriptionEnd::Backpressure => Err(CredentialResolverError::transport(
-                    "scoped watch consumer lagged",
-                )),
-                _ => Err(CredentialResolverError::transport(
-                    "scoped watch connection lost",
-                )),
+            let frame = decode_subscription_end(subscription.ended().await)?;
+            if let WatchFrame::Error(error) = &frame {
+                self.release_dead_route(error).await;
             }
+            Ok(frame)
         })
     }
 

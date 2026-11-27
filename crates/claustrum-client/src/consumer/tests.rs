@@ -111,9 +111,25 @@ impl Rig {
     }
 
     async fn reply(&mut self, request: &Frame, ty: FrameType, body: Value) {
+        self.reply_with_flags(
+            request,
+            ty,
+            body,
+            Flags::new(false, Priority::Interactive, false).with_daemon_origin(),
+        )
+        .await;
+    }
+
+    async fn reply_with_flags(
+        &mut self,
+        request: &Frame,
+        ty: FrameType,
+        body: Value,
+        flags: Flags,
+    ) {
         let frame = Frame::build(
             ty,
-            Flags::new(false, Priority::Interactive, false).with_daemon_origin(),
+            flags,
             request.header.channel,
             request.header.epoch,
             request.header.corr,
@@ -309,15 +325,32 @@ async fn consumer_routes_every_operation_without_identity_override() {
 
 #[tokio::test]
 async fn established_route_unknown_channel_reopens_and_resends() {
-    established_route_reopens_and_resends("unknown_channel").await;
+    established_route_reopens_and_resends(
+        "unknown_channel",
+        Flags::new(false, Priority::Interactive, false).with_daemon_origin(),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn established_route_stale_route_epoch_reopens_and_resends() {
-    established_route_reopens_and_resends("stale_route_epoch").await;
+    established_route_reopens_and_resends(
+        "stale_route_epoch",
+        Flags::new(false, Priority::Interactive, false).with_daemon_origin(),
+    )
+    .await;
 }
 
-async fn established_route_reopens_and_resends(code: &str) {
+#[tokio::test]
+async fn established_route_error_without_daemon_origin_still_reopens_and_resends() {
+    established_route_reopens_and_resends(
+        "unknown_channel",
+        Flags::new(false, Priority::Interactive, false),
+    )
+    .await;
+}
+
+async fn established_route_reopens_and_resends(code: &str, flags: Flags) {
     let mut rig = Rig::new().await;
     let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
     let calls = async {
@@ -330,10 +363,11 @@ async fn established_route_reopens_and_resends(code: &str) {
     let server = async {
         let (initial, request) = rig.next().await;
         assert_eq!(request, credential_get_request("handle", Some(12), true));
-        rig.reply(
+        rig.reply_with_flags(
             &initial,
             FrameType::Error,
             json!({"code":code,"message":"route no longer exists"}),
+            flags,
         )
         .await;
         let (retry, resent) = rig.next().await;
@@ -349,6 +383,84 @@ async fn established_route_reopens_and_resends(code: &str) {
     tokio::join!(calls, server);
     assert_eq!(rig.route_opens.len(), 2, "exactly one replacement route");
     rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn established_route_ordinary_refusal_and_transport_error_do_not_reopen() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let refusal = resolver.resolve("handle", None, false).await.unwrap_err();
+        assert_eq!(refusal.code(), "invalid_params");
+        assert_eq!(refusal.class, CredentialErrorClass::Unclassified);
+        let timeout = resolver.status_scoped("timeout").await.unwrap_err();
+        assert_eq!(timeout.code(), "module_timeout");
+        assert_eq!(timeout.class, CredentialErrorClass::Transport);
+        // The next caller operation lets the server distinguish a replay or
+        // replacement route from normal reuse of the SDK's cached route.
+        let barrier = resolver.status_scoped("barrier").await.unwrap_err();
+        assert_eq!(barrier.code(), "invalid_params");
+    };
+    let server = async {
+        for (request, code) in [
+            (
+                credential_get_request("handle", None, false),
+                "invalid_params",
+            ),
+            (credential_status_request("timeout"), "module_timeout"),
+            (credential_status_request("barrier"), "invalid_params"),
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body, request);
+            assert_eq!(frame.header.channel, 7, "the SDK route should be reused");
+            rig.reply(
+                &frame,
+                FrameType::Error,
+                json!({"code":code,"message":"request refused"}),
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 1);
+    rig.consumer.close().await;
+}
+
+#[test]
+fn established_route_adapter_uses_sdk_verdict_not_the_code() {
+    let body = ErrorBody {
+        code: "unknown_channel".to_owned(),
+        message: "request refused".to_owned(),
+        detail: None,
+    };
+    for (route_dead, call, watch) in [
+        (
+            false,
+            CallError::Module(body.clone()),
+            SubscriptionEnd::Error(body.clone()),
+        ),
+        (
+            true,
+            CallError::RouteDead(Box::new(body.clone())),
+            SubscriptionEnd::RouteDead(body.clone()),
+        ),
+    ] {
+        let WatchFrame::Error(watch_error) = decode_subscription_end(watch).unwrap() else {
+            panic!("expected a watch error");
+        };
+        for error in [decode_established_call_error(call), watch_error] {
+            assert_eq!(error.code(), body.code);
+            assert_eq!(error.established_route_dead, route_dead);
+            assert_eq!(
+                error.class,
+                if route_dead {
+                    CredentialErrorClass::Transport
+                } else {
+                    CredentialErrorClass::Unclassified
+                }
+            );
+        }
+    }
 }
 
 #[tokio::test]

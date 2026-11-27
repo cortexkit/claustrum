@@ -62,8 +62,8 @@ subc-transport = { workspace = true }
 subc-os = { workspace = true }
 subc-control = { workspace = true }
 subc-config = { workspace = true }
-subc-client-rs = "0.42.1"
-cortexkit-bus-client = "=0.1.18"
+subc-client-rs = "0.43.0"
+cortexkit-bus-client = "=0.1.19"
 cortexkit-bus-nats = "0.5.6"
 async-nats = "0.50"
 cortexkit-claustrum-client = { path = "../claustrum-client", optional = true }

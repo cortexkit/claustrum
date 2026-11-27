@@ -219,7 +219,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CK_NATIVE_STORE_TESTS: '1'
-        timeout-minutes: 20
+        timeout-minutes: 8
         shell: bash
         run: |
           set -euo pipefail
@@ -238,6 +238,72 @@ jobs:
           # Keep the shipped stdin write by changing the runner's default and search list.
           /usr/bin/security default-keychain -s "$keychain"
           /usr/bin/security list-keychains -s "$keychain"
+
+          probe_security() {
+            local label="$1" expected="$2" output=/dev/null status=0
+            shift 2
+            case "$1" in default-keychain|list-keychains) output="$scratch/probe-selection" ;; esac
+            printf 'Keychain preflight: %s (security %s)\n' "$label" "$1"
+            perl -e 'alarm 60; exec @ARGV' /usr/bin/security "$@" \
+              > "$output" 2> "$scratch/probe-stderr" || status=$?
+            printf 'Keychain preflight: %s exited %s (expected %s)\n' "$label" "$status" "$expected"
+            if [[ "$status" == 142 ]]; then
+              printf 'Keychain preflight: %s exceeded 60 seconds\n' "$label" >&2
+              return 1
+            fi
+            [[ "$status" == "$expected" ]] && return 0
+            # Match the master-key resolver's stderr fallbacks without printing raw output.
+            [[ "$status" != 0 ]] || return 1
+            case "$expected" in
+              44) LC_ALL=C grep -qi 'could not be found' "$scratch/probe-stderr" ;;
+              36) LC_ALL=C grep -Eqi 'interaction|locked|not allowed|-25308' "$scratch/probe-stderr" ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Check the effective store before any probe can read or write an item.
+          for selection in default-keychain list-keychains; do
+            : | probe_security "check $selection" 0 "$selection"
+            selected=$(<"$scratch/probe-selection")
+            selected="${selected#*\"}"
+            if [[ ! "${selected%\"}" -ef "$keychain" ]]; then
+              printf 'Keychain preflight: %s must select only the throwaway keychain\n' "$selection" >&2
+              exit 1
+            fi
+          done
+          if ( : < /dev/tty ) 2>/dev/null; then
+            echo 'Keychain preflight: controlling terminal is available'
+          else
+            echo 'Keychain preflight: no controlling terminal'
+          fi
+
+          service="cortexkit.claustrum.native-preflight.$(uuidgen)"
+          probe_key=$(openssl rand -hex 32)
+          probe_find() {
+            : | probe_security "$1" "$2" find-generic-password -s "$service" -a "$3" -w
+          }
+          probe_write() {
+            printf '%s\n' "$probe_key" "$probe_key" |
+              probe_security "$1" 0 add-generic-password -U -s "$service" -a "$2" -w
+          }
+          probe_delete() {
+            : | probe_security "$1" "$2" delete-generic-password -s "$service" -a "$3"
+          }
+          probe_find 'lookup before bootstrap' 44 master-key
+          probe_write 'bootstrap Current' master-key
+          probe_find 'read Current' 0 master-key
+          probe_write 'stage Next' master-key-next
+          probe_key=$(openssl rand -hex 32)
+          probe_write 'overwrite Next' master-key-next
+          probe_find 'read Next' 0 master-key-next
+          probe_write 'promote Next to Current' master-key
+          probe_delete 'delete Next' 0 master-key-next
+          probe_delete 'delete absent Next' 44 master-key-next
+          : | probe_security 'lock throwaway keychain' 0 lock-keychain "$keychain"
+          probe_find 'read existing Current while locked' 36 master-key
+          : | probe_security 'unlock throwaway keychain' 0 unlock-keychain -p "$password" "$keychain"
+          probe_delete 'delete Current' 0 master-key
+
           CK_NATIVE_STORE_KEYCHAIN="$keychain" \
             cargo test --locked -p credentials-core --test native_store -- --ignored
 

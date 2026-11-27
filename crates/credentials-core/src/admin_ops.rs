@@ -4342,6 +4342,7 @@ mod remote_record_handle_tests {
         let id = "oauth:anthropic:remote";
         store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: id.into(),
                 home_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
                 refresh_adapter: Some("anthropic".into()),

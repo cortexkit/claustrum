@@ -368,6 +368,7 @@ async fn admin_clear_condition_routes_and_audits_only_an_applied_local_clear() {
     let copy = rig
         .store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: COPY.into(),
             home_member: "fed-computer:22222222222222222222222222222222".into(),
             refresh_adapter: Some("antigravity".into()),

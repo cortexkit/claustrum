@@ -403,6 +403,7 @@ fn condition_report_refuses_an_openable_envelope_that_cannot_decode() {
 
 fn remote() -> NewRemoteRecord {
     NewRemoteRecord {
+        provider_ids: Vec::new(),
         credential_id: COPY.into(),
         home_member: HOME.into(),
         refresh_adapter: ADAPTER.map(str::to_owned),

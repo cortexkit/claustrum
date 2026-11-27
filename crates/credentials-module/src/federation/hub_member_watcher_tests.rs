@@ -260,6 +260,7 @@ impl Rig {
     fn add_handmade(&self, id: &str) {
         self.store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: id.into(),
                 home_member: HOME.into(),
                 refresh_adapter: None,

@@ -617,6 +617,7 @@ mod scoped_watch {
                 if remote {
                     rig.store
                         .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+                            provider_ids: Vec::new(),
                             credential_id: id.clone(),
                             home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
                             refresh_adapter: None,

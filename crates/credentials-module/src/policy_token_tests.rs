@@ -312,6 +312,7 @@ async fn policy_token_local_refusals_do_not_call_github_or_record_first_use() {
     );
     rig.store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: APP.into(),
             home_member: OTHER.into(),
             refresh_adapter: Some("github_app".into()),

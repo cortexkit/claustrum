@@ -746,6 +746,7 @@ fn declaration_union_covers_local_remote_audience_and_only_the_bound_reserved_pr
     let remote = "oauth:anthropic:declaration";
     store
         .remote_add_audited(&crate::federation::NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: remote.into(),
             home_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
             refresh_adapter: Some("anthropic".into()),

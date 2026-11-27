@@ -1282,6 +1282,7 @@ impl RemoteReader {
             .await
             .map_err(|failure| failure.refusal)?;
         Ok(NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: credential_id.to_string(),
             home_member: home.to_string(),
             refresh_adapter: reply.refresh_adapter.clone(),
@@ -2326,6 +2327,7 @@ mod tests {
             Arc::new(EncryptedStore::open(sqlite, MasterKey::from_bytes([77; 32])).unwrap());
         let active = store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: "oauth:still-active".into(),
                 home_member: HOME.into(),
                 refresh_adapter: Some("anthropic".into()),

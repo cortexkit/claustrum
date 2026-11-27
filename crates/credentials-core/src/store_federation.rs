@@ -710,7 +710,7 @@ impl EncryptedStore {
     }
 
     /// Register a remote record from one validated home reply, with a fresh
-    /// incarnation, and seed this vault's categories for it from that reply.
+    /// incarnation. Seed categories from the home and provider ids from the caller.
     ///
     /// Refuses an id that already holds a local record
     /// ([`StoreOpError::CredentialIdIsLocal`], from the id-uniqueness trigger) or a
@@ -726,7 +726,7 @@ impl EncryptedStore {
                 refresh_adapter: new.refresh_adapter.clone(),
                 identity: new.identity.clone(),
                 categories: new.categories.clone(),
-                provider_ids: None,
+                provider_ids: Some(new.provider_ids.clone()),
                 detected_plan: new.detected_plan.clone(),
                 home_version: new.home_version,
                 condition: None,
@@ -774,6 +774,12 @@ impl EncryptedStore {
                 tx.execute(
                     "INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
                     rusqlite::params![new.credential_id, category],
+                )?;
+            }
+            for provider_id in &new.provider_ids {
+                tx.execute(
+                    "INSERT INTO remote_record_provider_ids (credential_id, provider_id) VALUES (?1, ?2)",
+                    rusqlite::params![new.credential_id, provider_id],
                 )?;
             }
             // New categories change what every category grant naming them reaches.

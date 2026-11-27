@@ -313,6 +313,7 @@ fn peer_binding(own_box: &str, peer_box: &str, peer: &str, public: &[u8; 32]) ->
 fn add_operator_copy(store: &EncryptedStore, home: &str, adapter: &str) {
     store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: ID.into(),
             home_member: home.into(),
             refresh_adapter: Some(adapter.into()),

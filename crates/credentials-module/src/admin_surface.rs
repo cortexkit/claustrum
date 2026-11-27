@@ -1021,7 +1021,7 @@ impl AdminSurface {
                 let Some(reader) = self.remote.get() else {
                     return refused("home_unreachable", "transient", None);
                 };
-                let new = match reader.fetch_for_add(&credential_id, &home, budget).await {
+                let mut new = match reader.fetch_for_add(&credential_id, &home, budget).await {
                     Ok(new) => new,
                     Err(refusal) => {
                         return refused(
@@ -1031,6 +1031,10 @@ impl AdminSurface {
                         )
                     }
                 };
+                new.provider_ids = credentials_core::catalog::default_provider_ids(&credential_id)
+                    .iter()
+                    .map(|id| (*id).to_owned())
+                    .collect();
                 match self
                     .locked(&credential_id, budget, |store| {
                         store.remote_add_audited(&new)

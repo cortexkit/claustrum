@@ -367,6 +367,7 @@ fn login_condition_inventory_and_clear_condition_work_without_daemon() {
         .since_ms;
     let copy = store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: COPY.into(),
             home_member: "fed-computer:22222222222222222222222222222222".into(),
             refresh_adapter: Some("antigravity".into()),

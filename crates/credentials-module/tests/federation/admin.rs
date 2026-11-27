@@ -30,7 +30,8 @@ use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::{
     resolve_secret_home_role, EncryptedStore, GrantOperation, PhoneDeposit, PhoneOperation,
-    SecretHomeRole, SelectorKind, SetCategoryMode, StoreOpError, SECRET_HOME_SETTING,
+    SecretHomeRole, SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError,
+    SECRET_HOME_SETTING,
 };
 use serde_json::{json, Value};
 use subc_protocol::Principal;
@@ -1187,10 +1188,10 @@ async fn send_and_accept_run_through_the_admin_hook() {
 // Remote records
 // ---------------------------------------------------------------------------------
 
-fn login_record() -> VaultRecord {
+fn login_record(adapter: &str) -> VaultRecord {
     VaultRecord::new_oauth(
         "opencode",
-        "anthropic",
+        adapter,
         OAuthCredential {
             access_token: "access-home-1".to_string().into(),
             refresh_token: "refresh-home-1".to_string().into(),
@@ -1204,10 +1205,12 @@ fn login_record() -> VaultRecord {
     )
 }
 
-/// A as home of an Anthropic-shaped login granted to B, with both transfer keys
+/// A as home of a login granted to B, with both transfer keys
 /// announced, and A's home answering B's token fetches through the stand-in.
 async fn remote_rig(
     tag: &str,
+    id: &str,
+    adapter: &str,
 ) -> (
     credentials_core::test_support::TestTempDir,
     TwoVaults,
@@ -1223,10 +1226,10 @@ async fn remote_rig(
     vaults.callosum.announce_peer_key(&a.member, &a_public);
     vaults.callosum.announce_peer_key(&b.member, &b_public);
     vaults.callosum.set_pairing(&b.member, Some(PAIRING));
-    a.store().create(LOGIN_ID, &login_record()).unwrap();
+    a.store().create(id, &login_record(adapter)).unwrap();
     a.store()
         .set_categories_audited(
-            LOGIN_ID,
+            id,
             SetCategoryMode::Set,
             &[CATEGORY.to_string()],
             AuditCtx::admin(AuditOp::SetCategory),
@@ -1236,7 +1239,7 @@ async fn remote_rig(
         .create_member_grant_audited(
             &b.member,
             MemberGrantOperation::RemoteRead,
-            &MemberGrantSelector::Exact(LOGIN_ID.into()),
+            &MemberGrantSelector::Exact(id.into()),
             PAIRING,
         )
         .unwrap();
@@ -1384,7 +1387,7 @@ async fn home_watch_operator_add_converts_needs_reauth_without_fetch_and_keeps_a
 /// the remote id, and an id held locally is refused before any fetch.
 #[tokio::test]
 async fn remote_add_stores_the_home_description_and_refuses_an_unregistered_adapter() {
-    let (_root, vaults, _a, b) = remote_rig("admin-remote").await;
+    let (_root, vaults, _a, b) = remote_rig("admin-remote", LOGIN_ID, "anthropic").await;
     let add = AdminOpBody::RemoteAdd {
         v: ADMIN_OP_SCHEMA_V2,
         credential_id: LOGIN_ID.into(),
@@ -1447,6 +1450,47 @@ async fn remote_add_stores_the_home_description_and_refuses_an_unregistered_adap
     );
     assert!(local.starts_with("credential_id_is_local"), "{local}");
     assert_eq!(vaults.callosum.methods(TARGET_MODULE).len(), fetches);
+}
+
+#[tokio::test]
+async fn remote_add_provider_ids_seed_from_catalog_and_remain_operator_editable() {
+    let id = "oauth:xai";
+    let (_root, vaults, _a, b) = remote_rig("admin-remote-catalog", id, "xai").await;
+    assert!(b
+        .admin
+        .attach_remote_reader(reader(&b, &vaults.b, &FAKE_ADAPTERS)));
+    ok(b.run(&AdminOpBody::RemoteAdd {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: id.into(),
+        home: vaults.home_member().into(),
+    })
+    .await);
+    assert_eq!(b.store().provider_ids(id).unwrap(), ["xai"]);
+
+    ok(b.run(&AdminOpBody::SetProviders {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: id.into(),
+        mode: SetProvidersMode::Set,
+        provider_ids: vec!["openai".into()],
+    })
+    .await);
+    assert_eq!(b.store().provider_ids(id).unwrap(), ["openai"]);
+}
+
+#[tokio::test]
+async fn remote_add_provider_ids_stay_empty_without_catalog_defaults() {
+    let id = "oauth:google";
+    let (_root, vaults, _a, b) = remote_rig("admin-remote-no-default", id, "google").await;
+    assert!(b
+        .admin
+        .attach_remote_reader(reader(&b, &vaults.b, &FAKE_ADAPTERS)));
+    ok(b.run(&AdminOpBody::RemoteAdd {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: id.into(),
+        home: vaults.home_member().into(),
+    })
+    .await);
+    assert!(b.store().provider_ids(id).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------------

@@ -310,6 +310,7 @@ fn hub_member_applies_restores_and_ends_atomically_with_stored_generation() {
     let rows = [row("oauth:auto"), row("oauth:collision")];
     store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: "oauth:collision".into(),
             home_member: HOME.into(),
             refresh_adapter: None,
@@ -450,6 +451,7 @@ fn hub_member_applies_restores_and_ends_atomically_with_stored_generation() {
         .is_empty());
     store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: "oauth:operator".into(),
             home_member: HOME.into(),
             refresh_adapter: None,

@@ -254,6 +254,7 @@ async fn publishes_login_updates_and_ended_preserves_manual_copies() {
     let manual = rig
         .member
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: MANUAL.into(),
             home_member: member_id(HOME_FP),
             refresh_adapter: None,
@@ -372,6 +373,7 @@ async fn a_confirmed_unpair_removes_automatic_copies_while_the_hub_is_unreachabl
     let manual = rig
         .member
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: MANUAL.into(),
             home_member: member_id(HOME_FP),
             refresh_adapter: None,

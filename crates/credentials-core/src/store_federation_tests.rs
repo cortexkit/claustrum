@@ -176,11 +176,12 @@ mod remote_watch {
     #[test]
     fn provider_ids_seed_on_insert() {
         let (_root, store) = rig("watch-provider-insert", 240);
-        let mut input = row("oauth:watch");
+        let mut input = row("oauth:xai");
+        input.refresh_adapter = Some("xai".into());
         input.provider_ids = Some(vec!["openai".into(), "anthropic".into()]);
         assert_eq!(full(&store, &[input, row("oauth:older-home")]).inserted, 2);
         assert_eq!(
-            store.provider_ids("oauth:watch").unwrap(),
+            store.provider_ids("oauth:xai").unwrap(),
             ["anthropic", "openai"]
         );
         assert_eq!(
@@ -231,21 +232,28 @@ mod remote_watch {
     }
 
     #[test]
-    fn provider_ids_snapshot_does_not_change_manual_copy() {
+    fn manual_copy_stores_initial_provider_ids_and_keeps_operator_edits() {
         let (_root, store) = rig("watch-provider-manual", 240);
-        add_remote(&store, "oauth:operator");
+        let id = "oauth:xai";
+        let mut new = new_remote(id);
+        new.refresh_adapter = Some("xai".into());
+        new.detected_plan = None;
+        new.provider_ids = vec!["xai".into()];
+        store.remote_add_audited(&new).unwrap();
+        assert_eq!(store.provider_ids(id).unwrap(), ["xai"]);
         store
             .set_providers_audited(
-                "oauth:operator",
+                id,
                 SetProvidersMode::Set,
                 &["openai".into()],
                 AuditCtx::admin(AuditOp::SetProviders),
             )
             .unwrap();
         let before = store.remote_inventory().unwrap();
-        let mut input = row("oauth:operator");
+        let mut input = row(id);
         input.provider_ids = Some(vec!["anthropic".into()]);
-        assert_eq!(full(&store, &[input]).skipped, ["oauth:operator"]);
+        assert_eq!(full(&store, &[input]).skipped, [id]);
+        assert_eq!(store.provider_ids(id).unwrap(), ["openai"]);
         assert_eq!(store.remote_inventory().unwrap(), before);
     }
 
@@ -1123,6 +1131,7 @@ mod remote_watch {
                 .unwrap_err()
                 .to_string();
             let add = NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: input.credential_id.clone(),
                 home_member: home.into(),
                 refresh_adapter: input.refresh_adapter.clone(),
@@ -1220,6 +1229,7 @@ fn remote_plan_value_time_survives_same_tier_fetches_and_moves_on_changes() {
 
 fn new_remote(id: &str) -> NewRemoteRecord {
     NewRemoteRecord {
+        provider_ids: Vec::new(),
         credential_id: id.to_string(),
         home_member: HOME.to_string(),
         refresh_adapter: Some("anthropic".to_string()),

@@ -1999,7 +1999,14 @@ pub fn wall_ms() -> i64 {
 
 /// The adapter names the fake provider registers under: every shape the home tests
 /// serve refreshes through it, so a refresh never leaves the process.
-pub const FAKE_ADAPTERS: [&str; 4] = ["anthropic", "openai", "antigravity", "meta"];
+pub const FAKE_ADAPTERS: [&str; 6] = [
+    "anthropic",
+    "openai",
+    "antigravity",
+    "meta",
+    "xai",
+    "google",
+];
 
 /// A home vault's store and engine, opened in-process over `data_dir`, with the fake
 /// provider standing in for every adapter in [`FAKE_ADAPTERS`].

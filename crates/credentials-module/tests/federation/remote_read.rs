@@ -456,6 +456,7 @@ impl Rig {
         self.b
             .store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: id.to_string(),
                 home_member: home.to_string(),
                 refresh_adapter,
@@ -2089,6 +2090,7 @@ async fn setup_faults_name_the_member_whose_operator_must_fix_them() {
     let c = HomeStore::open(&rig.root.join("vault-c"));
     c.store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: TOKEN_ID.into(),
             home_member: rig.home_member(),
             refresh_adapter: Some("anthropic".into()),

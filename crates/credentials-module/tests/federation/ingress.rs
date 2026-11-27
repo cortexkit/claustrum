@@ -880,6 +880,7 @@ async fn the_transfer_key_and_a_remote_id_are_never_served() {
     assert_eq!(rig.fetch(VAULT_TRANSFER_ID).await, not_found());
     rig.store()
         .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: "oauth:anthropic:remote".into(),
             home_member: "fed-computer:cccccccccccccccccccccccccccccccc".into(),
             refresh_adapter: Some("anthropic".into()),

@@ -936,6 +936,7 @@ fn migration_44_preserves_every_step_43_row_and_leaves_plan_starts_unknown() {
     let remote = "oauth:anthropic:upgrade";
     store
         .remote_add_audited(&crate::federation::NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: remote.into(),
             home_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
             refresh_adapter: Some("anthropic".into()),

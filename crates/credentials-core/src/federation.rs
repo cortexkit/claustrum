@@ -384,8 +384,8 @@ impl RemoteHomeState {
     }
 }
 
-/// What `remote add` stores: the home's non-secret description of a rotating login,
-/// copied from one validated home reply. The token in that reply is never stored.
+/// What `remote add` stores: the home's non-secret description of a rotating login
+/// and this vault's initial provider ids. The token in the home reply is never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRemoteRecord {
     pub credential_id: String,
@@ -397,6 +397,8 @@ pub struct NewRemoteRecord {
     pub home_version: u64,
     /// The home's categories, which seed this vault's own category set once.
     pub categories: Vec<String>,
+    /// Initial ids chosen by this vault, not supplied by the home token reply.
+    pub provider_ids: Vec<String>,
 }
 
 /// One `logins` row from a home-watch snapshot, containing only non-secret metadata.

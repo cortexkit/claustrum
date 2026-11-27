@@ -37,6 +37,7 @@ fn seed_remote(vault: &GrantCliVault, source: RemoteRecordSource) {
         RemoteRecordSource::Operator => {
             store
                 .remote_add_audited(&NewRemoteRecord {
+                    provider_ids: Vec::new(),
                     credential_id: REMOTE_ID.into(),
                     home_member: HOME.into(),
                     refresh_adapter: Some("anthropic".into()),
@@ -174,6 +175,7 @@ fn remote_grant_reach_status_is_additive_and_inventory_reads_without_key_or_leas
     let store = open_leased_store(&vault.data_dir, &vault.key_path);
     store
         .remote_add_audited(&NewRemoteRecord {
+            provider_ids: Vec::new(),
             credential_id: REMOTE_ID.into(),
             home_member: HOME.into(),
             refresh_adapter: Some("anthropic".into()),

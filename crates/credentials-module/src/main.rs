@@ -4719,6 +4719,7 @@ mod tests {
         let (surface, admin, store) = deposit_cookie_rig(227);
         store
             .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: REMOTE_ID.into(),
                 home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
                 refresh_adapter: Some("anthropic".into()),

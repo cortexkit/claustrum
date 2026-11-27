@@ -139,6 +139,7 @@ mod federation_read_fixture {
                 .unwrap();
             b.store
                 .remote_add_audited(&NewRemoteRecord {
+                    provider_ids: Vec::new(),
                     credential_id: id.clone(),
                     home_member: home.into(),
                     refresh_adapter: Some(adapter.into()),

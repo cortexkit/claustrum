@@ -573,6 +573,7 @@ async fn permissions_credential_grants_revoke_rolls_back_on_audit_failure() {
 async fn permissions_category_reach_counts_remote_only_credentials() {
     let (surface, admin, store) = cp_rig(156);
     store.remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+        provider_ids: Vec::new(),
         credential_id: "oauth:shared:remote".into(),
         home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
         refresh_adapter: None,

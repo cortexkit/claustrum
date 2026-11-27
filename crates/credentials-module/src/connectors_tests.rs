@@ -651,6 +651,7 @@ mod connectors_contract {
         declared_category(&store, "apikey:declared");
         store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: "oauth:declared-copy".into(),
                 home_member: "fed-computer:22222222222222222222222222222222".into(),
                 refresh_adapter: Some("anthropic".into()),
@@ -1547,6 +1548,7 @@ mod connectors_contract {
         store.create("oauth:no-adapter", &no_adapter).unwrap();
         store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: "oauth:anthropic:copy".into(),
                 home_member: "fed-computer:22222222222222222222222222222222".into(),
                 refresh_adapter: Some("anthropic".into()),
@@ -1558,6 +1560,7 @@ mod connectors_contract {
             .unwrap();
         store
             .remote_add_audited(&NewRemoteRecord {
+                provider_ids: Vec::new(),
                 credential_id: "oauth:runtime-copy".into(),
                 home_member: "fed-computer:22222222222222222222222222222222".into(),
                 refresh_adapter: Some("anthropic".into()),

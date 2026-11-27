@@ -19,7 +19,14 @@ on:
     inputs:
       tag:
         description: "Existing tag to build and upload assets for"
-        required: true
+        required: false
+      # Rehearsal uses the dispatch commit. It does not check a release tag, only
+      # warns about development-only code, and never creates, replaces or publishes
+      # a GitHub release. A green rehearsal does not make a tag releasable.
+      rehearse:
+        description: "Verify all release assets without touching a GitHub release"
+        type: boolean
+        default: false
       replace_published:
         description: "Explicitly replace assets on an already-published release"
         type: boolean
@@ -57,12 +64,23 @@ jobs:
   prepare:
     permissions:
       contents: write
-    name: Ensure the release exists
+    name: Prepare release or rehearsal
     runs-on: ubuntu-latest
     outputs:
       checked_sha: ${{ steps.checked.outputs.sha }}
       asset_matrix: ${{ steps.platforms.outputs.matrix }}
+      requires_core: ${{ steps.core.outputs.requires_core }}
     steps:
+      - name: Require a tag for a manual release
+        if: github.event_name == 'workflow_dispatch' && !inputs.rehearse
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "REFUSING: specify an existing tag for a manual release, or set rehearse=true." >&2
+            exit 1
+          fi
+
       # A TAG CAN POINT AT A COMMIT THAT IS NOT ON master, and nothing else here notices.
       #
       # Every other guard in this repo protects a LOCAL artefact: the staging script
@@ -89,10 +107,10 @@ jobs:
       # is worse than not having it.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.rehearse && github.sha || inputs.tag || github.ref }}
           fetch-depth: 0
 
-      - name: Refuse a tag that is not on master
+      - name: Refuse a commit that is not on master
         id: checked
         run: |
           set -euo pipefail
@@ -102,13 +120,13 @@ jobs:
             echo "REFUSING: $(git rev-parse --short HEAD) is not an ancestor of origin/master." >&2
             echo "  A released binary is installed by other seats. Off master it has not" >&2
             echo "  passed landing CI, which supplies the x64 test results for this release." >&2
-            echo "  Land the commit first, then move the tag." >&2
+            echo "  Land the commit first, then retry the dispatch or move the tag." >&2
             exit 1
           fi
-          echo "tag commit $(git rev-parse --short HEAD) is on master"
+          echo "commit $(git rev-parse --short HEAD) is on master"
           echo "sha=$checked_sha" >> "$GITHUB_OUTPUT"
 
-      # Publish must verify assets for the same platforms the matrix builds.
+      # Verify assets for the same platforms the matrix builds in either mode.
       - name: Define release platforms
         id: platforms
         run: |
@@ -128,12 +146,18 @@ jobs:
       # below in their source. A public release must not ship them, and nothing else
       # would notice one left behind, so the release refuses while any remains.
       - name: Refuse development-only code
+        env:
+          REHEARSE: ${{ inputs.rehearse || false }}
         run: |
           set -euo pipefail
           if grep -rniI 'remove before the next public release' crates/ docs/; then
-            echo "REFUSING: the files above hold development-only code marked for removal" >&2
-            echo "  before a public release. Remove it on master, then move the tag." >&2
-            exit 1
+            if [ "$REHEARSE" = true ]; then
+              echo "::warning::Rehearsal only: the development-only code listed above blocks a public release."
+            else
+              echo "REFUSING: the files above hold development-only code marked for removal" >&2
+              echo "  before a public release. Remove it on master, then move the tag." >&2
+              exit 1
+            fi
           fi
 
       - name: Resolve minimum core version
@@ -144,6 +168,7 @@ jobs:
           printf 'requires_core=%s\n' "$requires_core" >> "$GITHUB_OUTPUT"
 
       - name: Create the release if it does not exist
+        if: ${{ !inputs.rehearse }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -203,16 +228,29 @@ jobs:
               --notes-file release-notes.txt
           fi
 
+      - name: Generate release manifest
+        env:
+          REQUIRES_CORE: ${{ steps.core.outputs.requires_core }}
+        run: |
+          printf '{"requires_core":"%s"}\n' "$REQUIRES_CORE" > release-manifest.json
+
       - name: Upload release manifest
+        if: ${{ !inputs.rehearse }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
-          REQUIRES_CORE: ${{ steps.core.outputs.requires_core }}
         run: |
-          set -euo pipefail
-          printf '{"requires_core":"%s"}\n' "$REQUIRES_CORE" > release-manifest.json
           gh release upload "$TAG" release-manifest.json \
             --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload rehearsal manifest
+        if: inputs.rehearse
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-manifest
+          path: release-manifest.json
+          if-no-files-found: error
+          overwrite: true
 
   assets:
     permissions:
@@ -235,8 +273,8 @@ jobs:
           path: claustrum
           ref: ${{ needs.prepare.outputs.checked_sha }}
 
-      # A tag can move after prepare checks its ancestry. Build and stamp only that
-      # checked commit, not a newly resolved tag or the workflow dispatch's github.sha.
+      # A tag can move after prepare checks its ancestry. Always build and stamp
+      # the commit prepare checked, whether it came from a tag or the dispatch ref.
       - name: Resolve the built revision
         id: rev
         shell: bash
@@ -264,18 +302,28 @@ jobs:
       # INPUT to another repo's acceptance check, and a field one consumer parses is not
       # decoration however much it looks like a label. Refusing here makes the mismatch
       # unshippable rather than remembered.
-      - name: Refuse a tag that disagrees with the crate version
+      - name: Resolve the crate version
+        id: version
         shell: bash
-        env:
-          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="$TAG"
-          want="${tag#v}"
           have=$(cargo metadata --no-deps --format-version 1 \
                  | python3 -c 'import json,sys; m=json.load(sys.stdin); \
                    print(next(p["version"] for p in m["packages"] \
                    if p["name"]=="credentials-module"))')
+          printf 'version=%s\n' "$have" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a tag that disagrees with the crate version
+        if: ${{ !inputs.rehearse }}
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          CRATE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          want="${tag#v}"
+          have="$CRATE_VERSION"
           echo "tag wants $want; crate reports $have"
           if [ "$want" != "$have" ]; then
             echo "REFUSING: tag $tag implies version $want but the crate is $have."
@@ -510,10 +558,11 @@ jobs:
       #
       # Every runner builds for itself, so every platform can run the packaged binaries
       # and verify their build identity before upload.
-      - name: Verify the packaged binary reports its revision
+      - name: Verify packaged versions and revisions
         shell: bash
         env:
           BUILT_REV: ${{ steps.rev.outputs.sha }}
+          CRATE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           # Same detection shape as packaging: the archiver, not the platform, is the fact.
@@ -554,6 +603,10 @@ jobs:
             case "$v" in
               *"unknown"*) echo "REFUSING: $b cannot name its own revision"; exit 1 ;;
             esac
+            if [[ "$v" != "$b $CRATE_VERSION "* ]]; then
+              echo "REFUSING: $b does not report crate version $CRATE_VERSION"
+              exit 1
+            fi
             # Compare against the revision resolved from the CHECKOUT, not against the
             # same expression that produced the stamp. Checking a value against its own
             # source is self-consistent by construction: the v0.1.0 run passed this leg
@@ -571,6 +624,7 @@ jobs:
           finished=1
 
       - name: Upload to the release
+        if: ${{ !inputs.rehearse }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -580,66 +634,94 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --clobber
         working-directory: claustrum
 
-  # PUBLISH LAST, AND ONLY IF EVERY PLATFORM UPLOADED. `needs` on a matrix job waits for
-  # ALL legs and skips this job if any failed, so a partial build leaves the release in
-  # draft where nobody installs from it. That is deliberate: fail-fast is off so one
-  # platform's failure does not cancel the others, and this is what stops that tolerance
-  # from publishing an incomplete release.
-  #
-  # A draft that never publishes is a visible, fixable state. A published release missing
-  # a platform looks finished and installs as "not supported on your OS".
-  publish:
+      - name: Upload rehearsal archives
+        if: inputs.rehearse
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-${{ matrix.platform }}
+          path: claustrum/dist/
+          if-no-files-found: error
+          overwrite: true
+
+  # Wait for every matrix leg and verify the stored bytes, not the original build files.
+  verify:
     permissions:
+      # This job only reads. GitHub requires write access to view draft releases,
+      # and job permissions cannot depend on the workflow input.
       contents: write
-    name: Publish once every platform is in
+    name: Verify all uploaded assets
     needs: [prepare, assets]
     runs-on: ubuntu-latest
+    env:
+      ASSET_DIR: verified-assets
     steps:
-      - name: Undraft the release
+      - name: Download draft release assets
+        if: ${{ !inputs.rehearse }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$ASSET_DIR" \
+            --pattern '*.zip' --pattern '*.zip.sha256' --pattern release-manifest.json
+
+      - name: Download rehearsal artifacts
+        if: inputs.rehearse
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rehearsal-*
+          path: ${{ env.ASSET_DIR }}
+          merge-multiple: true
+
+      - name: Verify uploaded asset names and checksums
+        env:
           ASSET_MATRIX: ${{ needs.prepare.outputs.asset_matrix }}
+          REQUIRES_CORE: ${{ needs.prepare.outputs.requires_core }}
         run: |
           set -euo pipefail
           platforms=$(jq -er '.include[].platform' <<< "$ASSET_MATRIX")
-          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          cd "$ASSET_DIR"
+          checksum_prefix='^[[:xdigit:]]{64} [ *]'
+          require_file() {
+            if [ ! -f "$1" ]; then
+              echo "REFUSING: missing $1" >&2
+              exit 1
+            fi
+          }
           while IFS= read -r platform; do
             for binary in ck-auth ck-claustrum; do
-              for suffix in zip zip.sha256; do
-                expected="$binary-$platform.$suffix"
-                if ! grep -Fx "$expected" <<< "$names" >/dev/null; then
-                  echo "REFUSING to publish: missing $expected. Leaving release in draft." >&2
-                  exit 1
-                fi
-              done
+              archive="$binary-$platform.zip"
+              require_file "$archive"
+              require_file "$archive.sha256"
+              # A valid sidecar for a different zip must not satisfy this check.
+              checksum=$(< "$archive.sha256")
+              if [[ ! "${checksum%$'\r'}" =~ $checksum_prefix"$archive"$ ]]; then
+                echo "REFUSING: $archive.sha256 must describe $archive." >&2
+                exit 1
+              fi
+              sha256sum -c "$archive.sha256"
             done
           done <<< "$platforms"
-          if ! grep -Fx "release-manifest.json" <<< "$names" >/dev/null; then
-            echo "REFUSING to publish: missing release-manifest.json. Leaving release in draft." >&2
+          require_file release-manifest.json
+          if ! jq -es --arg core "$REQUIRES_CORE" 'length == 1 and .[0].requires_core == $core' release-manifest.json >/dev/null; then
+            echo "REFUSING: release-manifest.json does not match the minimum core version $REQUIRES_CORE." >&2
             exit 1
           fi
-          # Bash 3.2 can report success on a nounset abort; require explicit completion.
-          finished=0
-          t=$(mktemp -d)
-          cleanup() {
-            status=$?
-            if [ "$status" -eq 0 ] && [ "${finished:-0}" -ne 1 ]; then
-              echo "release.yml: exited before successful completion" >&2
-              status=1
-            fi
-            rm -rf "$t"
-            exit "$status"
-          }
-          trap cleanup EXIT
-          # Verify the release's stored bytes, not the local files before upload.
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$t" \
-            --pattern '*.zip' --pattern '*.zip.sha256'
-          while IFS= read -r platform; do
-            for binary in ck-auth ck-claustrum; do
-              (cd "$t" && sha256sum -c "$binary-$platform.zip.sha256")
-            done
-          done <<< "$platforms"
+
+  # No partial or unverified release can be published, even with fail-fast disabled.
+  publish:
+    if: ${{ !inputs.rehearse }}
+    permissions:
+      contents: write
+    name: Publish verified release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Undraft the release
+        if: ${{ !inputs.rehearse }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > release-notes.txt
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.txt --draft=false
-          finished=1

@@ -500,8 +500,11 @@ class ScriptContracts(unittest.TestCase):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
         prepare = workflow['jobs']['prepare']
         self.assertEqual(prepare.get('outputs', {}).get('checked_sha'), '${{ steps.checked.outputs.sha }}')
-        checked = self.release_step('Refuse a tag that is not on master')
+        checked = self.release_step('Refuse a commit that is not on master')
         self.assertEqual(checked['id'], 'checked')
+        self.assertNotIn('if', checked)
+        checkout = next(step for step in prepare['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+        self.assertEqual(checkout['with']['ref'], '${{ inputs.rehearse && github.sha || inputs.tag || github.ref }}')
         self.assertIn('git merge-base --is-ancestor "$checked_sha" origin/master', checked['run'])
         self.assertIn('echo "sha=$checked_sha" >> "$GITHUB_OUTPUT"', checked['run'])
         self.assertLess(checked['run'].index('exit 1'), checked['run'].index('echo "sha=$checked_sha"'))
@@ -546,11 +549,82 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(jobs['prepare']['outputs']['asset_matrix'], '${{ steps.platforms.outputs.matrix }}')
         self.assertEqual(jobs['assets']['strategy']['matrix'], '${{ fromJSON(needs.prepare.outputs.asset_matrix) }}')
         self.assertEqual(jobs['assets']['strategy']['fail-fast'], 'false')
-        publish = self.release_step('Undraft the release')
-        self.assertEqual(publish['env']['ASSET_MATRIX'], '${{ needs.prepare.outputs.asset_matrix }}')
+        verify = self.release_step('Verify uploaded asset names and checksums')
+        self.assertEqual(verify['env']['ASSET_MATRIX'], '${{ needs.prepare.outputs.asset_matrix }}')
 
-    def release_publish_env(self):
-        return dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', ASSET_MATRIX=self.release_matrix())
+    def test_release_rehearsal_cannot_touch_github_releases(self):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
+        inputs = workflow['on']['workflow_dispatch']['inputs']
+        self.assertEqual(inputs['tag']['required'], 'false')
+        self.assertEqual(inputs['rehearse']['type'], 'boolean')
+        self.assertEqual(inputs['rehearse']['default'], 'false')
+
+        jobs = workflow['jobs']
+        real_only = '${{ !inputs.rehearse }}'
+        release_steps = [step for job in jobs.values() for step in job['steps']
+                         if re.search(r'\bgh\s+release\b', step.get('run', ''))]
+        self.assertEqual({step['name'] for step in release_steps}, {
+            'Create the release if it does not exist', 'Upload release manifest',
+            'Upload to the release', 'Download draft release assets', 'Undraft the release',
+        })
+        for step in release_steps:
+            with self.subTest(step=step['name']):
+                self.assertEqual(step['if'], real_only)
+        self.assertEqual(jobs['publish']['if'], real_only)
+        self.assertEqual(jobs['publish']['needs'], 'verify')
+        self.assertEqual(jobs['verify']['needs'], ['prepare', 'assets'])
+
+        steps = {step.get('name'): step for job in jobs.values() for step in job['steps']}
+        for name in ('Generate release manifest', 'Resolve the crate version',
+                     'Build release binaries', 'Package assets', 'Verify packaged versions and revisions',
+                     'Verify uploaded asset names and checksums'):
+            self.assertNotIn('if', steps[name], name)
+        self.assertEqual(steps['Refuse a tag that disagrees with the crate version']['if'], real_only)
+        for name, artifact_name, path in (('Upload rehearsal manifest', 'rehearsal-manifest', 'release-manifest.json'),
+                                          ('Upload rehearsal archives', 'rehearsal-${{ matrix.platform }}', 'claustrum/dist/')):
+            upload = steps[name]
+            self.assertEqual(upload['if'], 'inputs.rehearse')
+            self.assertTrue(upload['uses'].startswith('actions/upload-artifact@'))
+            self.assertEqual(upload['with']['name'], artifact_name)
+            self.assertEqual(upload['with']['path'], path)
+            self.assertEqual(upload['with']['if-no-files-found'], 'error')
+        download = steps['Download rehearsal artifacts']
+        self.assertEqual(download['if'], 'inputs.rehearse')
+        self.assertTrue(download['uses'].startswith('actions/download-artifact@'))
+        self.assertEqual(download['with'], {'pattern': 'rehearsal-*', 'path': '${{ env.ASSET_DIR }}',
+                                            'merge-multiple': 'true'})
+
+    def test_manual_public_release_still_requires_a_tag(self):
+        step = self.release_step('Require a tag for a manual release')
+        self.assertEqual(step['if'], "github.event_name == 'workflow_dispatch' && !inputs.rehearse")
+        self.assertEqual(step['env']['TAG'], '${{ inputs.tag }}')
+        missing = self.run_shell(step['run'], dict(self.env, TAG=''))
+        self.assertEqual(missing.returncode, 1, missing.stdout)
+        self.assertIn('specify an existing tag', missing.stdout)
+        present = self.run_shell(step['run'], dict(self.env, TAG='v1'))
+        self.assertEqual(present.returncode, 0, present.stdout)
+
+    def test_release_dev_marker_refuses_public_release_but_warns_in_rehearsal(self):
+        (self.root / 'crates').mkdir()
+        (self.root / 'docs').mkdir()
+        marker = self.root / 'crates' / 'development.rs'
+        marker.write_text('// remove before the next public release\n')
+        step = self.release_step('Refuse development-only code')
+        self.assertNotIn('if', step)
+        self.assertEqual(step['env']['REHEARSE'], '${{ inputs.rehearse || false }}')
+        live = self.run_shell(step['run'], dict(self.env, REHEARSE='false'), cwd=self.root)
+        self.assertEqual(live.returncode, 1, live.stdout)
+        self.assertIn('REFUSING:', live.stdout)
+        rehearsal = self.run_shell(step['run'], dict(self.env, REHEARSE='true'), cwd=self.root)
+        self.assertEqual(rehearsal.returncode, 0, rehearsal.stdout)
+        self.assertIn('crates/development.rs:1:', rehearsal.stdout)
+        self.assertIn('::warning::', rehearsal.stdout)
+        marker.unlink()
+        clean = self.run_shell(step['run'], dict(self.env, REHEARSE='false'), cwd=self.root)
+        self.assertEqual(clean.returncode, 0, clean.stdout)
+
+    def release_verify_env(self, assets):
+        return dict(self.env, ASSET_DIR=os.fspath(assets), ASSET_MATRIX=self.release_matrix())
 
     def uploaded_release(self):
         assets = self.root / 'uploaded'
@@ -562,9 +636,8 @@ class ScriptContracts(unittest.TestCase):
                 (assets / name).write_bytes(payload)
                 digest = hashlib.sha256(payload).hexdigest()
                 (assets / (name + '.sha256')).write_text(f'{digest}  {name}\n')
-        (assets / 'release-manifest.json').write_text('{}')
+        (assets / 'release-manifest.json').write_text(json.dumps({'requires_core': workspace_core_version()}))
         self.executable('gh', '''case "$*" in
-          *"--json assets"*) ls "$HOME/uploaded";;
           *"--json body"*) echo "Permanent notes plus release-specific instructions.";;
           *"release download"*)
             shift 3
@@ -577,6 +650,7 @@ class ScriptContracts(unittest.TestCase):
                 *) exit 99;;
               esac
             done
+            mkdir -p "$destination"
             for pattern in "${patterns[@]}"; do
               cp "$HOME/uploaded/"$pattern "$destination/"
             done;;
@@ -585,21 +659,45 @@ class ScriptContracts(unittest.TestCase):
         esac''')
         return assets
 
-    def test_release_publish_checks_uploaded_zip_bytes_against_sidecars(self):
+    def test_release_asset_gate_checks_downloaded_zip_bytes_against_sidecars(self):
         assets = self.uploaded_release()
-        step = self.release_step('Undraft the release')
-        env = self.release_publish_env()
+        step = self.release_step('Verify uploaded asset names and checksums')
+        env = self.release_verify_env(assets)
         for archive in sorted(assets.glob('*.zip')):
             with self.subTest(archive=archive.name):
                 original = archive.read_bytes()
                 archive.write_bytes(original + b'changed after packaging')
                 result = self.run_shell(step['run'], env, cwd=self.root)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertFalse((self.root / 'captured-notes').exists(), 'mismatched assets must stay in draft')
+                self.assertIn(f'{archive.name}: FAILED', result.stdout)
                 archive.write_bytes(original)
         result = self.run_shell(step['run'], env, cwd=self.root)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue((self.root / 'captured-notes').exists())
+
+    def test_release_asset_gate_rejects_a_sidecar_for_a_different_zip(self):
+        assets = self.uploaded_release()
+        sidecar = 'ck-auth-linux-arm64.zip.sha256'
+        step = self.release_step('Verify uploaded asset names and checksums')
+        env = self.release_verify_env(assets)
+        path = assets / sidecar
+        path.write_bytes(path.read_bytes().replace(b'  ', b' *', 1).replace(b'\n', b'\r\n'))
+        valid = self.run_shell(step['run'], env, cwd=self.root)
+        self.assertEqual(valid.returncode, 0, valid.stdout)
+        path.write_bytes((assets / 'ck-auth-linux-x64.zip.sha256').read_bytes())
+        result = self.run_shell(step['run'], env, cwd=self.root)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f'{sidecar} must describe ck-auth-linux-arm64.zip', result.stdout)
+
+    def test_release_asset_gate_rejects_a_wrong_core_floor(self):
+        assets = self.uploaded_release()
+        step = self.release_step('Verify uploaded asset names and checksums')
+        env = self.release_verify_env(assets)
+        for body in ('', '{"requires_core":"0.0.0"}'):
+            with self.subTest(body=body):
+                (assets / 'release-manifest.json').write_text(body)
+                result = self.run_shell(step['run'], env, cwd=self.root)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('release-manifest.json does not match the minimum core version', result.stdout)
 
     def test_release_asset_revision_refuses_a_different_checked_commit(self):
         built_sha = 'a' * 40
@@ -618,6 +716,36 @@ class ScriptContracts(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn('REFUSING:', result.stdout)
                     self.assertEqual(output.read_text(), '')
+
+    def test_release_smoke_checks_the_packaged_version_and_revision_without_a_tag(self):
+        step = self.release_step('Verify packaged versions and revisions')
+        self.assertEqual(step['env']['CRATE_VERSION'], '${{ steps.version.outputs.version }}')
+        self.assertEqual(step['env']['BUILT_REV'], '${{ steps.rev.outputs.sha }}')
+        library = self.root / 'scripts/lib'
+        library.mkdir(parents=True)
+        shutil.copyfile(ROOT / 'scripts/lib/ckdev-binary.sh', library / 'ckdev-binary.sh')
+        dist = self.root / 'dist'
+        dist.mkdir()
+        (dist / 'artifact.zip').touch()
+        self.executable('unzip', 'cp -p "$HOME/bin/ck-auth" "$HOME/bin/ck-claustrum" .')
+        for binary in ('ck-auth', 'ck-claustrum'):
+            self.executable(binary, f'''[ "$*" = --version ] || exit 99
+printf '%s %s (%s)\\n' '{binary}' "$STUB_VERSION" "$STUB_REV"''')
+        sha = 'a' * 40
+        env = dict(self.env, RUNNER_OS='Linux', CRATE_VERSION='1.2.3', BUILT_REV=sha)
+        for version, revision, refusal in (
+                ('1.2.3', sha, None),
+                ('1.2.30', sha, 'does not report crate version'),
+                ('1.2.3', 'b' * 40, 'reports a revision that is not the checked-out source')):
+            with self.subTest(version=version, revision=revision):
+                result = self.run_shell(step['run'], dict(env, STUB_VERSION=version, STUB_REV=revision), cwd=self.root)
+                if refusal is None:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertIn('ck-auth ->', result.stdout)
+                    self.assertIn('ck-claustrum ->', result.stdout)
+                else:
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(refusal, result.stdout)
 
     def release_step(self, label, path='.github/workflows/release.yml'):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / path))
@@ -654,8 +782,8 @@ class ScriptContracts(unittest.TestCase):
 
     def test_release_asset_gate_requires_expected_names(self):
         assets = self.uploaded_release()
-        step = self.release_step('Undraft the release')
-        env = self.release_publish_env()
+        step = self.release_step('Verify uploaded asset names and checksums')
+        env = self.release_verify_env(assets)
         for asset in sorted(assets.iterdir()):
             with self.subTest(asset=asset.name):
                 hold = self.root / asset.name
@@ -663,7 +791,6 @@ class ScriptContracts(unittest.TestCase):
                 result = self.run_shell(step['run'], env, cwd=self.root)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(f'missing {asset.name}', result.stdout)
-                self.assertFalse((self.root / 'captured-notes').exists(), 'incomplete releases must stay in draft')
                 hold.rename(asset)
 
     def test_release_manifest_is_uploaded_from_workspace_core_floor(self):
@@ -675,8 +802,12 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(output.read_text(), f'requires_core={version}\n')
         self.assertIn('python3 scripts/release-manifest.py', resolve['run'])
 
+        generate = self.release_step('Generate release manifest')
+        self.assertEqual(generate['env']['REQUIRES_CORE'], '${{ steps.core.outputs.requires_core }}')
+        result = self.run_shell(generate['run'], dict(self.env, REQUIRES_CORE=version), cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
         upload = self.release_step('Upload release manifest')
-        self.assertEqual(upload['env']['REQUIRES_CORE'], '${{ steps.core.outputs.requires_core }}')
         self.executable('gh', 'printf "%s\\n" "$*" > "$HOME/upload-args"\ncp release-manifest.json "$HOME/uploaded-manifest"')
         env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REQUIRES_CORE=version)
         result = self.run_shell(upload['run'], env, cwd=self.root)
@@ -811,9 +942,14 @@ class ScriptContracts(unittest.TestCase):
         self.assertNotIn('cortexkit/commons', repositories)
         self.assertFalse(any('sibling' in step.get('name', '').lower() for step in steps))
         self.uploaded_release()
+        destination = self.root / workflow['jobs']['verify']['env']['ASSET_DIR']
+        env = dict(self.release_verify_env(destination), TAG='v1', GITHUB_REPOSITORY='scratch/repo')
+        download = self.release_step('Download draft release assets')
+        verify = self.release_step('Verify uploaded asset names and checksums')
         publish = self.release_step('Undraft the release')
-        result = self.run_shell(publish['run'], self.release_publish_env(), cwd=self.root)
-        self.assertEqual(result.returncode, 0, result.stdout)
+        for step in (download, verify, publish):
+            result = self.run_shell(step['run'], env, cwd=self.root)
+            self.assertEqual(result.returncode, 0, result.stdout)
         notes = (self.root / 'captured-notes').read_text()
         self.assertIn('Permanent notes plus release-specific instructions.', notes)
 

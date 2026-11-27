@@ -83,6 +83,9 @@ supervisor core), version 0.20.154 or newer.** Before installing v0.3.0, run `ck
 to get `ck` 0.20.155 or newer, the public build carrying that core. This applies whether
 you install with `ck setup claustrum` or from the release page.
 
+Public releases support Apple Silicon Macs, plus Linux and Windows on x64 and ARM64.
+For manual downloads, see the [release asset names](docs/operator-runbook.md#release-assets).
+
 - [Operator runbook](docs/operator-runbook.md): install, master key, logins, grants and
   enrollments, backups and restore, key rotation, deploy and rollback.
 - [Wire contract](docs/wire-contract-v1.md): the consumer-facing read surface.

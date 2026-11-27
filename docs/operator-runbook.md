@@ -134,6 +134,31 @@ ck-auth --version          # prints the build revision
 ck auth status             # after bootstrap: health ladder + inventory
 ```
 
+### Release assets
+
+For manual downloads, choose the suffix matching your system:
+
+| System | Asset suffix |
+| --- | --- |
+| macOS on Apple Silicon | `darwin-arm64` |
+| Linux on x64 | `linux-x64` |
+| Linux on ARM64 | `linux-arm64` |
+| Windows on x64 | `windows-x64` |
+| Windows on ARM64 | `windows-arm64` |
+
+Each target has `ck-claustrum-<suffix>.zip` and `ck-auth-<suffix>.zip` archives, each with
+a matching `.zip.sha256` sidecar. `ck setup` does not support Intel Macs.
+
+To rehearse the five-platform release without creating or modifying a GitHub release:
+
+```sh
+gh workflow run release.yml --ref master -f rehearse=true
+```
+
+Look for **Verify all uploaded assets** in the run. The archives, checksums and manifest
+are workflow artifacts, not release downloads. A rehearsal needs no tag and warns about
+development-only code that would block a public release.
+
 ## 2. Bootstrap the master key
 
 The master key encrypts every credential at rest. It is created once and never

@@ -11,10 +11,12 @@ use super::{canonical_bytes, parse_canonical, PolicyError, RuleSet};
 // update_issue_comment checks the target's author; Plexus selects the last own
 // comment for edit-last. Search has no repository in its URL: Plexus supplies
 // the bound repository to the token partner, and the HTTP broker can't route it.
-// github.repo.get covers only the exact repository root, not Plexus's suffix reads.
-const GITHUB_DEFAULT_RELEASE: &str = "cortexkit-defaults-2026.11";
+// github.repo.get still covers only the exact repository root. Revision 2 adds
+// six specific reads below it: issue timelines, commit check runs and status,
+// matching Git refs, Actions runs and their jobs.
+const GITHUB_DEFAULT_RELEASE: &str = "cortexkit-defaults-2026.11.2";
 const GITHUB_DEFAULT_SHA256: &str =
-    "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7";
+    "c67bdaaeec7e2c86d3672afc1e7056b0dffecb3b37e9ab17b36414640d1599db";
 
 struct Release {
     release: &'static str,
@@ -24,11 +26,18 @@ struct Release {
 
 // Append entries on release. Signed policies can keep referring to any earlier
 // entry, so each entry embeds its own immutable copy of the release artifact.
-const GITHUB_RELEASES: &[Release] = &[Release {
-    release: "cortexkit-defaults-2026.11",
-    sha256: "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7",
-    bytes: include_bytes!("../../policy-defaults/github-2026.11.json"),
-}];
+const GITHUB_RELEASES: &[Release] = &[
+    Release {
+        release: "cortexkit-defaults-2026.11",
+        sha256: "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7",
+        bytes: include_bytes!("../../policy-defaults/github-2026.11.json"),
+    },
+    Release {
+        release: "cortexkit-defaults-2026.11.2",
+        sha256: "c67bdaaeec7e2c86d3672afc1e7056b0dffecb3b37e9ab17b36414640d1599db",
+        bytes: include_bytes!("../../policy-defaults/github-2026.11.2.json"),
+    },
+];
 
 /// Load the release default for GitHub, with `source` identifying the embedded bytes.
 pub fn github_default_rule_set() -> Result<RuleSet, PolicyError> {

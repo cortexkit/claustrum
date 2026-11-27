@@ -113,6 +113,11 @@ ck auth policy derive --manifest-version <M> --identities <file> --out <policy.j
 ck auth policy sign --file <policy.json> --manifest-version <M> --approver <name>
 ```
 
+For the first policy, derive uses the
+[current embedded GitHub rules](wire-contract-v1.md#rule-sets-kinds-and-actions)
+(revision 2). Later derivations keep the head policy's rules. The signer still
+accepts policies that cite revision 1 and stay within its rules.
+
 Approve the exact canonical file before signing. The newest manifest must be unpaired
 and its repository-to-agent map must equal the policy's. Once a policy exists, policy
 ceremonies may change rules but not bindings or identities. Manifest import is then

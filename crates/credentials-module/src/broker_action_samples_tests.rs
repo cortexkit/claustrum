@@ -1017,7 +1017,14 @@ async fn record_change_cases(samples: &mut Samples, github: &Github) {
 }
 
 async fn generate() -> Samples {
-    let (rig, github, digest) = setup_actions();
+    // The published samples were generated under revision 1 and must stay byte-identical.
+    const RELEASE: &str = "cortexkit-defaults-2026.11";
+    const SHA256: &str = "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7";
+    let bytes = include_bytes!("../../credentials-core/policy-defaults/github-2026.11.json");
+    assert_eq!(policy_sha256(bytes), SHA256);
+    let mut rules: Value = serde_json::from_slice(bytes).unwrap();
+    rules["source"] = json!({"release": RELEASE, "sha256": SHA256});
+    let (rig, github, digest) = setup_actions_with_rules(serde_json::from_value(rules).unwrap());
     grant(&rig, "plexus", APP, GrantOperation::PolicyToken);
     let mut samples = Samples::new(rig);
     let head = samples.mint("mint_head", "aft", head()).await;

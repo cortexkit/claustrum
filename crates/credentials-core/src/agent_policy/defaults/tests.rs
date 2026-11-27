@@ -1,7 +1,10 @@
 use super::{
-    github_default_rule_set, GITHUB_DEFAULT_RELEASE, GITHUB_DEFAULT_SHA256, GITHUB_RELEASES,
+    github_default_rule_set, github_rule_set_for_release, GITHUB_DEFAULT_RELEASE,
+    GITHUB_DEFAULT_SHA256, GITHUB_RELEASES,
 };
-use crate::agent_policy::{canonical_bytes, policy_sha256, Approval, Class, Identity};
+use crate::agent_policy::{
+    canonical_bytes, policy_sha256, Approval, Class, Constraints, Identity, Request,
+};
 
 const GITHUB_DEFAULT_BYTES: &[u8] = include_bytes!("../../../policy-defaults/github.json");
 
@@ -30,7 +33,7 @@ fn github_default_source_identifies_the_exact_source_free_bytes() {
     let mut object = serde_json::to_value(&rules).unwrap();
     object.as_object_mut().unwrap().remove("source").unwrap();
     assert_eq!(canonical_bytes(&object).unwrap(), GITHUB_DEFAULT_BYTES);
-    assert_eq!(rules.source.release, "cortexkit-defaults-2026.11");
+    assert_eq!(rules.source.release, "cortexkit-defaults-2026.11.2");
     assert_eq!(rules.source.sha256, policy_sha256(GITHUB_DEFAULT_BYTES));
 }
 
@@ -38,11 +41,11 @@ fn github_default_source_identifies_the_exact_source_free_bytes() {
 fn github_default_passes_model_checks_and_only_allows_unprompted_reads_and_speech() {
     let rules = github_default_rule_set().unwrap();
     assert_eq!(rules.rule_set, "github");
-    assert_eq!(rules.revision, 1);
+    assert_eq!(rules.revision, 2);
     assert_eq!(rules.extractor, "github-rest-graphql/v1");
     assert_eq!(rules.hosts, ["api.github.com", "uploads.github.com"]);
     assert!(rules.redirect_hosts.is_empty());
-    assert_eq!(rules.kinds.len(), 39); // 38 reviewed catalog rows plus node_repository.
+    assert_eq!(rules.kinds.len(), 45);
     for kind in &rules.kinds {
         assert!(
             matches!(kind.class, Class::Read | Class::Speech),
@@ -70,6 +73,73 @@ fn github_default_passes_model_checks_and_only_allows_unprompted_reads_and_speec
             action.requirements(&rules).unwrap(),
             (Class::Speech, Approval::None)
         );
+    }
+}
+
+#[test]
+fn github_revision_two_only_appends_six_non_overlapping_reads() {
+    let first = &GITHUB_RELEASES[0];
+    let revision_one = github_rule_set_for_release(first.release, first.sha256).unwrap();
+    let mut revision_two = github_default_rule_set().unwrap();
+    let appended = revision_two.kinds.split_off(revision_one.kinds.len());
+    revision_two.revision = revision_one.revision;
+    revision_two.source = revision_one.source.clone();
+    assert_eq!(revision_two, revision_one);
+
+    let expected: [(&str, &str, &[&str]); 6] = [
+        (
+            "github.issue_timeline.list",
+            "issues/{number}/timeline",
+            &["issues", "pull_requests"],
+        ),
+        (
+            "github.commit.check_runs",
+            "commits/{name}/check-runs",
+            &["checks"],
+        ),
+        (
+            "github.commit.status",
+            "commits/{name}/status",
+            &["statuses"],
+        ),
+        (
+            "github.git.matching_refs",
+            "git/matching-refs/{ref*}",
+            &["contents"],
+        ),
+        ("github.actions.run.get", "actions/runs/{id}", &["actions"]),
+        (
+            "github.actions.run.jobs",
+            "actions/runs/{id}/jobs",
+            &["actions"],
+        ),
+    ];
+    assert_eq!(appended.len(), expected.len());
+    for (kind, (name, suffix, permissions)) in appended.iter().zip(expected) {
+        assert_eq!(kind.kind, name);
+        assert_eq!(kind.class, Class::Read, "{name}");
+        assert!(kind.ownership.is_none() && kind.consent.is_none(), "{name}");
+        let actual_permissions = &kind.credential.as_ref().unwrap().github_permissions;
+        assert_eq!(actual_permissions.len(), permissions.len(), "{name}");
+        for permission in permissions {
+            assert_eq!(actual_permissions[*permission], "read", "{name}");
+        }
+        let [Request::Rest(rest)] = kind.requests.as_slice() else {
+            panic!("expected one REST request for {name}");
+        };
+        assert_eq!(rest.host, "api.github.com", "{name}");
+        assert_eq!(rest.method, "GET", "{name}");
+        assert_eq!(
+            rest.path,
+            format!("/repos/{{owner}}/{{repo}}/{suffix}"),
+            "{name}"
+        );
+        assert!(rest.body.is_none(), "{name}");
+        let query = (name == "github.issue_timeline.list").then(|| Constraints {
+            optional: Some(vec!["page".into(), "per_page".into()]),
+            ..Constraints::default()
+        });
+        assert_eq!(rest.query, query, "{name}");
     }
 }
 

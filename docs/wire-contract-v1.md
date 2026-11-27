@@ -6046,11 +6046,19 @@ The model validates the shape. To check narrowing, the signer finds the service'
 default rule set embedded in the vault release named by `source.release` and checks
 its identity against `source.sha256`. The identity is the SHA-256 of the default's
 RFC 8785 JSON Canonicalization Scheme bytes with the `source` member omitted.
-The vault embeds `crates/credentials-core/policy-defaults/github.json` at build
-time and adds `source` when loading the default. A narrowed rule set keeps the
-default's release name and digest, not a digest of the narrowed rules. GitHub
-revision 1 is from `cortexkit-defaults-2026.11`, with SHA-256
-`aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7`.
+The vault embeds the release artifacts from `crates/credentials-core/policy-defaults/`
+at build time and adds `source` when loading one. A narrowed rule set keeps the
+default's release name and digest, not a digest of the narrowed rules.
+
+| Revision | Release | Artifact | SHA-256 | Kinds |
+|---|---|---|---|---|
+| 2 (current default) | `cortexkit-defaults-2026.11.2` | `github-2026.11.2.json` | `c67bdaaeec7e2c86d3672afc1e7056b0dffecb3b37e9ab17b36414640d1599db` | 45 |
+| 1 (still accepted) | `cortexkit-defaults-2026.11` | `github-2026.11.json` | `aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7` | 39 |
+
+Revision 2 adds six repository reads: issue timelines, commit check runs and
+status, matching Git refs, Actions runs, and Actions run jobs. `github.repo.get`
+still matches only the repository root, and the action list is unchanged. Policies
+that cite revision 1 are still checked against its unchanged rules.
 
 Narrowing may remove kinds or actions, change an approval from
 `none` to `once`, remove permission entries or lower their level (`admin` → `write`
@@ -6285,7 +6293,8 @@ use `v: 1` and create an agent's GitHub App or manage its webhook relay:
 Prepare writes nothing. It refuses `agent_invalid` unless `agent` is `agent_`
 followed by 16 lowercase hexadecimal digits, `github_app_agent_exists` if a
 stored App already holds the agent, and `policy_unavailable` if the policy
-read fails. It uses the seeded GitHub rules only when no active policy exists.
+read fails. It uses the [current default GitHub rules](#rule-sets-kinds-and-actions)
+only when no active policy exists.
 
 Slot open requires the serving daemon, which makes the relay request after
 admin admission. It only confirms a `201` reply that supplies a valid slot,
@@ -6371,8 +6380,9 @@ write an `account_token` audit row.
 
 Sign and derive require the newest manifest to have no paired policy. Sign requires
 the next policy version and, if a policy is stored, the same bindings as the head,
-including identities. Derive uses the embedded GitHub revision 1 rule set described
-above and an `identities` object mapping exactly the manifest's agents to distinct
+including identities. Derive copies the head policy's rules if one exists;
+otherwise it uses the [current embedded GitHub rule set](#rule-sets-kinds-and-actions)
+(revision 2). Its `identities` object maps exactly the manifest's agents to distinct
 active GitHub App credentials.
 Sign and derive refuse `policy_identity_agent_mismatch` (permanent) when a
 binding names a vault-created App attested for a different agent.

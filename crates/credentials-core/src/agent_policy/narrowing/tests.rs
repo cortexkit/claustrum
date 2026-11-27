@@ -6,6 +6,18 @@ use crate::agent_policy::{
 fn with_shipped_default(edit: impl FnOnce(&mut RuleSet)) -> Result<(), PolicyError> {
     let mut rules = github_default_rule_set().unwrap();
     edit(&mut rules);
+    validate_policy_with_rules(rules)
+}
+
+fn revision_one_rules() -> RuleSet {
+    github_rule_set_for_release(
+        "cortexkit-defaults-2026.11",
+        "aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7",
+    )
+    .unwrap()
+}
+
+fn validate_policy_with_rules(rules: RuleSet) -> Result<(), PolicyError> {
     let policy = AgentPolicy {
         schema: AGENT_POLICY_SCHEMA_V1.into(),
         version: 1,
@@ -36,7 +48,26 @@ fn multi_request_kind(rules: &mut RuleSet) -> &mut Kind {
 
 #[test]
 fn signer_accepts_the_named_release_unchanged() {
-    assert_eq!(with_shipped_default(|_| {}), Ok(()));
+    let previous = revision_one_rules();
+    assert_eq!((previous.revision, previous.kinds.len()), (1, 39));
+    assert_eq!(validate_policy_with_rules(previous), Ok(()));
+
+    let current = github_default_rule_set().unwrap();
+    assert_eq!((current.revision, current.kinds.len()), (2, 45));
+    assert_eq!(validate_policy_with_rules(current), Ok(()));
+}
+
+#[test]
+fn signer_refuses_a_revision_two_kind_in_a_revision_one_policy() {
+    let mut previous = revision_one_rules();
+    let mut current = github_default_rule_set().unwrap();
+    previous
+        .kinds
+        .push(kind_mut(&mut current, "github.issue_timeline.list").clone());
+    assert_eq!(
+        validate_policy_with_rules(previous),
+        Err(PolicyError::RuleSetNotNarrowed)
+    );
 }
 
 #[test]

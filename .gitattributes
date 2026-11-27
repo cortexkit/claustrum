@@ -16,6 +16,7 @@
 # platform. Any future vendored fixture whose CONTENT is asserted — a golden file, a
 # signed payload, a digest source — belongs in this list.
 *.pem -text
+crates/credentials-core/policy-defaults/** -text
 crates/credentials-core/tests/fixtures/** -text
 crates/credentials-module/tests/fixtures/** -text
 crates/credentials-core/tests/vectors/** -text

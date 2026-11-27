@@ -5,7 +5,7 @@ use crate::{
 };
 use base64::prelude::{Engine, BASE64_URL_SAFE_NO_PAD};
 use credentials_core::{
-    agent_policy::{policy_sha256, Consent},
+    agent_policy::{policy_sha256, Consent, RuleSet},
     agent_secret::{SecretError, SECRET_ISSUE_SKEW_LIMIT_MS},
     broker_action::{check_statement, valid_ulid},
     store::{BrokerActionRequestError, BrokerActionRequestReply, PhoneOperation},
@@ -27,11 +27,14 @@ const APPROVING_PHONE: &str = "11111111111111111111111111111111";
 const DEVELOPMENT_DESKTOP: &str = "00000000000000000000000000000000";
 
 fn setup_actions() -> (Rig, Arc<Github>, String) {
+    setup_actions_with_rules(github_default_rule_set().unwrap())
+}
+
+fn setup_actions_with_rules(mut rules: RuleSet) -> (Rig, Arc<Github>, String) {
     let rig = Rig::new();
     let key = root(&rig);
     rig.self_member();
     let digest = manifest_with_bindings(&rig, 41, json!({"org/r":"agent", "org/s":"agent"}));
-    let mut rules = github_default_rule_set().unwrap();
     for (kind, fields) in [
         (COMMENT, ["number", "body"]),
         (CLOSE, ["number", "state_reason"]),

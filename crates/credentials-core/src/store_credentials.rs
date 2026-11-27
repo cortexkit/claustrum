@@ -11,6 +11,25 @@ struct CredentialSnapshot {
     envelope: Vec<u8>,
 }
 
+// Operator public-key reads must not quarantine a broken record. Open it
+// without going through the consumer read path, which can write on failure.
+pub(super) fn open_credential_read_only(
+    key: &MasterKey,
+    credential_id: &str,
+    version: i64,
+    blob: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, StoreOpError> {
+    envelope::open(
+        key,
+        blob,
+        &RecordBinding {
+            credential_id,
+            record_version: version as u64,
+        },
+    )
+    .map_err(StoreOpError::Decrypt)
+}
+
 impl CredentialSnapshot {
     fn with_digest(self) -> StoredRead {
         StoredRead {
@@ -1092,6 +1111,57 @@ impl EncryptedStore {
             &key.envelope,
         )
         .map(|(record, _)| record)
+    }
+
+    pub(crate) fn signing_public_key(
+        &self,
+        credential_id: &str,
+    ) -> Result<crate::signing::PublicKey, StoreOpError> {
+        self.store.with_read(|conn| {
+            Ok(Self::signing_public_key_read_only(
+                conn,
+                &self.key,
+                credential_id,
+            ))
+        })?
+    }
+
+    /// Derive a local signing credential's public half without mutating the store.
+    /// The offline operator calls this over a read-only connection without a lease.
+    pub fn signing_public_key_read_only(
+        conn: &rusqlite::Connection,
+        key: &MasterKey,
+        credential_id: &str,
+    ) -> Result<crate::signing::PublicKey, StoreOpError> {
+        let (version, state, blob): (i64, String, Vec<u8>) = conn
+            .query_row(
+                "SELECT record_version, state, envelope FROM credentials WHERE credential_id = ?1",
+                [credential_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(_, Some(ref message))
+                    if message == "no such table: credentials" =>
+                {
+                    StoreOpError::SigningKeyNotFound
+                }
+                other => StoreOpError::Store(other.to_string()),
+            })?
+            .ok_or(StoreOpError::SigningKeyNotFound)?;
+        if RecordState::from_str(&state) == RecordState::Corrupt {
+            return Err(StoreOpError::Quarantined);
+        }
+        let plaintext = open_credential_read_only(key, credential_id, version, &blob)?;
+        // A JSON parse error may include part of the decrypted record.
+        let record = VaultRecord::decode(&plaintext)
+            .map_err(|_| StoreOpError::Corrupt("invalid credential record".into()))?;
+        if record.kind != CredentialKind::SigningKey {
+            return Err(StoreOpError::NotSigningKey);
+        }
+        let corrupt = || StoreOpError::Corrupt("unusable Ed25519 signing key".into());
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
+        crate::signing::public_key_ed25519(pem).map_err(|_| corrupt())
     }
 
     /// Read and decrypt a record. Fails closed: a quarantined (`corrupt`) row is

@@ -2952,6 +2952,183 @@ fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+const PUBLIC_KEY_TEST_ID: &str = "signing:public-lookup:1";
+
+fn minted_public_key_lines(vault: &GrantCliVault, replace: bool) -> Vec<u8> {
+    let mut args = vec!["mint-signing-key", "--id", PUBLIC_KEY_TEST_ID];
+    if replace {
+        args.push("--replace");
+    }
+    let output = vault.run(&args);
+    assert!(output.status.success(), "minting the signing key failed");
+    let prefix = if replace { "replaced" } else { "created" };
+    let first_line = format!("{prefix} {PUBLIC_KEY_TEST_ID}\n");
+    output
+        .stdout
+        .strip_prefix(first_line.as_bytes())
+        .unwrap()
+        .to_vec()
+}
+
+#[test]
+fn public_key_matches_mint_and_replacement_without_a_writer_lease_or_private_material() {
+    let vault = GrantCliVault::new("public-key-offline");
+    vault.bootstrap();
+    let public_key = || vault.run(&["public-key", "--id", PUBLIC_KEY_TEST_ID]);
+    let first = minted_public_key_lines(&vault, false);
+    let read = public_key();
+    assert!(
+        read.status.success(),
+        "public-key could not read the minted key"
+    );
+    assert!(
+        read.stdout == first,
+        "public-key output differs from mint output"
+    );
+
+    let replacement = minted_public_key_lines(&vault, true);
+    assert!(
+        replacement != first,
+        "replacement must change the public key"
+    );
+    let leased = open_leased_store(&vault.data_dir, &vault.key_path);
+    let before = leased.audit_tip().unwrap();
+    let record = leased.get(PUBLIC_KEY_TEST_ID).unwrap();
+    let pem = std::str::from_utf8(record.payload.expose()).unwrap();
+    let b64 = pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect::<String>();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(&b64)
+        .unwrap();
+    let der_hex: String = der.iter().map(|byte| format!("{byte:02x}")).collect();
+    let read = public_key();
+    for stream in [&read.stdout, &read.stderr] {
+        for private in [
+            der.as_slice(),
+            der_hex.as_bytes(),
+            b64.as_bytes(),
+            pem.as_bytes(),
+        ] {
+            assert!(
+                !stream
+                    .windows(private.len())
+                    .any(|window| window == private),
+                "private key material reached process output"
+            );
+        }
+    }
+    assert!(
+        read.status.success(),
+        "public-key must not need the writer lease"
+    );
+    assert!(
+        read.stdout == replacement,
+        "public-key did not read the current key"
+    );
+    assert!(read.stderr.is_empty());
+    assert_eq!(leased.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn public_key_refuses_missing_non_signing_quarantined_and_unreadable_records() {
+    let vault = GrantCliVault::new("public-key-refusals");
+    vault.bootstrap();
+    let empty = vault.run(&["public-key", "--id", "signing:missing:1"]);
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(empty.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("credential not found"));
+
+    minted_public_key_lines(&vault, false);
+    assert!(vault
+        .run(&[
+            "put",
+            "--id",
+            "opaque:lookup",
+            "--payload-file",
+            &payload_file("test payload")
+        ])
+        .status
+        .success());
+    assert!(vault
+        .run(&["mint-kem-key", "--id", "kem:lookup"])
+        .status
+        .success());
+
+    let assert_refused = |id, reason| {
+        let out = vault.run(&["public-key", "--id", id]);
+        assert_eq!(out.status.code(), Some(1), "unexpected status for {id}");
+        assert!(
+            out.stdout.is_empty(),
+            "refusal unexpectedly printed to stdout"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(reason),
+            "wrong refusal for {id}: expected {reason}"
+        );
+    };
+    assert_refused("signing:missing:1", "credential not found");
+    assert_refused("opaque:lookup", "credential is not a signing key");
+    assert_refused("kem:lookup", "credential is not a signing key");
+
+    let conn = rusqlite::Connection::open(vault.data_dir.join("store.db")).unwrap();
+    conn.execute(
+        "UPDATE credentials SET envelope = x'00' WHERE credential_id = ?1",
+        [PUBLIC_KEY_TEST_ID],
+    )
+    .unwrap();
+    let leased = open_leased_store(&vault.data_dir, &vault.key_path);
+    let before = leased.audit_tip().unwrap();
+    assert_refused(PUBLIC_KEY_TEST_ID, "envelope decrypt failed");
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM credentials WHERE credential_id = ?1",
+            [PUBLIC_KEY_TEST_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "active",
+        "read failure must not quarantine the record"
+    );
+    assert_eq!(leased.audit_tip().unwrap(), before);
+
+    leased.quarantine(PUBLIC_KEY_TEST_ID).unwrap();
+    let before = leased.audit_tip().unwrap();
+    assert_refused(PUBLIC_KEY_TEST_ID, "credential is quarantined (corrupt)");
+    assert_eq!(leased.audit_tip().unwrap(), before);
+}
+
+#[test]
+fn public_key_online_uses_the_admin_operation_and_matches_offline() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("public-key-online");
+    vault.bootstrap();
+    let mint = minted_public_key_lines(&vault, false);
+    let offline = vault.run(&["public-key", "--id", PUBLIC_KEY_TEST_ID]);
+    assert!(offline.status.success());
+    let peer = ProviderRoutePeer::start(&vault);
+    let online = vault.run(&[
+        "public-key",
+        "--id",
+        PUBLIC_KEY_TEST_ID,
+        "--subc",
+        peer.connection.to_str().unwrap(),
+    ]);
+    assert!(online.status.success());
+    assert!(online.stderr.is_empty());
+    assert!(online.stdout == offline.stdout && online.stdout == mint);
+    assert_eq!(
+        peer.observed.lock().unwrap().as_slice(),
+        &[serde_json::json!({
+            "op": "admin.signing_public_key", "v": 2, "id": PUBLIC_KEY_TEST_ID,
+        })]
+    );
+}
+
 fn assert_minted_signature_audit_policy(enabled: bool) {
     let root = tmp_root(if enabled {
         "mint-audit-on"
@@ -6280,14 +6457,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
-    // budget for verbs: it equals the number of verbs `ck auth help` lists. Recent
-    // additions include sign, the four federation verbs (transfer, remote, member,
-    // federation), secret, ssh-key, provider-report, module-secret and
-    // clear-condition, policy, policy-root, github-app and github.
+    // budget for verbs: it equals the number of verbs `ck auth help` lists.
     assert_eq!(
         verbs.len(),
-        48,
-        "the rendered verb-table scan must include the GitHub binding commands"
+        49,
+        "the rendered verb-table scan must include public-key"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

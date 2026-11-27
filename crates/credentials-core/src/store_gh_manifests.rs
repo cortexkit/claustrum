@@ -1,6 +1,6 @@
 use super::{
-    append_audit_tx, envelope, hex32, payload_hash, CredentialKind, EncryptedStore, RecordBinding,
-    RecordState, StoreOpError, VaultRecord,
+    append_audit_tx, credentials::open_credential_read_only, hex32, payload_hash, CredentialKind,
+    EncryptedStore, RecordState, StoreOpError, VaultRecord,
 };
 use crate::audit::{AuditCtx, GhManifestAudit};
 use base64::Engine;
@@ -262,17 +262,8 @@ impl EncryptedStore {
         if RecordState::from_str(&state) != RecordState::Active {
             return Err(not_found());
         }
-        // Ordinary reads can quarantine a broken record through another write. This
-        // transaction must instead fail without attempting a nested store mutation.
-        let plaintext = envelope::open(
-            &self.key,
-            &blob,
-            &RecordBinding {
-                credential_id: &credential_id,
-                record_version: version as u64,
-            },
-        )
-        .map_err(|error| Unusable(StoreOpError::Decrypt(error)))?;
+        let plaintext = open_credential_read_only(&self.key, &credential_id, version, &blob)
+            .map_err(Unusable)?;
         let record = VaultRecord::decode(&plaintext)
             .map_err(|error| Unusable(StoreOpError::Corrupt(error.to_string())))?;
         if record.kind != CredentialKind::SigningKey {

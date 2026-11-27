@@ -1361,6 +1361,8 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
             | StoreOpError::PolicyRootExists
             | StoreOpError::PolicyRootEstablished
             | StoreOpError::PolicyRootAbsent
+            | StoreOpError::SigningKeyNotFound
+            | StoreOpError::NotSigningKey
     ) {
         return AdminOutcome::Refused(e.to_string());
     }
@@ -1604,6 +1606,69 @@ mod tests {
         assert!(
             matches!(exists, AdminOutcome::Refused(message) if message.starts_with("policy_root_exists/permanent: "))
         );
+        assert_eq!(r.store.audit_tip().unwrap(), tip);
+    }
+
+    #[tokio::test]
+    async fn signing_public_key_admin_requires_v2_and_returns_public_fields_only() {
+        let r = rig(229);
+        r.admin.record_bind(5, Principal::Direct);
+        r.admin.record_bind(
+            6,
+            Principal::Reserved {
+                module_id: "test".into(),
+            },
+        );
+        let root = credentials_core::admin_ops::apply(
+            &r.store,
+            AdminOpBody::PolicyRootInit { v: 1 },
+            "test",
+        )
+        .unwrap();
+        r.store
+            .create_audited(
+                "opaque:public-lookup",
+                &VaultRecord::new_static(
+                    CredentialKind::Opaque,
+                    "test",
+                    b"opaque test value".to_vec(),
+                    None,
+                ),
+                AuditCtx::route_admin(AuditOp::Put, "test"),
+            )
+            .unwrap();
+        let tip = r.store.audit_tip().unwrap();
+        let body = |id: &str, v| {
+            serde_json::json!({"op":"admin.signing_public_key", "v":v, "id":id}).to_string()
+        };
+
+        let success = body(root["credential_id"].as_str().unwrap(), 2);
+        let (tag, _) = challenge_and_sign(&r, 5, &success);
+        assert!(matches!(r.admin.execute(6, success.as_bytes(), &tag).await,
+            AdminOutcome::Refused(message) if message == "admin ops require a direct bind"));
+        assert!(
+            matches!(r.admin.execute(5, success.as_bytes(), &"00".repeat(tag.len()/2)).await,
+            AdminOutcome::Refused(message) if message == "auth failed")
+        );
+        let expected =
+            serde_json::json!({"public_key_hex":root["public_key_hex"], "key_id":root["key_id"]});
+        assert!(matches!(r.admin.execute(5, success.as_bytes(), &tag).await,
+            AdminOutcome::Ok(result) if result == expected));
+
+        for (id, v, reason) in [
+            (
+                "signing:policy-root:1",
+                1,
+                "unsupported admin op schema version/variant pairing",
+            ),
+            ("signing:absent:1", 2, "signing_key_not_found/permanent:"),
+            ("opaque:public-lookup", 2, "not_signing_key/permanent:"),
+        ] {
+            let body = body(id, v);
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            assert!(matches!(r.admin.execute(5, body.as_bytes(), &tag).await,
+                AdminOutcome::Refused(message) if message.starts_with(reason)));
+        }
         assert_eq!(r.store.audit_tip().unwrap(), tip);
     }
 

@@ -2182,6 +2182,13 @@ fn open_for_admin_with_key(
     route_path_exists: bool,
     preflighted_key: Option<MasterKey>,
 ) -> Result<EncryptedStore, CliError> {
+    // The writer open can create a vault. For a missing store, prove possession
+    // before taking that path; for an existing store, keep the lease-first order.
+    let store_was_missing = !store_path(global).exists();
+    let preflighted_key = match preflighted_key {
+        None if store_was_missing => Some(resolve_store_key(global)?),
+        key => key,
+    };
     let store = open_sqlite(&descriptor(global)).map_err(|e| match e {
         // A held lease means the daemon is up — the structural "while stopped" gate.
         StoreError::Lease(_) => CliError::DaemonRunning { route_path_exists },
@@ -2199,6 +2206,10 @@ fn open_for_admin_with_key(
             resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?
         }
     };
+    if store_was_missing {
+        resolver::record_resolved_key_source(&resolver_config(global))
+            .map_err(CliError::MasterKey)?;
+    }
     EncryptedStore::migrate_with_key(&store, &key).map_err(CliError::StoreOpen)?;
     EncryptedStore::open(store, key).map_err(CliError::Store)
 }

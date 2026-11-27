@@ -78,8 +78,8 @@ pub enum KeySource {
 /// Inputs that locate the vault's key and data directory.
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
-    /// The vault data directory (holds `store.db`). Created `0700` if absent;
-    /// also the root the operator key path must NOT live under.
+    /// The vault data directory (holds `store.db`), also the root the operator key
+    /// path must NOT live under.
     pub data_dir: PathBuf,
     /// Where the master key lives.
     pub source: KeySource,
@@ -376,9 +376,8 @@ impl KeychainCli {
         }
     }
 
-    /// Derive the per-vault keychain service from the data dir, failing closed if the
-    /// dir cannot be canonicalized (it must exist — every resolve path runs
-    /// `ensure_vault_dir` first, so it does in practice).
+    /// Derive the per-vault keychain service from the data dir, failing closed if
+    /// the directory cannot be canonicalized.
     fn service_for(data_dir: &Path) -> Result<String, MasterKeyError> {
         crate::contract::keychain_service_for(data_dir).ok_or_else(|| {
             MasterKeyError::KeyStoreUnwritable(format!(
@@ -519,7 +518,11 @@ fn resolve_with_backend(
     expected_key_id: Option<KeyId>,
     backend: &dyn MasterKeyStore,
 ) -> Result<MasterKey, MasterKeyError> {
-    ensure_vault_dir(&config.data_dir)?;
+    let data_dir_exists = config.data_dir.try_exists().map_err(MasterKeyError::Io)?;
+    if !data_dir_exists && !matches!(config.source, KeySource::OperatorPath { .. }) {
+        // Native stores only look up keys scoped to an existing canonical directory.
+        return Err(MasterKeyError::NotBootstrapped);
+    }
     let key = backend
         .load_slot(&config.data_dir, KeySlot::Current)?
         .ok_or(MasterKeyError::NotBootstrapped)?;
@@ -529,8 +532,18 @@ fn resolve_with_backend(
             return Err(MasterKeyError::KeyMismatch { loaded, expected });
         }
     }
-    source_record::record_migration(config)?;
+    if data_dir_exists {
+        record_resolved_key_source(config)?;
+    }
     Ok(key)
+}
+
+/// Secure the vault directory and record its custody source after a successful key
+/// resolution. A writer that resolved the key before creating the store calls this
+/// once the store exists.
+pub fn record_resolved_key_source(config: &ResolverConfig) -> Result<(), MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    source_record::record_migration(config)
 }
 
 /// Crash-safe resolve against an OPEN database's recorded key fingerprint.
@@ -759,7 +772,21 @@ fn ensure_vault_dir(data_dir: &Path) -> Result<(), MasterKeyError> {
 /// inside the data dir. For a new key, its parent must already exist because the
 /// operator provisions that directory out-of-band (e.g. `/run/secrets`).
 fn ensure_outside_data_dir(key_path: &Path, data_dir: &Path) -> Result<(), MasterKeyError> {
-    let data_canon = data_dir.canonicalize().map_err(MasterKeyError::Io)?;
+    let data_canon = match data_dir.canonicalize() {
+        Ok(path) => Some(path),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !data_dir
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir) =>
+        {
+            // No existing key can be under a missing directory. A path with `..`
+            // is not conclusive: creating its missing component could resolve to an
+            // existing directory, so do not waive the canonical containment check.
+            None
+        }
+        Err(e) => return Err(MasterKeyError::Io(e)),
+    };
     let parent = key_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -775,7 +802,7 @@ fn ensure_outside_data_dir(key_path: &Path, data_dir: &Path) -> Result<(), Maste
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent_canon.clone(),
         Err(e) => return Err(MasterKeyError::Io(e)),
     };
-    if key_canon.starts_with(&data_canon) {
+    if let Some(data_canon) = data_canon.filter(|dir| key_canon.starts_with(dir)) {
         return Err(MasterKeyError::KeyPathUnderDataDir {
             key_dir: key_canon,
             data_dir: data_canon,

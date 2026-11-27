@@ -12,6 +12,7 @@ mod payload_file;
 use payload_file::payload_file;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -47,6 +48,116 @@ fn cli_binary() -> Command {
         }
         None => dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth"))),
     }
+}
+
+fn assert_failed_write_leaves_vault_missing(verb: &[&str]) {
+    let root = tmp_root(verb[0]);
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    #[cfg(unix)]
+    let mut key_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)
+            .expect("create the private key fixture")
+    };
+    #[cfg(windows)]
+    let mut key_file = subc_os::windows_acl::create_private_file(&key_path)
+        .expect("create the private key fixture");
+    key_file.write_all(&[0; 32]).expect("write a malformed key");
+    drop(key_file);
+    let run = |args: &[&str]| {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path)
+            .output()
+            .expect("run ck-auth")
+    };
+    let assert_no_vault = |list: std::process::Output| {
+        let stderr = String::from_utf8_lossy(&list.stderr);
+        assert_eq!(list.status.code(), Some(1), "list --json: {stderr}");
+        assert!(stderr.contains("no vault at"), "list --json: {stderr}");
+        assert!(list.stdout.is_empty(), "no inventory exists to print");
+    };
+    assert_no_vault(run(&["list", "--json"]));
+
+    let write = run(verb);
+    let stderr = String::from_utf8_lossy(&write.stderr);
+    assert_eq!(write.status.code(), Some(4), "{}: {stderr}", verb[0]);
+    assert!(
+        stderr.contains("expected 64 hex chars, got 32"),
+        "{}: {stderr}",
+        verb[0]
+    );
+
+    let list = run(&["list", "--json"]);
+    assert!(
+        !data_dir.exists(),
+        "{} created the vault directory; list --json exited {:?}: {}{}",
+        verb[0],
+        list.status.code(),
+        String::from_utf8_lossy(&list.stdout),
+        String::from_utf8_lossy(&list.stderr),
+    );
+    assert_no_vault(list);
+}
+
+#[test]
+fn malformed_key_before_bootstrap_put_leaves_no_vault() {
+    assert_failed_write_leaves_vault_missing(&[
+        "put",
+        "--id",
+        "opaque:x:1",
+        "--kind",
+        "opaque",
+        "--generate-hex",
+        "32",
+    ]);
+}
+
+#[test]
+fn malformed_key_before_bootstrap_grant_leaves_no_vault() {
+    assert_failed_write_leaves_vault_missing(&[
+        "grant",
+        "--principal",
+        "reserved:json-probe",
+        "--selector-kind",
+        "exact",
+        "--selector",
+        "opaque:x:1",
+        "--operation",
+        "list",
+    ]);
+}
+
+#[test]
+fn offline_put_reopens_an_existing_vault_and_keeps_its_records() {
+    let vault = JsonVault::new("offline-reopen");
+    vault.bootstrap();
+
+    for id in ["opaque:x:1", "opaque:x:2"] {
+        let put = vault.run(&[
+            "put",
+            "--id",
+            id,
+            "--kind",
+            "opaque",
+            "--generate-hex",
+            "32",
+        ]);
+        let stderr = String::from_utf8_lossy(&put.stderr);
+        assert_eq!(put.status.code(), Some(0), "put {id}: {stderr}");
+    }
+    let rows = vault.list_json();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "opaque:x:1");
+    assert_eq!(rows[1]["id"], "opaque:x:2");
 }
 
 struct JsonVault {

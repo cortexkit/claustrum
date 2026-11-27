@@ -96,8 +96,7 @@ pub const KEYCHAIN_ACCOUNT_CURRENT: &str = "master-key";
 ///
 /// Fails closed: if the data directory cannot be canonicalized (it does not exist,
 /// or the OS rejects it), this returns `None`. Callers treat that as "no key
-/// resolvable" rather than falling back to an unscoped item — every resolve path
-/// runs `ensure_vault_dir` first, so in practice the directory exists by here.
+/// resolvable" rather than falling back to an unscoped item.
 pub fn keychain_service_for(data_dir: &Path) -> Option<String> {
     let id = ProjectRootId::from_path(data_dir).ok()?;
     let mut hasher = Sha256::new();

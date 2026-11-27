@@ -5,6 +5,7 @@ External commands run through scratch executables; no live vault or forge is cha
 """
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,13 @@ from typing import Any, cast
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+RELEASE_RUNNERS = {
+    'darwin-arm64': 'macos-latest',
+    'linux-x64': 'ubuntu-latest',
+    'linux-arm64': 'ubuntu-24.04-arm',
+    'windows-x64': 'windows-latest',
+    'windows-arm64': 'windows-11-arm',
+}
 
 
 def module(name):
@@ -515,10 +523,39 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(concurrency.get('group'), 'release-${{ inputs.tag || github.ref_name }}')
         self.assertEqual(concurrency.get('cancel-in-progress'), 'false')
 
+    def release_matrix(self):
+        step = self.release_step('Define release platforms')
+        output = self.root / 'matrix-output'
+        output.write_text('')
+        result = self.run_shell(step['run'], dict(self.env, GITHUB_OUTPUT=os.fspath(output)))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        key, matrix = output.read_text().strip().split('=', 1)
+        self.assertEqual(key, 'matrix')
+        return matrix
+
+    def test_release_matrix_matches_installer_platforms(self):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
+        jobs = workflow['jobs']
+        entries = json.loads(self.release_matrix())['include']
+        self.assertEqual(len(entries), len(RELEASE_RUNNERS))
+        self.assertEqual({entry['platform']: entry['runner'] for entry in entries}, RELEASE_RUNNERS)
+        self.assertEqual({entry['platform']: entry['arm64_host'] for entry in entries if 'arm64_host' in entry}, {
+            'linux-arm64': 'aarch64-unknown-linux-gnu',
+            'windows-arm64': 'aarch64-pc-windows-msvc',
+        })
+        self.assertEqual(jobs['prepare']['outputs']['asset_matrix'], '${{ steps.platforms.outputs.matrix }}')
+        self.assertEqual(jobs['assets']['strategy']['matrix'], '${{ fromJSON(needs.prepare.outputs.asset_matrix) }}')
+        self.assertEqual(jobs['assets']['strategy']['fail-fast'], 'false')
+        publish = self.release_step('Undraft the release')
+        self.assertEqual(publish['env']['ASSET_MATRIX'], '${{ needs.prepare.outputs.asset_matrix }}')
+
+    def release_publish_env(self):
+        return dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', ASSET_MATRIX=self.release_matrix())
+
     def uploaded_release(self):
         assets = self.root / 'uploaded'
         assets.mkdir()
-        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
+        for platform in RELEASE_RUNNERS:
             for binary in ('ck-auth', 'ck-claustrum'):
                 name = f'{binary}-{platform}.zip'
                 payload = (name + ' uploaded bytes').encode()
@@ -551,7 +588,7 @@ class ScriptContracts(unittest.TestCase):
     def test_release_publish_checks_uploaded_zip_bytes_against_sidecars(self):
         assets = self.uploaded_release()
         step = self.release_step('Undraft the release')
-        env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo')
+        env = self.release_publish_env()
         for archive in sorted(assets.glob('*.zip')):
             with self.subTest(archive=archive.name):
                 original = archive.read_bytes()
@@ -616,20 +653,18 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(self.run_shell(step['run'], env, cwd=self.root).returncode, 0)
 
     def test_release_asset_gate_requires_expected_names(self):
-        assets = [f'{binary}-{platform}.{suffix}'
-                  for platform in ('darwin-arm64', 'linux-x64', 'windows-x64')
-                  for binary in ('ck-auth', 'ck-claustrum')
-                  for suffix in ('zip', 'zip.sha256')]
-        asset_args = ' '.join("'" + name + "'" for name in assets)
-        self.executable('gh', f'''case "$*" in
-          *"--json assets"*) printf "%s\\n" {asset_args};;
-          *"--json body"*) echo release-notes;;
-          *) exit 0;;
-        esac''')
+        assets = self.uploaded_release()
         step = self.release_step('Undraft the release')
-        result = self.run_shell(step['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'), cwd=self.root)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('missing release-manifest.json', result.stdout)
+        env = self.release_publish_env()
+        for asset in sorted(assets.iterdir()):
+            with self.subTest(asset=asset.name):
+                hold = self.root / asset.name
+                asset.rename(hold)
+                result = self.run_shell(step['run'], env, cwd=self.root)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f'missing {asset.name}', result.stdout)
+                self.assertFalse((self.root / 'captured-notes').exists(), 'incomplete releases must stay in draft')
+                hold.rename(asset)
 
     def test_release_manifest_is_uploaded_from_workspace_core_floor(self):
         version = workspace_core_version()
@@ -777,7 +812,7 @@ class ScriptContracts(unittest.TestCase):
         self.assertFalse(any('sibling' in step.get('name', '').lower() for step in steps))
         self.uploaded_release()
         publish = self.release_step('Undraft the release')
-        result = self.run_shell(publish['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'), cwd=self.root)
+        result = self.run_shell(publish['run'], self.release_publish_env(), cwd=self.root)
         self.assertEqual(result.returncode, 0, result.stdout)
         notes = (self.root / 'captured-notes').read_text()
         self.assertIn('Permanent notes plus release-specific instructions.', notes)

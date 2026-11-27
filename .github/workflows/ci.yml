@@ -261,13 +261,16 @@ jobs:
             esac
           }
 
-          # Check the effective store before any probe can read or write an item.
+          # Check the effective store before any probe can read or write an item. Like the
+          # Rust guard, require the throwaway keychain first: the search list can also show
+          # the system keychain after it, which holds no user items.
           for selection in default-keychain list-keychains; do
             : | probe_security "check $selection" 0 "$selection"
-            selected=$(<"$scratch/probe-selection")
+            sed 's/^/Keychain preflight:   /' "$scratch/probe-selection"
+            IFS= read -r selected < "$scratch/probe-selection" || true
             selected="${selected#*\"}"
             if [[ ! "${selected%\"}" -ef "$keychain" ]]; then
-              printf 'Keychain preflight: %s must select only the throwaway keychain\n' "$selection" >&2
+              printf 'Keychain preflight: %s must select the throwaway keychain first\n' "$selection" >&2
               exit 1
             fi
           done

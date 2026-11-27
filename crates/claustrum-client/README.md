@@ -18,12 +18,12 @@ fall back to `plan_tier_observed_at_ms`.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.17.2"
+cortexkit-claustrum-client = "0.17.3"
 ```
 
 The default `transport` and `consumer` features provide the resolver, live watch,
 and SDK consumer adapter. For decoders only, use `cortexkit-claustrum-client = { version =
-"0.17.2", default-features = false }` for the public `decode_*_reply` functions,
+"0.17.3", default-features = false }` for the public `decode_*_reply` functions,
 the route-open and established-route error decoders, record/error types,
 `WatchNotice`, and `WatchTracker` without
 `subc-client-rs`, `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains a dependency;
@@ -126,6 +126,15 @@ is `Transport` and clears the cached route. `unknown_module`, `missing_identity`
 unknown codes, and refusals with `detail.expected_back: false` are terminal. They
 return `CredentialErrorClass::Unclassified` and do not trigger a retry. Both cases
 preserve the wire code in `code()`. They do not describe a credential's state.
+
+On an SDK-backed route with a negotiated request window, a daemon `route_busy`
+refusal proves the request was not forwarded. It returns `Transient` with the
+code `route_busy`; the caller can retry without the client reopening the route
+or replaying the request. A `route_busy` error frame without that proof remains
+`Unclassified`. The client also reports `Transient` when the SDK confirms its
+deadline expired waiting for credit before it sent the request. If the resolver's
+own deadline expires first, the error is still `Transport`.
+
 For a scoped watch, `unknown_method` ends the watch as `Unsupported`, the signal to
 poll instead.
 
@@ -137,6 +146,8 @@ transport connection so a held watch cannot block ordinary resolver calls. Its
 `closed().await`. `stop()` (or dropping the handle) sends best-effort CANCEL. The
 32-notice queue is bounded: a slow reader ends with `TransportLost`, not silent
 loss inside the client. The client never reconnects or re-subscribes on its own.
+For SDK-backed watch starts, the SDK can resend the start request on the same
+route after a verified `route_busy` refusal, until its start deadline.
 
 `ScopedWatchOutcome` distinguishes `Refused(error)` (including revocation after
 notices), `Ended` (STREAM_END after notices), `TransportLost(error)` (including
@@ -310,6 +321,8 @@ tagged Magic Context and Prefrontal samples in
 
 ## Changes
 
+- 0.17.3: SDK-backed calls report proven route-credit refusals as `Transient`.
+  See the [changelog](CHANGELOG.md).
 - 0.17.2: SDK-backed calls and watches use the `subc-client-rs` 0.43 route-death
   verdict. See the [changelog](CHANGELOG.md).
 - 0.17.0: `with_consumer` uses `SubcConsumer` from the `subc-client-rs` 0.42 line.

@@ -7,6 +7,7 @@ struct Rig {
     stream: TcpStream,
     consumer: Arc<SubcConsumer>,
     route_opens: Vec<Value>,
+    request_window: Option<usize>,
 }
 
 impl Drop for Rig {
@@ -68,6 +69,7 @@ impl Rig {
             stream,
             consumer: Arc::new(consumer.unwrap()),
             route_opens: Vec::new(),
+            request_window: Some(8),
         }
     }
 
@@ -98,12 +100,12 @@ impl Rig {
                 assert!(!String::from_utf8(frame.body.clone())
                     .unwrap()
                     .contains("launch_nonce"));
-                self.reply(
-                    &frame,
-                    FrameType::Response,
-                    json!({"op":"route.open", "route_channel":6 + self.route_opens.len(),"route_epoch":3, "request_window":8, "watch_window":8}),
-                )
-                .await;
+                let mut response = json!({"op":"route.open", "route_channel":6 + self.route_opens.len(),"route_epoch":3});
+                if let Some(window) = self.request_window {
+                    response["request_window"] = json!(window);
+                    response["watch_window"] = json!(window);
+                }
+                self.reply(&frame, FrameType::Response, response).await;
             } else {
                 return (frame, body);
             }
@@ -511,6 +513,68 @@ async fn consumer_closed_by_caller_refuses_scoped_read_as_transport() {
 }
 
 #[tokio::test]
+async fn consumer_read_returns_daemon_route_busy_as_transient_without_replaying() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let error = resolver.resolve("handle", None, false).await.unwrap_err();
+        assert_eq!(error.code(), "route_busy");
+        assert_eq!(error.class, CredentialErrorClass::Transient);
+        assert!(resolver.status_scoped("barrier").await.is_err());
+    };
+    let server = async {
+        for (request, code) in [
+            (credential_get_request("handle", None, false), "route_busy"),
+            (credential_status_request("barrier"), "invalid_params"),
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body, request, "the read must not replay");
+            assert_eq!(frame.header.channel, 7, "the route should stay open");
+            rig.reply(
+                &frame,
+                FrameType::Error,
+                json!({"code":code, "message":"request refused"}),
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 1);
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn consumer_read_leaves_unproven_route_busy_unclassified() {
+    for opted_in in [true, false] {
+        let mut rig = Rig::new().await;
+        rig.request_window = opted_in.then_some(8);
+        let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+        let client = resolver.resolve("handle", None, false);
+        let server = async {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body, credential_get_request("handle", None, false));
+            let flags = Flags::new(false, Priority::Interactive, false);
+            rig.reply_with_flags(
+                &frame,
+                FrameType::Error,
+                json!({"code":"route_busy", "message":"request refused"}),
+                if opted_in {
+                    flags
+                } else {
+                    flags.with_daemon_origin()
+                },
+            )
+            .await;
+        };
+        let (reply, ()) = tokio::join!(client, server);
+        let error = reply.unwrap_err();
+        assert_eq!(error.code(), "route_busy");
+        assert_eq!(error.class, CredentialErrorClass::Unclassified);
+        rig.consumer.close().await;
+    }
+}
+
+#[tokio::test]
 async fn consumer_seal_returns_route_busy_without_replaying() {
     let mut rig = Rig::new().await;
     let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
@@ -526,6 +590,7 @@ async fn consumer_seal_returns_route_busy_without_replaying() {
             .await
             .unwrap_err();
         assert_eq!(error.code(), "route_busy");
+        assert_eq!(error.class, CredentialErrorClass::Transient);
         assert!(resolver.status_scoped("barrier").await.is_err());
     };
     let server = async {
@@ -550,6 +615,166 @@ async fn consumer_seal_returns_route_busy_without_replaying() {
         .await;
     };
     tokio::join!(calls, server);
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn consumer_sign_and_public_key_do_not_replay_proven_route_busy() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        let sign = resolver.sign("key", b"payload").await.unwrap_err();
+        let public_key = resolver.public_key("key").await.unwrap_err();
+        assert!(resolver.status_scoped("barrier").await.is_err());
+        for error in [sign, public_key] {
+            assert_eq!(error.code(), "route_busy");
+            assert_eq!(error.class, CredentialErrorClass::Transient);
+        }
+    };
+    let server = async {
+        for (method, code) in [
+            ("credential.sign", "route_busy"),
+            ("credential.public_key", "route_busy"),
+            ("credential.status", "invalid_params"),
+        ] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body["method"], method, "no busy request may replay");
+            assert_eq!(frame.header.channel, 7);
+            rig.reply(
+                &frame,
+                FrameType::Error,
+                json!({"code":code, "message":"request refused"}),
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 1);
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn consumer_route_credit_timeout_is_transient_without_sending() {
+    let mut rig = Rig::new().await;
+    rig.request_window = Some(1);
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let (warmup, ()) = tokio::join!(resolver.status_scoped("warmup"), async {
+        let (frame, body) = rig.next().await;
+        assert_eq!(body, credential_status_request("warmup"));
+        rig.reply(
+            &frame,
+            FrameType::Error,
+            json!({"code":"invalid_params", "message":"warmup"}),
+        )
+        .await;
+    });
+    assert_eq!(warmup.unwrap_err().code(), "invalid_params");
+    let handle = rig
+        .consumer
+        .open_route(target(), identity(), options())
+        .await
+        .unwrap();
+    // Hold the cached route's only credit without queuing a request.
+    let held = rig
+        .consumer
+        .reserve(
+            &handle,
+            tokio::time::Instant::now() + CREDENTIAL_CALL_DEADLINE,
+        )
+        .await
+        .unwrap();
+    let mut connection = ConsumerConnection {
+        consumer: Arc::clone(&rig.consumer),
+        handle,
+        subscription: None,
+    };
+
+    // Exercise the SDK deadlines directly; the resolver's own deadline can expire first.
+    tokio::time::pause();
+    let read_error = connection
+        .credential_request(
+            credential_get_request("blocked", None, false),
+            CREDENTIAL_GET_OP,
+        )
+        .await
+        .unwrap_err();
+    let watch_error = connection
+        .subscribe(
+            transport::encode_request(&json!({"method":"auth.watch_scoped","params":{}})).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    tokio::time::resume();
+    drop(held);
+
+    let (barrier, ()) = tokio::join!(resolver.status_scoped("barrier"), async {
+        let (frame, body) = rig.next().await;
+        assert_eq!(
+            body,
+            credential_status_request("barrier"),
+            "neither blocked request may be sent"
+        );
+        assert_eq!(frame.header.channel, 7);
+        rig.reply(
+            &frame,
+            FrameType::Error,
+            json!({"code":"invalid_params", "message":"barrier"}),
+        )
+        .await;
+    });
+    assert_eq!(barrier.unwrap_err().code(), "invalid_params");
+    assert_eq!(rig.route_opens.len(), 1);
+    for error in [read_error, watch_error] {
+        assert_eq!(error.class, CredentialErrorClass::Transient);
+    }
+    rig.consumer.close().await;
+}
+
+#[tokio::test]
+async fn consumer_watch_classifies_only_proven_route_busy_as_transient() {
+    let mut rig = Rig::new().await;
+    let resolver = ClaustrumCredentialResolver::with_consumer(Arc::clone(&rig.consumer));
+    let calls = async {
+        for class in [
+            CredentialErrorClass::Unclassified,
+            CredentialErrorClass::Transient,
+        ] {
+            let mut watch = resolver.watch_scoped(None).await.unwrap();
+            let ScopedWatchOutcome::TransportLost(error) = watch.closed().await else {
+                panic!("expected a watch transport refusal");
+            };
+            assert_eq!(error.code(), "route_busy");
+            assert_eq!(error.class, class);
+        }
+    };
+    let server = async {
+        for daemon_origin in [false, true] {
+            let (frame, body) = rig.next().await;
+            assert_eq!(body["method"], "auth.watch_scoped");
+            assert!(frame.header.flags.is_subscription());
+            let flags = Flags::new(false, Priority::Interactive, false);
+            if daemon_origin {
+                // Expire the SDK's start deadline before the wire refusal. The watch
+                // itself has no response timeout, but its SDK busy backoff cannot resend.
+                tokio::time::pause();
+                tokio::time::advance(SubscribeOptions::default().route_open_timeout).await;
+                tokio::time::resume();
+            }
+            rig.reply_with_flags(
+                &frame,
+                FrameType::Error,
+                json!({"code":"route_busy", "message":"busy"}),
+                if daemon_origin {
+                    flags.with_daemon_origin()
+                } else {
+                    flags
+                },
+            )
+            .await;
+        }
+    };
+    tokio::join!(calls, server);
+    assert_eq!(rig.route_opens.len(), 1);
     rig.consumer.close().await;
 }
 

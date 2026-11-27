@@ -158,6 +158,7 @@ pub struct CredentialResolverError {
     code: String,
     safe_message: String,
     established_route_dead: bool,
+    sdk_route_credit_exhausted: bool,
 }
 
 impl CredentialResolverError {
@@ -168,6 +169,7 @@ impl CredentialResolverError {
             code: code.to_owned(),
             safe_message: safe_message.into(),
             established_route_dead: false,
+            sdk_route_credit_exhausted: false,
         }
     }
 
@@ -188,6 +190,7 @@ impl CredentialResolverError {
             code: code.into(),
             safe_message: message.into(),
             established_route_dead: false,
+            sdk_route_credit_exhausted: false,
         }
     }
 
@@ -778,6 +781,7 @@ pub trait CredentialGetTarget: Send + Sync {
 /// retries transient or transport errors for credential operations;
 /// scoped reads return the first error because each consumer owns its one-shot
 /// redial bound. Auth and permanent failures always return immediately.
+/// SDK route-credit failures are retryable by the caller, not replayed here.
 /// Login condition reports and clears are never retried.
 /// Module-secret methods are single-shot and use an additional route on the
 /// caller's SDK consumer without changing the ordinary credential route.
@@ -862,7 +866,7 @@ impl ClaustrumCredentialResolver {
         let mut retried_dead_route = false;
         for _ in 0..self.transient_retries {
             match attempt().await {
-                Err(error) if should_retry(&error) => {
+                Err(error) if !error.sdk_route_credit_exhausted && should_retry(&error) => {
                     if error.established_route_dead {
                         if retried_dead_route {
                             return Err(error);
@@ -2203,6 +2207,7 @@ fn classify_route_open_error(body: ErrorBody) -> CredentialResolverError {
             code: body.code,
             safe_message: body.message,
             established_route_dead: false,
+            sdk_route_credit_exhausted: false,
         }
     } else {
         CredentialResolverError::unclassified(body.code, body.message)
@@ -2224,6 +2229,7 @@ fn classify_established_route_verdict(
             code: body.code,
             safe_message: body.message,
             established_route_dead: true,
+            sdk_route_credit_exhausted: false,
         };
     }
     // Keep the previous classification for errors that do not invalidate the route.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.3
+
+- On SDK-backed routes, daemon `route_busy` refusals that prove non-delivery
+  are `Transient`. The client does not reopen the route or replay the request.
+  Watch starts still use the SDK's deadline-bounded resend for verified busy
+  refusals.
+- An SDK deadline waiting for route credit is also `Transient` when the SDK
+  reports that it never sent the request. If the public resolver's own
+  10-second deadline expires first, the error is still `Transport`.
+
 ## 0.17.2
 
 - The `consumer` feature uses `subc-client-rs` 0.43.0 and follows its route-death

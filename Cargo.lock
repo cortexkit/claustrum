@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-claustrum-client"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "base64",
  "ring",

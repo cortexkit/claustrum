@@ -314,17 +314,7 @@ pub(super) mod wire {
             target
                 .sensitive_request(request, "module_secret")
                 .await
-                .map_err(|error| {
-                    if error.code() == "route_busy" {
-                        CredentialResolverError::new(
-                            CredentialErrorClass::Transient,
-                            "module-secret route busy",
-                        )
-                        .into()
-                    } else {
-                        error.into()
-                    }
-                })
+                .map_err(Into::into)
         }
     }
 

@@ -1,9 +1,10 @@
 use super::transport::{CredentialTransport, WatchFrame};
 use super::*;
 use subc_client_rs::{
-    CallError, CallOptions, CloseRouteOptions, SubcConsumer, SubscribeOptions, Subscription,
-    SubscriptionEnd,
+    CallError, CallOptions, CloseRouteOptions, NotSentCause, SubcConsumer, SubscribeOptions,
+    Subscription, SubscriptionEnd,
 };
+use subc_protocol::error_codes::ROUTE_BUSY;
 use subc_protocol::{BindIdentity, RouteTarget};
 
 pub(super) struct ConsumerConnector(pub Arc<SubcConsumer>);
@@ -116,11 +117,49 @@ fn decode_sdk_error(error: CallError) -> CredentialResolverError {
     CredentialResolverError::transport("credential SDK connection failed")
 }
 
+fn classify_route_credit_exhausted(
+    code: &str,
+    message: impl Into<String>,
+) -> CredentialResolverError {
+    CredentialResolverError {
+        class: CredentialErrorClass::Transient,
+        code: code.to_owned(),
+        safe_message: message.into(),
+        established_route_dead: false,
+        sdk_route_credit_exhausted: true,
+    }
+}
+
+fn is_proven_route_busy(error: &CallError) -> bool {
+    // The SDK emits this verdict for route_busy only after checking daemon
+    // origin and negotiated credit. A Module error with the same code isn't proof.
+    error.never_forwarded() == Some(true)
+        && matches!(error.not_sent_cause(), Some(NotSentCause::DaemonRefusedBeforeForward { code }) if code == ROUTE_BUSY)
+}
+
+fn decode_route_admission_error(error: CallError) -> CredentialResolverError {
+    // SDK 0.43 groups route-credit deadlines with other failures before queueing.
+    // Match its exact local reason at admission so those other failures stay unchanged.
+    if error.never_forwarded() == Some(true)
+        && error.not_sent_cause() == Some(NotSentCause::BeforeQueue)
+        && matches!(&error, CallError::NotSent(source) if source.to_string() == "call deadline elapsed waiting for route flow-control")
+    {
+        return classify_route_credit_exhausted(
+            CredentialErrorClass::Transient.classifier_code(),
+            "credential request deadline elapsed waiting for route credit",
+        );
+    }
+    decode_sdk_error(error)
+}
+
 fn decode_established_call_error(error: CallError) -> CredentialResolverError {
     let route_dead = error.is_route_dead();
     match error {
         CallError::Module(body) => classify_established_route_verdict(body, route_dead),
         CallError::RouteDead(body) => classify_established_route_verdict(*body, route_dead),
+        error if is_proven_route_busy(&error) => {
+            classify_route_credit_exhausted(ROUTE_BUSY, "credential SDK request refused")
+        }
         error => decode_sdk_error(error),
     }
 }
@@ -203,7 +242,7 @@ impl CredentialTransport for ConsumerConnection {
                     tokio::time::Instant::now() + CREDENTIAL_CALL_DEADLINE,
                 )
                 .await
-                .map_err(decode_sdk_error)?;
+                .map_err(decode_route_admission_error)?;
             let (_, reply) = reservation.send(body, options());
             match reply.await {
                 Ok(body) => Ok(body),
@@ -233,7 +272,7 @@ impl CredentialTransport for ConsumerConnection {
                         },
                     )
                     .await
-                    .map_err(decode_sdk_error)?,
+                    .map_err(decode_route_admission_error)?,
             );
             Ok(0)
         })
@@ -254,7 +293,19 @@ impl CredentialTransport for ConsumerConnection {
             if let Some(body) = subscription.events().recv().await {
                 return Ok(WatchFrame::Data(body));
             }
-            let frame = decode_subscription_end(subscription.ended().await)?;
+            let frame = match subscription.ended().await {
+                // Only closed() retains the SDK's non-delivery verdict.
+                SubscriptionEnd::Error(body)
+                    if body.code == ROUTE_BUSY
+                        && subscription
+                            .closed()
+                            .await
+                            .is_err_and(|error| is_proven_route_busy(&error)) =>
+                {
+                    WatchFrame::Error(classify_route_credit_exhausted(ROUTE_BUSY, body.message))
+                }
+                end => decode_subscription_end(end)?,
+            };
             if let WatchFrame::Error(error) = &frame {
                 self.release_dead_route(error).await;
             }

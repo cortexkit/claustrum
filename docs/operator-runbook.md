@@ -1254,6 +1254,8 @@ column. `PRINCIPAL` is `-` on consumer reports because the read surface does not
   whoever saw the refusal, not whoever caused it.
 - **`refresh_failed`** means the vault's own exchange failed. On a transient failure the
   record stays active, so without this row nothing would show the attempt happened.
+  If the credential is unchanged, reads already queued behind that exchange get the same
+  transient failure rather than each retrying it. A later read can attempt another exchange.
 - **`applied`** says whether the event changed the credential. `no` on a report means the
   version it named had already been replaced, so the report was correctly ignored; a run of
   those is a consumer working from stale state.

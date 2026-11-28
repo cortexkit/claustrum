@@ -24,7 +24,9 @@
 //! Per `credential_id`, an in-process async lock ensures N concurrent `get`s that
 //! all see a stale token trigger EXACTLY ONE upstream refresh: the first holder
 //! refreshes and commits `version + 1`; every waiter then observes the bumped
-//! version and returns the fresh record without a second upstream call.
+//! version and returns the fresh record without a second upstream call. After a
+//! retryable failure, queued reads share the refusal if the record is unchanged.
+//! A read arriving after that attempt can retry.
 //!
 //! ## Startup reconciliation (boot gate)
 //!
@@ -38,7 +40,8 @@
 //! single-flight.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::future::{poll_fn, Future};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::audit::{AlarmReason, AuditCtx, AuditOp, AuthEventKind};
 use crate::oauth::OAuthCredential;
@@ -259,6 +262,54 @@ type BeforeFlightWaitHook = Box<dyn FnOnce() + Send>;
 struct InflightEntry {
     lock: Weak<tokio::sync::Mutex<()>>,
     last_refresh: Option<(String, u64)>,
+    // Readers already queued when an exchange begins can share its failure, even
+    // if they first queued behind an admin operation. Completion detaches the slot
+    // so readers that queue later cannot see the failure. Waiters also match the
+    // record version and the incarnation, which distinguishes a deleted row from
+    // a new credential created under the same ID.
+    failure_slot: Option<Arc<OnceLock<FailedRefresh>>>,
+}
+
+struct GetFlight {
+    incarnation: String,
+    initial_version: u64,
+    failure_slot: Option<Arc<OnceLock<FailedRefresh>>>,
+}
+
+struct FailedRefresh {
+    incarnation: String,
+    version: u64,
+    refusal: RetryableRefusal,
+}
+
+/// Only the failure classification is shared. Provider text can contain secrets.
+#[derive(Clone, Copy)]
+enum RetryableRefusal {
+    Transport,
+    Decode,
+    Status(u16),
+}
+
+impl RetryableRefusal {
+    fn from_error(error: &EngineError) -> Option<Self> {
+        let EngineError::RefreshFailed(error) = error else {
+            return None;
+        };
+        match error {
+            RefreshError::Transport(_) => Some(Self::Transport),
+            RefreshError::Decode(_) => Some(Self::Decode),
+            RefreshError::Status(status, _) => Some(Self::Status(*status)),
+            RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired => None,
+        }
+    }
+
+    fn into_error(self) -> EngineError {
+        EngineError::RefreshFailed(match self {
+            Self::Transport => RefreshError::Transport(String::new()),
+            Self::Decode => RefreshError::Decode(String::new()),
+            Self::Status(status) => RefreshError::Status(status, String::new()),
+        })
+    }
 }
 
 impl RefreshEngine {
@@ -477,25 +528,41 @@ impl RefreshEngine {
                 stored_digest_hex: initial.stored_digest_hex,
             });
         }
-        let initial_version = initial.record.record_version;
-        let waiting = lock.lock_owned();
-        #[cfg(any(test, feature = "test-support"))]
-        let waiting = async move {
-            use std::future::Future;
-            tokio::pin!(waiting);
-            std::future::poll_fn(|cx| {
+        let mut failure_slot = None;
+        let mut waiting = std::pin::pin!(lock.lock_owned());
+        let guard = poll_fn(|cx| {
+            let result = if failure_slot.is_some() {
+                waiting.as_mut().poll(cx)
+            } else {
+                // Join the wait and capture its slot together so a refresh can't
+                // publish its result between those two steps.
+                let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
                 let result = waiting.as_mut().poll(cx);
                 if result.is_pending() {
-                    let hook = self.before_flight_wait.lock().unwrap().take();
-                    if let Some(hook) = hook {
-                        hook();
-                    }
+                    let entry = map
+                        .get_mut(credential_id)
+                        .expect("a held flight cannot be pruned");
+                    failure_slot = Some(Arc::clone(
+                        entry.failure_slot.get_or_insert_with(Arc::default),
+                    ));
                 }
                 result
-            })
-            .await
+            };
+            #[cfg(any(test, feature = "test-support"))]
+            if result.is_pending() {
+                let hook = self.before_flight_wait.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            result
+        })
+        .await;
+        let flight = GetFlight {
+            incarnation,
+            initial_version: initial.record.record_version,
+            failure_slot,
         };
-        let guard = waiting.await;
         let engine = self.clone();
         let id = credential_id.to_owned();
         let settings_read = settings_read.cloned();
@@ -504,14 +571,7 @@ impl RefreshEngine {
         tokio::spawn(async move {
             let _guard = guard;
             engine
-                .get_locked(
-                    &id,
-                    incarnation,
-                    settings_read,
-                    initial_version,
-                    min_ttl_ms,
-                    force_refresh,
-                )
+                .get_locked(&id, flight, settings_read, min_ttl_ms, force_refresh)
                 .await
         })
         .await
@@ -521,12 +581,16 @@ impl RefreshEngine {
     async fn get_locked(
         &self,
         credential_id: &str,
-        incarnation: String,
+        flight: GetFlight,
         settings_read: Option<crate::store::SettingsReadPin>,
-        initial_version: u64,
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
+        let GetFlight {
+            incarnation,
+            initial_version,
+            failure_slot,
+        } = flight;
         let id = credential_id.to_owned();
         let admitted = incarnation.clone();
         let locked_pin = settings_read.clone();
@@ -541,10 +605,19 @@ impl RefreshEngine {
         if initial.has_refresh_intent {
             return Err(StoreOpError::NeedsReauth.into());
         }
+        let locked_version = initial.record.record_version;
+        if let Some(failure) = failure_slot.as_deref().and_then(OnceLock::get) {
+            if failure.incarnation == incarnation
+                && failure.version == initial_version
+                && failure.version == locked_version
+            {
+                return Err(failure.refusal.into_error());
+            }
+        }
         // Only the exact record committed by a prior refresh can share its
         // exchange. An admin replacement must be evaluated on its own merits.
-        if initial.record.record_version != initial_version
-            && self.is_last_refresh(credential_id, &incarnation, initial.record.record_version)
+        if locked_version != initial_version
+            && self.is_last_refresh(credential_id, &incarnation, locked_version)
         {
             return Ok(GetWithRefreshStatus {
                 incarnation,
@@ -640,10 +713,11 @@ impl RefreshEngine {
             });
         }
 
-        let (record, stored_digest_hex) = self
+        let result = self
             .do_refresh(credential_id, &incarnation, &served.record)
-            .await?;
-        self.stamp_refresh(credential_id, &incarnation, record.record_version);
+            .await;
+        self.finish_refresh(credential_id, &incarnation, locked_version, &result);
+        let (record, stored_digest_hex) = result?;
         let unmapped_plan = UnmappedPlanObservation::committed(credential_id, &record);
         Ok(GetWithRefreshStatus {
             incarnation,
@@ -1085,6 +1159,7 @@ impl RefreshEngine {
             InflightEntry {
                 lock: Arc::downgrade(&lock),
                 last_refresh: None,
+                failure_slot: None,
             },
         );
         lock
@@ -1101,10 +1176,30 @@ impl RefreshEngine {
             })
     }
 
-    fn stamp_refresh(&self, id: &str, incarnation: &str, version: u64) {
+    fn finish_refresh(
+        &self,
+        id: &str,
+        incarnation: &str,
+        version: u64,
+        result: &Result<(VaultRecord, String), EngineError>,
+    ) {
         let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
         let entry = map.get_mut(id).expect("a held flight cannot be pruned");
-        entry.last_refresh = Some((incarnation.to_owned(), version));
+        let slot = entry.failure_slot.take();
+        match result {
+            Ok((record, _)) => {
+                entry.last_refresh = Some((incarnation.to_owned(), record.record_version));
+            }
+            Err(error) => {
+                if let (Some(slot), Some(refusal)) = (slot, RetryableRefusal::from_error(error)) {
+                    let _ = slot.set(FailedRefresh {
+                        incarnation: incarnation.to_owned(),
+                        version,
+                        refusal,
+                    });
+                }
+            }
+        }
     }
 }
 

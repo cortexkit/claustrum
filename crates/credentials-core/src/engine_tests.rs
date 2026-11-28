@@ -1068,6 +1068,83 @@ async fn concurrent_gets_single_flight_one_upstream_call() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+async fn queue_get_for_refresh(
+    engine: &RefreshEngine,
+    id: &'static str,
+) -> tokio::task::JoinHandle<Result<VaultRecord, EngineError>> {
+    let (queued, waiting) = tokio::sync::oneshot::channel();
+    engine.set_before_flight_wait_hook_for_test(move || queued.send(()).unwrap());
+    let engine = engine.clone();
+    let read = tokio::spawn(async move { engine.get(id, None, false).await });
+    waiting.await.unwrap();
+    read
+}
+
+fn assert_transport_failure(result: Result<VaultRecord, EngineError>) {
+    let Err(EngineError::RefreshFailed(error)) = result else {
+        panic!("expected a refresh failure");
+    };
+    assert_eq!(
+        (error.variant_name(), error.provider_status()),
+        ("transport", None)
+    );
+}
+
+#[tokio::test]
+async fn queued_gets_share_one_failed_refresh_but_a_later_get_retries() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 2);
+    let id = "oauth:stub";
+    store.create(id, &stale_oauth_record()).unwrap();
+    let gate = ProviderGate::default();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("transport");
+    adapter.paused = Some(gate.clone());
+    let (engine, calls) = engine(store, adapter);
+    let leader_engine = engine.clone();
+    let leader = tokio::spawn(async move { leader_engine.get(id, None, false).await });
+    let mut reads = vec![leader];
+    gate.entered.notified().await;
+    for _ in 0..7 {
+        reads.push(queue_get_for_refresh(&engine, id).await);
+    }
+
+    gate.release.notify_one();
+    tokio::select! {
+        () = async {
+            for read in reads {
+                assert_transport_failure(read.await.unwrap());
+            }
+        } => {}
+        () = gate.entered.notified() => panic!("a queued read made a second provider call"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    gate.release.notify_one();
+    assert_transport_failure(engine.get(id, None, false).await);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn queued_gets_behind_an_admin_lock_share_the_failed_refresh() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 2);
+    let id = "oauth:stub";
+    store.create(id, &stale_oauth_record()).unwrap();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("transport");
+    let (engine, calls) = engine(store, adapter);
+    let admin = engine.acquire_admin_lock(id).await;
+
+    let leader = queue_get_for_refresh(&engine, id).await;
+    let waiter = queue_get_for_refresh(&engine, id).await;
+    drop(admin);
+
+    assert_transport_failure(leader.await.unwrap());
+    assert_transport_failure(waiter.await.unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn refreshes_on_different_credentials_overlap_rather_than_serialising() {
     // The OTHER half of the manifest's ModuleManaged declaration.

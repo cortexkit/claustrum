@@ -5543,7 +5543,10 @@ mod tests {
             deposit_cookie_params(),
         )
         .await;
-        assert_eq!(reply.body, bodies[0]);
+        assert_eq!(
+            deposit_cookie_body(&reply),
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
+        );
     }
 
     #[tokio::test]
@@ -9806,6 +9809,7 @@ mod tests {
 
         admin.record_bind(47, subc_protocol::Principal::Direct);
         let ordinary_refusal = scoped_request(&surface, &admin, 47, "github_app:fleet-a").await;
+        assert_scoped_not_found(&ordinary_refusal);
         admin.record_bind(
             48,
             subc_protocol::Principal::Reserved {
@@ -9819,14 +9823,20 @@ mod tests {
         let store_refusal = scoped_request(&surface, &admin, 48, "github_app:fleet-a").await;
 
         assert_eq!(
-            store_refusal, ordinary_refusal,
-            "a grant lookup failure must not make the wire distinguish vault storage from no grant"
+            store_refusal,
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
         );
         let events = store.recent_auth_events(10).expect("read events");
         assert_eq!(events[0].detail.as_deref(), Some("store_error"));
         assert_eq!(events[0].principal_kind.as_deref(), Some("reserved"));
         assert_eq!(events[0].principal_id.as_deref(), Some("prefrontal-core"));
         assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+
+        surface.force_scoped_grant_lookup_error_for_test();
+        assert_eq!(
+            scoped_request(&surface, &admin, 48, "github_app:missing").await,
+            store_refusal
+        );
     }
 
     #[tokio::test]
@@ -9929,6 +9939,8 @@ mod tests {
     async fn scoped_status_grant_lookup_failure_is_uniform_and_records_store_error() {
         let (surface, admin, store) = scoped_rig(80);
         let credential_id = "github_app:status-store-error";
+        let remote_id = "oauth:anthropic:status-store-error";
+        let unknown_id = "github_app:status-missing";
         store
             .create(
                 credential_id,
@@ -9936,35 +9948,80 @@ mod tests {
             )
             .expect("create credential");
         store
-            .create_read_grant_audited(
-                "reserved",
-                "prefrontal-core",
-                SelectorKind::Exact,
-                "github_app:",
-                GrantOperation::Read,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .expect("create read grant");
-        admin.record_bind(54, subc_protocol::Principal::Direct);
-        let ordinary_refusal = scoped_status_request(&surface, &admin, 54, credential_id).await;
+            .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+                provider_ids: Vec::new(),
+                credential_id: remote_id.into(),
+                home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: Default::default(),
+                home_version: 1,
+                categories: Vec::new(),
+            })
+            .expect("create remote record");
+        for id in [credential_id, remote_id] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "prefrontal-core",
+                    SelectorKind::Exact,
+                    id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("create read grant");
+        }
+        admin.record_bind(
+            54,
+            subc_protocol::Principal::Reserved {
+                module_id: "stranger".into(),
+            },
+        );
         admin.record_bind(
             55,
             subc_protocol::Principal::Reserved {
                 module_id: "prefrontal-core".into(),
             },
         );
+        let local_ready = scoped_status_request(&surface, &admin, 55, credential_id).await;
+        assert_eq!(local_ready["result"]["ready"], true);
+        assert_eq!(local_ready["result"]["credential_id"], credential_id);
+        let remote_ready = scoped_status_request(&surface, &admin, 55, remote_id).await;
+        assert_eq!(remote_ready["result"]["ready"], true);
+        assert_eq!(remote_ready["result"]["credential_id"], remote_id);
+        assert!(remote_ready["result"]["remote_home"].is_string());
+
+        let ordinary_refusal = scoped_status_request(&surface, &admin, 54, credential_id).await;
+        assert_eq!(ordinary_refusal["result"]["last_error_code"], "not_found");
         surface.force_scoped_grant_lookup_error_for_test();
         let store_refusal = scoped_status_request(&surface, &admin, 55, credential_id).await;
 
         assert_eq!(
-            store_refusal, ordinary_refusal,
-            "a grant lookup failure must remain indistinguishable from ordinary missing coverage"
+            store_refusal,
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
         );
         let events = store.recent_auth_events(2).expect("read refusal events");
         assert_eq!(events[0].detail.as_deref(), Some("store_error"));
         assert_eq!(events[0].principal_kind.as_deref(), Some("reserved"));
         assert_eq!(events[0].principal_id.as_deref(), Some("prefrontal-core"));
         assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+
+        for (channel, id) in [(55, remote_id), (54, credential_id), (55, unknown_id)] {
+            surface.force_scoped_grant_lookup_error_for_test();
+            assert_eq!(
+                scoped_status_request(&surface, &admin, channel, id).await,
+                store_refusal,
+                "a grant lookup failure must not disclose whether the id exists or is covered"
+            );
+        }
+        assert_eq!(
+            scoped_status_request(&surface, &admin, 55, credential_id).await,
+            local_ready
+        );
+        assert_eq!(
+            scoped_status_request(&surface, &admin, 55, remote_id).await,
+            remote_ready
+        );
     }
 
     #[tokio::test]
@@ -16456,7 +16513,11 @@ mod tests {
             .await;
             bodies.push((id, serde_json::to_string(&reply).unwrap()));
         }
-        // A store fault in the grant lookup answers the same way.
+        let expected = r#"{"result":{"error":{"class":"permanent","code":"not_found"}}}"#;
+        for (reason, body) in &bodies {
+            assert_eq!(body, expected, "{reason}");
+        }
+
         surface.force_scoped_grant_lookup_error_for_test();
         let reply = scoped_route_request(
             &surface,
@@ -16466,11 +16527,10 @@ mod tests {
             seal_params("kem:push", &recipient, b"probe"),
         )
         .await;
-        bodies.push(("grant lookup fault", serde_json::to_string(&reply).unwrap()));
-        let expected = r#"{"result":{"error":{"class":"permanent","code":"not_found"}}}"#;
-        for (reason, body) in &bodies {
-            assert_eq!(body, expected, "{reason}");
-        }
+        assert_eq!(
+            reply,
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
+        );
         assert_eq!(
             store.read_audit(None).unwrap().len(),
             audit_before,
@@ -18028,7 +18088,10 @@ mod tests {
 
         surface.force_scoped_grant_lookup_error_for_test();
         let refused = scoped_public_key_request(&surface, &admin, 91, credential_id).await;
-        assert_scoped_not_found(&refused);
+        assert_eq!(
+            refused,
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
+        );
         let event = store
             .recent_auth_events(1)
             .expect("read auth events")
@@ -18037,6 +18100,36 @@ mod tests {
         assert_eq!(event.detail.as_deref(), Some("store_error"));
         assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
         assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+
+        surface.force_scoped_grant_lookup_error_for_test();
+        assert_eq!(
+            scoped_public_key_request(&surface, &admin, 91, "signing:public-key:missing").await,
+            refused
+        );
+    }
+
+    #[tokio::test]
+    async fn account_token_grant_lookup_failure_is_transient() {
+        let (surface, admin, _store) = scoped_rig(91);
+        admin.record_bind(
+            91,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        surface.force_scoped_grant_lookup_error_for_test();
+        let reply = scoped_route_request(
+            &surface,
+            &admin,
+            91,
+            OP_ACCOUNT_TOKEN,
+            json!({"audience": "cortexkit-runners"}),
+        )
+        .await;
+        assert_eq!(
+            reply,
+            json!({"result": {"error": {"code": "store_error", "class": "transient"}}})
+        );
     }
 
     /// The signing fence: a signing-key credential signs, and EVERY other kind is

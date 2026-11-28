@@ -3183,11 +3183,11 @@ impl ReadSurface {
     /// a malformed request costs no key access); the refusal-rate gate `open` also uses;
     /// the exact `seal` grant; the record and its kind; the seal; one audit row; reply.
     ///
-    /// ONE REFUSAL FOR EVERYTHING ABOUT THE KEY. An unknown id, no grant, a revoked
-    /// grant, a grant for another operation, a record that is not a KEM key, and a
-    /// store fault while reading it all answer `not_found`, so a caller cannot use this
-    /// op to learn which ids exist or what kind they are. Each counts toward the shared
-    /// refusal threshold.
+    /// An unknown id, no grant, a revoked grant, a grant for another operation, a
+    /// record that is not a KEM key, and a store fault while reading the record all
+    /// answer `not_found`. A store fault during grant lookup instead answers
+    /// `store_error` regardless of the requested key or its coverage. Both refusals
+    /// count toward the shared threshold.
     ///
     /// AUDITED ON EVERY CALL, before the ciphertext is returned, because whoever opens
     /// the message attributes it to this key. If the row cannot be written, or the key
@@ -3253,7 +3253,10 @@ impl ReadSurface {
             GrantOperation::Seal,
         ) {
             Ok(resolved) => resolved,
-            Err(_) => return Err(refuse(&mut counter)),
+            Err(code) => {
+                self.count_open_refusal(&mut counter, connection_id);
+                return Err(code);
+            }
         };
         let credential_id = params.credential_id.as_str();
         let snapshot = match incarnation.and_then(|incarnation| {
@@ -3653,7 +3656,10 @@ impl ReadSurface {
         }
         let (kind, id) = self
             .authorize_scoped_as(caller, None, &params.id, GrantOperation::Deposit)
-            .map_err(|_| DepositCookieError::NotFound)?
+            .map_err(|code| match code {
+                ReadError::StoreError => DepositCookieError::StoreError,
+                _ => DepositCookieError::NotFound,
+            })?
             .principal;
         let result = self
             .engine
@@ -3924,22 +3930,32 @@ impl ReadSurface {
                 },
                 refusal,
             );
+        };
+        let deny = |refusal| {
+            record_refusal(refusal);
             ReadError::NotFound
         };
         let (kind, id, mut coverage) = coverage
-            .map_err(|_| record_refusal(ScopedReadRefusal::StoreError))?
-            .ok_or_else(|| record_refusal(ScopedReadRefusal::NoGrant))?;
+            .map_err(|error| {
+                record_refusal(ScopedReadRefusal::StoreError);
+                match error {
+                    // The store also uses errors for policy fences, not only failed reads.
+                    StoreOpError::NotFound | StoreOpError::BusKeyReserved => ReadError::NotFound,
+                    _ => ReadError::StoreError,
+                }
+            })?
+            .ok_or_else(|| deny(ScopedReadRefusal::NoGrant))?;
         if operation == GrantOperation::AccountToken
             && !account_token::audience_admits(credential_id, kind, &id)
         {
-            return Err(record_refusal(ScopedReadRefusal::NoGrant));
+            return Err(deny(ScopedReadRefusal::NoGrant));
         }
         if require_record && coverage.covered && !coverage.id_exists {
-            return Err(record_refusal(ScopedReadRefusal::NotFound));
+            return Err(deny(ScopedReadRefusal::NotFound));
         }
         let settings_read = coverage.settings_read.take();
         if let Some(refusal) = classify_scoped_coverage(coverage) {
-            return Err(record_refusal(refusal));
+            return Err(deny(refusal));
         }
         // Record first use at shared scoped authorization, except for deposit and sign,
         // which can still reject caller input after authorization and record success
@@ -4141,40 +4157,47 @@ impl ReadSurface {
 
     /// The `credential.status` reply body. A remote record answers from this vault's
     /// storage (the local fields plus `remote_home` and `last_fetch_outcome`) after the
-    /// same grant check, and its refusal is the same body an uncovered local id gets.
-    /// Everything else is [`Self::status`].
+    /// same grant check as a local id. A grant lookup fault returns a classified error
+    /// instead of a status body, whether the id is local, remote or unresolved.
     pub async fn status_reply(
         &self,
         connection_id: u64,
         caller: &crate::federation::ingress::ScopedCaller,
         params: &StatusParams,
     ) -> serde_json::Value {
-        if let Some(record) =
+        let status = if let Some(record) =
             self.remote_address(params.handle.as_ref(), params.credential_id.as_ref())
         {
             let fenced_out = self.engine.store().is_fenced_out();
-            if !self
-                .authorize_scoped_as(
-                    caller,
-                    params.enrollment_token.as_deref(),
-                    &record.credential_id,
-                    GrantOperation::Read,
-                )
-                .is_ok_and(|authorization| authorization.settings_read.is_none())
-            {
-                return serde_json::to_value(StatusResult {
-                    ready: false,
-                    last_error_code: Some(ReadError::NotFound),
-                    lease_held: !fenced_out,
-                    credential_id: None,
-                    record_version: None,
-                    stale_pending: None,
-                })
-                .unwrap_or_default();
+            let code = match self.authorize_scoped_as(
+                caller,
+                params.enrollment_token.as_deref(),
+                &record.credential_id,
+                GrantOperation::Read,
+            ) {
+                Ok(authorization) if authorization.settings_read.is_none() => {
+                    return crate::federation::remote_read::status_body(&record, fenced_out);
+                }
+                Ok(_) => ReadError::NotFound,
+                Err(code) => code,
+            };
+            StatusResult {
+                ready: false,
+                last_error_code: Some(code),
+                lease_held: !fenced_out,
+                credential_id: None,
+                record_version: None,
+                stale_pending: None,
             }
-            return crate::federation::remote_read::status_body(&record, fenced_out);
+        } else {
+            self.status(connection_id, caller, params).await
+        };
+        // Only scoped grant lookup produces this code in a local status result.
+        if params.credential_id.is_some() && status.last_error_code == Some(ReadError::StoreError) {
+            let code = ReadError::StoreError;
+            return serde_json::json!({ "error": ErrorBody { code, class: code.class() } });
         }
-        serde_json::to_value(self.status(connection_id, caller, params).await).unwrap_or_default()
+        serde_json::to_value(status).unwrap_or_default()
     }
 
     /// The `credential.report_auth_failure` reply body. A report on a remote record is
@@ -4841,7 +4864,12 @@ impl ReadSurface {
                         false,
                     ) {
                         Ok(authorization) => authorization,
-                        Err(_) => return unavailable(None),
+                        Err(code) => {
+                            return StatusResult {
+                                last_error_code: Some(code),
+                                ..unavailable(None)
+                            };
+                        }
                     };
                     let Ok(incarnation) = incarnation else {
                         return unavailable(None);

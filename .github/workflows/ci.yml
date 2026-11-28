@@ -141,6 +141,7 @@ jobs:
       # The shared lane retains per-step names, counts and Bun/runtime timeouts.
       - name: Windows CI checks
         if: runner.os == 'Windows'
+        timeout-minutes: 75
         shell: bash
         run: bash scripts/gate.sh --lane windows-ci
 
@@ -211,6 +212,7 @@ jobs:
 
       - name: Linux Secret Service round trips and locked refusal
         if: runner.os == 'Linux'
+        timeout-minutes: 8
         env:
           CK_NATIVE_STORE_TESTS: '1'
         run: bash scripts/test-native-store.sh
@@ -382,12 +384,25 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
 
+      - name: Select OpenSSL for the Ed25519 vector verifier
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS /usr/bin/openssl is LibreSSL and does not support pkeyutl -rawin.
+          openssl_bin="$(brew --prefix openssl@3)/bin"
+          "$openssl_bin/openssl" version
+          printf '%s\n' "$openssl_bin" >> "$GITHUB_PATH"
+
       - name: Test
         if: runner.os != 'Windows'
+        # Leave about twice the time of the slowest healthy platform's full job.
+        timeout-minutes: 75
         run: cargo test --locked --workspace --all-targets
 
       - name: Client without transport
         if: runner.os != 'Windows'
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
@@ -413,6 +428,7 @@ jobs:
       # cfg(windows) branches via the regular suite above.
       - name: Real-daemon e2e (ship gate, no silent skip)
         if: matrix.os == 'ubuntu'
+        timeout-minutes: 75
         env:
           CRED_REQUIRE_DAEMON: "1"
         run: cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- --ignored --test-threads=1
@@ -424,6 +440,7 @@ jobs:
       # is the expensive part.
       - name: Release-artifact assertions (ship gate)
         if: matrix.os == 'ubuntu'
+        timeout-minutes: 75
         run: cargo test --locked --workspace --features credentials-core/test-support --test cli_admin test_escape_hatches_are_absent -- --ignored
 
       # The released v0.1.2 artifact must keep reading a store that carries every
@@ -433,6 +450,7 @@ jobs:
       # and linux-x64, the two the test knows how to fetch.
       - name: Released v0.1.2 reads a migration-N store
         if: matrix.os == 'ubuntu'
+        timeout-minutes: 20
         run: cargo test --locked --workspace --features credentials-core/test-support --test v012_release_compat -- --ignored --nocapture
 
       # Keep feature variants after the default-feature suites to avoid relinking
@@ -440,11 +458,13 @@ jobs:
       # repeating the workspace suite.
       - name: Security-conformance suite (crash-safety seams)
         if: runner.os != 'Windows'
+        timeout-minutes: 75
         run: cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
 
       # Probe the separately built default-feature artifact, not the seam binary.
       - name: Interactive import picker + real-terminal smoke
         if: matrix.os == 'ubuntu'
+        timeout-minutes: 75
         shell: bash
         run: |
           cargo build --release --locked -p credentials-module --bin ck-auth

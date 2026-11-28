@@ -1179,29 +1179,34 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
 async fn the_consumers_expiry_runs_on_bs_clock_whatever_the_wall_offset() {
     let rig = Rig::new("remote-clocks").await;
     let clock = rig.vaults.b.clock.clone();
-    for (index, offset) in [600_000i64, -600_000].into_iter().enumerate() {
+    for (index, (offset, home_lifetime_ms)) in [(600_000, 200_000), (-600_000, 198_000)]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("oauth:anthropic:offset-{index}");
         rig.login(
             &id,
-            oauth_record("anthropic", "access-0", "refresh-0", Some(200_000)),
+            oauth_record("anthropic", "access-0", "refresh-0", Some(home_lifetime_ms)),
         );
         clock.set_wall_offset(offset);
         let t0_wall = clock.wall_ms();
         let got = rig.served(&id, None).await;
         let expires_in = got.expires_at_ms.unwrap() - t0_wall;
         assert!(
-            expires_in > 190_000 && expires_in <= 200_000,
+            expires_in > 190_000 && expires_in <= home_lifetime_ms,
             "offset {offset}: expires_at_ms is B's wall clock at t0 plus expires_in_ms ({expires_in})"
         );
         let before = rig.fetches();
-        clock.advance(139_000);
+        // The home derives the remaining lifetime from its real wall clock.
+        // Test the consumer's boundary against the lifetime the home returned.
+        clock.advance(expires_in - 60_000 - 1);
         rig.served(&id, None).await;
         assert_eq!(
             rig.fetches(),
             before,
-            "offset {offset}: still inside expiry minus skew"
+            "offset {offset}: still inside expiry minus skew (A returned {expires_in} ms)"
         );
-        clock.advance(2_000);
+        clock.advance(1);
         rig.served(&id, None).await;
         assert_eq!(
             rig.fetches(),

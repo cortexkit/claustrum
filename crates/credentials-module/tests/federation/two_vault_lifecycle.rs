@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use claustrum_module_probe::{
     federation::{transfer::ensure_transfer_key, OutboundClient},
@@ -16,8 +16,8 @@ use credentials_core::{
 use serde_json::{json, Value};
 
 use super::support::{
-    poll_until_ready, temp_root, wait_until, Held, HomeStore, Reply, SharedCallosumStandIn,
-    VaultFixture, TARGET_MODULE,
+    temp_root, wait_until, Held, HomeStore, Reply, SharedCallosumStandIn, VaultFixture,
+    TARGET_MODULE,
 };
 
 const HOME_FP: &str = "00000000000000000000000000000007";
@@ -102,15 +102,12 @@ impl Rig {
     }
 
     async fn wait_for_login(&self, org: &str, pairing: &str) -> RemoteRecord {
-        let row = poll_until_ready(std::future::poll_fn(|_| {
-            match self.remote().filter(|row| {
+        let row = wait_for_store(&self.member, || {
+            self.remote().filter(|row| {
                 row.identity.org_name.as_deref() == Some(org)
                     && row.home_pairing_id.as_deref() == Some(pairing)
-            }) {
-                Some(row) => std::task::Poll::Ready(row),
-                None => std::task::Poll::Pending,
-            }
-        })).await.unwrap_or_else(|| {
+            })
+        }).await.unwrap_or_else(|| {
             panic!("no automatic login for {org:?}, {pairing}; remote={:?} home grants={:?} home targets={:?} member state={:?} home watches={:?} member watches={:?}",
                 self.remote(), self.home.list_member_grants().unwrap(),
                 self.home.list_hub_login_targets().unwrap().iter().map(|row| (row.kind, row.delivered, row.pairing_id.clone())).collect::<Vec<_>>(),
@@ -141,6 +138,25 @@ impl Rig {
             assert_eq!(callosum.watch_snapshot(Some(body)).await, 2);
         }
     }
+}
+
+async fn wait_for_store<T>(
+    store: &EncryptedStore,
+    mut read: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    // Subscribe before the first read so a concurrent commit cannot be missed.
+    // Parking between writes lets the publisher and its database jobs make progress.
+    let mut writes = store.subscribe_writes();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(result) = read() {
+                break result;
+            }
+            writes.changed().await.expect("store write stream closed");
+        }
+    })
+    .await
+    .ok()
 }
 
 async fn prepare(
@@ -265,8 +281,10 @@ async fn publishes_login_updates_and_ended_preserves_manual_copies() {
         })
         .unwrap();
     rig.home.set_login_sharing_audited(false, "test").unwrap();
-    wait_until(|| rig.remote().is_none()).await;
-    wait_until(|| {
+    wait_for_store(&rig.member, || rig.remote().is_none().then_some(()))
+        .await
+        .expect("member did not remove the automatic login");
+    wait_for_store(&rig.home, || {
         rig.home
             .list_hub_login_targets()
             .unwrap()
@@ -277,8 +295,10 @@ async fn publishes_login_updates_and_ended_preserves_manual_copies() {
                     && row.delivered
                     && row.sealed_bytes.is_some()
             })
+            .then_some(())
     })
-    .await;
+    .await
+    .expect("home did not deliver the ended login list");
     assert_eq!(rig.member.remote_record(MANUAL).unwrap(), Some(manual));
 }
 
@@ -289,14 +309,16 @@ async fn outage_and_replacement_catch_up_and_an_empty_bucket_reset_keeps_the_cop
     let version = rig.home.list_hub_login_targets().unwrap()[0].generation;
     rig.hub.set_online(false);
     rig.overwrite("written offline");
-    wait_until(|| {
+    wait_for_store(&rig.home, || {
         rig.home
             .list_hub_login_targets()
             .unwrap()
             .iter()
             .any(|row| row.generation > version && !row.delivered)
+            .then_some(())
     })
-    .await;
+    .await
+    .expect("home did not prepare a newer login list while offline");
     assert_eq!(rig.remote(), Some(original.clone()));
 
     rig.hub.set_online(true);
@@ -357,7 +379,9 @@ async fn signed_member_manifest_report_becomes_readiness_on_the_home() {
         record_manifest_report(&rig.member, &member_id(MEMBER_FP), &report)["status"],
         "recorded"
     );
-    wait_until(|| status().ready).await;
+    wait_for_store(&rig.home, || status().ready.then_some(()))
+        .await
+        .expect("home did not record the member's manifest report");
     let member = status()
         .computers
         .into_iter()
@@ -410,7 +434,9 @@ async fn a_confirmed_unpair_removes_automatic_copies_while_the_hub_is_unreachabl
         "devices": [], "peers": []});
     answer(&rig.member_callosum, &unpaired);
     second.release(Reply::Ok(unpaired));
-    wait_until(|| rig.remote().is_none()).await;
+    wait_for_store(&rig.member, || rig.remote().is_none().then_some(()))
+        .await
+        .expect("member did not remove the unpaired home's automatic login");
     assert_eq!(rig.member.remote_record(MANUAL).unwrap(), Some(manual));
     // The hub never connected.
     drop(connect);

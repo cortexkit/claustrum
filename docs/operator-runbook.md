@@ -972,7 +972,10 @@ authenticated by a request secret only it holds, so neither an operator nor a sq
 collect a token for a name they do not hold. `--name` overrides the proposed spelling, which
 is a stranger's claim rather than a fact. After approval, grant `enrolled:<name>` what it
 needs. In `enroll list`, `awaiting-poll` means admitted but never collected: a stalled
-handover, not a live consumer.
+handover, not a live consumer. When a poll or the vault's expiry sweep finds an expired
+approval for which no token was issued, the entry disappears from `enroll list` and
+the name can be approved again. Grants on the name stay in place and still require
+explicit consent before the next consumer can inherit them.
 
 A plugin can request up to four `read`/`list` grants with its proposal. `enroll list`
 and `enroll approve` show the stored list and how many credentials each grant reaches

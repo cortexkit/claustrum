@@ -2,6 +2,8 @@
 
 use super::*;
 
+const RETIRED_UNCOLLECTED_DETAIL: &str = "retired_uncollected";
+
 struct PollRow {
     secret_hash: String,
     state: String,
@@ -91,8 +93,23 @@ fn sweep_pending_enrollments_tx(
          WHERE state IN ('pending','approved') AND expires_at_ms <= ?1",
         [now],
     )?;
-    if expired > 0 {
-        append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
+    // The only enrollment insert creates and links an approved request in one
+    // transaction, and only terminal requests are pruned. A tokenless enrollment
+    // with no approved request is stranded, even if its expired request is gone.
+    let retired = tx.execute(
+        "UPDATE enrolled_consumers SET revoked_at_ms = ?1 \
+         WHERE revoked_at_ms IS NULL AND token_hash IS NULL AND token_generation = 0 \
+           AND enrollment_id NOT IN (SELECT enrollment_id FROM pending_enrollments \
+                                     WHERE state = 'approved' AND enrollment_id IS NOT NULL)",
+        [now],
+    )?;
+    if expired > 0 || retired > 0 {
+        let detail = if retired > 0 {
+            RETIRED_UNCOLLECTED_DETAIL
+        } else {
+            "expired"
+        };
+        append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, detail, now, None)?;
     }
 
     let retention_cutoff = now.saturating_sub(ENROLLMENT_TERMINAL_RETENTION_MS);
@@ -596,13 +613,24 @@ impl EncryptedStore {
                         "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
                         [request_id],
                     )?;
-                    append_enrollment_event_tx(
-                        tx,
-                        ENROLL_EXPIRE_SUBJECT,
-                        "expired",
-                        now,
-                        principal,
-                    )?;
+                    let retired = if let ("approved", Some(enrollment_id)) =
+                        (state.as_str(), enrollment_id.as_deref())
+                    {
+                        tx.execute(
+                            "UPDATE enrolled_consumers SET revoked_at_ms = ?1 \
+                             WHERE enrollment_id = ?2 AND revoked_at_ms IS NULL \
+                               AND token_hash IS NULL AND token_generation = 0",
+                            rusqlite::params![now, enrollment_id],
+                        )? > 0
+                    } else {
+                        false
+                    };
+                    let detail = if retired {
+                        RETIRED_UNCOLLECTED_DETAIL
+                    } else {
+                        "expired"
+                    };
+                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, detail, now, principal)?;
                     append_enrollment_event_tx(
                         tx,
                         ENROLL_POLL_SUBJECT,

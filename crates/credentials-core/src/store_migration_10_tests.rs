@@ -3876,7 +3876,7 @@ fn approved_restart_poll_rotation_and_total_poll_transitions_hold() {
 
 #[test]
 fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_changes() {
-    let (_root, store) = rig("enrollment-superseded", 115);
+    let (root, store) = rig("enrollment-superseded", 115);
     let base = now_ms();
 
     let old_secret = enrollment_secret(20);
@@ -3925,9 +3925,10 @@ fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_
 
     let reissue_secret = enrollment_secret(22);
     let reissue_request = store
-        .propose_enrollment(
+        .propose_enrollment_at(
             "repair-proposal",
             &enrollment_secret_hash(&reissue_secret).unwrap(),
+            base,
         )
         .expect("repair proposal");
     let reissue_id = store
@@ -3939,9 +3940,21 @@ fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_
     assert_eq!(reissued.token_generation, 1);
     let reissued_hash = enrollment_secret_hash(&reissued.token).unwrap();
     assert!(matches!(
-        store.poll_enrollment(&reissue_request.request_id, &reissue_secret),
+        store.poll_enrollment_at(&reissue_request.request_id, &reissue_secret, base),
         Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
     ));
+    assert!(matches!(
+        store.poll_enrollment_at(
+            &reissue_request.request_id,
+            &reissue_secret,
+            base + ENROLLMENT_PENDING_TTL_MS
+        ),
+        Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+    ));
+    assert_eq!(
+        store.resolve_enrollment_token(&reissued.token).unwrap(),
+        Some(("repair-name".into(), 1))
+    );
     let hash_after_poll: String = store
         .with_raw_conn(|conn| {
             conn.query_row(
@@ -3964,6 +3977,11 @@ fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_
     let expiring_id = store
         .approve_enrollment(&expiring.request_id, "expiring", "operator")
         .expect("approve expiring request");
+    let store_path = root.join("store.db");
+    let listed = list_enrollments_read_only(&store_path).expect("list awaiting approval handover");
+    assert!(listed
+        .iter()
+        .any(|row| row.name == "expiring" && row.state == "awaiting-poll"));
     assert!(matches!(
         store.poll_enrollment_at(
             &expiring.request_id,
@@ -3982,6 +4000,187 @@ fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_
         })
         .expect("expired approval token hash");
     assert_eq!(expired_hash, None);
+
+    let listed_after_expiry = list_enrollments_read_only(&store_path).expect("list after expiry");
+    let replacement = store
+        .propose_enrollment(
+            "expiring",
+            &enrollment_secret_hash(&enrollment_secret(24)).unwrap(),
+        )
+        .expect("propose a replacement after poll-time expiry");
+    store
+        .approve_enrollment(&replacement.request_id, "expiring", "operator")
+        .expect("approve the same name after poll-time expiry");
+    assert!(
+        listed_after_expiry.iter().all(|row| row.name != "expiring"),
+        "poll-time expiry must remove the uncollected enrollment from the listing"
+    );
+}
+
+#[test]
+fn enrollment_expiry_sweep_releases_an_approved_name() {
+    let (_root, store) = rig("enrollment-sweep-approved", 116);
+    let base = now_ms();
+    let secret = enrollment_secret(25);
+    let request = store
+        .propose_enrollment_at(
+            "suggested-name",
+            &enrollment_secret_hash(&secret).unwrap(),
+            base,
+        )
+        .expect("propose expiring enrollment");
+    store
+        .approve_enrollment(&request.request_id, "reserved-name", "operator")
+        .expect("approve with a name override");
+    let waiting_secret = enrollment_secret(29);
+    let waiting = store
+        .propose_enrollment_at(
+            "still-waiting",
+            &enrollment_secret_hash(&waiting_secret).unwrap(),
+            base + 1,
+        )
+        .expect("propose an enrollment with a later deadline");
+    store
+        .approve_enrollment(&waiting.request_id, "still-waiting", "operator")
+        .expect("approve the later request");
+
+    let expired_at = base + ENROLLMENT_PENDING_TTL_MS;
+    let audit_before_sweep = store.audit_tip().expect("audit tip before expiry");
+    let replacement = store
+        .propose_enrollment_at(
+            "reserved-name",
+            &enrollment_secret_hash(&enrollment_secret(26)).unwrap(),
+            expired_at,
+        )
+        .expect("sweep and propose a replacement");
+    assert!(matches!(
+        store.poll_enrollment_at(&request.request_id, &secret, expired_at),
+        Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+    ));
+    assert_eq!(store.audit_tip().unwrap(), audit_before_sweep);
+    store
+        .approve_enrollment(&replacement.request_id, "reserved-name", "operator")
+        .expect("approve the same name after sweep-time expiry");
+    assert!(matches!(
+        store.poll_enrollment_at(&waiting.request_id, &waiting_secret, expired_at),
+        Ok(EnrollmentPoll::Approved { name, .. }) if name == "still-waiting"
+    ));
+}
+
+#[test]
+fn enrollment_expiry_sweep_releases_a_preexisting_stranded_name() {
+    let (_root, store) = rig("enrollment-sweep-stranded", 117);
+    let secret = enrollment_secret(27);
+    let request = store
+        .propose_enrollment("stranded", &enrollment_secret_hash(&secret).unwrap())
+        .expect("propose enrollment");
+    store
+        .approve_enrollment(&request.request_id, "stranded", "operator")
+        .expect("approve enrollment");
+    store
+        .create_read_grant_audited(
+            "enrolled",
+            "stranded",
+            SelectorKind::Exact,
+            "apikey:retained",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        )
+        .expect("grant access to the reserved name");
+    let grants = store.list_read_grants().expect("grants before the sweep");
+    // Older writers expired the request without retiring the reserved enrollment.
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE pending_enrollments SET state = 'expired', expires_at_ms = 0 WHERE request_id = ?1",
+                [&request.request_id],
+            )
+        })
+        .expect("seed a stranded approval");
+
+    let replacement = store
+        .propose_enrollment(
+            "stranded",
+            &enrollment_secret_hash(&enrollment_secret(28)).unwrap(),
+        )
+        .expect("sweep and propose a replacement");
+    assert!(matches!(
+        store.approve_enrollment(&replacement.request_id, "stranded", "operator"),
+        Err(StoreOpError::EnrollmentNameHasGrants { name }) if name == "stranded"
+    ));
+    store
+        .approve_enrollment_with_grants(&replacement.request_id, "stranded", true, "operator")
+        .expect("approve the same name after the sweep repairs a stranded approval");
+    assert_eq!(store.list_read_grants().unwrap(), grants);
+    let retirement_events: i64 = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM auth_events WHERE credential_id = ?1 AND detail = 'retired_uncollected'",
+                [ENROLL_EXPIRE_SUBJECT],
+                |row| row.get(0),
+            )
+        })
+        .expect("count retirement events in the bounded expiry history");
+    assert_eq!(retirement_events, 1);
+}
+
+#[test]
+fn enrollment_expiry_sweep_recovers_pruned_approvals_without_retiring_issued_tokens() {
+    let (_root, store) = rig("enrollment-sweep-pruned", 118);
+    let mut issued = Vec::new();
+    for (name, byte) in [("collected", 30), ("reissued", 31), ("pruned", 32)] {
+        let secret = enrollment_secret(byte);
+        let request = store
+            .propose_enrollment(name, &enrollment_secret_hash(&secret).unwrap())
+            .expect("propose enrollment");
+        store
+            .approve_enrollment(&request.request_id, name, "operator")
+            .expect("approve enrollment");
+        match name {
+            "collected" => {
+                let EnrollmentPoll::Approved { token, .. } = store
+                    .poll_enrollment(&request.request_id, &secret)
+                    .expect("collect token")
+                else {
+                    panic!("expected an approved token");
+                };
+                issued.push((name, token));
+            }
+            "reissued" => {
+                let token = store
+                    .reissue_enrollment(name, "operator")
+                    .expect("reissue token");
+                issued.push((name, token.token));
+            }
+            _ => {}
+        }
+    }
+    // Reproduce the old sweep expiring and then pruning the request rows.
+    store
+        .with_raw_conn(|conn| {
+            conn.execute_batch(
+                "UPDATE pending_enrollments SET state = 'expired' WHERE state = 'approved';
+                 DELETE FROM pending_enrollments WHERE state IN ('consumed', 'expired');",
+            )
+        })
+        .expect("prune historical terminal requests");
+
+    let replacement = store
+        .propose_enrollment(
+            "pruned",
+            &enrollment_secret_hash(&enrollment_secret(33)).unwrap(),
+        )
+        .expect("sweep and propose a replacement");
+    store
+        .approve_enrollment(&replacement.request_id, "pruned", "operator")
+        .expect("approve the same name after the sweep repairs a pruned approval");
+    for (name, token) in issued {
+        assert_eq!(
+            store.resolve_enrollment_token(&token).unwrap(),
+            Some((name.to_string(), 1)),
+            "a pruned request must not retire a {name} token"
+        );
+    }
 }
 
 #[test]

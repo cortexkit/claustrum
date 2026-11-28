@@ -63,7 +63,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `needs_reauth` | auth_required | the provider refused the stored login for good (for example `invalid_grant`, or a GitHub App that is no longer installed) and it stays refused until a new login, the credential was deliberately retired, or it has an unresolved refresh intent |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
-| `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
+| `store_error` | transient | a scoped grant lookup failed or `credential.list_scoped` could not read one complete snapshot |
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
 | `invalid_service_name` | permanent | an API-key service is empty, contains `-gw-`, or contains a colon, whitespace, control character or `\|` |
 | `service_in_provider_catalog` | permanent | a provider registration names a service already owned by the fixed API-key catalog |
@@ -325,6 +325,11 @@ both addresses or neither is refused as a malformed request
 `enrollment_token` selects the principal for a scoped credential-id request or
 `credential.list_scoped`; it is not an additional credential address and does not
 authorize a handle-form request.
+
+**Scoped grant lookup failures.** If the store fails while checking grant coverage,
+the operation returns `store_error` / `transient` in `result.error`. This reply does
+not depend on whether the target exists or the caller has a grant for it. When the
+store works, unknown and ungranted targets remain indistinguishable (`not_found`).
 
 **Batch envelope.** `credential.get_many` takes `params: { items: [{ handle, ... }, ...] }`
 and returns a `Response` with top-level `results`, not `result`. Each entry is either
@@ -1451,8 +1456,18 @@ repair at the home (§14).
 
 A store failure while resolving a handle or reading its metadata reports the same
 transient `last_error_code` as the other handle reads (`refresh_failed` for an
-underlying store outage), never `not_found`. No keys are added to the status reply;
-the error code's class determines retry policy. Scoped refusals remain uniform.
+underlying store outage), never `not_found`. No keys are added to that handle status
+reply; the error code's class determines retry policy.
+
+A scoped grant lookup failure returns a classified refusal rather than a status body,
+whether the requested id is local, remote, or unresolved:
+
+```json
+{"result":{"error":{"class":"transient","code":"store_error"}}}
+```
+
+When the lookup succeeds, unknown and uncovered ids still get the same unresolved
+status body (`ready: false`, `last_error_code: "not_found"`, no id or version).
 
 | field | meaning |
 |---|---|
@@ -1928,14 +1943,14 @@ Every post-decode refusal is a Response frame with
 `store_error` is transient (store, lease, I/O, shutdown, audit-append or version-guard
 failure). Refusals mutate no credentials, categories, audit or first-use rows.
 For each refusal, the vault attempts one bounded diagnostic in the trimmable
-`auth_events` table, without secret bytes: invalid_id,
-invalid_payload and not_found use subject `credential.deposit_cookie`;
-not_permitted and store_error use the validated id. Diagnostic failure never changes
-the reply. Authorization uses the scoped diagnostic reason `no_grant`, `not_found`,
-`uncategorized`, `wrong_kind` or `store_error`, while always replying `not_found`;
-other reasons are
-`deposit_cookie_invalid_id`, `deposit_cookie_invalid_payload`,
-`deposit_cookie_not_permitted` and `deposit_cookie_store_error`.
+`auth_events` table, without secret bytes. Authorization uses subject
+`credential.deposit_cookie` with the scoped diagnostic reason `no_grant`, `not_found`,
+`uncategorized`, `wrong_kind` or `store_error`. A failed grant lookup returns
+`store_error` / `transient`; other authorization denials return `not_found` / `permanent`.
+Input validation uses the same subject with `deposit_cookie_invalid_id` or
+`deposit_cookie_invalid_payload`. Write refusals use the validated id with
+`deposit_cookie_not_permitted` or `deposit_cookie_store_error`. Diagnostic failure
+never changes the reply.
 
 A successful write and audit append commit in one transaction. Audit operations are
 `deposit_cookie_create` and `deposit_cookie_replace`, actor/source/created_by are the
@@ -2099,6 +2114,7 @@ Refusals use the ordinary `result.error` object with `code`, `class`, and option
 | Code | Class / remedy |
 | --- | --- |
 | `not_found` | `permanent`; no information about other grants or audiences |
+| `store_error` | `transient`; the scoped grant lookup failed |
 | `account_login_required` | `auth_required`; run `ck account login` |
 | `machine_revoked`, `machine_not_found`, `account_not_active` | `auth_required`; re-login |
 | `invalid_request`, `auth_failed`, `signature_invalid`, `account_exchange_invalid` | `permanent`; signer/contract mismatch, fixed-text operator warning |
@@ -2173,12 +2189,12 @@ Checks run in order, each only after its predecessors pass:
 9. one audit row (below), then the reply.
 
 Steps 2 to 5 run before anything is authorized or read, so a malformed request never
-touches a key. **One answer for everything about the key:** an unknown id, no grant, a
-revoked grant, a grant for another operation (`read`, `open`, `sign`, `list`), a seal
-grant on a record that is not a `KemKey`, and a store fault while checking the grant
-or reading the record all return the identical `not_found` / permanent body, and each
-counts toward the refusal threshold. A `seal` grant authorizes no other operation, and
-no other grant authorizes `seal`.
+touches a key. An unknown id, no grant, a revoked grant, a grant for another operation
+(`read`, `open`, `sign`, `list`), a seal grant on a record that is not a `KemKey`, and a
+store fault while reading the record all return the identical `not_found` / permanent
+body. A store fault while checking the grant instead returns `store_error` / transient,
+regardless of the requested key or its coverage. Both refusals count toward the refusal
+threshold. A `seal` grant authorizes no other operation, and no other grant authorizes `seal`.
 
 `kem:vault-transfer:1` is reserved for federation, including hub login lists. No
 grant can authorize `credential.seal` with this key: the store refuses such grants,

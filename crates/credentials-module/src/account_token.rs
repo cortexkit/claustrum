@@ -1,6 +1,6 @@
 //! Grant-gated, audience-scoped account tokens with an identity-bound cache.
 
-use super::{ErrorClass, ReadSurface};
+use super::{ErrorClass, ReadError, ReadSurface};
 use crate::account_token_mint::{
     candidate, machine_state_path, mint, observe_refusal, signer, AccountTokenError,
     AccountTokenResult, Mint,
@@ -123,7 +123,10 @@ impl ReadSurface {
                     &audience,
                     GrantOperation::AccountToken,
                 )
-                .map_err(|_| AccountTokenError::new("not_found", ErrorClass::Permanent))?
+                .map_err(|code| match code {
+                    ReadError::StoreError => AccountTokenError::new("store_error", code.class()),
+                    _ => AccountTokenError::new("not_found", ErrorClass::Permanent),
+                })?
                 .principal;
             let key = candidate(&surface.engine, &surface.account_tokens.path()?)
                 .map_err(|_| AccountTokenError::login())?;

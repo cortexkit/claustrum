@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "claustrum-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aft-secret-rules",
  "base64",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "claustrum-providers"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aft-secret-rules",
  "async-trait",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-module"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-nats",
  "async-trait",

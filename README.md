@@ -79,9 +79,8 @@ A bug fix ships with a test that fails without the fix.
 ## Install and operate
 
 `ck setup claustrum` installs the vault. **Claustrum releases require subc-core (the
-supervisor core), version 0.20.154 or newer.** Before installing v0.3.0, run `ck upgrade`
-to get `ck` 0.20.155 or newer, the public build carrying that core. This applies whether
-you install with `ck setup claustrum` or from the release page.
+supervisor core), version 0.24.8 or newer.** Before installing v0.4.0, run `ck upgrade`
+to get that core. This applies whether you install with `ck setup claustrum` or from the release page.
 
 Public releases support Apple Silicon Macs, plus Linux and Windows on x64 and ARM64.
 For manual downloads, see the [release asset names](docs/operator-runbook.md#release-assets).

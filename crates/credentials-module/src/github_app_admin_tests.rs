@@ -994,7 +994,7 @@ async fn github_app_oversized_successes_keep_the_endpoint_invalid_reply_outcome(
         let rig = Rig::new(vec![Step::LoopbackPost(url)], true);
         let before = rig.counts();
         let response = rig.call(&create_body(CODE, AGENT, Some(SLOT))).await;
-        server.join().unwrap();
+        server.await.expect("loopback conversion fixture failed");
         assert_result(
             response,
             json!({"outcome":"github_app_unsaved","cause":"reply_invalid"}),
@@ -1008,7 +1008,7 @@ async fn github_app_oversized_successes_keep_the_endpoint_invalid_reply_outcome(
         steps.push(Step::LoopbackPut(url));
         let rig = Rig::new(steps, true);
         let response = rig.call(&create_body(CODE, AGENT, Some(SLOT))).await;
-        server.join().unwrap();
+        server.await.expect("loopback relay fixture failed");
         let mut expected = created("oversized-relay");
         expected["outcome"] = json!("relay_registration_failed");
         expected["cause"] = json!("relay_reply_invalid");
@@ -1021,25 +1021,37 @@ fn loopback_reply(
     status: u16,
     headers: &'static str,
     len: usize,
-) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{BufRead, BufReader, Write};
+) -> (String, tokio::task::JoinHandle<()>) {
+    use std::io::ErrorKind;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let url = format!("http://{}/reply", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut reader = BufReader::new(&mut stream);
-        loop {
-            let mut line = String::new();
-            assert!(reader.read_line(&mut line).unwrap() > 0);
-            if line == "\r\n" {
-                break;
+    // The client can stop reading at the body cap. Waiting for the fixture must
+    // let Tokio keep polling the HTTP connection so that the client can close it.
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            let (mut stream, _) = listener.accept().await.expect("accept loopback request");
+            let mut reader = BufReader::new(&mut stream);
+            loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).await.expect("read loopback request");
+                assert_ne!(read, 0, "loopback request ended before its headers");
+                if line == "\r\n" {
+                    break;
+                }
             }
-        }
-        write!(stream, "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {len}\r\nConnection: close\r\n\r\n").unwrap();
-        let _ = stream.write_all(&vec![b' '; len]);
+            let head = format!("HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {len}\r\nConnection: close\r\n\r\n");
+            stream.write_all(head.as_bytes()).await.expect("write loopback response headers");
+            if let Err(error) = stream.write_all(&vec![b' '; len]).await {
+                assert!(matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset),
+                    "write loopback response body: {error}");
+            }
+        })
+        .await
+        .expect("loopback fixture did not finish accepting, reading and writing the reply");
     });
     (url, server)
 }
@@ -1107,7 +1119,7 @@ async fn github_app_create_complete_conversion_status_table_never_retries() {
             rig.call(&create_body(CODE, AGENT, Some(SLOT))).await,
             prefix,
         );
-        server.join().unwrap();
+        server.await.expect("loopback rate-limit fixture failed");
         assert_eq!(rig.counts(), before);
         assert_eq!(rig.http.requests.lock().unwrap().len(), 1);
     }

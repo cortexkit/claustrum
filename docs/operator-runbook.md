@@ -475,6 +475,10 @@ before any write. Flag-looking filenames remain values: `--payload-file --replac
 reads the file named `--replace` and does not request replacement. To replace with that
 file, supply a separate `--replace` option too.
 
+For any `ck auth` verb, giving a single-value flag twice is a usage error before the
+command accesses the vault. For example, `ck auth remove --id a --id b` is refused.
+Repeat a flag only when the verb's help says it is repeatable.
+
 `put` is create-only. To rotate a static key in place, pass `--replace` (unconditional,
 keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:<label>` id
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the

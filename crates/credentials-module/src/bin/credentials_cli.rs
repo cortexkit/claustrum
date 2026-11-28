@@ -676,6 +676,20 @@ fn verb_flags(command: &str, subcommand: &str) -> FlagSpec {
     (value_flags, bool_flags)
 }
 
+fn is_repeatable_value_flag(command: &str, subcommand: &str, flag: &str) -> bool {
+    matches!(
+        (command, subcommand, flag),
+        (
+            "put",
+            _,
+            "--category" | "--provider-id" | "--gateway-header"
+        ) | ("provider", "set", "--category" | "--provider-id" | "--host")
+            | ("login", _, "--provider-id")
+            | ("ssh-key", "allow", "--target")
+            | ("secret", "put", "--rule" | "--origin" | "--target")
+    )
+}
+
 const GLOBAL_FLAGS: &[&str] = &["--data-dir", "--subc", "--key-path"];
 const HELP_FLAGS: &[&str] = &["--help", "-h"];
 
@@ -772,6 +786,11 @@ fn scan_verb_args(
             continue;
         }
         if value_flags.contains(&arg.as_str()) {
+            if options.values.contains_key(&arg)
+                && !is_repeatable_value_flag(&command, subcommand, &arg)
+            {
+                return Err(CliError::Usage(format!("{arg} given more than once")));
+            }
             // A put payload path is documented to accept a literal flag-shaped filename.
             let literal_path = command == "put" && arg == "--payload-file";
             let value = flag_value(&arg, &mut input, |next| {
@@ -3408,6 +3427,21 @@ mod tests {
     fn remove_flags_are_validated() {
         assert!(reject_unknown_args("remove", &v(&["--id", "oauth:anthropic:old"])).is_ok());
         assert!(reject_unknown_args("remove", &v(&["--provider", "anthropic"])).is_err());
+    }
+
+    #[test]
+    fn remove_rejects_duplicate_ids_before_dispatch() {
+        let err = parse_invocation(v(&["remove", "--id", "dummy-a", "--id", "dummy-b"]))
+            .expect_err("the parser must refuse duplicate remove IDs before dispatch");
+        assert!(matches!(err, CliError::Usage(message) if message == "--id given more than once"));
+    }
+
+    #[test]
+    fn put_keeps_all_repeatable_category_values() {
+        let args = v(&["--category", "first", "--category", "second"]);
+        let invocation = parse_invocation([v(&["put"]), args.clone()].concat())
+            .expect("put accepts more than one category");
+        assert_eq!(invocation.args, args);
     }
 }
 

@@ -428,6 +428,9 @@ mod redirect_rules {
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut forwarded, _)) => {
+                        // macOS hands the listener's non-blocking mode to the accepted
+                        // socket; reading it needs blocking mode with a timeout.
+                        forwarded.set_nonblocking(false).unwrap();
                         forwarded
                             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                             .unwrap();

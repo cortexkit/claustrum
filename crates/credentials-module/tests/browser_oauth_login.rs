@@ -131,6 +131,10 @@ impl Fixture {
                     other => panic!("token exchange was not reached: {other:?}"),
                 }
             };
+            // On macOS an accepted socket inherits the listener's non-blocking mode, so a
+            // read that runs before the request arrives fails with WouldBlock. Linux and
+            // Windows hand back a blocking socket.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut first = String::new();
